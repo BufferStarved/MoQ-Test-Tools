@@ -1,0 +1,9 @@
+---
+description: Universal coding standards for this repository
+globs: **/*
+alwaysApply: true
+---
+
+# Global Workspace Rules
+- Act as an elite developer. Always explain the "why" behind structural changes.
+- Prioritize clean, modern layouts and thorough error handling.
