@@ -1,4 +1,3 @@
-# src/metrics.py
 import csv
 import time
 import os
@@ -7,37 +6,62 @@ import logging
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
+
 class MetricsCollector:
-    def __init__(self, output_dir: str = "results"):
+    def __init__(self, protocol: str, endpoint_url: str, output_dir: str = "results"):
+        self.protocol = protocol
+        self.endpoint_url = endpoint_url
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Create a unique filename based on the test start time
+
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        self.filename = os.path.join(self.output_dir, f"benchmark_{timestamp}.csv")
-        
+        self.filename = os.path.join(self.output_dir, f"upload_{timestamp}.csv")
         self._init_csv()
 
     def _init_csv(self):
-        """Initializes the CSV file with headers."""
-        with open(self.filename, mode='w', newline='') as file:
+        with open(self.filename, mode="w", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow(["timestamp", "protocol", "pid", "cpu_percent", "memory_mb"])
-        logger.info(f"Metrics logging initialized: {self.filename}")
+            writer.writerow([
+                "timestamp",
+                "protocol",
+                "endpoint",
+                "pid",
+                "cpu_percent",
+                "memory_mb",
+                "bitrate_kbps",
+                "fps",
+                "speed",
+                "out_time",
+            ])
 
-    def record_process_metrics(self, protocol_name: str, pid: int):
-        """Samples the process and writes a row to the CSV."""
+    def record_sample(
+        self,
+        pid: int,
+        bitrate_kbps: float,
+        fps: float,
+        speed: float,
+        out_time: str,
+    ):
         try:
-            p = psutil.Process(pid)
-            # interval=None is non-blocking after the first call
-            cpu = p.cpu_percent(interval=None) 
-            mem = p.memory_info().rss / (1024 * 1024)  # Convert bytes to MB
-            
-            with open(self.filename, mode='a', newline='') as file:
+            process = psutil.Process(pid)
+            cpu = process.cpu_percent(interval=None)
+            mem = process.memory_info().rss / (1024 * 1024)
+
+            with open(self.filename, mode="a", newline="") as file:
                 writer = csv.writer(file)
-                writer.writerow([time.time(), protocol_name, pid, f"{cpu:.2f}", f"{mem:.2f}"])
-                
+                writer.writerow([
+                    time.time(),
+                    self.protocol,
+                    self.endpoint_url,
+                    pid,
+                    f"{cpu:.2f}",
+                    f"{mem:.2f}",
+                    f"{bitrate_kbps:.2f}",
+                    f"{fps:.2f}",
+                    f"{speed:.2f}",
+                    out_time,
+                ])
         except psutil.NoSuchProcess:
-            logger.warning(f"Process {pid} for {protocol_name} no longer exists.")
-        except Exception as e:
-            logger.error(f"Failed to record metrics for {protocol_name}: {e}")
+            logger.warning("Process %s no longer exists.", pid)
+        except Exception as exc:
+            logger.error("Failed to record metrics: %s", exc)
