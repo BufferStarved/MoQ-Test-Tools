@@ -1,4 +1,4 @@
-const GH_REPO = "https://github.com/bufferstarved/moq-test-tools";
+const GH_REPO = "https://github.com/BufferStarved/MoQ-Test-Tools";
 const GH_BLOB = `${GH_REPO}/blob/main`;
 
 function FlowArrow() {

@@ -93,6 +93,6 @@ See [METRICS.md](./METRICS.md) for field-level detail. High-level stages:
 
 ## Feedback
 
-- File issues: [github.com/bufferstarved/moq-test-tools](https://github.com/bufferstarved/moq-test-tools)
+- File issues: [github.com/BufferStarved/MoQ-Test-Tools](https://github.com/BufferStarved/MoQ-Test-Tools)
 - Email: [me@sean-mccarthy.net](mailto:me@sean-mccarthy.net)
 - Slack: **Sean McCarthy** on [video-dev](https://video-dev.org/) Slack

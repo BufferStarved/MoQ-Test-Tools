@@ -4,7 +4,7 @@ Benchmark live video ingest across **MoQ (WebTransport)**, **SRT**, **RTMP**, an
 
 A React web UI and CLI runner share the same Python core (`src/upload_service.py`).
 
-Live demo: [https://moq.sean-mccarthy.net](https://moq.sean-mccarthy.net) · Source: [github.com/bufferstarved/moq-test-tools](https://github.com/bufferstarved/moq-test-tools)
+Live demo: [https://moq.sean-mccarthy.net](https://moq.sean-mccarthy.net) · Source: [github.com/BufferStarved/MoQ-Test-Tools](https://github.com/BufferStarved/MoQ-Test-Tools)
 
 ## Features
 
@@ -44,7 +44,7 @@ Regular Homebrew `ffmpeg` does **not** include SRT support. `scripts/dev.sh` pre
 ## Setup
 
 ```bash
-git clone https://github.com/bufferstarved/moq-test-tools.git && cd moq-test-tools
+git clone https://github.com/BufferStarved/MoQ-Test-Tools.git && cd moq-test-tools
 
 python3 -m venv venv
 source venv/bin/activate
