@@ -211,6 +211,48 @@ def recording_status(job_id: str) -> RecordingResponse:
     return _recording_to_response(state)
 
 
+class MediaHealthRequest(BaseModel):
+    start_epoch: float = 0.0
+    end_epoch: float = 0.0
+    recording_dir: str = ""
+    output_path: str = ""
+
+
+@app.post("/api/v1/jobs/{job_id}/media-health", dependencies=[Depends(verify_token)])
+def run_media_health(job_id: str, request: MediaHealthRequest) -> dict:
+    """Analyze post-relay CMAF/fMP4 recording for Media Health (seq/tfdt gaps)."""
+    from cmaf_integrity import analyze_cmaf_file
+    from recording_service import get_recording_state, recording_output_path
+    from vmaf_service import find_distorted_recording
+
+    path = (request.output_path or "").strip()
+    if not path:
+        recording = get_recording_state(job_id)
+        if recording and recording.output_path:
+            path = recording.output_path
+        else:
+            candidate = recording_output_path(job_id, recording_dir=request.recording_dir)
+            if candidate.is_file():
+                path = str(candidate)
+    if not path and request.start_epoch and request.end_epoch:
+        found = find_distorted_recording(
+            request.start_epoch,
+            request.end_epoch,
+            recording_dir=request.recording_dir,
+            job_id=job_id,
+        )
+        if found:
+            path = found
+    if not path or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail="No MoQ recording found for media health")
+
+    report = analyze_cmaf_file(path)
+    payload = report.as_summary_dict()
+    payload["status"] = "failed" if report.error and report.fragment_count == 0 else "completed"
+    payload["job_id"] = job_id
+    return payload
+
+
 @app.post("/api/v1/jobs/{job_id}/vmaf", dependencies=[Depends(verify_token)])
 def run_vmaf(job_id: str, request: VmafComputeRequest) -> JobResponse:
     if request.end_epoch < request.start_epoch:

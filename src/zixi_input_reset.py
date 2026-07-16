@@ -68,7 +68,10 @@ def reset_zixi_srt_input(
     password = password or os.environ.get("ZIXI_API_PASSWORD", "")
 
     if not base_url or not password:
-        logger.debug("Zixi SRT input reset skipped: ZIXI_API_BASE/ZIXI_API_PASSWORD not set.")
+        logger.warning(
+            "Zixi SRT input reset skipped: ZIXI_API_BASE/ZIXI_API_PASSWORD not set. "
+            "HLS will likely loop the previous encode's last segment until the input is reset."
+        )
         return False
 
     stream_enc = quote(stream_id, safe="")

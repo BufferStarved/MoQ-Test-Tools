@@ -1,0 +1,44 @@
+#cloud-config
+# Baseline packages for the OpenMOQ moqx relay host.
+# moqx itself is installed by infra/moqx/scripts/gcp-install-moqx.sh after the VM is up.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - wget
+  - jq
+  - htop
+  - net-tools
+  - ca-certificates
+  - gnupg
+  - ufw
+
+write_files:
+  - path: /etc/motd
+    content: |
+      MoQ Test Tools — OpenMOQ moqx relay
+      -----------------------------------
+      Relay domain (sslip.io): ${relay_domain}
+      Install moqx: infra/moqx/scripts/gcp-install-moqx.sh <this-host-ip>
+
+  - path: /opt/moq-test-tools/moqx.env
+    content: |
+      MOQX_PORT=${moqx_port}
+      MOQX_PICO_PORT=${moqx_pico_port}
+      MOQX_ADMIN_PORT=${moqx_admin_port}
+      DOMAIN=${relay_domain}
+      CERTBOT_EMAIL=${certbot_email}
+      MOQX_ENDPOINT=/moq-relay
+      MOQX_NAMESPACE=benchmark
+
+runcmd:
+  - timedatectl set-timezone UTC || true
+  - ufw allow 22/tcp || true
+  - ufw allow 80/tcp || true
+  - ufw allow ${moqx_port}/udp || true
+  - ufw allow ${moqx_pico_port}/udp || true
+  - ufw allow ${moqx_admin_port}/tcp || true
+  - ufw --force enable || true
+  - echo "MoQ relay host ready. Run gcp-install-moqx.sh next." > /var/log/moq-relay-bootstrap.log

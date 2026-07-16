@@ -1,25 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   checkHealth,
+  createLiveSession,
   createUpload,
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
   fetchQualityAvailable,
-  fetchResults,
   fetchUpload,
   fetchVmafAvailable,
+  resultDownloadUrl,
+  resultFilenameFromPath,
+  stopUpload,
   subscribeToUpload,
-  uploadMedia,
 } from "./api";
+import { MetricLabel } from "./MetricLabel";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { EndpointSection } from "./EndpointSection";
-import { ResultsView } from "./ResultsView";
+import { AboutPage } from "./AboutPage";
+import { SessionMetrics } from "./SessionMetrics";
 import { StreamPlayer } from "./StreamPlayer";
 import { moqDefaultsFromPublishUrl } from "./playbackUrls";
 import { playbackGateForJob } from "./playbackGate";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
-import { groupResultFiles, type ResultSession } from "./resultGrouping";
 import {
   INGEST_ENDPOINTS,
   ingestEndpointLabel,
@@ -29,8 +32,16 @@ import {
   type IngestEndpointId,
 } from "./ingestEndpoints";
 import type { EndpointConfig, Preset, Protocol, ResultSummary, UploadJob, UploadSample } from "./types";
+import {
+  LIVE_WEBCAM_MAX_DURATION_SEC,
+  openWebcamStream,
+  startLiveWebcamBroadcast,
+  webcamCaptureSeconds,
+} from "./webcamCapture";
 
-type Tab = "benchmark" | "results" | "tools";
+type MediaSourceId = "dummy" | "bbb" | "webcam";
+
+type Tab = "benchmark" | "metrics" | "about";
 
 const MIN_ENDPOINTS = 2;
 const MAX_ENDPOINTS = 5;
@@ -123,27 +134,29 @@ function App() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
-  const [useDefaultMedia, setUseDefaultMedia] = useState(true);
-  const [mediaPath, setMediaPath] = useState("dummy.mp4");
-  const [mediaLabel, setMediaLabel] = useState("dummy.mp4");
+  const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
+  const [, setMediaPath] = useState("dummy.mp4");
+  const [mediaLabel, setMediaLabel] = useState("Default Color Bar Asset (dummy.mp4)");
   const [uploadingMedia, setUploadingMedia] = useState(false);
-  const [duration, setDuration] = useState(30);
-  const [computeVmafOnIngest, setComputeVmafOnIngest] = useState(false);
-  const [computeVmafEncoder, setComputeVmafEncoder] = useState(false);
+  const [computeVmaf, setComputeVmaf] = useState(false);
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
   const [encoderVmafUnavailableReason, setEncoderVmafUnavailableReason] = useState<string | null>(null);
   const [vmafUnavailableReason, setVmafUnavailableReason] = useState<string | null>(null);
   const [comparisonLegs, setComparisonLegs] = useState<ComparisonLegState[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [resultStreams, setResultStreams] = useState<ResultSummary[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [resultSessions, setResultSessions] = useState<ResultSession[]>([]);
+  const [sessionMetrics, setSessionMetrics] = useState<ResultSummary[]>([]);
+  const [sessionMetricLabels, setSessionMetricLabels] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
+  const webcamPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
+  const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
   const anyIngestVmafAvailable = endpoints.some((endpoint) => endpoint.vmafAvailable);
+  const vmafBothAvailable = encoderVmafAvailable && anyIngestVmafAvailable;
   const endpointSignature = endpoints
     .map(
       (endpoint) =>
@@ -159,15 +172,10 @@ function App() {
       await checkHealth();
       setApiOnline(true);
 
-      const [protocolData, presetData, resultData] = await Promise.all([
-        fetchProtocols(),
-        fetchPresets(),
-        fetchResults(),
-      ]);
+      const [protocolData, presetData] = await Promise.all([fetchProtocols(), fetchPresets()]);
 
       setProtocols(protocolData.protocols);
       setPresets(presetData.presets);
-      setResultSessions(groupResultFiles(resultData.results));
       setEndpoints((current) =>
         current.length >= MIN_ENDPOINTS ? current : buildDefaultEndpoints(),
       );
@@ -321,20 +329,69 @@ function App() {
   }, [apiOnline]);
 
   useEffect(() => {
-    if (!anyIngestVmafAvailable) {
-      setComputeVmafOnIngest(false);
-      setVmafUnavailableReason("Ingest VMAF is not available for any selected managed endpoint.");
+    if (!vmafBothAvailable) {
+      setComputeVmaf(false);
+      if (!encoderVmafAvailable && !anyIngestVmafAvailable) {
+        setVmafUnavailableReason(
+          encoderVmafUnavailableReason ??
+            "VMAF needs ffmpeg/libvmaf on this host and an ingest server with recording support.",
+        );
+      } else if (!encoderVmafAvailable) {
+        setVmafUnavailableReason(
+          encoderVmafUnavailableReason ?? "Encoder VMAF requires ffmpeg with libvmaf on this host.",
+        );
+      } else {
+        setVmafUnavailableReason("Ingest VMAF is not available for the selected ingest endpoints.");
+      }
       return;
     }
-    setVmafUnavailableReason("Runs on managed Zixi ingest endpoints after the upload completes.");
-  }, [anyIngestVmafAvailable]);
+    setVmafUnavailableReason(null);
+  }, [vmafBothAvailable, encoderVmafAvailable, anyIngestVmafAvailable, encoderVmafUnavailableReason]);
 
   useEffect(() => {
-    if (!encoderVmafAvailable) {
-      setComputeVmafEncoder(false);
-      return;
+    let cancelled = false;
+
+    async function syncWebcamPreview() {
+      const existing = webcamStreamRef.current;
+      if (existing) {
+        existing.getTracks().forEach((track) => track.stop());
+        webcamStreamRef.current = null;
+      }
+      if (webcamPreviewRef.current) {
+        webcamPreviewRef.current.srcObject = null;
+      }
+      if (mediaSource !== "webcam") {
+        setWebcamStatus(null);
+        return;
+      }
+      setWebcamStatus("Requesting webcam…");
+      try {
+        const stream = await openWebcamStream();
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        webcamStreamRef.current = stream;
+        if (webcamPreviewRef.current) {
+          webcamPreviewRef.current.srcObject = stream;
+          void webcamPreviewRef.current.play().catch(() => undefined);
+        }
+        setWebcamStatus("Webcam ready — capture starts when you run the comparison.");
+      } catch (err) {
+        setWebcamStatus(err instanceof Error ? err.message : "Could not open webcam.");
+      }
     }
-  }, [encoderVmafAvailable]);
+
+    void syncWebcamPreview();
+    return () => {
+      cancelled = true;
+      const stream = webcamStreamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        webcamStreamRef.current = null;
+      }
+    };
+  }, [mediaSource]);
 
   function updateEndpoint(id: string, patch: Partial<EndpointConfig>) {
     setEndpoints((current) =>
@@ -373,30 +430,15 @@ function App() {
     });
   }
 
-  async function handleMediaUpload(file: File | null) {
-    if (!file) {
-      return;
-    }
-    setUploadingMedia(true);
-    setError(null);
-    try {
-      const uploaded = await uploadMedia(file);
-      setMediaPath(uploaded.media_path);
-      setMediaLabel(uploaded.filename);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Media upload failed");
-    } finally {
-      setUploadingMedia(false);
-    }
-  }
-
   function buildUploadPayload(
     endpoint: EndpointConfig,
     comparisonId: string,
     streamIndex: number,
+    resolvedMediaPath: string,
+    durationSec?: number,
   ): {
     media_path: string;
-    duration_sec: number;
+    duration_sec?: number;
     compute_vmaf_on_ingest: boolean;
     compute_vmaf_encoder: boolean;
     comparison_id: string;
@@ -407,11 +449,13 @@ function App() {
     endpoint_url?: string;
   } {
     const presetId = resolvePresetId(endpoint);
+    const isLive = resolvedMediaPath.toLowerCase().startsWith("udp://");
     return {
-      media_path: mediaPath,
-      duration_sec: duration,
-      compute_vmaf_on_ingest: computeVmafOnIngest && endpoint.vmafAvailable,
-      compute_vmaf_encoder: computeVmafEncoder && encoderVmafAvailable,
+      media_path: resolvedMediaPath,
+      ...(durationSec != null ? { duration_sec: durationSec } : {}),
+      // Live webcam has no file reference for VMAF.
+      compute_vmaf_on_ingest: computeVmaf && endpoint.vmafAvailable && !isLive,
+      compute_vmaf_encoder: computeVmaf && encoderVmafAvailable && !isLive,
       comparison_id: comparisonId,
       stream_index: streamIndex,
       stream_label: endpointLabel(endpoint, streamIndex),
@@ -426,7 +470,7 @@ function App() {
 
   function subscribeLeg(
     job: UploadJob,
-    ingestVmafRequested: boolean,
+    _ingestVmafRequested: boolean,
     onAllFinished?: () => void,
   ) {
     void fetchUpload(job.id)
@@ -462,36 +506,38 @@ function App() {
         );
       },
       (status) => {
-        const updatedJob: UploadJob = {
-          ...job,
-          status: status.status as UploadJob["status"],
-          csv_path: status.csv_path,
-          summary_path: status.summary_path,
-          error: status.error,
-          moq_namespace: status.moq_namespace ?? job.moq_namespace,
-          vmaf_status: status.vmaf_status ?? job.vmaf_status,
-          vmaf_score: status.vmaf_score ?? job.vmaf_score,
-          vmaf_error: status.vmaf_error ?? job.vmaf_error,
-          encoder_vmaf_status: status.encoder_vmaf_status ?? job.encoder_vmaf_status,
-          encoder_vmaf_score: status.encoder_vmaf_score ?? job.encoder_vmaf_score,
-          encoder_vmaf_error: status.encoder_vmaf_error ?? job.encoder_vmaf_error,
-        };
-
         setComparisonLegs((current) => {
-          const next = current.map((leg) =>
-            leg.id === job.id
-              ? {
-                  ...leg,
-                  job: updatedJob,
-                  latestSample: leg.latestSample,
-                }
-              : leg,
-          );
+          const next = current.map((leg) => {
+            if (leg.id !== job.id) {
+              return leg;
+            }
+            const updatedJob: UploadJob = {
+              ...leg.job,
+              status: status.status as UploadJob["status"],
+              csv_path: status.csv_path ?? leg.job.csv_path,
+              summary_path: status.summary_path ?? leg.job.summary_path,
+              error: status.error,
+              moq_namespace: status.moq_namespace ?? leg.job.moq_namespace,
+              vmaf_status: status.vmaf_status ?? leg.job.vmaf_status,
+              vmaf_score: status.vmaf_score ?? leg.job.vmaf_score,
+              psnr_db: status.psnr_db ?? leg.job.psnr_db,
+              ssim: status.ssim ?? leg.job.ssim,
+              vmaf_error: status.vmaf_error ?? leg.job.vmaf_error,
+              encoder_vmaf_status: status.encoder_vmaf_status ?? leg.job.encoder_vmaf_status,
+              encoder_vmaf_score: status.encoder_vmaf_score ?? leg.job.encoder_vmaf_score,
+              encoder_psnr_db: status.encoder_psnr_db ?? leg.job.encoder_psnr_db,
+              encoder_ssim: status.encoder_ssim ?? leg.job.encoder_ssim,
+              encoder_vmaf_error: status.encoder_vmaf_error ?? leg.job.encoder_vmaf_error,
+            };
+            return {
+              ...leg,
+              job: updatedJob,
+              latestSample: leg.latestSample,
+            };
+          });
           if (next.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested))) {
             onAllFinished?.();
-            void fetchResults().then((data) => {
-              setResultSessions(groupResultFiles(data.results));
-            });
+            void loadSessionMetricsFromLegs(next);
           }
           return next;
         });
@@ -499,9 +545,36 @@ function App() {
     );
   }
 
+  async function loadSessionMetricsFromLegs(legs: ComparisonLegState[]) {
+    const entries = legs
+      .map((leg) => ({
+        label: leg.label,
+        filename: resultFilenameFromPath(leg.job.csv_path),
+      }))
+      .filter((entry): entry is { label: string; filename: string } => Boolean(entry.filename));
+
+    if (entries.length === 0) {
+      return;
+    }
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const details = await Promise.all(entries.map((entry) => fetchResultDetail(entry.filename)));
+        setSessionMetrics(details);
+        setSessionMetricLabels(entries.map((entry) => entry.label));
+        setTab("metrics");
+        return;
+      } catch {
+        await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)));
+      }
+    }
+  }
+
   async function handleStart() {
     setError(null);
     setComparisonLegs([]);
+    setSessionMetrics([]);
+    setSessionMetricLabels([]);
     setLoading(true);
 
     const unavailableEndpoint = endpoints.find(
@@ -510,7 +583,7 @@ function App() {
         (!isIngestEndpointAvailable(endpoint) || !resolvePresetId(endpoint)),
     );
     if (unavailableEndpoint) {
-      setError("Select an available ingest endpoint (GCP Zixi) or use a custom URL.");
+      setError("Select an available ingest endpoint (Zixi Broadcaster gcp-us-central1) or use a custom URL.");
       setLoading(false);
       return;
     }
@@ -524,17 +597,63 @@ function App() {
       return;
     }
 
-    if (!useDefaultMedia && mediaPath === "dummy.mp4") {
-      setError("Upload source media or enable the default VOD asset.");
-      setLoading(false);
-      return;
-    }
-
     try {
+      if (mediaSource === "bbb") {
+        throw new Error("Big Buck Bunny is not available yet.");
+      }
+
       const comparisonId = crypto.randomUUID();
+      let mediaPaths: string[];
+      let durationSec: number | undefined;
+      liveBroadcastRef.current = null;
+
+      if (mediaSource === "webcam") {
+        setUploadingMedia(true);
+        setWebcamStatus("Starting live webcam session…");
+        const live = await createLiveSession({
+          stream_count: endpoints.length,
+          duration_sec: LIVE_WEBCAM_MAX_DURATION_SEC,
+        });
+        durationSec = live.duration_sec;
+        mediaPaths = live.media_paths;
+
+        let stream = webcamStreamRef.current;
+        if (!stream || stream.getTracks().every((track) => track.readyState === "ended")) {
+          stream = await openWebcamStream();
+          webcamStreamRef.current = stream;
+          if (webcamPreviewRef.current) {
+            webcamPreviewRef.current.srcObject = stream;
+          }
+        }
+
+        const liveBroadcast = startLiveWebcamBroadcast({
+          stream,
+          wsPath: live.ws_path,
+          maxDurationSec: live.duration_sec,
+          onStatus: setWebcamStatus,
+        });
+        liveBroadcastRef.current = liveBroadcast;
+        await liveBroadcast.ready;
+        setUploadingMedia(false);
+        setWebcamStatus(
+          `Live camera streaming — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
+        );
+      } else {
+        mediaPaths = endpoints.map(() => "dummy.mp4");
+        setMediaPath("dummy.mp4");
+      }
+
       const jobs = await Promise.all(
         endpoints.map((endpoint, index) =>
-          createUpload(buildUploadPayload(endpoint, comparisonId, index)),
+          createUpload(
+            buildUploadPayload(
+              endpoint,
+              comparisonId,
+              index,
+              mediaPaths[index] ?? mediaPaths[0],
+              durationSec,
+            ),
+          ),
         ),
       );
 
@@ -545,26 +664,54 @@ function App() {
         job,
         samples: [],
         latestSample: null,
-        ingestVmafRequested: computeVmafOnIngest && endpoints[index].vmafAvailable,
-        encoderVmafRequested: computeVmafEncoder && encoderVmafAvailable,
+        ingestVmafRequested:
+          computeVmaf && endpoints[index].vmafAvailable && mediaSource !== "webcam",
+        encoderVmafRequested: computeVmaf && encoderVmafAvailable && mediaSource !== "webcam",
       }));
       setComparisonLegs(legs);
 
-      const finish = () => setLoading(false);
+      const finish = () => {
+        liveBroadcastRef.current?.stop();
+        liveBroadcastRef.current = null;
+        setLoading(false);
+        if (mediaSource === "webcam") {
+          setWebcamStatus("Live webcam run finished.");
+        }
+      };
       jobs.forEach((job, index) => {
         subscribeLeg(job, legs[index].ingestVmafRequested, finish);
+      });
+      void liveBroadcastRef.current?.finished.then(() => {
+        setWebcamStatus((current) => current ?? "Live webcam send complete.");
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start upload");
       setLoading(false);
+      setUploadingMedia(false);
+      liveBroadcastRef.current?.stop();
+      liveBroadcastRef.current = null;
     }
   }
 
-  async function loadResultSession(session: ResultSession) {
-    const details = await Promise.all(session.files.map((filename) => fetchResultDetail(filename)));
-    setResultStreams(details);
-    setSelectedSessionId(session.id);
-    setTab("results");
+  async function handleStopWebcam() {
+    setWebcamStatus("Stopping live webcam and encoders…");
+    liveBroadcastRef.current?.stop();
+    liveBroadcastRef.current = null;
+    const stream = webcamStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      webcamStreamRef.current = null;
+      if (webcamPreviewRef.current) {
+        webcamPreviewRef.current.srcObject = null;
+      }
+    }
+    await Promise.all(
+      comparisonLegs.map((leg) =>
+        stopUpload(leg.id).catch(() => ({ ok: false, status: "error" })),
+      ),
+    );
   }
 
   return (
@@ -574,18 +721,18 @@ function App() {
           <p className="eyebrow">Streaming benchmark platform</p>
           <h1>MoQ Test Tools</h1>
           <p className="subtitle">
-            Compare two or more streams side by side using the same source media and live-stream duration.
+            Compare two or more ingest protocols side by side using the same source media.
           </p>
         </div>
         <nav className="tabs">
           <button className={tab === "benchmark" ? "active" : ""} onClick={() => setTab("benchmark")}>
             Benchmark
           </button>
-          <button className={tab === "results" ? "active" : ""} onClick={() => setTab("results")}>
-            Results
+          <button className={tab === "metrics" ? "active" : ""} onClick={() => setTab("metrics")}>
+            Metrics{sessionMetrics.length > 0 ? ` (${sessionMetrics.length})` : ""}
           </button>
-          <button className={tab === "tools" ? "active" : ""} onClick={() => setTab("tools")}>
-            Tools
+          <button className={tab === "about" ? "active" : ""} onClick={() => setTab("about")}>
+            About
           </button>
         </nav>
       </header>
@@ -605,14 +752,14 @@ function App() {
             <div className="panel">
               <h2>Upload configuration</h2>
               <p className="hint">
-                Each stream uses the same source media and duration so metrics align in time. The
-                player beside each stream uses the selected playback mode — start a benchmark so
-                live outputs are available.
+                Configure each stream side by side. Shared media and quality options sit below.
+                Choose the playback player under each Preview.
               </p>
 
-              {endpoints.map((endpoint, index) => (
-                <div key={endpoint.id} className="stream-config-row">
+              <div className="endpoints-grid">
+                {endpoints.map((endpoint, index) => (
                   <EndpointSection
+                    key={endpoint.id}
                     index={index}
                     endpoint={endpoint}
                     protocols={protocols}
@@ -623,48 +770,8 @@ function App() {
                     onChange={updateEndpoint}
                     onRemove={removeEndpoint}
                   />
-                  <div className="stream-player-column">
-                    <StreamPlayer
-                      key={`${endpoint.id}:${endpoint.playbackMode ?? "auto"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
-                      title={`Stream ${index + 1} preview`}
-                      protocol={endpoint.protocol}
-                      endpointUrl={resolveEndpointUrl(endpoint, presets)}
-                      ingestEndpointId={endpoint.ingestEndpointId}
-                      playbackMode={endpoint.playbackMode}
-                      playbackDvr={endpoint.playbackDvr}
-                      whepPlaybackUrl={endpoint.whepPlaybackUrl}
-                      moqRelayUrl={endpoint.moqRelayUrl}
-                      moqFingerprintUrl={endpoint.moqFingerprintUrl}
-                      moqNamespace={
-                        comparisonLegs[index]?.job.moq_namespace ??
-                        endpoint.moqNamespace
-                      }
-                      playbackGate={playbackGateForJob(comparisonLegs[index]?.job, loading)}
-                      jobId={comparisonLegs[index]?.job.id}
-                      encodeStartedAtEpoch={comparisonLegs[index]?.job.started_at_epoch}
-                      onPlaybackSample={(playback) => {
-                        const jobId = comparisonLegs[index]?.job.id;
-                        if (!jobId) {
-                          return;
-                        }
-                        setComparisonLegs((current) =>
-                          current.map((leg) =>
-                            leg.id === jobId
-                              ? {
-                                  ...leg,
-                                  samples: mergePlaybackSampleIntoUploadSample(leg.samples, playback),
-                                }
-                              : leg,
-                          ),
-                        );
-                      }}
-                      jobStatus={comparisonLegs[index]?.job.status}
-                      benchmarkLoading={loading}
-                      encodeDurationSec={duration}
-                    />
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
 
               {endpoints.length < MAX_ENDPOINTS && (
                 <button type="button" className="ghost-button add-output-button" onClick={addEndpoint}>
@@ -674,94 +781,150 @@ function App() {
 
               <div className="source-media-section">
                 <h3>Media</h3>
-                <p className="hint">
-                  Upload a VOD asset which will be encoded into a live stream or use the default VOD asset.
-                </p>
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={useDefaultMedia}
+                <label>
+                  Source
+                  <select
+                    value={mediaSource}
                     onChange={(e) => {
-                      const checked = e.target.checked;
-                      setUseDefaultMedia(checked);
-                      if (checked) {
+                      const next = e.target.value as MediaSourceId;
+                      setMediaSource(next);
+                      if (next === "dummy") {
                         setMediaPath("dummy.mp4");
-                        setMediaLabel("dummy.mp4");
+                        setMediaLabel("Default Color Bar Asset (dummy.mp4)");
+                      } else if (next === "bbb") {
+                        setMediaLabel("Big Buck Bunny (coming soon)");
+                      } else {
+                        setMediaLabel("Webcam");
                       }
                     }}
-                  />
-                  <span>Use default (dummy.mp4)</span>
+                  >
+                    <option value="dummy">Default Color Bar Asset (dummy.mp4)</option>
+                    <option value="bbb" disabled>
+                      Big Buck Bunny (coming soon)
+                    </option>
+                    <option value="webcam">Webcam</option>
+                  </select>
                 </label>
-                {!useDefaultMedia && (
-                  <label>
-                    Source media
-                    <input
-                      type="file"
-                      accept="video/*,.mp4,.mov,.mkv,.ts"
-                      disabled={uploadingMedia}
-                      onChange={(e) => void handleMediaUpload(e.target.files?.[0] ?? null)}
+                {mediaSource === "dummy" && (
+                  <p className="hint">
+                    Uses the built-in color-bar asset. Encode length matches the file duration
+                    (about 60s).
+                  </p>
+                )}
+                {mediaSource === "webcam" && (
+                  <div className="webcam-preview-block">
+                    <video
+                      ref={webcamPreviewRef}
+                      className="webcam-preview"
+                      muted
+                      playsInline
+                      autoPlay
                     />
-                    <span className="hint">
-                      {uploadingMedia
-                        ? "Uploading..."
-                        : `Using: ${mediaLabel} (${mediaPath})`}
-                    </span>
-                  </label>
+                    <p className="hint">
+                      {webcamStatus ??
+                        `Live camera → ffmpeg → Zixi/MoQ. Press Stop when finished. Auto-stops after ${webcamCaptureSeconds() / 60} minutes for safety. Preview players show the live encode (not a pre-recorded file). VMAF is disabled for live webcam.`}
+                    </p>
+                  </div>
+                )}
+                {mediaSource !== "webcam" && mediaSource !== "dummy" && (
+                  <p className="hint">Using: {mediaLabel}</p>
                 )}
               </div>
-
-              <label>
-                Duration (seconds) of live stream
-                <input
-                  type="number"
-                  min={5}
-                  max={3600}
-                  value={duration}
-                  onChange={(e) => setDuration(Number(e.target.value))}
-                />
-              </label>
 
               <div className="vmaf-section">
                 <label className="checkbox-row">
                   <input
                     type="checkbox"
-                    checked={computeVmafEncoder}
-                    disabled={!encoderVmafAvailable}
-                    onChange={(e) => setComputeVmafEncoder(e.target.checked)}
+                    checked={computeVmaf}
+                    disabled={!vmafBothAvailable}
+                    onChange={(e) => setComputeVmaf(e.target.checked)}
                   />
-                  <span>Encoder VMAF (local) — VMAF, PSNR, SSIM on captured output</span>
+                  <span>Compute VMAF — encoder + ingest (VMAF, PSNR, SSIM)</span>
                 </label>
                 <p className="hint">
-                  {encoderVmafAvailable
-                    ? "Scores the ffmpeg output before it leaves this machine. Works for all protocols."
-                    : encoderVmafUnavailableReason ?? "Encoder VMAF requires ffmpeg with libvmaf locally."}
+                  Encoder: scores the ffmpeg output before it leaves this host.
+                  <br />
+                  Ingest: scores the recording after upload. Runs on the ingest server.
                 </p>
-
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={computeVmafOnIngest}
-                    disabled={!anyIngestVmafAvailable}
-                    onChange={(e) => setComputeVmafOnIngest(e.target.checked)}
-                  />
-                  <span>Ingest VMAF (server) — VMAF, PSNR, SSIM after ingest recording</span>
-                </label>
-                <p className="hint">
-                  {anyIngestVmafAvailable
-                    ? vmafUnavailableReason
-                    : vmafUnavailableReason ?? "Ingest VMAF is only available for managed Zixi endpoints."}
-                </p>
+                {vmafUnavailableReason && <p className="hint">{vmafUnavailableReason}</p>}
               </div>
 
               {error && <p className="error">{error}</p>}
 
-              <button
-                className="primary"
-                onClick={() => void handleStart()}
-                disabled={loading || bootstrapping || !apiOnline || endpoints.length < MIN_ENDPOINTS}
-              >
-                {loading ? "Running comparison..." : `Start comparison (${endpoints.length} streams)`}
-              </button>
+              <div className="button-row">
+                <button
+                  className="primary"
+                  onClick={() => void handleStart()}
+                  disabled={
+                    loading ||
+                    bootstrapping ||
+                    !apiOnline ||
+                    endpoints.length < MIN_ENDPOINTS ||
+                    uploadingMedia ||
+                    mediaSource === "bbb"
+                  }
+                >
+                  {uploadingMedia
+                    ? "Preparing media..."
+                    : loading
+                      ? "Running comparison..."
+                      : `Start comparison (${endpoints.length} streams)`}
+                </button>
+                {loading && mediaSource === "webcam" && (
+                  <button className="secondary-button stop-webcam-button" onClick={() => void handleStopWebcam()}>
+                    Stop webcam
+                  </button>
+                )}
+              </div>
+
+              <div className="player-grid benchmark-players">
+                {endpoints.map((endpoint, index) => (
+                  <StreamPlayer
+                    key={`${endpoint.id}:${endpoint.playbackMode ?? "auto"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
+                    title={`Stream ${index + 1} Preview`}
+                    protocol={endpoint.protocol}
+                    endpointUrl={resolveEndpointUrl(endpoint, presets)}
+                    ingestEndpointId={endpoint.ingestEndpointId}
+                    playbackMode={endpoint.playbackMode}
+                    playbackDvr={false}
+                    whepPlaybackUrl={endpoint.whepPlaybackUrl}
+                    moqRelayUrl={endpoint.moqRelayUrl}
+                    moqFingerprintUrl={endpoint.moqFingerprintUrl}
+                    moqNamespace={
+                      comparisonLegs[index]?.job.moq_namespace ?? endpoint.moqNamespace
+                    }
+                    playbackGate={playbackGateForJob(comparisonLegs[index]?.job, loading)}
+                    jobId={comparisonLegs[index]?.job.id}
+                    encodeStartedAtEpoch={comparisonLegs[index]?.job.started_at_epoch}
+                    onPlaybackSample={(playback) => {
+                      const jobId = comparisonLegs[index]?.job.id;
+                      if (!jobId) {
+                        return;
+                      }
+                      setComparisonLegs((current) =>
+                        current.map((leg) =>
+                          leg.id === jobId
+                            ? {
+                                ...leg,
+                                samples: mergePlaybackSampleIntoUploadSample(leg.samples, playback),
+                              }
+                            : leg,
+                        ),
+                      );
+                    }}
+                    jobStatus={comparisonLegs[index]?.job.status}
+                    benchmarkLoading={loading}
+                    encodeDurationSec={comparisonLegs[index]?.job.duration_sec ?? 60}
+                    controlsLocked={bootstrapping || !apiOnline}
+                    onPlaybackModeChange={(mode) =>
+                      updateEndpoint(endpoint.id, { playbackMode: mode })
+                    }
+                    onWhepPlaybackUrlChange={(url) =>
+                      updateEndpoint(endpoint.id, { whepPlaybackUrl: url })
+                    }
+                  />
+                ))}
+              </div>
             </div>
 
             <div className="panel status-panel">
@@ -787,7 +950,11 @@ function App() {
                           <span>Encoder quality</span>
                           <strong className={`pill ${leg.job.encoder_vmaf_status ?? "disabled"}`}>
                             {formatVmafStatus(leg.job.encoder_vmaf_status)}
-                            {leg.job.encoder_vmaf_score != null ? ` (VMAF ${leg.job.encoder_vmaf_score})` : ""}
+                            {formatQualityScores(
+                              leg.job.encoder_vmaf_score,
+                              leg.job.encoder_psnr_db,
+                              leg.job.encoder_ssim,
+                            )}
                           </strong>
                         </div>
                       )}
@@ -796,7 +963,7 @@ function App() {
                           <span>Ingest quality</span>
                           <strong className={`pill ${leg.job.vmaf_status ?? "disabled"}`}>
                             {formatVmafStatus(leg.job.vmaf_status)}
-                            {leg.job.vmaf_score != null ? ` (VMAF ${leg.job.vmaf_score})` : ""}
+                            {formatQualityScores(leg.job.vmaf_score, leg.job.psnr_db, leg.job.ssim)}
                           </strong>
                         </div>
                       )}
@@ -806,8 +973,13 @@ function App() {
                       </div>
                       {leg.latestSample && (
                         <div className="metrics-grid comparison-metrics">
-                          <Metric label="Bitrate" value={`${leg.latestSample.encoded_bitrate_kbps.toFixed(0)} kbps`} />
                           <Metric
+                            metricKey="encoded_bitrate_kbps"
+                            label="Bitrate"
+                            value={`${leg.latestSample.encoded_bitrate_kbps.toFixed(0)} kbps`}
+                          />
+                          <Metric
+                            metricKey="encoder_send_rate_mbps"
                             label="Send rate"
                             value={
                               leg.latestSample.encoder_send_rate_mbps
@@ -816,6 +988,7 @@ function App() {
                             }
                           />
                           <Metric
+                            metricKey="transport_rtt_ms"
                             label="RTT"
                             value={
                               leg.latestSample.transport_rtt_ms
@@ -823,8 +996,13 @@ function App() {
                                 : "—"
                             }
                           />
-                          <Metric label="FPS" value={leg.latestSample.fps.toFixed(1)} />
                           <Metric
+                            metricKey="fps"
+                            label="FPS"
+                            value={leg.latestSample.fps.toFixed(1)}
+                          />
+                          <Metric
+                            metricKey="client_memory_percent"
                             label="Client mem"
                             value={
                               leg.latestSample.client_memory_percent
@@ -834,6 +1012,7 @@ function App() {
                           />
                           {(leg.latestSample.server_cpu_percent ?? 0) > 0 && (
                             <Metric
+                              metricKey="server_cpu_percent"
                               label="Server CPU"
                               value={`${leg.latestSample.server_cpu_percent?.toFixed(1)}%`}
                             />
@@ -847,6 +1026,36 @@ function App() {
                 </div>
               )}
 
+              {!loading &&
+                comparisonLegs.length > 0 &&
+                comparisonLegs.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested)) && (
+                  <div className="session-download-strip">
+                    <p className="hint">Download this session’s raw metrics, or open the Metrics tab for the scorecard.</p>
+                    <div className="download-actions">
+                      {comparisonLegs.map((leg) => {
+                        const filename = resultFilenameFromPath(leg.job.csv_path);
+                        if (!filename) {
+                          return null;
+                        }
+                        return (
+                          <div key={leg.id} className="session-download-inline">
+                            <span>{leg.label}</span>
+                            <a className="csv-download" href={resultDownloadUrl(filename, "csv")} download>
+                              CSV
+                            </a>
+                            <a className="csv-download" href={resultDownloadUrl(filename, "json")} download>
+                              JSON
+                            </a>
+                          </div>
+                        );
+                      })}
+                      <button type="button" className="secondary-button" onClick={() => setTab("metrics")}>
+                        Open Metrics
+                      </button>
+                    </div>
+                  </div>
+                )}
+
               {(loading || comparisonLegs.some((leg) => leg.samples.length > 0)) && (
                 <div className="live-charts">
                   <h3>Comparison charts</h3>
@@ -857,6 +1066,8 @@ function App() {
                       protocol: leg.protocol,
                       samples: leg.samples,
                       vmafScore: leg.job.vmaf_score,
+                      psnrDb: leg.job.psnr_db,
+                      ssim: leg.job.ssim,
                     }))}
                   />
                 </div>
@@ -865,52 +1076,14 @@ function App() {
           </section>
         )}
 
-        {tab === "results" && (
+        {tab === "metrics" && (
           <section className="panel results-panel">
-            <h2>Results</h2>
-            <div className="results-layout">
-              <aside className="results-sidebar">
-                <h3>Saved runs</h3>
-                <ul className="file-list">
-                  {resultSessions.map((session) => (
-                    <li key={session.id}>
-                      <button
-                        className={selectedSessionId === session.id ? "active" : ""}
-                        onClick={() => void loadResultSession(session)}
-                      >
-                        {session.label}
-                      </button>
-                    </li>
-                  ))}
-                  {resultSessions.length === 0 && <li className="muted">No results yet.</li>}
-                </ul>
-              </aside>
-
-              <div className="results-detail">
-                {resultStreams.length === 0 ? (
-                  <p className="muted">Select a saved run to view per-stream summaries and comparison charts.</p>
-                ) : (
-                  <ResultsView streams={resultStreams} />
-                )}
-              </div>
-            </div>
+            <h2>Session metrics</h2>
+            <SessionMetrics streams={sessionMetrics} labels={sessionMetricLabels} />
           </section>
         )}
 
-        {tab === "tools" && (
-          <section className="panel">
-            <h2>Additional tooling</h2>
-            <p>
-              This section is reserved for upcoming utilities: MoQ relay integration, batch comparisons,
-              publisher automation, and deployment helpers.
-            </p>
-            <ul className="tool-list">
-              <li>CLI runner: <code>python src/runner.py</code></li>
-              <li>Publisher: <code>python src/publisher.py</code></li>
-              <li>Preset list: <code>python src/runner.py --list-presets</code></li>
-            </ul>
-          </section>
-        )}
+        {tab === "about" && <AboutPage />}
       </main>
     </div>
   );
@@ -923,10 +1096,36 @@ function formatVmafStatus(status?: string | null): string {
   return status.replaceAll("_", " ");
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function formatQualityScores(
+  vmaf?: number | null,
+  psnrDb?: number | null,
+  ssim?: number | null,
+): string {
+  const parts: string[] = [];
+  if (vmaf != null) {
+    parts.push(`VMAF ${vmaf}`);
+  }
+  if (psnrDb != null) {
+    parts.push(`PSNR ${psnrDb} dB`);
+  }
+  if (ssim != null) {
+    parts.push(`SSIM ${ssim}`);
+  }
+  return parts.length > 0 ? ` (${parts.join(" · ")})` : "";
+}
+
+function Metric({
+  metricKey,
+  label,
+  value,
+}: {
+  metricKey: string;
+  label: string;
+  value: string;
+}) {
   return (
     <div className="metric">
-      <span>{label}</span>
+      <MetricLabel metricKey={metricKey} label={label} />
       <strong>{value}</strong>
     </div>
   );

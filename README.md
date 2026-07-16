@@ -1,36 +1,32 @@
 # MoQ Test Tools — Upload Benchmark
 
-Benchmark live video upload performance across **SRT**, **RTMP**, **HTTP** (presigned PUT), and **WebRTC** (WHIP) endpoints. The tool streams a local media file with `ffmpeg`, collects encode and network telemetry every second, and writes results to CSV + JSON summary files.
+Benchmark live video ingest across **MoQ (WebTransport)**, **SRT**, **RTMP**, and related paths. The tool encodes a shared media source (file or webcam) with `ffmpeg`, publishes in parallel, collects encode / transport / playback / quality telemetry every second, and writes CSV + JSON summaries.
 
 A React web UI and CLI runner share the same Python core (`src/upload_service.py`).
 
+Live demo: [https://moq.sean-mccarthy.net](https://moq.sean-mccarthy.net) · Source: [github.com/bufferstarved/moq-test-tools](https://github.com/bufferstarved/moq-test-tools)
+
 ## Features
 
-- **Protocols:** SRT, RTMP, HTTP PUT, WHIP (MoQ planned)
-- **Encode telemetry:** bitrate, FPS, FPS stability, CPU, memory
-- **SRT network metrics:** RTT, jitter, packet loss, retransmits, FEC (via `srt-live-transmit` + libsrt)
-- **Optional receiver metrics:** Zixi Broadcaster API (CC/TR101 errors, receiver-side jitter)
-- **Optional VMAF:** post-run quality score when a recorded output file is provided
-- **Destinations:** preset catalog + custom URLs; Zixi VMs on AWS/GCP/Linode ([infra/zixi](infra/zixi/README.md))
+- **Protocols:** MoQ (openmoq → moqx relay), SRT, RTMP, HTTP PUT, WHIP
+- **Side-by-side comparisons** with live charts and a post-run Metrics scorecard
+- **Encode telemetry:** bitrate, FPS, FPS stability, encode lag, CPU, memory
+- **Normalized transport metrics:** RTT, jitter, send rate, loss/retrans
+- **Browser playback:** MoQ player (moq-playa) and HLS.js against Zixi egress
+- **Media health:** Zixi TR101 continuity and MoQ CMAF sequence/decode-time checks
+- **Optional VMAF / PSNR / SSIM** via the ingest agent (encoder and/or ingest legs)
+- **Destinations:** managed GCP presets + custom URLs ([infra/](infra/))
 
 ## Architecture
 
-```
-┌─────────────┐     ┌──────────────────────────────────────────┐
-│ Web UI / CLI│────▶│ FastAPI (web/api)  →  UploadService      │
-└─────────────┘     └──────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┴───────────────┐
-                    │ SRT pipeline                  │ Other protocols
-                    ▼                               ▼
-         ffmpeg → UDP localhost          ffmpeg → endpoint directly
-              → srt-live-transmit → SRT
-                    │
-                    ▼
-              MetricsCollector → results/*.csv + *.summary.json
-```
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for client / transport / server diagrams and design notes.
 
-For SRT, `ffmpeg` muxes MPEG-TS to a local UDP port; `srt-live-transmit` forwards to the remote endpoint and writes libsrt statistics to a CSV file that the collector polls each second. Non-SRT protocols push directly from `ffmpeg`.
+```
+Browser (React) → moq-web API (FastAPI + UploadService)
+                      ├─ SRT: ffmpeg → srt-live-transmit → Zixi → HLS preview
+                      └─ MoQ: ffmpeg → openmoq-publisher → moqx → MoQ player
+Ingest agent (:8090) — host metrics, recordings, CMAF health, VMAF
+```
 
 See [docs/METRICS.md](docs/METRICS.md) for the full metric reference.
 
@@ -48,7 +44,7 @@ Regular Homebrew `ffmpeg` does **not** include SRT support. `scripts/dev.sh` pre
 ## Setup
 
 ```bash
-git clone <repo-url> && cd moq-test-tools
+git clone https://github.com/bufferstarved/moq-test-tools.git && cd moq-test-tools
 
 python3 -m venv venv
 source venv/bin/activate
@@ -77,7 +73,7 @@ npm install --prefix web/frontend
 - API: http://127.0.0.1:8000
 - Frontend: http://127.0.0.1:5173
 
-Use the **Benchmark** tab to pick a preset or enter a custom endpoint URL. Live metrics stream during the run; completed CSVs appear under **Results**.
+Use the **Benchmark** tab to configure streams and start a comparison. Live charts update during the run; when it finishes, open **Metrics** for the session scorecard and CSV/JSON downloads. **About** covers architecture and contact info.
 
 ### CLI
 
@@ -112,9 +108,9 @@ Each run writes two files to `results/`:
 | File | Contents |
 |------|----------|
 | `upload_YYYYMMDD-HHMMSS.csv` | Per-second samples (all metrics) |
-| `upload_YYYYMMDD-HHMMSS.summary.json` | Aggregated averages + SRT summary |
+| `upload_YYYYMMDD-HHMMSS.summary.json` | Aggregated averages + throughput + quality |
 
-View summaries from the web UI **Results** tab, or aggregate the latest run from the CLI:
+Download from the web UI after a run, or aggregate the latest run from the CLI:
 
 ```bash
 python src/publisher.py
@@ -152,7 +148,7 @@ sudo bash infra/zixi/scripts/install-ingest-agent.sh
 # or manually set INGEST_AGENT_TOKEN in .env
 ```
 
-**3. In the web UI**, select **MoQ Zixi GCP ingest**, check **Compute VMAF after upload**, and run the benchmark. No tokens or SSH required.
+**3. In the web UI**, select a managed Zixi or MoQ ingest endpoint, check **Compute VMAF**, and run the benchmark. No tokens or SSH required.
 
 ### VMAF locally (legacy)
 
@@ -169,7 +165,7 @@ export MOQ_VMAF_DISTORTED=/path/to/recording.ts
 moq-test-tools/
 ├── src/
 │   ├── runner.py           # CLI entry point
-│   ├── upload_service.py   # ffmpeg orchestration + SRT pipeline
+│   ├── upload_service.py   # ffmpeg orchestration + SRT/MoQ pipelines
 │   ├── metrics.py          # CSV + summary JSON writer
 │   ├── srt_stats.py        # libsrt CSV parser
 │   ├── zixi_stats.py       # Optional Zixi API poller
@@ -179,19 +175,24 @@ moq-test-tools/
 ├── web/
 │   ├── api/                # FastAPI backend
 │   └── frontend/           # React UI
-├── infra/zixi/             # Zixi VM Terraform + runbooks
+├── infra/
+│   ├── web/                # Hosted UI VM runbooks
+│   ├── moqx/               # MoQ relay Terraform + runbooks
+│   └── zixi/               # Zixi ingest Terraform + runbooks
+├── ingest_agent/           # Recording, media health, VMAF sidecar
 ├── scripts/dev.sh          # Start API + frontend
 ├── results/                # Benchmark output (gitignored)
-└── docs/METRICS.md         # Metric definitions and sources
+└── docs/
+    ├── ARCHITECTURE.md     # System design
+    └── METRICS.md          # Metric definitions and sources
 ```
 
-## Zixi deployment
+## Deployment
 
-See [infra/zixi/README.md](infra/zixi/README.md) and [infra/zixi/GCP-ZIXI-RUNBOOK.md](infra/zixi/GCP-ZIXI-RUNBOOK.md) for provisioning ingest VMs on AWS, GCP, and Linode.
+- Web UI: [infra/web/](infra/web/)
+- MoQ relay: [infra/moqx/GCP-MOQX-RUNBOOK.md](infra/moqx/GCP-MOQX-RUNBOOK.md)
+- Zixi ingest: [infra/zixi/README.md](infra/zixi/README.md)
 
-## Roadmap
+## Feedback
 
-- MoQ relay integration
-- Browser-based player metrics (WebRTC stats)
-- Cloud runner abstraction (encode locally vs on GCP/AWS worker)
-- One-click Zixi recording + VMAF in the web UI
+Open issues on GitHub, email [me@sean-mccarthy.net](mailto:me@sean-mccarthy.net), or ping **Sean McCarthy** on [video-dev](https://video-dev.org/) Slack.

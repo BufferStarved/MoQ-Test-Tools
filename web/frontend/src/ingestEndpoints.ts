@@ -1,6 +1,6 @@
 export const INGEST_ENDPOINTS = [
-  { id: "gcp_zixi", label: "GCP Zixi", available: true },
-  { id: "gcp_moq_relay", label: "GCP MoQ Relay", available: true },
+  { id: "gcp_zixi", label: "Zixi Broadcaster gcp-us-central1", available: true },
+  { id: "gcp_moq_relay", label: "OpenMOQ MOQ-X gcp-us-central1", available: true },
   { id: "aws_zixi", label: "AWS Zixi", available: false },
   { id: "linode_zixi", label: "Linode Zixi", available: false },
   { id: "custom", label: "Custom URL", available: true },

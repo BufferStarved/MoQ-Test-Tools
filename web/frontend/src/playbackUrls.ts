@@ -16,7 +16,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "hls",
     label: "HLS",
-    hint: "HTTP Live Streaming via hls.js (live + DVR when available).",
+    hint: "HTTP Live Streaming via hls.js (Zixi live playlist).",
   },
   {
     id: "dash",
@@ -49,6 +49,41 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
     hint: "Full Zixi WebRTC player UI in an iframe.",
   },
 ];
+
+/** Playback modes that can work for a given ingest protocol selection. */
+export function isPlaybackModeCompatible(
+  mode: PlaybackMode,
+  protocol: string,
+): boolean {
+  if (mode === "auto") {
+    return true;
+  }
+  if (protocol === "moq") {
+    return mode === "moq";
+  }
+  if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
+    return mode === "hls" || mode === "dash" || mode === "whep" || mode === "webrtc"
+      || mode === "mpegts" || mode === "zixi-embed";
+  }
+  if (protocol === "webrtc") {
+    return mode === "whep" || mode === "webrtc" || mode === "zixi-embed";
+  }
+  return true;
+}
+
+export function defaultPlaybackModeForProtocol(protocol: string): PlaybackMode {
+  return protocol === "moq" ? "moq" : "auto";
+}
+
+export function managedEndpointUrlLabel(protocol: string): string {
+  if (protocol === "moq") return "WebTransport URL";
+  if (protocol === "srt") return "SRT URL";
+  if (protocol === "rtmp") return "RTMP URL";
+  if (protocol === "hls") return "HLS URL";
+  if (protocol === "dash") return "DASH URL";
+  if (protocol === "webrtc") return "WebRTC URL";
+  return "Endpoint URL";
+}
 
 function parseHost(endpointUrl: string): string | null {
   if (!endpointUrl.trim()) {
@@ -257,7 +292,6 @@ export function resolvePlaybackTarget(options: {
       label: "WHEP (WebRTC)",
       streamId,
       host: resolvedHost,
-      note: "Requires a WHEP gateway (e.g. Eyevinn srt-whep) in front of the SRT ingest stream.",
     };
   }
 
@@ -273,7 +307,6 @@ export function resolvePlaybackTarget(options: {
       moqNamespace,
       moqFingerprintUrl: fingerprint || proxiedMoqFingerprintUrl(webTransportUrl),
       streamId: moqNamespace,
-      note: "Requires a MoQ relay with WebTransport (draft 16). Stream must be live on the relay namespace.",
     };
   }
 
@@ -313,7 +346,6 @@ export function resolvePlaybackTarget(options: {
       label: "Zixi WebRTC",
       streamId,
       host: resolvedHost,
-      note: "Uses Zixi's built-in WebRTC monitor. Stream must be live and WebRTC-compliant (H.264 + Opus).",
     };
   }
 
@@ -324,7 +356,6 @@ export function resolvePlaybackTarget(options: {
       label: "MPEG-TS",
       streamId,
       host: resolvedHost,
-      note: "Raw transport-stream preview from Zixi HTTP origin. Live only.",
     };
   }
 
@@ -335,10 +366,6 @@ export function resolvePlaybackTarget(options: {
       label: dvr ? "DASH (DVR)" : "DASH (live)",
       streamId,
       host: resolvedHost,
-      note:
-        options.protocol === "dash"
-          ? "Plays Zixi DASH output for this ingest stream."
-          : "Plays Zixi DASH origin output while the ingest stream is active.",
     };
   }
 
@@ -349,12 +376,6 @@ export function resolvePlaybackTarget(options: {
       label: dvr ? "HLS (DVR)" : "HLS (live)",
       streamId,
       host: resolvedHost,
-      note:
-        options.protocol === "srt" && !hasWhepUrl
-          ? "SRT preview uses Zixi HLS. If verify-zixi-srt-ingest.sh fails, no browser player will work until Zixi HTTP:7777 HLS output is fixed."
-          : options.protocol === "rtmp"
-            ? "Browsers cannot play RTMP directly. Preview uses Zixi HLS origin output."
-            : "Plays Zixi HLS origin output for this stream.",
     };
   }
 
@@ -370,9 +391,9 @@ export function proxiedPlaybackUrl(remoteUrl: string): string {
   return `/api/playback/fetch?url=${encodeURIComponent(remoteUrl)}`;
 }
 
-export function showWhepUrlField(mode: PlaybackMode | undefined, protocol: string): boolean {
-  const resolved = mode ?? "auto";
-  return resolved === "whep" || (resolved === "auto" && protocol === "srt");
+export function showWhepUrlField(mode: PlaybackMode | undefined, _protocol?: string): boolean {
+  // Only when explicitly selecting WHEP — Auto uses Zixi HLS for SRT without a gateway URL.
+  return (mode ?? "auto") === "whep";
 }
 
 export function showMoqUrlFields(

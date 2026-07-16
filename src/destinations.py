@@ -55,6 +55,7 @@ class DestinationProfile:
     url: str
     label: str = ""
     preset_id: str = ""
+    ingest_provider: str = ""
     moq_target: Optional[MoqPublishTarget] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -103,7 +104,7 @@ class DestinationProfile:
 SERVICE_PRESETS: List[ServicePreset] = [
     ServicePreset(
         id="moq_zixi_gcp",
-        name="GCP Zixi",
+        name="Zixi Broadcaster gcp-us-central1",
         protocol="srt",
         url="srt://35.222.33.58:10080?mode=caller&latency=200000",
         notes=(
@@ -119,7 +120,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_zixi_gcp_rtmp",
-        name="GCP Zixi",
+        name="Zixi Broadcaster gcp-us-central1",
         protocol="rtmp",
         url="rtmp://35.222.33.58:1935/live/benchmark",
         notes="Managed Zixi RTMP ingest on GCP. Zixi stream ID must be benchmark.",
@@ -130,7 +131,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_zixi_gcp_hls",
-        name="GCP Zixi",
+        name="Zixi Broadcaster gcp-us-central1",
         protocol="hls",
         url="http://35.222.33.58:7777/benchmark",
         notes=(
@@ -145,7 +146,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_zixi_gcp_dash",
-        name="GCP Zixi",
+        name="Zixi Broadcaster gcp-us-central1",
         protocol="dash",
         url="http://35.222.33.58:7777/benchmark",
         notes=(
@@ -160,7 +161,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_gcp_relay",
-        name="GCP MoQ Relay",
+        name="OpenMOQ MOQ-X gcp-us-central1",
         protocol="moq",
         url="https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark",
         notes=(
@@ -407,6 +408,7 @@ def resolve_preset(preset_id: str) -> DestinationProfile:
         url=url,
         label=preset.name,
         preset_id=preset.id,
+        ingest_provider=preset.ingest_provider,
     )
 
 

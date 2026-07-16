@@ -152,6 +152,43 @@ def compute_vmaf_via_agent(
         return RemoteVmafResult(error=str(exc))
 
 
+def compute_media_health_via_agent(
+    endpoint_url: str,
+    job_id: str,
+    *,
+    start_epoch: float = 0.0,
+    end_epoch: float = 0.0,
+    agent_url: str = "",
+    recording_dir: str = "",
+    agent_token: str = "",
+    output_path: str = "",
+) -> Optional[dict]:
+    """Return CMAF media-health summary from the ingest agent, or None on failure."""
+    config = resolve_ingest_agent(
+        endpoint_url,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
+    if config is None:
+        return None
+    client = IngestAgentClient(config)
+    try:
+        payload = client.compute_media_health(
+            job_id,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            output_path=output_path,
+        )
+    except RuntimeError as exc:
+        logger.warning("Ingest media health failed: %s", exc)
+        return None
+    if payload.get("status") == "failed" and not payload.get("cmaf_fragment_count"):
+        logger.warning("Ingest media health failed: %s", payload.get("error"))
+        return None
+    return payload
+
+
 def start_moq_recording_via_agent(
     endpoint_url: str,
     job_id: str,

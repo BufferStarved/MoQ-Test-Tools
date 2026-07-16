@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  applyVmafScore,
+  applyQualityScores,
   chartGroupById,
   resultToChartPoints,
   samplesToChartPoints,
@@ -8,6 +8,7 @@ import {
   type ChartPoint,
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
+import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
 import type { ResultSummary, UploadSample } from "./types";
 
 interface ResultChartsProps {
@@ -15,16 +16,32 @@ interface ResultChartsProps {
   liveSamples?: UploadSample[];
   protocol?: string;
   vmafScore?: number | null;
+  psnrDb?: number | null;
+  ssim?: number | null;
 }
 
-export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: ResultChartsProps) {
+function AvailabilityNote({ metricKey, protocol }: { metricKey: string; protocol: string }) {
+  if (metricSupportedForProtocol(metricKey, protocol)) {
+    return null;
+  }
+  return <p className="hint chart-availability-note">{metricUnavailableMessage(metricKey, protocol)}</p>;
+}
+
+export function ResultCharts({
+  result,
+  liveSamples = [],
+  protocol,
+  vmafScore,
+  psnrDb,
+  ssim,
+}: ResultChartsProps) {
   const points = useMemo<ChartPoint[]>(() => {
     if (result) {
       return resultToChartPoints(result);
     }
     const livePoints = samplesToChartPoints(liveSamples);
-    return applyVmafScore(livePoints, vmafScore);
-  }, [result, liveSamples, vmafScore]);
+    return applyQualityScores(livePoints, { vmafScore, psnrDb, ssim });
+  }, [result, liveSamples, vmafScore, psnrDb, ssim]);
 
   const resolvedProtocol = result?.protocol ?? protocol ?? "srt";
   const groups = useMemo(() => visibleGroups(points, resolvedProtocol), [points, resolvedProtocol]);
@@ -38,14 +55,14 @@ export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: 
 
   const currentGroup = groups.find((group) => group.id === activeGroup) ?? groups[0];
   const encodeGroup = chartGroupById("encode");
-  const networkGroup = chartGroupById("network");
-  const bandwidthGroup = chartGroupById("bandwidth");
-  const systemGroup = chartGroupById("system");
+  const transportGroup = chartGroupById("transport");
+  const clientGroup = chartGroupById("client");
   const serverGroup = chartGroupById("server");
-  const moqxGroup = chartGroupById("moqx");
-  const quicGroup = chartGroupById("quic");
+  const relayGroup = chartGroupById("edge_relay");
+  const zixiGroup = chartGroupById("edge_zixi");
+  const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
-  const qualityGroup = chartGroupById("quality");
+  const qualityGroup = chartGroupById("video_quality");
 
   if (points.length === 0) {
     return (
@@ -56,11 +73,7 @@ export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: 
   }
 
   if (!currentGroup) {
-    return (
-      <div className="charts-empty muted">
-        No plottable metrics in this result.
-      </div>
-    );
+    return <div className="charts-empty muted">No plottable metrics in this result.</div>;
   }
 
   return (
@@ -85,6 +98,7 @@ export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: 
           <>
             <MetricChart
               title="Bitrate & frame rate"
+              metricKey="encoded_bitrate_kbps"
               data={points}
               series={encodeGroup.series.filter(
                 (series) => series.key === "encoded_bitrate_kbps" || series.key === "fps",
@@ -92,142 +106,168 @@ export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: 
               height={260}
             />
             <MetricChart
-              title="Speed & stability"
+              title="Speed & lag"
+              metricKey="encode_lag_ms"
               data={points}
-              series={encodeGroup.series.filter((series) => series.key === "speed" || series.key === "fps_stability")}
+              series={encodeGroup.series.filter(
+                (series) =>
+                  series.key === "speed" ||
+                  series.key === "fps_stability" ||
+                  series.key === "encode_lag_ms",
+              )}
               height={260}
             />
           </>
         )}
-        {currentGroup.id === "network" && networkGroup && (
+
+        {currentGroup.id === "transport" && transportGroup && (
           <>
+            <AvailabilityNote metricKey="net_rtt_ms" protocol={resolvedProtocol} />
             <MetricChart
-              title="RTT & jitter"
+              title="RTT & jitter (normalized)"
+              metricKey="net_rtt_ms"
               data={points}
-              series={networkGroup.series.filter(
-                (series) =>
-                  series.key === "transport_rtt_ms" || series.key === "transport_rtt_jitter_ms",
+              series={transportGroup.series.filter(
+                (series) => series.key === "net_rtt_ms" || series.key === "net_jitter_ms",
               )}
               height={260}
             />
             <MetricChart
-              title="Loss & recovery"
+              title="Send & receive rate"
+              metricKey="net_send_mbps"
               data={points}
-              series={networkGroup.series.filter(
-                (series) =>
-                  series.key === "pkt_retrans" ||
-                  series.key === "pkt_rcv_drop" ||
-                  series.key === "pkt_snd_drop" ||
-                  series.key === "pkt_fec_extra",
+              series={transportGroup.series.filter(
+                (series) => series.key === "net_send_mbps" || series.key === "net_recv_mbps",
               )}
               height={260}
             />
-            {hasData(points, "ts_continuity_counter_errors") && (
+            {(hasData(points, "net_loss_pct") || hasData(points, "net_retrans_pct")) && (
               <MetricChart
-                title="Continuity counter errors"
+                title="Loss & retransmit %"
+                metricKey="net_loss_pct"
                 data={points}
-                series={networkGroup.series.filter(
-                  (series) => series.key === "ts_continuity_counter_errors",
+                series={transportGroup.series.filter(
+                  (series) => series.key === "net_loss_pct" || series.key === "net_retrans_pct",
                 )}
                 height={220}
               />
             )}
           </>
         )}
-        {currentGroup.id === "bandwidth" && bandwidthGroup && (
-          <MetricChart
-            title="Send & receive rate"
-            data={points}
-            series={bandwidthGroup.series}
-            height={260}
-          />
+
+        {currentGroup.id === "client" && clientGroup && (
+          <MetricChart title="Client (publisher host)" metricKey="cpu_percent" data={points} series={clientGroup.series} height={260} />
         )}
-        {currentGroup.id === "system" && systemGroup && (
-          <MetricChart
-            title="Client (ffmpeg host)"
-            data={points}
-            series={systemGroup.series}
-            height={260}
-          />
-        )}
+
         {currentGroup.id === "server" && serverGroup && (
           <MetricChart
             title="Server (ingest / relay host)"
+            metricKey="server_cpu_percent"
             data={points}
             series={serverGroup.series}
             height={260}
           />
         )}
-        {currentGroup.id === "moqx" && moqxGroup && (
+
+        {currentGroup.id === "edge_relay" && relayGroup && (
           <>
+            <AvailabilityNote metricKey="moqx_subscribe_success" protocol={resolvedProtocol} />
+            <p className="hint chart-availability-note">
+              MoQ relay counters are job-window deltas (not absolute since relay restart).
+            </p>
             <MetricChart
-              title="Relay subscribe outcomes"
+              title="Relay subscribe outcomes (Δ)"
+              metricKey="moqx_subscribe_success"
               data={points}
-              series={moqxGroup.series.filter(
-                (series) => series.key === "moqx_subscribe_success" || series.key === "moqx_subscribe_error",
+              series={relayGroup.series.filter(
+                (series) =>
+                  series.key === "moqx_subscribe_success" || series.key === "moqx_subscribe_error",
               )}
               height={260}
             />
             <MetricChart
-              title="Relay publish activity"
+              title="Relay publish activity (Δ)"
+              metricKey="moqx_publish_received"
               data={points}
-              series={moqxGroup.series.filter(
+              series={relayGroup.series.filter(
                 (series) =>
                   series.key === "moqx_publish_namespace_success" ||
-                  series.key === "moqx_publish_received" ||
-                  series.key === "moqx_publish_done",
+                  series.key === "moqx_publish_received",
               )}
               height={260}
             />
-          </>
-        )}
-        {currentGroup.id === "quic" && quicGroup && (
-          <>
-            <MetricChart
-              title="QUIC RTT & congestion window"
-              data={points}
-              series={quicGroup.series.filter(
-                (series) => series.key === "quic_rtt_ms" || series.key === "quic_cwnd_bytes",
-              )}
-              height={260}
-            />
-            {hasData(points, "quic_packets_lost") && (
+            {hasData(points, "quic_cwnd_bytes") && (
               <MetricChart
-                title="QUIC packets lost"
+                title="QUIC congestion window"
+                metricKey="quic_cwnd_bytes"
                 data={points}
-                series={quicGroup.series.filter((series) => series.key === "quic_packets_lost")}
+                series={relayGroup.series.filter((series) => series.key === "quic_cwnd_bytes")}
                 height={220}
               />
             )}
           </>
         )}
-        {currentGroup.id === "playback" && playbackGroup && (
+
+        {currentGroup.id === "edge_zixi" && zixiGroup && (
           <>
+            <p className="hint chart-availability-note">
+              Libsrt recovery counters from the SRT sender. Flat zeros mean a clean path.
+            </p>
             <MetricChart
-              title="MoQ playback stats"
+              title="SRT recovery"
+              metricKey="pkt_retrans"
               data={points}
-              series={playbackGroup.series.filter(
-                (series) =>
-                  series.key === "playback_stats_events" ||
-                  series.key === "playback_frames_rendered" ||
-                  series.key === "playback_stall_count",
-              )}
+              series={zixiGroup.series}
               height={260}
             />
+          </>
+        )}
+
+        {currentGroup.id === "media_health" && mediaHealthGroup && (
+          <>
+            <AvailabilityNote metricKey="ts_continuity_counter_errors" protocol={resolvedProtocol} />
+            <AvailabilityNote metricKey="cmaf_seq_gap_count" protocol={resolvedProtocol} />
+            <p className="hint chart-availability-note">
+              Media Health is container/timeline integrity — not transport.
+            </p>
             <MetricChart
-              title="HLS playback health"
+              title="Media Health"
+              metricKey="ts_continuity_counter_errors"
+              data={points}
+              series={mediaHealthGroup.series.filter((series) => hasData(points, series.key))}
+              height={260}
+            />
+          </>
+        )}
+
+        {currentGroup.id === "playback" && playbackGroup && (
+          <>
+            {hasData(points, "e2e_latency_ms") && (
+              <MetricChart
+                title="E2E latency (estimated)"
+                metricKey="e2e_latency_ms"
+                data={points}
+                series={playbackGroup.series.filter((series) => series.key === "e2e_latency_ms")}
+                height={260}
+              />
+            )}
+            <MetricChart
+              title="Playback health"
+              metricKey="playback_stall_count"
               data={points}
               series={playbackGroup.series.filter(
                 (series) =>
-                  series.key === "playback_hls_errors" ||
-                  series.key === "playback_hls_buffer_stalls" ||
-                  series.key === "playback_hls_frag_loads",
+                  series.key === "playback_ttff_ms" ||
+                  series.key === "playback_stall_count" ||
+                  series.key === "playback_error_count" ||
+                  series.key === "playback_frames_rendered",
               )}
               height={260}
             />
             {hasData(points, "playback_video_time_sec") && (
               <MetricChart
                 title="Video playback time"
+                metricKey="playback_video_time_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_video_time_sec")}
                 height={220}
@@ -235,13 +275,39 @@ export function ResultCharts({ result, liveSamples = [], protocol, vmafScore }: 
             )}
           </>
         )}
-        {currentGroup.id === "quality" && qualityGroup && (
-          <MetricChart
-            title="Quality (post-ingest)"
-            data={points}
-            series={qualityGroup.series.filter((series) => hasData(points, series.key))}
-            height={260}
-          />
+
+        {currentGroup.id === "video_quality" && qualityGroup && (
+          <>
+            {hasData(points, "vmaf_score") && (
+              <MetricChart
+                title="VMAF score"
+                metricKey="vmaf_score"
+                data={points}
+                series={qualityGroup.series.filter((series) => series.key === "vmaf_score")}
+                height={260}
+                yDomain={[0, 100]}
+              />
+            )}
+            {hasData(points, "psnr_db") && (
+              <MetricChart
+                title="PSNR"
+                metricKey="psnr_db"
+                data={points}
+                series={qualityGroup.series.filter((series) => series.key === "psnr_db")}
+                height={260}
+              />
+            )}
+            {hasData(points, "ssim") && (
+              <MetricChart
+                title="SSIM"
+                metricKey="ssim"
+                data={points}
+                series={qualityGroup.series.filter((series) => series.key === "ssim")}
+                height={260}
+                yDomain={[0, 1]}
+              />
+            )}
+          </>
         )}
       </div>
     </div>

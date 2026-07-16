@@ -228,12 +228,33 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
     )
 
 
+def is_live_media_source(media_path: str) -> bool:
+    """True for live UDP/TCP/RTSP inputs (already realtime — do not use -re)."""
+    value = (media_path or "").strip().lower()
+    return value.startswith(("udp://", "tcp://", "rtsp://", "srt://"))
+
+
+def build_ffmpeg_input_args(media_path: str) -> List[str]:
+    if is_live_media_source(media_path):
+        return [
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-probesize",
+            "32k",
+            "-analyzeduration",
+            "0",
+            "-i",
+            media_path,
+        ]
+    return ["-re", "-i", media_path]
+
+
 def build_ffmpeg_moq_cmd(media_path: str, *, progress_path: str) -> List[str]:
     return [
         find_ffmpeg(),
-        "-re",
-        "-i",
-        media_path,
+        *build_ffmpeg_input_args(media_path),
         "-map",
         "0:v:0",
         "-map",
@@ -282,6 +303,7 @@ def build_moq_publisher_cmd(
     *,
     duration_sec: int,
     qlog_dir: str = "",
+    paced: bool = True,
 ) -> List[str]:
     if backend == "moq5":
         return build_moq5_publisher_cmd(
@@ -294,6 +316,7 @@ def build_moq_publisher_cmd(
         publisher_bin,
         target,
         duration_sec=duration_sec,
+        paced=paced,
     )
 
 
@@ -302,9 +325,13 @@ def build_openmoq_publisher_cmd(
     target: MoqPublishTarget,
     *,
     duration_sec: int,
+    paced: bool = True,
 ) -> List[str]:
     timeout_sec = max(duration_sec + 60, 120)
-    return [
+    # --paced delays object sends to media timestamps. For live webcam/UDP the
+    # encode is already realtime; pacing stacks delay and makes browser playback
+    # fall behind the live edge. Keep paced for VOD file publishes only.
+    cmd = [
         publisher_bin,
         "--input",
         "-",
@@ -320,7 +347,9 @@ def build_openmoq_publisher_cmd(
         str(target.forward),
         "--timeout",
         str(timeout_sec),
-        "--paced",
         "--publish-catalog",
         *(["--insecure"] if target.insecure_tls else []),
     ]
+    if paced:
+        cmd.append("--paced")
+    return cmd

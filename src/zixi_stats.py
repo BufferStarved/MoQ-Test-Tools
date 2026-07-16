@@ -139,12 +139,20 @@ class ZixiStatsPoller:
       ZIXI_INPUT_ID   optional input stream id/name
     """
 
-    def __init__(self, endpoint_url: str):
+    def __init__(self, endpoint_url: str, input_id: Optional[str] = None):
         self._enabled = False
         self._base_url = os.environ.get("ZIXI_API_BASE", "").rstrip("/")
         self._user = os.environ.get("ZIXI_API_USER", "admin")
         self._password = os.environ.get("ZIXI_API_PASSWORD", "")
-        self._input_id = os.environ.get("ZIXI_INPUT_ID", "") or self._stream_id_from_url(endpoint_url)
+        env_input = os.environ.get("ZIXI_INPUT_ID", "").strip()
+        self._input_id = (
+            (input_id or "").strip()
+            or env_input
+            or self._stream_id_from_url(endpoint_url)
+        )
+        # GCP managed SRT preset omits streamid in the public URL; default to Zixi input name.
+        if not self._input_id and self._looks_like_gcp_zixi_srt(endpoint_url):
+            self._input_id = "SRT Test"
         self._latest = ZixiStatsSnapshot()
 
         if not self._base_url:
@@ -154,6 +162,11 @@ class ZixiStatsPoller:
 
         if self._password:
             self._enabled = True
+
+    @staticmethod
+    def _looks_like_gcp_zixi_srt(endpoint_url: str) -> bool:
+        parsed = urlparse(endpoint_url)
+        return parsed.scheme == "srt" and parsed.hostname == "35.222.33.58"
 
     @staticmethod
     def _stream_id_from_url(endpoint_url: str) -> str:

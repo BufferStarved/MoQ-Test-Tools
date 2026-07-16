@@ -30,15 +30,28 @@ CSV_COLUMNS = [
     "fps",
     "fps_stability",
     "speed",
+    "encode_lag_ms",
     "out_time",
     "transport_rtt_ms",
     "transport_rtt_jitter_ms",
+    "net_rtt_ms",
+    "net_jitter_ms",
+    "net_send_mbps",
+    "net_recv_mbps",
+    "net_loss_pct",
+    "net_retrans_pct",
     "pkt_rcv_drop",
     "pkt_snd_drop",
     "pkt_snd_loss",
     "pkt_retrans",
     "pkt_fec_extra",
     "ts_continuity_counter_errors",
+    "cmaf_fragment_count",
+    "cmaf_seq_gap_count",
+    "cmaf_tfdt_gap_count",
+    "cmaf_tfdt_gap_ms",
+    "cmaf_tfdt_overlap_count",
+    "cmaf_parse_errors",
     "vmaf_score",
     "psnr_db",
     "ssim",
@@ -61,7 +74,36 @@ CSV_COLUMNS = [
     "playback_hls_buffer_stalls",
     "playback_hls_frag_loads",
     "playback_video_time_sec",
+    "playback_error_count",
+    "e2e_latency_ms",
 ]
+
+
+def parse_out_time_seconds(out_time: str) -> float:
+    """Parse ffmpeg out_time (HH:MM:SS.microseconds) to seconds."""
+    value = (out_time or "").strip()
+    if not value or value == "N/A":
+        return 0.0
+    try:
+        parts = value.split(":")
+        if len(parts) != 3:
+            return 0.0
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        return max(0.0, hours * 3600.0 + minutes * 60.0 + seconds)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def compute_encode_lag_ms(wall_elapsed_sec: float, out_time: str) -> float:
+    media_sec = parse_out_time_seconds(out_time)
+    if media_sec <= 0 or wall_elapsed_sec <= 0:
+        return 0.0
+    lag_ms = (wall_elapsed_sec - media_sec) * 1000.0
+    if lag_ms < 0 or lag_ms > 120_000:
+        return 0.0
+    return round(lag_ms, 1)
 
 
 class MetricsCollector:
@@ -90,6 +132,7 @@ class MetricsCollector:
         self._total_bytes_received = 0
         self._peak_bandwidth_sent_mbps = 0.0
         self._peak_bandwidth_recv_mbps = 0.0
+        self._run_started_at: Optional[float] = None
         self._init_csv()
 
     def _init_csv(self) -> None:
@@ -114,6 +157,12 @@ class MetricsCollector:
         pkt_retrans: int = 0,
         pkt_fec_extra: int = 0,
         ts_continuity_counter_errors: int = 0,
+        cmaf_fragment_count: int = 0,
+        cmaf_seq_gap_count: int = 0,
+        cmaf_tfdt_gap_count: int = 0,
+        cmaf_tfdt_gap_ms: float = 0.0,
+        cmaf_tfdt_overlap_count: int = 0,
+        cmaf_parse_errors: int = 0,
         vmaf_score: Optional[float] = None,
         psnr_db: Optional[float] = None,
         ssim: Optional[float] = None,
@@ -143,6 +192,15 @@ class MetricsCollector:
         playback_hls_buffer_stalls: int = 0,
         playback_hls_frag_loads: int = 0,
         playback_video_time_sec: float = 0.0,
+        playback_error_count: int = 0,
+        e2e_latency_ms: float = 0.0,
+        encode_lag_ms: float = 0.0,
+        net_rtt_ms: float = 0.0,
+        net_jitter_ms: float = 0.0,
+        net_send_mbps: float = 0.0,
+        net_recv_mbps: float = 0.0,
+        net_loss_pct: float = 0.0,
+        net_retrans_pct: float = 0.0,
     ) -> float:
         fps_stability = 0.0
         if fps > 0:
@@ -170,8 +228,35 @@ class MetricsCollector:
             self._peak_bandwidth_sent_mbps = max(self._peak_bandwidth_sent_mbps, send_mbps)
             self._peak_bandwidth_recv_mbps = max(self._peak_bandwidth_recv_mbps, recv_mbps)
 
+            now = time.time()
+            if self._run_started_at is None:
+                self._run_started_at = now
+            wall_elapsed = max(0.0, now - self._run_started_at)
+            resolved_encode_lag = (
+                encode_lag_ms
+                if encode_lag_ms > 0
+                else compute_encode_lag_ms(wall_elapsed, out_time)
+            )
+            resolved_net_rtt = net_rtt_ms or transport_rtt_ms or quic_rtt_ms
+            resolved_net_jitter = net_jitter_ms or transport_rtt_jitter_ms
+            resolved_net_send = net_send_mbps or send_mbps
+            resolved_net_recv = net_recv_mbps or recv_mbps
+            sent_pkts_proxy = max(pkt_snd_loss + pkt_retrans + 1, int(wall_elapsed) * 100)
+            resolved_net_loss = net_loss_pct
+            if resolved_net_loss <= 0 and (pkt_snd_loss > 0 or quic_packets_lost > 0):
+                resolved_net_loss = min(
+                    100.0,
+                    ((pkt_snd_loss + quic_packets_lost) / sent_pkts_proxy) * 100.0,
+                )
+            resolved_net_retrans = net_retrans_pct
+            if resolved_net_retrans <= 0 and pkt_retrans > 0:
+                resolved_net_retrans = min(100.0, (pkt_retrans / sent_pkts_proxy) * 100.0)
+            resolved_playback_errors = playback_error_count or (
+                playback_hls_errors + playback_hls_fatal_errors
+            )
+
             row = {
-                "timestamp": time.time(),
+                "timestamp": now,
                 "protocol": self.protocol,
                 "endpoint": self.endpoint_url,
                 "pid": pid,
@@ -188,15 +273,28 @@ class MetricsCollector:
                 "fps": f"{fps:.2f}",
                 "fps_stability": f"{fps_stability:.4f}",
                 "speed": f"{speed:.2f}",
+                "encode_lag_ms": f"{resolved_encode_lag:.1f}",
                 "out_time": out_time,
                 "transport_rtt_ms": f"{transport_rtt_ms:.3f}",
                 "transport_rtt_jitter_ms": f"{transport_rtt_jitter_ms:.3f}",
+                "net_rtt_ms": f"{resolved_net_rtt:.3f}",
+                "net_jitter_ms": f"{resolved_net_jitter:.3f}",
+                "net_send_mbps": f"{resolved_net_send:.3f}",
+                "net_recv_mbps": f"{resolved_net_recv:.3f}",
+                "net_loss_pct": f"{resolved_net_loss:.3f}",
+                "net_retrans_pct": f"{resolved_net_retrans:.3f}",
                 "pkt_rcv_drop": str(pkt_rcv_drop),
                 "pkt_snd_drop": str(pkt_snd_drop),
                 "pkt_snd_loss": str(pkt_snd_loss),
                 "pkt_retrans": str(pkt_retrans),
                 "pkt_fec_extra": str(pkt_fec_extra),
                 "ts_continuity_counter_errors": str(ts_continuity_counter_errors),
+                "cmaf_fragment_count": str(cmaf_fragment_count),
+                "cmaf_seq_gap_count": str(cmaf_seq_gap_count),
+                "cmaf_tfdt_gap_count": str(cmaf_tfdt_gap_count),
+                "cmaf_tfdt_gap_ms": f"{cmaf_tfdt_gap_ms:.3f}",
+                "cmaf_tfdt_overlap_count": str(cmaf_tfdt_overlap_count),
+                "cmaf_parse_errors": str(cmaf_parse_errors),
                 "vmaf_score": "" if vmaf_score is None else f"{vmaf_score:.3f}",
                 "psnr_db": "" if psnr_db is None else f"{psnr_db:.3f}",
                 "ssim": "" if ssim is None else f"{ssim:.4f}",
@@ -219,6 +317,8 @@ class MetricsCollector:
                 "playback_hls_buffer_stalls": str(playback_hls_buffer_stalls),
                 "playback_hls_frag_loads": str(playback_hls_frag_loads),
                 "playback_video_time_sec": f"{playback_video_time_sec:.3f}",
+                "playback_error_count": str(resolved_playback_errors),
+                "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
             }
             self._rows.append(row)
 
@@ -291,13 +391,22 @@ class MetricsCollector:
             "fps",
             "fps_stability",
             "speed",
+            "encode_lag_ms",
             "transport_rtt_ms",
             "transport_rtt_jitter_ms",
+            "net_rtt_ms",
+            "net_jitter_ms",
+            "net_send_mbps",
+            "net_recv_mbps",
+            "net_loss_pct",
+            "net_retrans_pct",
             "quic_rtt_ms",
             "quic_cwnd_bytes",
             "playback_bitrate_bps",
             "playback_ttff_ms",
             "playback_video_time_sec",
+            "e2e_latency_ms",
+            "cmaf_tfdt_gap_ms",
             "psnr_db",
             "ssim",
         ]
@@ -317,6 +426,11 @@ class MetricsCollector:
                 "pkt_retrans",
                 "pkt_fec_extra",
                 "ts_continuity_counter_errors",
+                "cmaf_fragment_count",
+                "cmaf_seq_gap_count",
+                "cmaf_tfdt_gap_count",
+                "cmaf_tfdt_overlap_count",
+                "cmaf_parse_errors",
                 "moqx_subscribe_success",
                 "moqx_subscribe_error",
                 "moqx_publish_namespace_success",
@@ -331,6 +445,7 @@ class MetricsCollector:
                 "playback_hls_fatal_errors",
                 "playback_hls_buffer_stalls",
                 "playback_hls_frag_loads",
+                "playback_error_count",
             ):
                 averages[counter_key] = int(float(self._rows[-1].get(counter_key, 0) or 0))
 

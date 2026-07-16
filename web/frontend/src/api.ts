@@ -95,7 +95,7 @@ export function uploadMedia(file: File): Promise<{
 
 export function createUpload(payload: {
   media_path: string;
-  duration_sec: number;
+  duration_sec?: number;
   preset_id?: string;
   protocol?: string;
   endpoint_url?: string;
@@ -106,6 +106,22 @@ export function createUpload(payload: {
   stream_label?: string;
 }): Promise<UploadJob> {
   return request("/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createLiveSession(payload: {
+  stream_count: number;
+  duration_sec?: number;
+}): Promise<{
+  session_id: string;
+  duration_sec: number;
+  media_paths: string[];
+  ws_path: string;
+}> {
+  return request("/live/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -124,6 +140,8 @@ export interface PlaybackMetricsSnapshot {
   playback_hls_buffer_stalls: number;
   playback_hls_frag_loads: number;
   playback_video_time_sec: number;
+  playback_error_count?: number;
+  e2e_latency_ms?: number;
 }
 
 export function postPlaybackSample(
@@ -141,12 +159,30 @@ export function fetchUpload(jobId: string): Promise<UploadJob> {
   return request(`/uploads/${jobId}`);
 }
 
+export function stopUpload(jobId: string): Promise<{ ok: boolean; status: string }> {
+  return request(`/uploads/${jobId}/stop`, { method: "POST" });
+}
+
 export function fetchResults(): Promise<{ results: ResultFile[] }> {
   return request("/results");
 }
 
 export function fetchResultDetail(filename: string): Promise<ResultSummary> {
   return request(`/results/${encodeURIComponent(filename)}`);
+}
+
+/** Basename of a job csv_path for /api/results/{filename}. */
+export function resultFilenameFromPath(csvPath?: string | null): string | null {
+  if (!csvPath) {
+    return null;
+  }
+  const parts = csvPath.replace(/\\/g, "/").split("/");
+  const name = parts[parts.length - 1] || "";
+  return name.endsWith(".csv") ? name : null;
+}
+
+export function resultDownloadUrl(filename: string, kind: "csv" | "json" = "csv"): string {
+  return `/api/results/${encodeURIComponent(filename)}/download?kind=${kind}`;
 }
 
 export function fetchPlaybackProbe(manifestUrl: string): Promise<{
@@ -190,9 +226,13 @@ export function subscribeToUpload(
     moq_namespace?: string | null;
     vmaf_status?: string | null;
     vmaf_score?: number | null;
+    psnr_db?: number | null;
+    ssim?: number | null;
     vmaf_error?: string | null;
     encoder_vmaf_status?: string | null;
     encoder_vmaf_score?: number | null;
+    encoder_psnr_db?: number | null;
+    encoder_ssim?: number | null;
     encoder_vmaf_error?: string | null;
   }) => void,
 ): () => void {

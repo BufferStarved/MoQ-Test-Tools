@@ -296,7 +296,13 @@ export default function MoqPlayer({
           video,
           muted: true,
           autoplay: true,
-          targetLatencyMs: 500,
+          // Keep near the live edge. Default maxCatchUpRate is 1.0 (disabled),
+          // which lets webcam/live MoQ fall far behind while still looking "low
+          // latency" on wall−currentTime until catch-up is enabled.
+          targetLatencyMs: 400,
+          maxCatchUpRate: 1.15,
+          catchUpThresholdMs: 250,
+          catchUpRecoveryMs: 50,
           moqtPlayerConfig: {
             catalog: OPENMOQ_BENCHMARK_CATALOG,
           },

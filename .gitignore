@@ -39,7 +39,10 @@ web/frontend/vendor/**/node_modules/
 *.log
 *.tsbuildinfo
 
-# Terraform plugin cache
+# Terraform plugin cache / local plans / secrets
 **/.terraform/
 *.tfstate
 *.tfstate.*
+**/terraform.tfvars
+**/tfplan
+**/*.tfplan

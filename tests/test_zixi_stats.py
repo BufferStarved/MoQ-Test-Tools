@@ -42,6 +42,12 @@ class ZixiStatsTests(unittest.TestCase):
         url = "rtmp://35.222.33.58:1935/live/benchmark"
         self.assertEqual(ZixiStatsPoller._stream_id_from_url(url), "benchmark")
 
+    def test_gcp_srt_preset_url_defaults_input_id(self):
+        # Public preset omits streamid; poller must still resolve Zixi input "SRT Test".
+        url = "srt://35.222.33.58:10080?mode=caller&latency=200000"
+        poller = ZixiStatsPoller(url)
+        self.assertEqual(poller._input_id, "SRT Test")
+
 
 if __name__ == "__main__":
     unittest.main()

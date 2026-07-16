@@ -220,6 +220,26 @@ class IngestAgentClient:
             log_path=payload.get("log_path", ""),
         )
 
+    def compute_media_health(
+        self,
+        job_id: str,
+        *,
+        start_epoch: float = 0.0,
+        end_epoch: float = 0.0,
+        output_path: str = "",
+    ) -> dict:
+        return self._request(
+            "POST",
+            f"/api/v1/jobs/{job_id}/media-health",
+            body={
+                "start_epoch": start_epoch,
+                "end_epoch": end_epoch,
+                "recording_dir": self._config.recording_dir,
+                "output_path": output_path,
+            },
+            timeout=120,
+        )
+
     def start_moq_recording(
         self,
         job_id: str,

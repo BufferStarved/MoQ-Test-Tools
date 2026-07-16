@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "./api";
+import { estimateE2eLatencyMs } from "./metricModel";
 
 const REPORT_INTERVAL_MS = 1000;
 
@@ -43,10 +44,16 @@ export function usePlaybackMetricsReporter(options: {
       }
       const snapshot = getSnapshotRef.current();
       const elapsed_sec = elapsedSecFromStart(startedAtEpoch);
+      const e2e = estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
+      const playback_error_count =
+        snapshot.playback_error_count ??
+        (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);
       const payload = {
         elapsed_sec,
         engine,
         ...snapshot,
+        playback_error_count,
+        e2e_latency_ms: e2e ?? snapshot.e2e_latency_ms ?? 0,
       };
       onSampleRef.current?.(payload);
       void postPlaybackSample(jobId, payload).catch(() => {

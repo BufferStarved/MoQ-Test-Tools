@@ -1,221 +1,206 @@
 # Metrics Reference
 
-This document describes every metric collected during an upload benchmark, where it comes from, and how to interpret it.
+This document describes the normalized metrics model used for cross-protocol comparison, where each field comes from, and how to interpret it.
 
 ## Collection overview
 
 - **Sample interval:** 1 second
-- **Output:** `results/upload_<timestamp>.csv` (per-second rows) + `results/upload_<timestamp>.summary.json` (aggregates)
-- **Encode stats:** `ffmpeg -progress` (bitrate, FPS, speed, out_time)
-- **Process stats:** `psutil` (CPU %, RSS memory for ffmpeg + srt-live-transmit)
-- **SRT stats:** `srt-live-transmit -statsout` CSV (libsrt counters)
-- **Receiver stats (optional):** Zixi Broadcaster REST API
-- **VMAF (optional):** `ffmpeg -lavfi libvmaf` post-run
+- **Output:** `results/upload_<timestamp>.csv` + `results/upload_<timestamp>.summary.json`
+- **Encode stats:** `ffmpeg -progress` (bitrate, FPS, speed, out_time, encode lag)
+- **Process / client host:** `psutil`
+- **Normalized transport (`net_*`):** filled from SRT (libsrt), MoQ (picoquic qlog or TCP path probe + moqx QUIC counters), or bitrate proxies
+- **Server host:** ingest-agent psutil and/or **GCP Cloud Monitoring**
+- **Edge (Zixi):** Zixi Broadcaster REST (TR 101 290, RTT, …)
+- **Edge (MoQ relay):** moqx Prometheus counters (charts show **job-window deltas**)
+- **Browser playback:** player stats + estimated end-to-end latency
+- **Video Quality:** VMAF / PSNR / SSIM (optional, post-run)
+
+## Pipeline stages (chart groups)
+
+| Stage | Chart group | What it measures |
+|-------|-------------|------------------|
+| Metadata | (summary only) | Protocol, endpoint, sample count |
+| Client | `client` | Publisher host (ffmpeg / openmoq-publisher) |
+| Encode | `encode` | Encoder output before the network path |
+| Video Quality | `video_quality` | VMAF / PSNR / SSIM |
+| Network transport | `transport` | Normalized `net_*` fields |
+| Server | `server` | Ingest or relay VM health |
+| Relay health (MoQ) | `edge_relay` | moqx / QUIC job-window deltas |
+| Edge (Zixi) | `edge_zixi` | SRT recovery (retransmits, FEC) — transport |
+| Media Health | `media_health` | Container/timeline integrity (not transport) |
+| Browser playback | `playback` | TTFF, stalls, **E2E latency estimate** |
+
+When a metric cannot be produced for the active protocol, the UI shows:
+
+> **Not available with protocol X**
+
+(for example Zixi TR101 on a MoQ leg).
+
+---
+
+## Answers to common design questions
+
+### 1. Can we compute TR 101 290 via open source for non-Zixi MSF / segmented MPEG?
+
+**Yes for MPEG-TS**, with tools such as [TSDuck](https://tsduck.io/) (`tsanalyze` / continuity-counter checks) on a TS ingest or recording. That path fits SRT/RTMP/HLS-TS style muxes.
+
+**MoQ fMP4/CMAF** uses a separate **Media Health** metric family (not TR101 field names):
+`cmaf_seq_gap_count`, `cmaf_tfdt_gap_count`, `cmaf_tfdt_gap_ms`, `cmaf_parse_errors`.
+These live in the same UI group as Zixi’s `ts_continuity_counter_errors` so protocols compare under one “Media Health” label.
+
+Today MPEG-TS Media Health still comes from **Zixi TR101**. An OSS TSDuck leg remains a natural follow-up for non-Zixi TS ingest.
+
+### 2. Do these metrics account for RTMP, HTTP, and WebRTC?
+
+| Stage | RTMP / HLS / DASH / HTTP | WebRTC (WHIP) | Notes |
+|-------|--------------------------|---------------|-------|
+| Client + encode | Yes | Yes (when publish path runs) | ffmpeg progress + psutil |
+| `net_*` transport | Sparse | Sparse | Usually send-rate proxy only; no libsrt RTT |
+| Server | Yes when agent/GCP configured | Same | |
+| Edge Zixi | RTMP via Zixi only | No | TR101 when Zixi Analyze is on |
+| Edge MoQ | No | No | MoQ only |
+| Playback | HLS player path | WHEP / future | Depends on browser player wiring |
+| Video Quality | Yes when VMAF enabled | Yes when enabled | |
+
+Unsupported cells show **Not available with protocol X** rather than fake zeros.
+
+### 3. Encode quality → Video Quality
+
+The former “encode quality” / `quality` chart group is now **`video_quality`** (“Video Quality”) for VMAF / PSNR / SSIM on encoder and/or ingest recordings.
+
+### 4. End-to-end latency across protocols
+
+**TTFF is not glass-to-glass.** Time-to-first-frame measures join delay after the player starts, not how far the picture lags the live encode.
+
+We added **`e2e_latency_ms`** (estimated):
+
+```
+e2e_latency_ms ≈ (wall_clock_now − encode_started_at) − playback_video_time_sec × 1000
+```
+
+Assumptions: encode starts near wall clock T0; player `currentTime` tracks media timeline from that encode; browser and publisher clocks are roughly NTP-aligned. Values outside 0–120s are dropped as invalid.
+
+**How to compare protocols:** run legs in parallel (or back-to-back with the same media), keep playback open during the encode, and compare the **`e2e_latency_ms`** series (and summary average) under **Browser playback**. Pair with TTFF and stall count for a fuller viewer story.
+
+A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-to-glass without clock skew.
+
+---
+
+## Normalized transport (`net_*`)
+
+| Column | Typical source |
+|--------|----------------|
+| `net_rtt_ms` | **SRT:** libsrt/Zixi. **MoQ:** picoquic qlog smoothed RTT (moq5), else TCP path probe to relay admin port (`MOQX_ADMIN_PORT`, default 8000) |
+| `net_jitter_ms` | Same estimator for both: mean absolute successive RTT deltas |
+| `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` |
+| `net_recv_mbps` | libsrt receive rate |
+| `net_loss_pct` / `net_retrans_pct` | **SRT:** libsrt. **MoQ:** moqx `quicPacketLoss` / `quicPacketRetransmissions` rates |
+
+Legacy columns (`transport_rtt_ms`, `encoder_send_rate_mbps`, …) remain for compatibility.
+
+### Encode lag
+
+`encode_lag_ms` = wall elapsed since run start − ffmpeg `out_time`. Large values mean the encoder is falling behind realtime (`-re` / live webcam).
+
+---
+
+## Server host metrics (ingest agent + GCP)
+
+1. **Ingest agent** (`/host_metrics`) — preferred for Zixi / shared worker.
+2. **GCP Cloud Monitoring** — preferred for **MoQ relay** (`gcp_moq_relay`), and fallback elsewhere.
+
+Environment on the collector / web VM:
+
+```bash
+export GCP_METRICS_ENABLED=1
+export GCP_METRICS_PROJECT=<gcp-project-id>
+export GCP_METRICS_ZONE=us-central1-a
+export GCP_INSTANCE_ZIXI=moq-zixi-gcp
+export GCP_INSTANCE_MOQX=moq-relay-gcp
+```
+
+The web VM service account needs **Monitoring Metric Viewer**. CPU uses `compute.googleapis.com/instance/cpu/utilization`; memory/disk use Ops Agent metrics when installed.
+
+---
 
 ## SRT pipeline
 
-SRT benchmarks do not push directly from ffmpeg. Instead:
-
 ```
-ffmpeg -re -i <media> -c:v copy -c:a copy -f mpegts udp://127.0.0.1:<port>
+ffmpeg -re -i <media> … -f mpegts udp://127.0.0.1:<port>
     ↓
-srt-live-transmit udp://:@127.0.0.1:<port> <srt-url> -statsout <csv> -statspf:csv -s:50
+srt-live-transmit udp://:@127.0.0.1:<port> <srt-url> -statsout <csv>
 ```
 
-This is required because ffmpeg's SRT muxer does not expose libsrt statistics in this build, while `srt-live-transmit` writes full sender/receiver counters to CSV.
-
-If `srt-live-transmit` is not found in `PATH`, SRT runs fall back to direct ffmpeg output **without** network metrics.
-
----
-
-## CSV columns
-
-| Column | Type | Source | Description |
-|--------|------|--------|-------------|
-| `timestamp` | float | system clock | Unix epoch seconds when the sample was recorded |
-| `protocol` | string | job config | `srt`, `rtmp`, `http`, or `webrtc` |
-| `endpoint` | string | job config | Full destination URL |
-| `pid` | int | ffmpeg | Primary process ID (ffmpeg) |
-| `cpu_percent` | float | psutil | Combined CPU % for ffmpeg + srt-live-transmit (SRT only) |
-| `memory_mb` | float | psutil | Combined RSS memory in MB |
-| `encoded_bitrate_kbps` | float | ffmpeg | Encoder output bitrate from `-progress`. Measures encode load before the network path — not delivered network throughput. |
-| `encoder_send_rate_mbps` | float | ffmpeg / libsrt | Outbound rate in Mbps. Defaults to `encoded_bitrate_kbps / 1000` when no transport-level send measurement exists; `srt-live-transmit` supplies a measured value when enabled. |
-| `transport_recv_rate_mbps` | float | libsrt | Measured receive bandwidth from `srt-live-transmit` when stats are enabled. |
-| `fps` | float | ffmpeg | Output frame rate |
-| `fps_stability` | float | computed | Coefficient of variation (stddev/mean) of FPS over a rolling 30-sample window. Lower = more stable. `0` until enough samples exist. |
-| `speed` | float | ffmpeg | Encode/upload speed relative to realtime (`1.0` = realtime) |
-| `out_time` | string | ffmpeg | Media timestamp reached (`HH:MM:SS.microseconds`) |
-| `transport_rtt_ms` | float | libsrt / Zixi | Round-trip time in milliseconds for the active transport instrument. SRT sender: `msRTT`. Overridden by Zixi receiver RTT when API poller is enabled. |
-| `transport_rtt_jitter_ms` | float | computed / Zixi | Variation in transport RTT between samples. SRT: mean absolute delta between consecutive RTT samples. Zixi: receiver jitter when API poller is enabled. |
-| `pkt_rcv_drop` | int | libsrt / Zixi | Packets dropped on the **receive** side (`pktRcvDrop`). On the sender this is typically `0`; use Zixi input stats for receiver-side drops. |
-| `pkt_snd_drop` | int | libsrt | Packets dropped on the **send** side (`pktSndDrop`) |
-| `pkt_snd_loss` | int | libsrt | Sender packet loss (`pktSndLoss`) |
-| `pkt_retrans` | int | libsrt | Retransmitted packets (`pktRetrans`) |
-| `pkt_fec_extra` | int | libsrt | FEC recovery packets sent (`pktSndFilterExtra`) |
-| `ts_continuity_counter_errors` | int | Zixi API | MPEG-TS continuity-counter errors from Zixi TR101 analysis. Meaningful for TS-muxed SRT/RTMP only. Requires Zixi API credentials and TR101 analysis enabled on the input. `0` when not configured. |
-| `vmaf_score` | float | libvmaf | Perceptual quality score (0–100). Only populated post-run when `MOQ_VMAF_DISTORTED` is set. Empty during live collection. |
-
----
-
-## Summary JSON
-
-The `.summary.json` file written alongside each CSV contains:
-
-```json
-{
-  "csv_path": "results/upload_....csv",
-  "protocol": "srt",
-  "endpoint": "srt://...",
-  "samples": 30,
-  "averages": { ... },
-  "srt": {
-    "avg_rtt_ms": 49.7,
-    "max_rtt_ms": 63.8,
-    "avg_jitter_ms": 1.0,
-    "max_jitter_ms": 1.8,
-    "total_pkt_rcv_drop": 0,
-    "total_pkt_snd_drop": 0,
-    "total_pkt_retrans": 0,
-    "total_pkt_fec_extra": 0,
-    "samples": 30
-  },
-  "extra": {
-    "vmaf_available": false,
-    "zixi_poller_enabled": false,
-    "vmaf_note": ""
-  }
-}
-```
-
-**Averages** are arithmetic means for numeric columns. Counter columns (`pkt_rcv_drop`, `pkt_retrans`, etc.) use the **last sample value** (cumulative counters).
+If `srt-live-transmit` is missing, SRT falls back to direct ffmpeg **without** libsrt network metrics.
 
 ---
 
 ## Optional: Zixi receiver metrics
 
-Set these environment variables before starting a benchmark (API or CLI):
-
 ```bash
 export ZIXI_API_BASE=http://<zixi-host>:4444
 export ZIXI_API_USER=admin
 export ZIXI_API_PASSWORD=<password>
-export ZIXI_INPUT_ID=<input-id>    # optional, targets a specific input
+export ZIXI_INPUT_ID=<input-id>    # optional
 ```
-
-The poller calls Zixi Broadcaster's UI-backed JSON endpoints (HTTP Basic auth on port `4444`):
-
-- `input_stream_stats.json?func=fill_inputs_stats&id=<stream_id>` — RTT, jitter, packet loss, RTP drops
-- `input_stream_stats.json?func=fill_ts_anaysis_data&id=<stream_id>` — TR101 analysis (note Zixi's `anaysis` spelling)
-
-Responses are JSONP callbacks (e.g. `fill_inputs_stats({...})`). The poller maps:
 
 | Zixi field | CSV column |
 |------------|------------|
-| `net.rtt` | `transport_rtt_ms` |
-| `net.jitter` | `transport_rtt_jitter_ms` |
-| `net.loss_millipercent / 1000` | (internal `packet_loss_pct`) |
+| `net.rtt` | `transport_rtt_ms` / `net_rtt_ms` |
+| `net.jitter` | `transport_rtt_jitter_ms` / `net_jitter_ms` |
 | `tr101[].Continuity_count_error` | `ts_continuity_counter_errors` |
-| `failover.rtp_drops` or `net.dropped` | (internal `rtp_drops`) |
 
-The older guessed paths (`/api/v1/inputs/statistics`) are **not** valid on standard Zixi Broadcaster installs.
-
-**CC errors** require TR101 analysis on the Zixi input:
-
-1. Zixi UI → Inputs → select input → enable **Analyze** / TR101
-2. Run benchmark with API credentials set
-
-Receiver-side **pktRcvDrop** and **jitter** from Zixi are more accurate than sender-side libsrt counters for measuring what the ingest point experienced.
+Enable **Analyze / TR101** on the Zixi input for continuity errors.
 
 ---
 
-## Optional: VMAF on ingest server
+## Media Health (not transport)
 
-VMAF should run on the **ingest host** (where the stream is received), not on the ffmpeg sender. When enabled in the benchmark form:
+Shared UI group for **container/timeline integrity**. Protocols use different underlying counters:
 
-1. **Browser upload:** reference media is uploaded to the hosted API (`POST /api/media/upload`)
-2. **Before stream:** the API uploads the reference to the ingest HTTP agent (`POST /api/v1/jobs/{id}/reference`)
-3. **During upload:** Zixi records the received stream to disk
-4. **After upload:** the API asks the agent to compute VMAF (`POST /api/v1/jobs/{id}/vmaf`)
-5. **Score** is written to `*.summary.json` and shown in the Results tab
+| Protocol | Metric keys | Source |
+|----------|-------------|--------|
+| SRT / RTMP (Zixi) | `ts_continuity_counter_errors` | Zixi TR 101 290 continuity |
+| MoQ (CMAF/fMP4) | `cmaf_seq_gap_count`, `cmaf_tfdt_gap_count`, `cmaf_tfdt_gap_ms`, `cmaf_tfdt_overlap_count`, `cmaf_parse_errors` | Post-encode / post-relay fMP4 analysis |
 
-### Ingest host setup
+MoQ analysis runs on the local encoder capture every MoQ publish, and is **replaced by post-relay ingest recording** analysis when ingest VMAF/recording is enabled (`POST /api/v1/jobs/{id}/media-health` on the ingest agent).
 
-```bash
-# On the GCP/Zixi VM (after syncing this repo)
-sudo bash infra/zixi/scripts/install-ingest-vmaf.sh
-sudo bash infra/zixi/scripts/install-ingest-agent.sh
+These are intentionally **not** `net_*` / QUIC / SRT packet metrics.
 
-# Zixi UI → Inputs → enable Record to disk
-# Open TCP 8090 in your ingest firewall for the hosted app
-```
+## Relay health (MoQ)
 
-### Hosted app configuration
-
-```bash
-export INGEST_AGENT_TOKEN=<shared-secret-from-/etc/moq-ingest-agent.env>
-export INGEST_RECORDING_DIR=/opt/zixi_broadcaster-linux64
-```
-
-Web UI: upload a reference file, enable **Compute VMAF via ingest HTTP agent**, enter the agent token (or rely on server env), and optionally override the recording directory. Use **Check ingest agent** to verify connectivity before running.
-
-### Legacy: local VMAF
-
-If `MOQ_VMAF_DISTORTED` is set and ingest VMAF is disabled, VMAF still runs locally via `ffmpeg libvmaf` for backward compatibility.
+Prometheus counters from moqx are absolute since relay restart. The UI charts **deltas from the first sample of the job** so comparisons stay meaningful.
 
 ---
 
-## Interpreting key metrics
+## Browser playback
 
-### Transport RTT and jitter
-
-- **transport_rtt_ms** is the SRT control-channel round trip (or Zixi receiver RTT when the API poller is active). Spikes often correlate with congestion or route changes.
-- **transport_rtt_jitter_ms** (computed as mean |ΔRTT| for SRT) measures RTT stability. Zixi receiver jitter is an alternative when the API poller is active.
-
-### Packet loss and retransmits
-
-- **pkt_snd_loss** / **pkt_snd_drop**: problems on the upload path from the sender's perspective.
-- **pkt_rcv_drop**: drops at the receiver. On a sender-only libsrt connection this stays at 0 — check Zixi input stats for real receiver drops.
-- **pkt_retrans**: SRT ARQ retransmissions. Sustained non-zero values indicate lossy links.
-
-### FEC
-
-- **pkt_fec_extra** (`pktSndFilterExtra`): forward error correction packets sent. Only non-zero when SRT FEC is configured on the socket.
-
-### FPS stability
-
-Coefficient of variation of FPS over the last 30 samples:
-
-| Value | Interpretation |
-|-------|----------------|
-| < 0.05 | Very stable frame pacing |
-| 0.05 – 0.15 | Normal for `-re` realtime streaming |
-| > 0.20 | Irregular frame delivery; check CPU or source file frame timing |
-
-### TS continuity counter errors
-
-MPEG-TS continuity counter errors (`ts_continuity_counter_errors`) detected by Zixi TR101 analysis. Non-zero values indicate transport stream corruption — often from packet loss or jitter buffer underruns.
+| Column | Meaning |
+|--------|---------|
+| `e2e_latency_ms` | Estimated glass-to-glass (see above) |
+| `playback_ttff_ms` | Time to first frame after player start |
+| `playback_stall_count` | Stalls (MoQ playa / HLS buffer stalled) |
+| `playback_video_time_sec` | Max `<video>.currentTime` |
+| `playback_error_count` | Normalized player errors |
 
 ---
 
-## Metrics by protocol
+## Video Quality (VMAF)
 
-| Metric | SRT | RTMP | HTTP | WHIP |
-|--------|-----|------|------|------|
-| encoded_bitrate_kbps, fps, speed, cpu, memory | ✓ | ✓ | ✓ | ✓ |
-| fps_stability | ✓ | ✓ | ✓ | ✓ |
-| transport_rtt_ms, transport_rtt_jitter_ms, loss, retrans, FEC | ✓ | — | — | — |
-| ts_continuity_counter_errors (Zixi) | ✓* | ✓* | — | — |
-| vmaf (post-run) | ✓* | ✓* | ✓* | ✓* |
-
-\* Requires optional configuration (Zixi API, recording + libvmaf).
+Optional post-run libvmaf on encoder capture and/or ingest recording. See the ingest-agent sections in this repo’s Zixi / web runbooks.
 
 ---
 
-## Future metrics
+## Metrics by protocol (summary)
 
-Planned additions:
+| Metric family | SRT | RTMP | HTTP/HLS/DASH | WebRTC | MoQ |
+|---------------|-----|------|---------------|--------|-----|
+| Client + encode | ✓ | ✓ | ✓ | ✓* | ✓ |
+| `net_rtt` / loss | ✓ | — | — | — | ✓ (QUIC) |
+| Zixi TR101 | ✓* | ✓* | — | — | — |
+| Relay health | — | — | — | — | ✓ |
+| Server host | ✓* | ✓* | ✓* | ✓* | ✓* (GCP) |
+| Playback + E2E | ✓* | ✓* | ✓* | ✓* | ✓* |
+| Video Quality | ✓* | ✓* | ✓* | ✓* | ✓* |
 
-- **Bandwidth estimate** (`mbpsBandwidth` from libsrt)
-- **Buffer occupancy** (`msSndBuf`, `msRcvBuf`)
-- **Time-to-first-frame** (connection setup latency)
-- **WebRTC inbound stats** (browser player: packets lost, jitter, frames decoded)
+\* Requires optional wiring (Zixi API, GCP metrics, browser player open during encode, VMAF).

@@ -1,13 +1,12 @@
 import { INGEST_ENDPOINTS, isCustomIngestEndpoint, presetIdForIngest } from "./ingestEndpoints";
 import type { EndpointConfig, Preset, Protocol } from "./types";
-import type { PlaybackMode } from "./playbackTypes";
 import {
-  PLAYBACK_MODE_OPTIONS,
-  defaultWhepPlaybackUrl,
+  defaultPlaybackModeForProtocol,
   isManagedMoqRelay,
+  managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
+  relayWebTransportUrl,
   showMoqUrlFields,
-  showWhepUrlField,
 } from "./playbackUrls";
 
 interface EndpointSectionProps {
@@ -43,6 +42,17 @@ function moqPatchFromPreset(endpoint: EndpointConfig, presets: Preset[]): Partia
   };
 }
 
+function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string {
+  const publishUrl = resolvePresetUrl(endpoint, presets);
+  if (!publishUrl) {
+    return "";
+  }
+  if (endpoint.protocol === "moq") {
+    return moqDefaultsFromPublishUrl(publishUrl).webTransportUrl || relayWebTransportUrl(publishUrl);
+  }
+  return publishUrl;
+}
+
 export function EndpointSection({
   index,
   endpoint,
@@ -57,15 +67,9 @@ export function EndpointSection({
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
   const selectedIngest = INGEST_ENDPOINTS.find((item) => item.id === endpoint.ingestEndpointId);
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
-  const playbackMode = endpoint.playbackMode ?? "auto";
-  const showWhep = showWhepUrlField(playbackMode, endpoint.protocol);
-  const showMoq = showMoqUrlFields(playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
-  const managedMoq = endpoint.protocol === "moq" && isManagedMoqRelay(endpoint.ingestEndpointId);
-  const managedMoqDefaults = managedMoq ? moqDefaultsFromPublishUrl(resolvePresetUrl(endpoint, presets)) : null;
-  const whepPlaceholder =
-    endpoint.protocol === "srt"
-      ? defaultWhepPlaybackUrl("35.222.33.58", "benchmark")
-      : "http://host:8080/whep/benchmark";
+  const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
+  const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
+  const managedLabel = managedEndpointUrlLabel(endpoint.protocol);
 
   const controlsLocked = bootstrapping || !apiOnline;
 
@@ -75,7 +79,7 @@ export function EndpointSection({
         <p className="hint endpoint-lock-hint">
           {bootstrapping
             ? "Loading protocol and preset options from the API..."
-            : "Controls are locked until the API is reachable. Use http://127.0.0.1:5173 after ./scripts/dev.sh, then click Retry if needed."}
+            : "Controls are locked until the API is reachable."}
         </p>
       )}
       <div className="endpoint-header">
@@ -93,14 +97,18 @@ export function EndpointSection({
           value={endpoint.protocol}
           onChange={(e) => {
             const protocol = e.target.value;
-            const patch: Partial<EndpointConfig> = { protocol };
+            const patch: Partial<EndpointConfig> = {
+              protocol,
+              playbackMode: defaultPlaybackModeForProtocol(protocol),
+            };
             if (protocol === "moq") {
               patch.ingestEndpointId = "gcp_moq_relay";
-              patch.playbackMode = "moq";
               Object.assign(
                 patch,
                 moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: "gcp_moq_relay" }, presets),
               );
+            } else if (endpoint.ingestEndpointId === "gcp_moq_relay") {
+              patch.ingestEndpointId = "gcp_zixi";
             }
             onChange(endpoint.id, patch);
           }}
@@ -115,7 +123,7 @@ export function EndpointSection({
       </label>
 
       <label>
-        Ingest endpoint
+        Ingest Endpoint
         <select
           value={endpoint.ingestEndpointId}
           onChange={(e) => {
@@ -152,78 +160,10 @@ export function EndpointSection({
         </label>
       )}
 
-      <label>
-        Playback
-        <select
-          value={endpoint.playbackMode ?? "auto"}
-          onChange={(e) => onChange(endpoint.id, { playbackMode: e.target.value as PlaybackMode })}
-          disabled={controlsLocked}
-        >
-          {PLAYBACK_MODE_OPTIONS.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-        <span className="hint">
-          {PLAYBACK_MODE_OPTIONS.find((item) => item.id === (endpoint.playbackMode ?? "auto"))?.hint}
-        </span>
-      </label>
-
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={endpoint.playbackDvr ?? false}
-          onChange={(e) => onChange(endpoint.id, { playbackDvr: e.target.checked })}
-          disabled={controlsLocked}
-        />
-        <span>Enable DVR playlist (HLS/DASH when available)</span>
-      </label>
-
-      {managedMoq && managedMoqDefaults?.relayUrl && (
-        <div className="managed-playback-summary">
-          <p className="hint">
-            MoQ playback is configured automatically from the GCP MoQ relay preset. You do not need to
-            fill in relay, namespace, or fingerprint fields.
-          </p>
-          <dl className="managed-playback-values">
-            <div>
-              <dt>WebTransport URL</dt>
-              <dd>
-                <code>{managedMoqDefaults.webTransportUrl}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Namespace</dt>
-              <dd>
-                <code>{managedMoqDefaults.namespace}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>Fingerprint URL</dt>
-              <dd>
-                <code>{managedMoqDefaults.fingerprintUrl}</code>
-              </dd>
-            </div>
-          </dl>
-        </div>
-      )}
-
-      {showWhep && (
-        <label>
-          WHEP channel URL
-          <input
-            type="url"
-            value={endpoint.whepPlaybackUrl ?? ""}
-            onChange={(e) => onChange(endpoint.id, { whepPlaybackUrl: e.target.value })}
-            placeholder={whepPlaceholder}
-            disabled={controlsLocked}
-          />
-          <span className="hint">
-            WebRTC preview endpoint from a WHEP gateway (e.g. Eyevinn srt-whep). Auto mode uses WHEP
-            for SRT when this is set; otherwise falls back to Zixi HLS.
-          </span>
-        </label>
+      {managedUrl && (
+        <p className="hint managed-endpoint-url">
+          {managedLabel} <code>{managedUrl}</code>
+        </p>
       )}
 
       {showMoq && (
@@ -257,9 +197,6 @@ export function EndpointSection({
               placeholder="https://relay.example.com:4433/fingerprint"
               disabled={controlsLocked}
             />
-            <span className="hint">
-              Only needed for custom MoQ relays. Managed GCP MoQ relay fills these in automatically.
-            </span>
           </label>
         </>
       )}

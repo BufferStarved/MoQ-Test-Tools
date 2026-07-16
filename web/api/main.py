@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import uuid
 import urllib.error
@@ -11,11 +12,13 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from live_webcam import DEFAULT_LIVE_DURATION_SEC, MAX_LIVE_DURATION_SEC, live_webcam_manager
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
@@ -62,7 +65,8 @@ app.add_middleware(
 
 class CreateUploadRequest(BaseModel):
     media_path: str = "dummy.mp4"
-    duration_sec: int = Field(default=30, ge=5, le=3600)
+    # When omitted, the API uses the media file duration (ffprobe).
+    duration_sec: Optional[int] = Field(default=None, ge=5, le=3600)
     preset_id: Optional[str] = None
     protocol: Optional[str] = None
     endpoint_url: Optional[str] = None
@@ -71,6 +75,37 @@ class CreateUploadRequest(BaseModel):
     comparison_id: Optional[str] = None
     stream_index: int = Field(default=0, ge=0, le=9)
     stream_label: str = ""
+
+
+def probe_media_duration_sec(media_path: str) -> int:
+    """Return media duration in seconds (clamped), defaulting to 60 on failure."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 60
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                media_path,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        raw = (completed.stdout or "").strip()
+        duration = float(raw)
+        if duration <= 0 or duration != duration:  # NaN
+            return 60
+        return max(5, min(3600, int(round(duration))))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 60
 
 
 class PlaybackSampleRequest(BaseModel):
@@ -87,6 +122,8 @@ class PlaybackSampleRequest(BaseModel):
     playback_hls_buffer_stalls: int = 0
     playback_hls_frag_loads: int = 0
     playback_video_time_sec: float = 0.0
+    playback_error_count: int = 0
+    e2e_latency_ms: float = 0.0
 
 
 def job_to_dict(job) -> dict:
@@ -108,9 +145,13 @@ def job_to_dict(job) -> dict:
         "compute_vmaf_encoder": job.compute_vmaf_encoder,
         "vmaf_status": job.vmaf_status,
         "vmaf_score": job.vmaf_score,
+        "psnr_db": job.psnr_db,
+        "ssim": job.ssim,
         "vmaf_error": job.vmaf_error,
         "encoder_vmaf_status": job.encoder_vmaf_status,
         "encoder_vmaf_score": job.encoder_vmaf_score,
+        "encoder_psnr_db": job.encoder_psnr_db,
+        "encoder_ssim": job.encoder_ssim,
         "encoder_vmaf_error": job.encoder_vmaf_error,
         "started_at_epoch": job.started_at_epoch,
     }
@@ -328,14 +369,69 @@ def presets(protocol: Optional[str] = None):
     return {"presets": items}
 
 
+class CreateLiveSessionRequest(BaseModel):
+    stream_count: int = Field(default=2, ge=1, le=9)
+    duration_sec: int = Field(default=DEFAULT_LIVE_DURATION_SEC, ge=5, le=MAX_LIVE_DURATION_SEC)
+
+
+@app.post("/api/live/sessions")
+def create_live_session(request: CreateLiveSessionRequest):
+    try:
+        session = live_webcam_manager.create(
+            stream_count=request.stream_count,
+            duration_sec=request.duration_sec,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "session_id": session.id,
+        "duration_sec": session.duration_sec,
+        "media_paths": session.media_paths,
+        "ws_path": f"/api/live/sessions/{session.id}/ws",
+    }
+
+
+@app.websocket("/api/live/sessions/{session_id}/ws")
+async def live_session_ws(websocket: WebSocket, session_id: str):
+    session = live_webcam_manager.get(session_id)
+    if session is None:
+        await websocket.close(code=4404)
+        return
+
+    await websocket.accept()
+    await websocket.send_json({"type": "accepted", "session_id": session_id})
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data:
+                session.write(data)
+                if session.failed:
+                    await websocket.send_json({"type": "error", "message": session.failed})
+                    break
+                if session.ready.is_set() and not session._ready_notified:
+                    session._ready_notified = True
+                    await websocket.send_json({"type": "ready", "bytes_in": session._bytes_in})
+            text = message.get("text")
+            if text == "end":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        live_webcam_manager.close(session_id)
+
+
 @app.post("/api/uploads")
 def create_upload(request: CreateUploadRequest):
-    media_path = request.media_path
-    if not os.path.isabs(media_path):
-        media_path = str(ROOT_DIR / media_path)
-
-    if not os.path.exists(media_path):
-        raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
+    media_path = request.media_path.strip()
+    is_live = media_path.lower().startswith(("udp://", "tcp://", "rtsp://"))
+    if not is_live:
+        if not os.path.isabs(media_path):
+            media_path = str(ROOT_DIR / media_path)
+        if not os.path.exists(media_path):
+            raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
 
     try:
         destination = resolve_destination_request(
@@ -346,7 +442,11 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if request.compute_vmaf_on_ingest:
+    # Live webcam has no stable reference file for VMAF.
+    compute_vmaf_on_ingest = request.compute_vmaf_on_ingest and not is_live
+    compute_vmaf_encoder = request.compute_vmaf_encoder and not is_live
+
+    if compute_vmaf_on_ingest:
         preset = PRESET_BY_ID.get(request.preset_id or destination.preset_id)
         if preset is not None and not preset.supports_vmaf:
             raise HTTPException(
@@ -360,18 +460,27 @@ def create_upload(request: CreateUploadRequest):
                 detail="VMAF is not available for this destination. Use a managed ingest endpoint.",
             )
 
-    if request.compute_vmaf_encoder and not libvmaf_available():
+    if compute_vmaf_encoder and not libvmaf_available():
         raise HTTPException(
             status_code=400,
             detail="Encoder VMAF requires ffmpeg with libvmaf on this machine.",
         )
 
+    duration_sec = request.duration_sec
+    if duration_sec is None:
+        if is_live:
+            duration_sec = DEFAULT_LIVE_DURATION_SEC
+        else:
+            duration_sec = probe_media_duration_sec(media_path)
+    if is_live:
+        duration_sec = max(5, min(MAX_LIVE_DURATION_SEC, int(duration_sec)))
+
     job = UploadJob(
         media_path=media_path,
         destination=destination,
-        duration_sec=request.duration_sec,
-        compute_vmaf_on_ingest=request.compute_vmaf_on_ingest,
-        compute_vmaf_encoder=request.compute_vmaf_encoder,
+        duration_sec=duration_sec,
+        compute_vmaf_on_ingest=compute_vmaf_on_ingest,
+        compute_vmaf_encoder=compute_vmaf_encoder,
         comparison_id=request.comparison_id or "",
         stream_index=request.stream_index,
         stream_label=request.stream_label,
@@ -407,6 +516,14 @@ def post_playback_sample(job_id: str, request: PlaybackSampleRequest):
     return {"ok": True}
 
 
+@app.post("/api/uploads/{job_id}/stop")
+def stop_upload(job_id: str):
+    """Request cooperative cancel of a running upload (used by live webcam Stop)."""
+    if not job_manager.request_cancel(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"ok": True, "status": "stopping"}
+
+
 @app.get("/api/uploads/{job_id}/events")
 async def upload_events(job_id: str):
     job = job_manager.get_job(job_id)
@@ -432,9 +549,13 @@ async def upload_events(job_id: str):
                 "moq_namespace": current.moq_namespace,
                 "vmaf_status": current.vmaf_status,
                 "vmaf_score": current.vmaf_score,
+                "psnr_db": current.psnr_db,
+                "ssim": current.ssim,
                 "vmaf_error": current.vmaf_error,
                 "encoder_vmaf_status": current.encoder_vmaf_status,
                 "encoder_vmaf_score": current.encoder_vmaf_score,
+                "encoder_psnr_db": current.encoder_psnr_db,
+                "encoder_ssim": current.encoder_ssim,
                 "encoder_vmaf_error": current.encoder_vmaf_error,
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
@@ -533,7 +654,16 @@ def playback_fetch(url: str):
         content = _rewrite_m3u8_manifest(url, content)
         media_type = "application/vnd.apple.mpegurl"
 
-    return Response(content=content, media_type=media_type)
+    # Zixi playlists/segments must never be cached — a stale m3u8 or TS chunk
+    # is exactly the "last 2 seconds looping" failure mode.
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @app.get("/api/playback/probe")
@@ -771,6 +901,36 @@ def result_detail(filename: str):
 
     summary = read_result_summary(str(csv_path))
     return {"filename": filename, **summary}
+
+
+@app.get("/api/results/{filename}/download")
+def download_result(filename: str, kind: str = "csv"):
+    """Download the raw CSV sample log or the .summary.json for a result file."""
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    kind_normalized = (kind or "csv").strip().lower()
+    if kind_normalized not in {"csv", "json", "summary"}:
+        raise HTTPException(status_code=400, detail="kind must be csv or json")
+
+    if kind_normalized == "csv":
+        path = ROOT_DIR / "results" / filename
+        media_type = "text/csv"
+        download_name = filename
+    else:
+        base = filename[:-4] if filename.endswith(".csv") else filename
+        path = ROOT_DIR / "results" / f"{base}.summary.json"
+        media_type = "application/json"
+        download_name = f"{base}.summary.json"
+
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=download_name,
+    )
 
 
 FRONTEND_DIST = ROOT_DIR / "web" / "frontend" / "dist"

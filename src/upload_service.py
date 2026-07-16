@@ -15,19 +15,22 @@ import psutil
 from destinations import DestinationProfile
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
-from metrics import MetricsCollector
+from metrics import MetricsCollector, compute_encode_lag_ms
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     BROWSER_COMPAT_VIDEO_ARGS,
     MPEGTS_VIDEO_BSF,
+    build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
     build_moq_publisher_cmd,
     find_ffmpeg,
     find_moq_publisher,
+    is_live_media_source,
     with_srt_stream_id,
     zixi_srt_stream_id_for_preset,
 )
 from moqx_stats import MoqxStatsPoller
+from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
 from zixi_input_reset import reset_zixi_srt_input
 from network_metrics import (
@@ -69,7 +72,11 @@ class UploadJob:
     distorted_path: str = ""
     encoder_capture_path: str = ""
     compute_vmaf: bool = False
+    cancel_event: Optional[threading.Event] = None
     ffmpeg_cmd: List[str] = field(default_factory=list, init=False)
+
+    def is_cancelled(self) -> bool:
+        return bool(self.cancel_event and self.cancel_event.is_set())
 
     def __post_init__(self):
         if not self.ffmpeg_cmd:
@@ -100,9 +107,7 @@ class UploadJob:
             output_args = self._browser_compat_output_args()
         return [
             find_ffmpeg(),
-            "-re",
-            "-i",
-            self.media_path,
+            *build_ffmpeg_input_args(self.media_path),
             *BROWSER_COMPAT_VIDEO_ARGS,
             *BROWSER_COMPAT_AUDIO_ARGS,
             "-progress",
@@ -142,6 +147,15 @@ class UploadSample:
     progress: str
     transport_rtt_ms: float = 0.0
     transport_rtt_jitter_ms: float = 0.0
+    net_rtt_ms: float = 0.0
+    net_jitter_ms: float = 0.0
+    net_send_mbps: float = 0.0
+    net_recv_mbps: float = 0.0
+    net_loss_pct: float = 0.0
+    net_retrans_pct: float = 0.0
+    encode_lag_ms: float = 0.0
+    e2e_latency_ms: float = 0.0
+    playback_error_count: int = 0
     pkt_rcv_drop: int = 0
     pkt_snd_drop: int = 0
     pkt_snd_loss: int = 0
@@ -174,8 +188,12 @@ class UploadResult:
     csv_path: Optional[str] = None
     summary_path: Optional[str] = None
     vmaf_score: Optional[float] = None
+    psnr_db: Optional[float] = None
+    ssim: Optional[float] = None
     encoder_vmaf_status: str = "disabled"
     encoder_vmaf_score: Optional[float] = None
+    encoder_psnr_db: Optional[float] = None
+    encoder_ssim: Optional[float] = None
     encoder_vmaf_error: Optional[str] = None
     error: Optional[str] = None
 
@@ -238,21 +256,33 @@ class UploadService:
             return UploadResult(success=False, error="ffmpeg not found in PATH")
 
         progress_reader = FfmpegProgressReader(process.stdout)
+        zixi_stats_url = (
+            job._resolved_srt_destination_url()
+            if job.destination.protocol == "srt"
+            else job.destination.url
+        )
         collector = MetricsCollector(
             protocol=job.destination.protocol,
-            endpoint_url=job.destination.url,
+            endpoint_url=zixi_stats_url,
             run_id=job.job_id,
         )
-        zixi_poller = ZixiStatsPoller(job.destination.url)
+        zixi_poller = ZixiStatsPoller(zixi_stats_url)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
             agent_url=job.ingest_agent_url,
+            ingest_provider=job.destination.ingest_provider,
         )
         start_time = time.time()
 
         try:
             while time.time() - start_time < job.duration_sec:
+                if job.is_cancelled():
+                    logger.info("Upload job %s cancelled by user", job.job_id)
+                    break
                 if process.poll() is not None:
+                    if process.returncode == 0:
+                        # Source ended cleanly before wall-clock duration — finalize + VMAF.
+                        break
                     return UploadResult(
                         success=False,
                         error=self._ffmpeg_failure_message(process),
@@ -265,10 +295,12 @@ class UploadService:
                 elapsed = int(time.time() - start_time)
                 cpu, mem = self._process_usage([process.pid])
                 send_mbps = status.bitrate_kbps / 1000.0
+                encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
+                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     fps_stability=0.0,
                     speed=status.speed,
@@ -278,6 +310,10 @@ class UploadService:
                     progress=status.progress,
                     transport_rtt_ms=zixi_stats.rtt_ms,
                     transport_rtt_jitter_ms=zixi_stats.jitter_ms,
+                    net_rtt_ms=zixi_stats.rtt_ms,
+                    net_jitter_ms=zixi_stats.jitter_ms,
+                    net_send_mbps=send_mbps,
+                    encode_lag_ms=encode_lag_ms,
                     ts_continuity_counter_errors=zixi_stats.cc_errors,
                     encoder_send_rate_mbps=send_mbps,
                     client_memory_percent=client_host.memory_percent,
@@ -288,7 +324,7 @@ class UploadService:
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=process.pid,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
@@ -296,6 +332,10 @@ class UploadService:
                     transport_rtt_jitter_ms=sample.transport_rtt_jitter_ms,
                     ts_continuity_counter_errors=sample.ts_continuity_counter_errors,
                     encoder_send_rate_mbps=send_mbps,
+                    encode_lag_ms=encode_lag_ms,
+                    net_rtt_ms=sample.net_rtt_ms,
+                    net_jitter_ms=sample.net_jitter_ms,
+                    net_send_mbps=send_mbps,
                     client_memory_percent=sample.client_memory_percent,
                     client_disk_percent=sample.client_disk_percent,
                     server_cpu_percent=sample.server_cpu_percent,
@@ -346,12 +386,24 @@ class UploadService:
     ) -> UploadResult:
         """Push MPEG-TS to Zixi over SRT.
 
-        Prefer native ffmpeg→SRT (stable single session, HLS segments roll reliably).
-        Set SRT_USE_LIVE_TRANSMIT=1 to use srt-live-transmit for extra SRT CSV stats.
+        Prefer srt-live-transmit when available (libsrt pkt_* / send-rate CSV stats).
+        Set SRT_USE_LIVE_TRANSMIT=0 to force native ffmpeg→SRT.
+        Set SRT_USE_LIVE_TRANSMIT=1 to require live-transmit (error if missing).
         """
         self._reset_zixi_srt_input_if_managed(job)
 
-        if os.environ.get("SRT_USE_LIVE_TRANSMIT", "").strip() != "1":
+        live_transmit_flag = os.environ.get("SRT_USE_LIVE_TRANSMIT", "").strip().lower()
+        srt_bin = find_srt_live_transmit()
+        use_live_transmit = live_transmit_flag in {"1", "true", "yes"} or (
+            live_transmit_flag not in {"0", "false", "no"} and bool(srt_bin)
+        )
+
+        if not use_live_transmit or not srt_bin:
+            if live_transmit_flag in {"1", "true", "yes"} and not srt_bin:
+                return UploadResult(
+                    success=False,
+                    error="SRT_USE_LIVE_TRANSMIT=1 but srt-live-transmit was not found in PATH",
+                )
             resolved = job._resolved_srt_destination_url()
             ffmpeg_bin = find_ffmpeg()
             if not shutil.which(ffmpeg_bin) and not os.path.isfile(ffmpeg_bin):
@@ -375,13 +427,6 @@ class UploadService:
             except (OSError, subprocess.TimeoutExpired):
                 pass
             logger.info("SRT destination (direct ffmpeg): %s", resolved)
-            return self._run_direct_ffmpeg(job, on_sample=on_sample)
-
-        srt_bin = find_srt_live_transmit()
-        if not srt_bin:
-            logger.warning(
-                "srt-live-transmit not found; falling back to direct ffmpeg SRT without network stats"
-            )
             return self._run_direct_ffmpeg(job, on_sample=on_sample)
 
         udp_port = _pick_udp_port()
@@ -437,16 +482,25 @@ class UploadService:
             endpoint_url=resolved_srt_url,
             run_id=job.job_id,
         )
-        zixi_poller = ZixiStatsPoller(job.destination.url)
+        # Must use resolved URL (with streamid) so Zixi API looks up "SRT Test", not "".
+        zixi_poller = ZixiStatsPoller(resolved_srt_url)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
             agent_url=job.ingest_agent_url,
+            ingest_provider=job.destination.ingest_provider,
         )
         start_time = time.time()
 
         try:
             while time.time() - start_time < job.duration_sec:
+                if job.is_cancelled():
+                    logger.info("SRT upload job %s cancelled by user", job.job_id)
+                    break
                 if ffmpeg_proc.poll() is not None:
+                    if ffmpeg_proc.returncode == 0:
+                        # Media EOF before wall-clock duration — still finalize so VMAF runs.
+                        logger.info("ffmpeg finished cleanly before duration; finalizing SRT job")
+                        break
                     return UploadResult(
                         success=False,
                         error=self._ffmpeg_failure_message(ffmpeg_proc),
@@ -474,11 +528,14 @@ class UploadService:
                 transport_rtt_jitter_ms = srt_stats.rtt_jitter_ms or zixi_stats.jitter_ms
                 ts_continuity_counter_errors = zixi_stats.cc_errors
                 send_mbps = srt_stats.mbps_send_rate or (status.bitrate_kbps / 1000.0)
+                # ffmpeg -progress often reports bitrate=N/A for mpegts/UDP tee; use libsrt send rate.
+                encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
                 recv_mbps = srt_stats.mbps_recv_rate
+                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     fps_stability=0.0,
                     speed=status.speed,
@@ -488,6 +545,11 @@ class UploadService:
                     progress=status.progress,
                     transport_rtt_ms=transport_rtt_ms,
                     transport_rtt_jitter_ms=transport_rtt_jitter_ms,
+                    net_rtt_ms=transport_rtt_ms,
+                    net_jitter_ms=transport_rtt_jitter_ms,
+                    net_send_mbps=send_mbps,
+                    net_recv_mbps=recv_mbps,
+                    encode_lag_ms=encode_lag_ms,
                     pkt_rcv_drop=srt_stats.pkt_rcv_drop,
                     pkt_snd_drop=srt_stats.pkt_snd_drop,
                     pkt_snd_loss=srt_stats.pkt_snd_loss,
@@ -504,7 +566,7 @@ class UploadService:
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
@@ -519,6 +581,11 @@ class UploadService:
                     ts_continuity_counter_errors=ts_continuity_counter_errors,
                     encoder_send_rate_mbps=send_mbps,
                     transport_recv_rate_mbps=recv_mbps,
+                    encode_lag_ms=encode_lag_ms,
+                    net_rtt_ms=transport_rtt_ms,
+                    net_jitter_ms=transport_rtt_jitter_ms,
+                    net_send_mbps=send_mbps,
+                    net_recv_mbps=recv_mbps,
                     client_memory_percent=sample.client_memory_percent,
                     client_disk_percent=sample.client_disk_percent,
                     server_cpu_percent=sample.server_cpu_percent,
@@ -601,6 +668,7 @@ class UploadService:
             target,
             duration_sec=job.duration_sec,
             qlog_dir=qlog_dir,
+            paced=not is_live_media_source(job.media_path),
         )
         logger.info(
             "MoQ publish via %s (%s) → %s namespace=%s forward=%s",
@@ -623,9 +691,8 @@ class UploadService:
         fanout_thread: Optional[threading.Thread] = None
         tee_proc: Optional[subprocess.Popen] = None
 
-        capture_for_vmaf = job.compute_vmaf_encoder
-        if capture_for_vmaf:
-            job.encoder_capture_path = encoder_capture_path(temp_dir, "moq")
+        # Always tee MoQ fMP4 for Media Health (CMAF integrity); also used for encoder VMAF.
+        job.encoder_capture_path = encoder_capture_path(temp_dir, "moq")
 
         try:
             ffmpeg_proc = subprocess.Popen(
@@ -633,7 +700,7 @@ class UploadService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            if capture_for_vmaf and ffmpeg_proc.stdout is not None:
+            if ffmpeg_proc.stdout is not None:
                 tee_proc = start_moq_capture_tee(
                     ffmpeg_proc.stdout,
                     job.encoder_capture_path,
@@ -676,19 +743,31 @@ class UploadService:
             endpoint_url=job.destination.url,
             run_id=job.job_id,
         )
-        # IngestHostMetricsPoller reports the VMAF worker host when ingest_agent_url
-        # is set (MoQ relay uploads use the shared GCP ingest worker).
+        # For MoQ, prefer GCP Monitoring on the relay VM (ingest agent is often
+        # the shared Zixi/VMAF worker, not the relay itself).
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
             agent_url=job.ingest_agent_url,
+            ingest_provider=job.destination.ingest_provider or "gcp_moq_relay",
         )
         moqx_poller = MoqxStatsPoller(job.destination.url)
         qlog_tailer = PicoquicQlogTailer(qlog_dir) if qlog_dir else None
+        # openmoq has no qlog; probe relay admin TCP for path RTT/jitter equivalent.
+        path_rtt_probe = PathRttProbe(job.destination.url)
         start_time = time.time()
+        prev_moqx_loss = 0
+        prev_moqx_retrans = 0
+        prev_moqx_sent = 0
 
         try:
             while time.time() - start_time < job.duration_sec:
+                if job.is_cancelled():
+                    logger.info("MoQ upload job %s cancelled by user", job.job_id)
+                    break
                 if ffmpeg_proc.poll() is not None:
+                    if ffmpeg_proc.returncode == 0:
+                        logger.info("ffmpeg finished cleanly before duration; finalizing MoQ job")
+                        break
                     return UploadResult(
                         success=False,
                         error=self._ffmpeg_failure_message(ffmpeg_proc),
@@ -712,15 +791,46 @@ class UploadService:
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
+                moqx_deltas = moqx_poller.job_window_deltas() if moqx_poller.enabled else None
                 quic_stats = qlog_tailer.poll() if qlog_tailer and qlog_tailer.enabled else None
+                path_rtt = path_rtt_probe.poll() if path_rtt_probe.enabled else None
                 elapsed = int(time.time() - start_time)
                 pids = [pid for pid in (ffmpeg_proc.pid, publisher_proc.pid if publisher_proc else None) if pid]
                 cpu, mem = self._process_usage(pids)
                 send_mbps = status.bitrate_kbps / 1000.0
+                encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
+                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+
+                # Prefer native QUIC smoothed RTT (moq5 qlog); else path TCP probe.
+                quic_rtt = quic_stats.rtt_ms if quic_stats and quic_stats.rtt_ms > 0 else 0.0
+                path_rtt_ms = path_rtt.rtt_ms if path_rtt else 0.0
+                path_jitter_ms = path_rtt.jitter_ms if path_rtt else 0.0
+                net_rtt = quic_rtt or path_rtt_ms
+                net_jitter = path_jitter_ms if quic_rtt <= 0 else 0.0
+
+                quic_packets_lost = quic_stats.packets_lost if quic_stats else 0
+                quic_cwnd = quic_stats.cwnd_bytes if quic_stats else 0
+                net_loss_pct = 0.0
+                net_retrans_pct = 0.0
+                if moqx_deltas is not None:
+                    sent_delta = max(0, moqx_deltas.quic_packets_sent - prev_moqx_sent)
+                    loss_delta = max(0, moqx_deltas.quic_packet_loss - prev_moqx_loss)
+                    retrans_delta = max(
+                        0, moqx_deltas.quic_packet_retransmissions - prev_moqx_retrans
+                    )
+                    prev_moqx_sent = moqx_deltas.quic_packets_sent
+                    prev_moqx_loss = moqx_deltas.quic_packet_loss
+                    prev_moqx_retrans = moqx_deltas.quic_packet_retransmissions
+                    # Cumulative job-window loss for quic_packets_lost chart; rates from Δ.
+                    quic_packets_lost = max(quic_packets_lost, moqx_deltas.quic_packet_loss)
+                    denom = max(sent_delta, 1)
+                    if sent_delta > 0:
+                        net_loss_pct = min(100.0, (loss_delta / denom) * 100.0)
+                        net_retrans_pct = min(100.0, (retrans_delta / denom) * 100.0)
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     fps_stability=0.0,
                     speed=status.speed,
@@ -728,7 +838,15 @@ class UploadService:
                     cpu_percent=cpu,
                     memory_mb=mem,
                     progress=status.progress,
+                    transport_rtt_ms=net_rtt,
+                    transport_rtt_jitter_ms=net_jitter,
                     encoder_send_rate_mbps=send_mbps,
+                    net_rtt_ms=net_rtt,
+                    net_jitter_ms=net_jitter,
+                    net_send_mbps=send_mbps,
+                    net_loss_pct=net_loss_pct,
+                    net_retrans_pct=net_retrans_pct,
+                    encode_lag_ms=encode_lag_ms,
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
@@ -741,18 +859,26 @@ class UploadService:
                     ),
                     moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
                     moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,
-                    quic_rtt_ms=quic_stats.rtt_ms if quic_stats else 0.0,
-                    quic_cwnd_bytes=quic_stats.cwnd_bytes if quic_stats else 0,
-                    quic_packets_lost=quic_stats.packets_lost if quic_stats else 0,
+                    quic_rtt_ms=net_rtt,
+                    quic_cwnd_bytes=quic_cwnd,
+                    quic_packets_lost=quic_packets_lost,
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
-                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=encoded_bitrate_kbps,
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
                     extra_pids=[publisher_proc.pid] if publisher_proc else None,
+                    transport_rtt_ms=net_rtt,
+                    transport_rtt_jitter_ms=net_jitter,
                     encoder_send_rate_mbps=send_mbps,
+                    encode_lag_ms=encode_lag_ms,
+                    net_rtt_ms=net_rtt,
+                    net_jitter_ms=net_jitter,
+                    net_send_mbps=send_mbps,
+                    net_loss_pct=net_loss_pct,
+                    net_retrans_pct=net_retrans_pct,
                     client_memory_percent=sample.client_memory_percent,
                     client_disk_percent=sample.client_disk_percent,
                     server_cpu_percent=sample.server_cpu_percent,
@@ -812,6 +938,8 @@ class UploadService:
         ssim = None
         encoder_vmaf_status = "disabled"
         encoder_vmaf_score = None
+        encoder_psnr_db = None
+        encoder_ssim = None
         encoder_vmaf_error = None
         quality_legs: dict = {}
         should_compute_legacy_local_vmaf = (
@@ -841,6 +969,8 @@ class UploadService:
                     )
                     encoder_vmaf_status = "completed"
                     encoder_vmaf_score = encoder_result.vmaf_score
+                    encoder_psnr_db = encoder_result.psnr_db
+                    encoder_ssim = encoder_result.ssim
                 else:
                     encoder_vmaf_error = "Encoder VMAF calculation failed"
                     quality_legs["encoder"] = quality_leg_from_vmaf_result(
@@ -907,13 +1037,32 @@ class UploadService:
             },
         )
 
+        if job.destination.protocol == "moq":
+            capture_path = job.encoder_capture_path
+            if capture_path and os.path.exists(capture_path) and os.path.getsize(capture_path) > 0:
+                try:
+                    from media_health import analyze_media_health_file, patch_summary_with_media_health
+
+                    report = analyze_media_health_file(capture_path)
+                    patch_summary_with_media_health(
+                        summary_path,
+                        report,
+                        computed_on="encoder_capture",
+                    )
+                except Exception as exc:
+                    logger.warning("MoQ media health analysis failed: %s", exc)
+
         return UploadResult(
             success=True,
             csv_path=collector.filename,
             summary_path=summary_path,
             vmaf_score=vmaf_score,
+            psnr_db=psnr_db,
+            ssim=ssim,
             encoder_vmaf_status=encoder_vmaf_status,
             encoder_vmaf_score=encoder_vmaf_score,
+            encoder_psnr_db=encoder_psnr_db,
+            encoder_ssim=encoder_ssim,
             encoder_vmaf_error=encoder_vmaf_error,
         )
 

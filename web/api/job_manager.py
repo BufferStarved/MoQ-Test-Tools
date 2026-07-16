@@ -10,11 +10,14 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 from remote_vmaf import (
+    compute_media_health_via_agent,
     compute_vmaf_via_agent,
     patch_summary_with_vmaf,
     prepare_reference_via_agent,
     start_moq_recording_via_agent,
 )
+from cmaf_integrity import CmafIntegrityReport
+from media_health import patch_summary_with_media_health
 from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback
 from quality_metrics import patch_summary_quality_leg
 from upload_service import UploadJob, UploadSample, UploadService
@@ -55,13 +58,18 @@ class UploadJobRecord:
     compute_vmaf_encoder: bool = False
     vmaf_status: str = VmafStatus.DISABLED.value
     vmaf_score: Optional[float] = None
+    psnr_db: Optional[float] = None
+    ssim: Optional[float] = None
     vmaf_error: Optional[str] = None
     encoder_vmaf_status: str = VmafStatus.DISABLED.value
     encoder_vmaf_score: Optional[float] = None
+    encoder_psnr_db: Optional[float] = None
+    encoder_ssim: Optional[float] = None
     encoder_vmaf_error: Optional[str] = None
     started_at_epoch: Optional[float] = None
     playback_samples: List[dict] = field(default_factory=list)
     playback_engine: str = ""
+    cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
 class JobManager:
@@ -113,6 +121,7 @@ class JobManager:
             ),
             encoder_vmaf_status=VmafStatus.DISABLED.value,
         )
+        job.cancel_event = record.cancel_event
         with self._lock:
             self._jobs[job_id] = record
 
@@ -123,6 +132,15 @@ class JobManager:
         )
         thread.start()
         return record
+
+    def request_cancel(self, job_id: str) -> bool:
+        """Signal a running job to stop at the next sample boundary."""
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                return False
+            record.cancel_event.set()
+            return True
 
     def _run_job(self, job_id: str, job: UploadJob) -> None:
         started_at_epoch = time.time()
@@ -190,7 +208,11 @@ class JobManager:
                 summary_path=result.summary_path,
                 encoder_vmaf_status=result.encoder_vmaf_status,
                 encoder_vmaf_score=result.encoder_vmaf_score,
+                encoder_psnr_db=result.encoder_psnr_db,
+                encoder_ssim=result.encoder_ssim,
                 encoder_vmaf_error=result.encoder_vmaf_error,
+                psnr_db=result.psnr_db,
+                ssim=result.ssim,
             )
             if job.compute_vmaf_on_ingest:
                 with self._lock:
@@ -313,12 +335,66 @@ class JobManager:
                     "ssim": remote_result.ssim,
                 },
             )
+            self._patch_ingest_media_health(
+                job,
+                job_id,
+                summary_path,
+                start_epoch=start_epoch,
+                end_epoch=end_epoch,
+                distorted_path=remote_result.distorted_path,
+            )
 
         self._update(
             job_id,
             vmaf_status=VmafStatus.COMPLETED.value,
             vmaf_score=remote_result.vmaf_score,
+            psnr_db=remote_result.psnr_db,
+            ssim=remote_result.ssim,
             vmaf_error=None,
+        )
+
+    def _patch_ingest_media_health(
+        self,
+        job: UploadJob,
+        job_id: str,
+        summary_path: str,
+        *,
+        start_epoch: float,
+        end_epoch: float,
+        distorted_path: str = "",
+    ) -> None:
+        """Prefer post-relay CMAF Media Health from the ingest recording when available."""
+        if job.destination.protocol != "moq":
+            return
+        payload = compute_media_health_via_agent(
+            job.destination.url,
+            job_id,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            agent_url=job.ingest_agent_url,
+            recording_dir=job.ingest_recording_dir,
+            output_path=distorted_path,
+        )
+        if not payload:
+            return
+        report = CmafIntegrityReport(
+            path=str(payload.get("source_path") or distorted_path or ""),
+            fragment_count=int(payload.get("cmaf_fragment_count") or 0),
+            seq_gap_count=int(payload.get("cmaf_seq_gap_count") or 0),
+            tfdt_gap_count=int(payload.get("cmaf_tfdt_gap_count") or 0),
+            tfdt_gap_ms_total=float(payload.get("cmaf_tfdt_gap_ms") or 0),
+            tfdt_overlap_count=int(payload.get("cmaf_tfdt_overlap_count") or 0),
+            parse_errors=int(payload.get("cmaf_parse_errors") or 0),
+            timescale=int(payload.get("cmaf_timescale") or 0),
+            error=str(payload.get("error") or ""),
+        )
+        # Rebuild a single final sample bucket so CSV gets ingest totals.
+        if report.fragment_count > 0:
+            report.events = []
+        patch_summary_with_media_health(
+            summary_path,
+            report,
+            computed_on="ingest_recording",
         )
 
     def record_playback_sample(self, job_id: str, sample: dict) -> bool:
@@ -409,9 +485,13 @@ class JobManager:
                 compute_vmaf_encoder=record.compute_vmaf_encoder,
                 vmaf_status=record.vmaf_status,
                 vmaf_score=record.vmaf_score,
+                psnr_db=record.psnr_db,
+                ssim=record.ssim,
                 vmaf_error=record.vmaf_error,
                 encoder_vmaf_status=record.encoder_vmaf_status,
                 encoder_vmaf_score=record.encoder_vmaf_score,
+                encoder_psnr_db=record.encoder_psnr_db,
+                encoder_ssim=record.encoder_ssim,
                 encoder_vmaf_error=record.encoder_vmaf_error,
                 started_at_epoch=record.started_at_epoch,
                 playback_samples=list(record.playback_samples),
@@ -439,9 +519,13 @@ class JobManager:
                     compute_vmaf_encoder=record.compute_vmaf_encoder,
                     vmaf_status=record.vmaf_status,
                     vmaf_score=record.vmaf_score,
+                    psnr_db=record.psnr_db,
+                    ssim=record.ssim,
                     vmaf_error=record.vmaf_error,
                     encoder_vmaf_status=record.encoder_vmaf_status,
                     encoder_vmaf_score=record.encoder_vmaf_score,
+                    encoder_psnr_db=record.encoder_psnr_db,
+                    encoder_ssim=record.encoder_ssim,
                     encoder_vmaf_error=record.encoder_vmaf_error,
                 )
                 for record in self._jobs.values()
@@ -529,6 +613,7 @@ def read_result_summary(csv_path: str) -> dict:
         "fps",
         "fps_stability",
         "speed",
+        "encode_lag_ms",
         "transport_rtt_ms",
         "transport_rtt_jitter_ms",
         "quic_rtt_ms",
@@ -536,6 +621,7 @@ def read_result_summary(csv_path: str) -> dict:
         "playback_bitrate_bps",
         "playback_ttff_ms",
         "playback_video_time_sec",
+        "e2e_latency_ms",
         "psnr_db",
         "ssim",
     ]
@@ -551,6 +637,11 @@ def read_result_summary(csv_path: str) -> dict:
         "pkt_retrans",
         "pkt_fec_extra",
         "ts_continuity_counter_errors",
+        "cmaf_fragment_count",
+        "cmaf_seq_gap_count",
+        "cmaf_tfdt_gap_count",
+        "cmaf_tfdt_overlap_count",
+        "cmaf_parse_errors",
         "moqx_subscribe_success",
         "moqx_subscribe_error",
         "moqx_publish_namespace_success",
@@ -565,11 +656,21 @@ def read_result_summary(csv_path: str) -> dict:
         "playback_hls_fatal_errors",
         "playback_hls_buffer_stalls",
         "playback_hls_frag_loads",
+        "playback_error_count",
     )
     for key in counter_keys:
         legacy = _LEGACY_CSV_COLUMNS.get(key)
         if key in rows[-1] or (legacy and legacy in rows[-1]):
             averages[key] = int(_row_value(rows[-1], key))
+
+    e2e_values = [
+        float(r["e2e_latency_ms"])
+        for r in rows
+        if r.get("e2e_latency_ms") not in (None, "", "0", "0.0")
+    ]
+    if e2e_values:
+        averages["e2e_latency_ms"] = round(sum(e2e_values) / len(e2e_values), 1)
+        averages["e2e_latency_max_ms"] = round(max(e2e_values), 1)
 
     vmaf_values = [float(r["vmaf_score"]) for r in rows if r.get("vmaf_score")]
     if vmaf_values:
@@ -587,12 +688,31 @@ def read_result_summary(csv_path: str) -> dict:
         throughput = summary_payload.get("throughput", {})
         quality = summary_payload.get("quality", {})
         summary_averages = summary_payload.get("averages", {})
-        if summary_averages.get("vmaf_score") is not None:
-            averages["vmaf_score"] = summary_averages["vmaf_score"]
-        if summary_averages.get("psnr_db") is not None:
-            averages["psnr_db"] = summary_averages["psnr_db"]
-        if summary_averages.get("ssim") is not None:
-            averages["ssim"] = summary_averages["ssim"]
+        for key in (
+            "vmaf_score",
+            "psnr_db",
+            "ssim",
+            "encode_lag_ms",
+            "e2e_latency_ms",
+            "fps_stability",
+            "cmaf_fragment_count",
+            "cmaf_seq_gap_count",
+            "cmaf_tfdt_gap_count",
+            "cmaf_parse_errors",
+            "ts_continuity_counter_errors",
+        ):
+            if summary_averages.get(key) is not None:
+                averages[key] = summary_averages[key]
+
+        # Prefer quality legs when CSV averages are empty/zero (common for post-run VMAF).
+        for leg_name in ("ingest", "encoder"):
+            leg = quality.get(leg_name) or {}
+            if averages.get("vmaf_score") in (None, 0, 0.0) and leg.get("vmaf_score") is not None:
+                averages["vmaf_score"] = leg["vmaf_score"]
+            if averages.get("psnr_db") in (None, 0, 0.0) and leg.get("psnr_db") is not None:
+                averages["psnr_db"] = leg["psnr_db"]
+            if averages.get("ssim") in (None, 0, 0.0) and leg.get("ssim") is not None:
+                averages["ssim"] = leg["ssim"]
 
     return {
         "samples": count,

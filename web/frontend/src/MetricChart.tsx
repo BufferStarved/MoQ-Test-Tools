@@ -88,7 +88,11 @@ export function MetricChart({
   height = 220,
   yDomain,
 }: MetricChartProps) {
-  const activeSeries = series.filter((item) => data.some((point) => point[item.key] > 0));
+  // Prefer series with non-zero samples, but keep all-zero series visible when
+  // the chart has data (e.g. clean SRT paths with zero retransmits).
+  const nonzeroSeries = series.filter((item) => data.some((point) => (point[item.key] ?? 0) > 0));
+  const activeSeries = nonzeroSeries.length > 0 ? nonzeroSeries : data.length > 0 ? series : [];
+  const resolvedMetricKey = metricKey ?? (series.length === 1 ? series[0]?.key : undefined);
 
   if (activeSeries.length === 0) {
     return null;
@@ -97,8 +101,8 @@ export function MetricChart({
   return (
     <div className="chart-card">
       <div className="chart-card-header">
-        {metricKey ? (
-          <MetricLabel metricKey={metricKey} label={title} className="chart-title" />
+        {resolvedMetricKey ? (
+          <MetricLabel metricKey={resolvedMetricKey} label={title} className="chart-title" />
         ) : (
           <h4>{title}</h4>
         )}

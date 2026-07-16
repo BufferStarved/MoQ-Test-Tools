@@ -1,6 +1,12 @@
-import { Suspense, lazy, useMemo } from "react";
+import { Suspense, lazy, useEffect, useMemo } from "react";
 import type { PlaybackMetricsSnapshot } from "./api";
-import { resolvePlaybackTarget } from "./playbackUrls";
+import {
+  PLAYBACK_MODE_OPTIONS,
+  defaultPlaybackModeForProtocol,
+  defaultWhepPlaybackUrl,
+  isPlaybackModeCompatible,
+  resolvePlaybackTarget,
+} from "./playbackUrls";
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
@@ -31,6 +37,9 @@ interface StreamPlayerProps {
   jobStatus?: string;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  controlsLocked?: boolean;
+  onPlaybackModeChange?: (mode: PlaybackMode) => void;
+  onWhepPlaybackUrlChange?: (url: string) => void;
 }
 
 function PlayerFallback() {
@@ -55,7 +64,19 @@ export function StreamPlayer({
   jobStatus,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  controlsLocked = false,
+  onPlaybackModeChange,
+  onWhepPlaybackUrlChange,
 }: StreamPlayerProps) {
+  useEffect(() => {
+    if (!onPlaybackModeChange) {
+      return;
+    }
+    if (!isPlaybackModeCompatible(playbackMode, protocol)) {
+      onPlaybackModeChange(defaultPlaybackModeForProtocol(protocol));
+    }
+  }, [playbackMode, protocol, onPlaybackModeChange]);
+
   const target = useMemo(
     () =>
       resolvePlaybackTarget({
@@ -82,66 +103,117 @@ export function StreamPlayer({
     ],
   );
 
+  const showWhepField = playbackMode === "whep";
+  const whepPlaceholder =
+    protocol === "srt"
+      ? defaultWhepPlaybackUrl("35.222.33.58", "benchmark")
+      : "http://host:8080/whep/benchmark";
+  const selectedOption = PLAYBACK_MODE_OPTIONS.find((item) => item.id === playbackMode);
+  const modeHint = selectedOption
+    ? isPlaybackModeCompatible(playbackMode, protocol)
+      ? selectedOption.hint
+      : `Not available with ${protocol.toUpperCase()} ingest.`
+    : "";
+
   return (
     <div className="stream-player-card">
       <div className="stream-player-header">
         <h4>{title}</h4>
         <span className="pill">{target.label}</span>
       </div>
-      {target.note && <p className="hint player-note">{target.note}</p>}
-      {target.url && target.engine !== "webrtc-embed" && target.engine !== "moq" && (
+      {target.url && target.engine !== "webrtc-embed" && (
         <p className="hint player-url">
           <code>{target.url}</code>
         </p>
       )}
-      {target.engine === "moq" && (
+      {target.engine === "webrtc-embed" && target.embedUrl && (
         <p className="hint player-url">
-          <code>
-            {target.url} (namespace: {target.moqNamespace})
-          </code>
+          <code>{target.embedUrl}</code>
         </p>
       )}
       <PlayerErrorBoundary engine={target.engine}>
         <Suspense fallback={<PlayerFallback />}>
-        {target.engine === "hls" && (
-          <HlsPlayer
-            key={target.url}
-            url={target.url}
-            label={target.label}
-            playbackGate={playbackGate}
-            jobId={jobId}
-            encodeStartedAtEpoch={encodeStartedAtEpoch}
-            onPlaybackSample={onPlaybackSample}
-            jobStatus={jobStatus}
-            benchmarkLoading={benchmarkLoading}
-          />
-        )}
-        {target.engine === "dash" && <DashPlayer key={target.url} url={target.url} label={target.label} />}
-        {target.engine === "mpegts" && <MpegTsPlayer key={target.url} url={target.url} label={target.label} />}
-        {target.engine === "whep" && <WhepPlayer key={target.url} url={target.url} label={target.label} />}
-        {target.engine === "moq" && (
-          <MoqPlayer
-            key={`${target.url}:${target.moqNamespace}`}
-            relayUrl={target.url}
-            namespace={target.moqNamespace ?? "benchmark"}
-            fingerprintUrl={target.moqFingerprintUrl}
-            label={target.label}
-            playbackGate={playbackGate}
-            pinTlsCert
-            jobId={jobId}
-            encodeStartedAtEpoch={encodeStartedAtEpoch}
-            onPlaybackSample={onPlaybackSample}
-            jobStatus={jobStatus}
-            benchmarkLoading={benchmarkLoading}
-            encodeDurationSec={encodeDurationSec}
-          />
-        )}
-        {target.engine === "webrtc-embed" && target.embedUrl && (
-          <ZixiWebRtcEmbed embedUrl={target.embedUrl} label={target.label} />
-        )}
-        {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
+          {target.engine === "hls" && (
+            <HlsPlayer
+              key={target.url}
+              url={target.url}
+              label={target.label}
+              playbackGate={playbackGate}
+              jobId={jobId}
+              encodeStartedAtEpoch={encodeStartedAtEpoch}
+              onPlaybackSample={onPlaybackSample}
+              jobStatus={jobStatus}
+              benchmarkLoading={benchmarkLoading}
+            />
+          )}
+          {target.engine === "dash" && (
+            <DashPlayer key={target.url} url={target.url} label={target.label} />
+          )}
+          {target.engine === "mpegts" && (
+            <MpegTsPlayer key={target.url} url={target.url} label={target.label} />
+          )}
+          {target.engine === "whep" && (
+            <WhepPlayer key={target.url} url={target.url} label={target.label} />
+          )}
+          {target.engine === "moq" && (
+            <MoqPlayer
+              key={`${target.url}:${target.moqNamespace}`}
+              relayUrl={target.url}
+              namespace={target.moqNamespace ?? "benchmark"}
+              fingerprintUrl={target.moqFingerprintUrl}
+              label={target.label}
+              playbackGate={playbackGate}
+              pinTlsCert
+              jobId={jobId}
+              encodeStartedAtEpoch={encodeStartedAtEpoch}
+              onPlaybackSample={onPlaybackSample}
+              jobStatus={jobStatus}
+              benchmarkLoading={benchmarkLoading}
+              encodeDurationSec={encodeDurationSec}
+            />
+          )}
+          {target.engine === "webrtc-embed" && target.embedUrl && (
+            <ZixiWebRtcEmbed embedUrl={target.embedUrl} label={target.label} />
+          )}
+          {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
         </Suspense>
       </PlayerErrorBoundary>
+
+      {onPlaybackModeChange && (
+        <div className="player-playback-controls">
+          <label>
+            Playback player
+            <select
+              value={playbackMode}
+              onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
+              disabled={controlsLocked}
+            >
+              {PLAYBACK_MODE_OPTIONS.map((item) => {
+                const compatible = isPlaybackModeCompatible(item.id, protocol);
+                return (
+                  <option key={item.id} value={item.id} disabled={!compatible}>
+                    {item.label}
+                    {!compatible ? " — incompatible with ingest" : ""}
+                  </option>
+                );
+              })}
+            </select>
+            <span className="hint">{modeHint}</span>
+          </label>
+          {showWhepField && onWhepPlaybackUrlChange && (
+            <label>
+              WHEP channel URL
+              <input
+                type="url"
+                value={whepPlaybackUrl}
+                onChange={(e) => onWhepPlaybackUrlChange(e.target.value)}
+                placeholder={whepPlaceholder}
+                disabled={controlsLocked}
+              />
+            </label>
+          )}
+        </div>
+      )}
     </div>
   );
 }

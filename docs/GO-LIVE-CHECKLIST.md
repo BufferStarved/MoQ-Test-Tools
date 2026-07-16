@@ -14,6 +14,25 @@ Do **not** use AWS/Linode presets (coming soon).
 
 ## Morning boot (5 minutes)
 
+### Hosted UI (preferred for demos)
+
+Public site: **https://moq.sean-mccarthy.net**  
+Deploy/ops: [infra/web/GCP-WEB-RUNBOOK.md](../infra/web/GCP-WEB-RUNBOOK.md)
+
+```bash
+# 1) Confirm hosted API
+curl -fsS https://moq.sean-mccarthy.net/api/health
+
+# 2) Confirm worker agent + recorder
+ssh ubuntu@35.222.33.58 'curl -s http://127.0.0.1:8090/api/v1/health | python3 -m json.tool'
+# Expect: status=ok, libvmaf_available=true, moq_recorder_available=true
+
+# 3) Open the UI
+open https://moq.sean-mccarthy.net
+```
+
+### Local stack (development)
+
 ```bash
 # 1) Sync ingest token
 cd ~/Developer/moq-test-tools
@@ -21,7 +40,6 @@ cd ~/Developer/moq-test-tools
 
 # 2) Confirm worker agent + recorder
 ssh ubuntu@35.222.33.58 'curl -s http://127.0.0.1:8090/api/v1/health | python3 -m json.tool'
-# Expect: status=ok, libvmaf_available=true, moq_recorder_available=true
 
 # 3) Start stack (API + UI)
 ./scripts/dev.sh

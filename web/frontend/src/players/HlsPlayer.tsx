@@ -20,9 +20,12 @@ interface HlsPlayerProps {
 
 const MANIFEST_POLL_MS = 1500;
 const MANIFEST_POLL_MAX = 120;
-/** Zixi may keep media_sequence flat while still serving fresh TS — play after this many stable polls. */
-const MANIFEST_STABLE_PLAY_POLLS = 8;
+/**
+ * Require the playlist to advance (media_sequence or segment URI) before play.
+ * A "stable" frozen playlist is the stale last-chunk loop — do not fall back to play.
+ */
 const MANIFEST_STUCK_POLLS = 28;
+const STALE_FRAG_FAIL_AFTER = 4;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -50,18 +53,16 @@ async function waitForManifest(
   const manifestUrl = proxiedPlaybackUrl(url);
   let previousSequence: string | null = null;
   let previousSegment: string | null = null;
-  let stablePolls = 0;
-  let lastBody = "";
+  let unchangedPolls = 0;
   for (let attempt = 1; attempt <= MANIFEST_POLL_MAX; attempt += 1) {
     if (!shouldContinue()) {
       return null;
     }
     try {
-      const response = await fetch(manifestUrl);
+      const response = await fetch(manifestUrl, { cache: "no-store" });
       if (response.ok) {
         const body = await response.text();
         if (body.includes("#EXTM3U")) {
-          lastBody = body;
           const sequence = mediaSequence(body);
           const segment = segmentUri(body);
           onAttempt(
@@ -74,14 +75,13 @@ async function waitForManifest(
           if (segment && previousSegment && segment !== previousSegment) {
             return body;
           }
-          if (sequence && previousSequence && sequence === previousSequence) {
-            stablePolls += 1;
-            if (stablePolls >= MANIFEST_STABLE_PLAY_POLLS) {
-              onAttempt(attempt, `media_sequence=${sequence} fallback=stable_live`);
-              return body;
-            }
-            if (stablePolls >= MANIFEST_STUCK_POLLS) {
-              onStuck?.(sequence);
+          if (
+            (sequence && previousSequence && sequence === previousSequence) ||
+            (segment && previousSegment && segment === previousSegment)
+          ) {
+            unchangedPolls += 1;
+            if (unchangedPolls >= MANIFEST_STUCK_POLLS) {
+              onStuck?.(sequence ?? "unknown");
               return null;
             }
           }
@@ -94,7 +94,7 @@ async function waitForManifest(
     }
     await sleep(MANIFEST_POLL_MS);
   }
-  return lastBody.includes("#EXTM3U") ? lastBody : null;
+  return null;
 }
 
 export default function HlsPlayer({
@@ -153,7 +153,8 @@ export default function HlsPlayer({
   });
 
   function hlsPlaybackOk(session: (typeof sessionRef)["current"]): boolean {
-    return session.maxVideoTime > 0.25 && !session.sawStaleFrag && !session.sawBufferStall;
+    // Successful decode/progress wins over transient early "stale" flags.
+    return session.maxVideoTime > 0.25;
   }
 
   useEffect(() => {
@@ -168,6 +169,7 @@ export default function HlsPlayer({
         const hadManifest = session.manifestParsed || session.fragmentLoads > 0;
         if (hlsPlaybackOk(session)) {
           setError(null);
+          lastErrorRef.current = null;
           setStatus("Playback OK");
         } else if (lastErrorRef.current) {
           setError(lastErrorRef.current);
@@ -178,11 +180,15 @@ export default function HlsPlayer({
           lastErrorRef.current = message;
           setError(message);
           setStatus("Failed (see diagnostics)");
-        } else if (hadManifest && session.fragmentLoads > 0) {
+        } else if (hadManifest && session.fragmentLoads > 0 && session.uniqueFragUrls.size <= 1) {
           const message =
-            session.uniqueFragUrls.size <= 1
-              ? "HLS playlist stayed on one stale segment (chunk not advancing). Zixi HLS output is not rolling — run ./scripts/verify-zixi-srt-ingest.sh (must PASS). Fix Zixi HTTP :7777 HLS, not the browser player."
-              : "HLS segments downloaded but video never advanced past 0s. Segments may lack decodable H.264 keyframes at chunk boundaries.";
+            "HLS playlist stayed on one stale segment (chunk not advancing). Zixi HLS output is not rolling — run ./scripts/verify-zixi-srt-ingest.sh (must PASS). Fix Zixi HTTP :7777 HLS, not the browser player.";
+          lastErrorRef.current = message;
+          setError(message);
+          setStatus("Failed (see diagnostics)");
+        } else if (hadManifest && session.fragmentLoads > 0 && session.maxVideoTime <= 0.25) {
+          const message =
+            "HLS segments downloaded but video never advanced past 0s. Segments may lack decodable H.264 keyframes at chunk boundaries.";
           lastErrorRef.current = message;
           setError(message);
           setStatus("Failed (see diagnostics)");
@@ -303,7 +309,10 @@ export default function HlsPlayer({
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
-        liveSyncDurationCount: 3,
+        // Standard live HLS: stay ~2 segments behind the live edge so
+        // playback does not underrun between segment rolls.
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 4,
         xhrSetup(xhr, requestUrl) {
           const resolved = resolvePlaybackXhrUrl(requestUrl);
           lastRequestUrl = resolved;
@@ -329,15 +338,24 @@ export default function HlsPlayer({
       hls.on(Hls.Events.FRAG_LOADED, () => {
         sessionRef.current.fragmentLoads += 1;
         sessionRef.current.uniqueFragUrls.add(lastRequestUrl);
+        const uniqueCount = sessionRef.current.uniqueFragUrls.size;
+        // Only treat as stale after several loads of the *same* URL; clear once
+        // the playlist advances (unique > 1). Early live HLS often repeats the
+        // first chunk once before rolling — that must not poison the end verdict.
         const isStale =
-          sessionRef.current.uniqueFragUrls.size === 1 && sessionRef.current.fragmentLoads > 1;
-        if (isStale) {
-          sessionRef.current.sawStaleFrag = true;
-        }
+          uniqueCount === 1 && sessionRef.current.fragmentLoads >= STALE_FRAG_FAIL_AFTER;
+        sessionRef.current.sawStaleFrag = isStale;
         const stale = isStale ? " stale=yes" : "";
         pushDiag(
-          `frag_loaded=${sessionRef.current.fragmentLoads} unique=${sessionRef.current.uniqueFragUrls.size}${stale} last=${lastRequestUrl}`,
+          `frag_loaded=${sessionRef.current.fragmentLoads} unique=${uniqueCount}${stale} last=${lastRequestUrl}`,
         );
+        if (isStale && !destroyed) {
+          fail(
+            "Zixi HLS is looping a single stale segment (playlist not advancing). " +
+              "The web host needs ZIXI_API_BASE/ZIXI_API_PASSWORD so each SRT push can reset the input.",
+          );
+          hls.destroy();
+        }
       });
 
       hls.on(Hls.Events.BUFFER_APPENDED, (_event, data) => {

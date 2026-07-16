@@ -32,12 +32,54 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   transport_rtt_ms: {
     label: "Transport RTT",
     description:
-      "Round-trip time for the active transport instrument: libsrt (SRT path) or Zixi REST API (receiver-side). Not populated for MoQ unless a compatible transport source is wired.",
+      "Legacy alias for net_rtt_ms. Round-trip time from libsrt (SRT) or Zixi REST API (receiver-side).",
   },
   transport_rtt_jitter_ms: {
     label: "Transport jitter",
     description:
-      "Variation in transport RTT between samples. For SRT this is mean |ΔRTT| over consecutive libsrt readings; Zixi may supply receiver jitter when the API poller is enabled.",
+      "Legacy alias for net_jitter_ms. Variation in transport RTT between samples.",
+  },
+  net_rtt_ms: {
+    label: "Network RTT",
+    description:
+      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
+  },
+  net_jitter_ms: {
+    label: "Network jitter",
+    description:
+      "Normalized RTT jitter (ms) from successive RTT samples. SRT → libsrt; MoQ → path-probe RTT variance (same estimator).",
+  },
+  net_send_mbps: {
+    label: "Network send rate",
+    description: "Normalized outbound rate in Mbps (transport send when available, else encoded bitrate).",
+  },
+  net_recv_mbps: {
+    label: "Network receive rate",
+    description: "Normalized inbound rate in Mbps when the transport exposes it (SRT).",
+  },
+  net_loss_pct: {
+    label: "Network loss %",
+    description:
+      "Best-effort packet loss percentage. SRT → libsrt/Zixi; MoQ → moqx_quicPacketLoss_total job-window rate.",
+  },
+  net_retrans_pct: {
+    label: "Network retransmit %",
+    description:
+      "Best-effort retransmit percentage. SRT → ARQ; MoQ → moqx_quicPacketRetransmissions_total job-window rate.",
+  },
+  encode_lag_ms: {
+    label: "Encode lag",
+    description:
+      "Wall-clock time minus ffmpeg media out_time while publishing. Large values mean the encoder is falling behind realtime.",
+  },
+  e2e_latency_ms: {
+    label: "E2E latency (estimated)",
+    description:
+      "Estimated glass-to-glass latency: (wall clock since encode start) − (player video currentTime). Includes intentional player buffers — for HLS that is ~2 live segments (liveSyncDurationCount). MoQ targets a low catch-up latency instead. Distinct from TTFF (join delay).",
+  },
+  playback_error_count: {
+    label: "Player errors",
+    description: "Normalized browser player error count (HLS fatal+nonfatal today; MoQ when wired).",
   },
   pkt_rcv_drop: {
     label: "Receive packet drops",
@@ -61,9 +103,35 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description: "Extra forward-error-correction packets sent by SRT beyond the media payload (pktSndFilterExtra).",
   },
   ts_continuity_counter_errors: {
-    label: "TS continuity counter errors",
+    label: "TS continuity errors",
     description:
-      "MPEG-TS continuity-counter errors from Zixi TR101 analysis. Meaningful for TS-muxed SRT/RTMP only — not applicable to MoQ fMP4.",
+      "Media Health (MPEG-TS): continuity-counter errors from Zixi TR 101 290 analysis. Not a transport metric. MoQ uses CMAF sequence/decode-time gaps instead.",
+  },
+  cmaf_seq_gap_count: {
+    label: "CMAF sequence gaps",
+    description:
+      "Media Health (MoQ/CMAF): count of mfhd.sequence_number discontinuities (not +1). Analogue of TS continuity errors for fragmented MP4.",
+  },
+  cmaf_tfdt_gap_count: {
+    label: "CMAF decode-time gaps",
+    description:
+      "Media Health (MoQ/CMAF): count of tfdt baseMediaDecodeTime jumps larger than the prior fragment duration (+ slack).",
+  },
+  cmaf_tfdt_gap_ms: {
+    label: "CMAF decode-time gap",
+    description: "Media Health (MoQ/CMAF): total decode-time discontinuity duration in milliseconds.",
+  },
+  cmaf_tfdt_overlap_count: {
+    label: "CMAF timeline overlaps",
+    description: "Media Health (MoQ/CMAF): fragments whose decode time rewinds relative to the prior fragment end.",
+  },
+  cmaf_parse_errors: {
+    label: "CMAF parse errors",
+    description: "Media Health (MoQ/CMAF): unparseable or malformed moof/mdat structures in the recording.",
+  },
+  cmaf_fragment_count: {
+    label: "CMAF fragments",
+    description: "Number of moof fragments observed in the MoQ fMP4 capture used for Media Health analysis.",
   },
   encoder_send_rate_mbps: {
     label: "Encoder send rate",
@@ -123,37 +191,38 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   server_cpu_percent: {
     label: "Server CPU",
     description:
-      "CPU utilization on the managed ingest/relay host (Zixi VM for SRT, moqx relay for MoQ). 0% often means not collected rather than idle — check server_metrics_enabled in the summary.",
+      "CPU on the destination edge VM. Zixi: ingest-agent psutil (GCP Monitoring fallback). MoQ: GCP Monitoring on the relay instance. 0% often means not collected.",
   },
   server_memory_percent: {
     label: "Server memory",
     description:
-      "Memory utilization on the managed ingest/relay host. 0% often means not collected rather than idle.",
+      "Memory on the destination edge VM (ingest agent and/or GCP Monitoring). 0% often means not collected.",
   },
   server_disk_percent: {
     label: "Server disk",
     description:
-      "Disk utilization on the managed ingest/relay host. 0% often means not collected rather than idle.",
+      "Disk on the destination edge VM (ingest agent and/or GCP Monitoring). 0% often means not collected.",
   },
   moqx_subscribe_success: {
-    label: "Relay subscribe OK",
-    description: "Cumulative moqx relay subscriptions accepted (Prometheus counter). Global since relay restart, not per-browser.",
+    label: "Relay subscribe OK (Δ)",
+    description:
+      "MoQ relay subscribe successes as a job-window delta (charts subtract the first sample). Absolute Prometheus counters are global since relay restart.",
   },
   moqx_subscribe_error: {
-    label: "Relay subscribe errors",
-    description: "Cumulative moqx relay subscription rejections (Prometheus counter).",
+    label: "Relay subscribe errors (Δ)",
+    description: "MoQ relay subscription rejections as a job-window delta.",
   },
   moqx_publish_namespace_success: {
-    label: "Relay publish OK",
-    description: "Cumulative successful namespace publish announcements accepted by the moqx relay.",
+    label: "Relay publish OK (Δ)",
+    description: "Successful namespace publish announcements as a job-window delta.",
   },
   moqx_publish_received: {
-    label: "Relay objects received",
-    description: "Cumulative MoQT objects received by the moqx relay from publishers.",
+    label: "Relay objects received (Δ)",
+    description: "MoQT objects received by the relay as a job-window delta.",
   },
   moqx_publish_done: {
     label: "Relay publish sessions closed",
-    description: "Cumulative publish sessions completed on the moqx relay since last restart.",
+    description: "Publish sessions completed on the moqx relay (Prometheus counter).",
   },
   quic_rtt_ms: {
     label: "QUIC RTT",

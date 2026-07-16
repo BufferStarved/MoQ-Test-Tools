@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -161,11 +162,12 @@ class FfmpegProgressFileReader:
 
 def find_srt_live_transmit() -> Optional[str]:
     candidates = [
-        "srt-live-transmit",
-        "/opt/homebrew/bin/srt-live-transmit",
+        shutil.which("srt-live-transmit"),
+        "/usr/bin/srt-live-transmit",
         "/usr/local/bin/srt-live-transmit",
+        "/opt/homebrew/bin/srt-live-transmit",
     ]
     for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None

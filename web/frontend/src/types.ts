@@ -31,12 +31,27 @@ export interface UploadSample {
   progress: string;
   transport_rtt_ms?: number;
   transport_rtt_jitter_ms?: number;
+  net_rtt_ms?: number;
+  net_jitter_ms?: number;
+  net_send_mbps?: number;
+  net_recv_mbps?: number;
+  net_loss_pct?: number;
+  net_retrans_pct?: number;
+  encode_lag_ms?: number;
+  e2e_latency_ms?: number;
+  playback_error_count?: number;
   pkt_rcv_drop?: number;
   pkt_snd_drop?: number;
   pkt_snd_loss?: number;
   pkt_retrans?: number;
   pkt_fec_extra?: number;
   ts_continuity_counter_errors?: number;
+  cmaf_fragment_count?: number;
+  cmaf_seq_gap_count?: number;
+  cmaf_tfdt_gap_count?: number;
+  cmaf_tfdt_gap_ms?: number;
+  cmaf_tfdt_overlap_count?: number;
+  cmaf_parse_errors?: number;
   vmaf_score?: number | null;
   psnr_db?: number | null;
   ssim?: number | null;
@@ -102,9 +117,13 @@ export interface UploadJob {
   compute_vmaf_encoder?: boolean;
   vmaf_status?: string;
   vmaf_score?: number | null;
+  psnr_db?: number | null;
+  ssim?: number | null;
   vmaf_error?: string | null;
   encoder_vmaf_status?: string;
   encoder_vmaf_score?: number | null;
+  encoder_psnr_db?: number | null;
+  encoder_ssim?: number | null;
   encoder_vmaf_error?: string | null;
 }
 
@@ -139,6 +158,7 @@ export interface ResultSummary {
     fps: number;
     fps_stability?: number;
     speed: number;
+    encode_lag_ms?: number;
     transport_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
     pkt_rcv_drop?: number;
@@ -146,6 +166,12 @@ export interface ResultSummary {
     pkt_retrans?: number;
     pkt_fec_extra?: number;
     ts_continuity_counter_errors?: number;
+    cmaf_fragment_count?: number;
+    cmaf_seq_gap_count?: number;
+    cmaf_tfdt_gap_count?: number;
+    cmaf_tfdt_gap_ms?: number;
+    cmaf_tfdt_overlap_count?: number;
+    cmaf_parse_errors?: number;
     vmaf_score?: number;
     psnr_db?: number;
     ssim?: number;
@@ -175,6 +201,9 @@ export interface ResultSummary {
     playback_hls_buffer_stalls?: number;
     playback_hls_frag_loads?: number;
     playback_video_time_sec?: number;
+    e2e_latency_ms?: number;
+    e2e_latency_max_ms?: number;
+    playback_error_count?: number;
   };
   throughput?: {
     total_bytes_sent?: number;
