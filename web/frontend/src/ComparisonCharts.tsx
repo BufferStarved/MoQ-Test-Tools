@@ -135,8 +135,9 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
         {currentGroup.id === "transport" && transportGroup && (
           <>
             <p className="hint chart-availability-note">
-              Normalized transport: SRT uses libsrt/Zixi RTT; MoQ uses QUIC qlog RTT when
-              available, otherwise a TCP path probe to the relay (same host as WebTransport).
+              Normalized transport: SRT uses libsrt/Zixi RTT; RTMP uses Zixi receiver RTT when
+              available, otherwise a TCP path probe to the RTMP host:port; MoQ uses QUIC qlog RTT
+              when available, otherwise a TCP path probe to the relay (same host as WebTransport).
             </p>
             <MetricChart
               title="RTT (normalized)"

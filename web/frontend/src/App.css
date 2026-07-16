@@ -1198,6 +1198,46 @@ code {
   font-weight: 600;
 }
 
+.about-metrics-doc-link {
+  margin: 12px 0 14px;
+}
+
+.about-metric-glossary {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.about-metric-glossary-row {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.about-metric-glossary-row dt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: baseline;
+  margin: 0 0 6px;
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+.about-metric-glossary-row dt code {
+  font-size: 0.78rem;
+  color: #67e8f9;
+}
+
+.about-metric-glossary-row dd {
+  margin: 0;
+  color: #9fb3c8;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
 @media (max-width: 900px) {
   .about-header {
     flex-direction: column;

@@ -95,8 +95,8 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   encoder_send_rate_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Normalized transport
-  net_rtt_ms: ["srt", "moq"],
-  net_jitter_ms: ["srt"],
+  net_rtt_ms: ["srt", "rtmp", "moq"],
+  net_jitter_ms: ["srt", "rtmp", "moq"],
   net_send_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   net_recv_mbps: ["srt"],
   net_loss_pct: ["srt", "moq"],
@@ -104,8 +104,8 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   net_fec_pct: ["srt"],
 
   // Legacy aliases (same support as normalized)
-  transport_rtt_ms: ["srt", "moq"],
-  transport_rtt_jitter_ms: ["srt"],
+  transport_rtt_ms: ["srt", "rtmp", "moq"],
+  transport_rtt_jitter_ms: ["srt", "rtmp", "moq"],
   transport_recv_rate_mbps: ["srt"],
   quic_rtt_ms: ["moq"],
   quic_cwnd_bytes: ["moq"],

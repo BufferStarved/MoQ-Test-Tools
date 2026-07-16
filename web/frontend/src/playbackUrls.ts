@@ -15,7 +15,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   },
   {
     id: "hls",
-    label: "HLS",
+    label: "HLS Playback (Live)",
     hint: "HTTP Live Streaming via hls.js (Zixi live playlist).",
   },
   {
@@ -30,8 +30,8 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   },
   {
     id: "moq",
-    label: "MoQ (WebTransport)",
-    hint: "Media over QUIC via @playa/player (Chrome/Edge + MoQ relay).",
+    label: "MoQ Playback (Playa)",
+    hint: "Media over QUIC via the Playa MoQ player (@playa/player; Chrome/Edge + MoQ relay).",
   },
   {
     id: "webrtc",
@@ -303,7 +303,7 @@ export function resolvePlaybackTarget(options: {
     return {
       engine: "moq",
       url: webTransportUrl,
-      label: "MoQ (WebTransport)",
+      label: "MoQ Playback (Playa)",
       moqNamespace,
       moqFingerprintUrl: fingerprint || proxiedMoqFingerprintUrl(webTransportUrl),
       streamId: moqNamespace,
@@ -323,7 +323,7 @@ export function resolvePlaybackTarget(options: {
     return {
       engine: "unsupported",
       url: "",
-      label: "MoQ",
+      label: "MoQ Playback (Playa)",
       note: "Set a MoQ relay URL (e.g. https://relay:4443) in playback settings.",
     };
   }
@@ -363,7 +363,7 @@ export function resolvePlaybackTarget(options: {
     return {
       engine: "dash",
       url: zixiDashUrl(resolvedHost, streamId, dvr),
-      label: dvr ? "DASH (DVR)" : "DASH (live)",
+      label: dvr ? "DASH Playback (DVR)" : "DASH Playback (Live)",
       streamId,
       host: resolvedHost,
     };
@@ -373,7 +373,7 @@ export function resolvePlaybackTarget(options: {
     return {
       engine: "hls",
       url: zixiHlsUrl(resolvedHost, streamId, dvr),
-      label: dvr ? "HLS (DVR)" : "HLS (live)",
+      label: dvr ? "HLS Playback (DVR)" : "HLS Playback (Live)",
       streamId,
       host: resolvedHost,
     };

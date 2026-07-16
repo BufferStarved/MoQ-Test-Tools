@@ -1,10 +1,13 @@
 """Active path RTT probe used when a transport has no native RTT instrument.
 
-openmoq-publisher does not expose picoquic qlog. moqx Prometheus currently
-exports QUIC loss/retransmit counters but not smoothed RTT. For MoQ runs we
-probe the relay admin HTTP port (same host / network path as WebTransport)
-with a short TCP connect and treat that as net_rtt_ms, with jitter derived
-from successive samples — the same jitter estimator used for libsrt RTT.
+Used when the publish path lacks a peer RTT gauge:
+
+- MoQ: openmoq has no qlog; moqx Prometheus lacks smoothed RTT. Probe the
+  relay admin HTTP port (same host as WebTransport).
+- RTMP: ffmpeg→RTMP has no libsrt-style RTT. Probe TCP connect to the RTMP
+  host:port (typically 1935) as a path RTT stand-in.
+
+Jitter is derived from successive samples with the same estimator as libsrt.
 """
 from __future__ import annotations
 

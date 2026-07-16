@@ -8,7 +8,7 @@ This document describes the normalized metrics model used for cross-protocol com
 - **Output:** `results/upload_<timestamp>.csv` + `results/upload_<timestamp>.summary.json`
 - **Encode stats:** `ffmpeg -progress` (bitrate, FPS, speed, out_time, encode lag)
 - **Process / client host:** `psutil`
-- **Normalized transport (`net_*`):** filled from SRT (libsrt), MoQ (picoquic qlog or TCP path probe + moqx QUIC counters), or bitrate proxies
+- **Normalized transport (`net_*`):** filled from SRT (libsrt), RTMP (Zixi receiver RTT when available, else TCP path probe to the RTMP host:port), MoQ (picoquic qlog or TCP path probe + moqx QUIC counters), or bitrate proxies
 - **Server host:** ingest-agent psutil and/or **GCP Cloud Monitoring**
 - **Edge (Zixi):** Zixi Broadcaster REST (TR 101 290, RTT, …)
 - **Edge (MoQ relay):** moqx Prometheus counters (charts show **job-window deltas**)
@@ -90,7 +90,7 @@ A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-
 
 | Column | Typical source |
 |--------|----------------|
-| `net_rtt_ms` | **SRT:** libsrt/Zixi. **MoQ:** picoquic qlog smoothed RTT (moq5), else TCP path probe to relay admin port (`MOQX_ADMIN_PORT`, default 8000) |
+| `net_rtt_ms` | **SRT:** libsrt/Zixi. **RTMP:** Zixi receiver RTT when available, else TCP connect probe to RTMP host:port (default 1935). **MoQ:** picoquic qlog smoothed RTT (moq5), else TCP path probe to relay admin port (`MOQX_ADMIN_PORT`, default 8000) |
 | `net_jitter_ms` | Same estimator for both: mean absolute successive RTT deltas |
 | `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` |
 | `net_recv_mbps` | libsrt receive rate |
@@ -196,7 +196,7 @@ Optional post-run libvmaf on encoder capture and/or ingest recording. See the in
 | Metric family | SRT | RTMP | HTTP/HLS/DASH | WebRTC | MoQ |
 |---------------|-----|------|---------------|--------|-----|
 | Client + encode | ✓ | ✓ | ✓ | ✓* | ✓ |
-| `net_rtt` / loss | ✓ | — | — | — | ✓ (QUIC) |
+| `net_rtt` / loss | ✓ | ✓ (path/Zixi RTT; no loss %) | — | — | ✓ (QUIC / path) |
 | Zixi TR101 | ✓* | ✓* | — | — | — |
 | Relay health | — | — | — | — | ✓ |
 | Server host | ✓* | ✓* | ✓* | ✓* | ✓* (GCP) |

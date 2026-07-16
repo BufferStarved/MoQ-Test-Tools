@@ -1,5 +1,40 @@
+import { METRIC_DEFINITIONS } from "./metricDefinitions";
+
 const GH_REPO = "https://github.com/BufferStarved/MoQ-Test-Tools";
 const GH_BLOB = `${GH_REPO}/blob/main`;
+
+/** Stable order for the About metric glossary (matches chart / scorecard groups). */
+const ABOUT_METRIC_KEYS = [
+  "encoded_bitrate_kbps",
+  "fps",
+  "fps_stability",
+  "speed",
+  "encode_lag_ms",
+  "net_rtt_ms",
+  "net_jitter_ms",
+  "net_send_mbps",
+  "net_recv_mbps",
+  "net_loss_pct",
+  "net_retrans_pct",
+  "pkt_retrans",
+  "pkt_snd_loss",
+  "pkt_fec_extra",
+  "ts_continuity_counter_errors",
+  "cmaf_seq_gap_count",
+  "cmaf_tfdt_gap_count",
+  "cmaf_parse_errors",
+  "e2e_latency_ms",
+  "playback_ttff_ms",
+  "playback_stall_count",
+  "playback_frames_dropped",
+  "vmaf_score",
+  "psnr_db",
+  "ssim",
+  "total_bytes_sent",
+  "peak_bandwidth_sent_mbps",
+  "moqx_subscribe_success",
+  "moqx_publish_received",
+] as const;
 
 function FlowArrow() {
   return <span className="about-flow-arrow" aria-hidden="true">→</span>;
@@ -202,13 +237,14 @@ export function AboutPage() {
       </section>
 
       <section className="about-section">
-        <h3>Metric model (summary)</h3>
+        <h3>Metric model</h3>
         <ol className="about-list numbered">
           <li>
             <strong>Encode</strong> — bitrate, FPS, speed, encode lag
           </li>
           <li>
             <strong>Network transport</strong> — normalized RTT / jitter / send / loss / retrans
+            (SRT libsrt; RTMP Zixi or TCP path probe; MoQ qlog or TCP path probe)
           </li>
           <li>
             <strong>Edge & relay</strong> — Zixi/libsrt recovery; moqx subscribe & object counters
@@ -223,6 +259,30 @@ export function AboutPage() {
             <strong>Video quality</strong> — encoder and ingest VMAF / PSNR / SSIM when enabled
           </li>
         </ol>
+        <p className="hint about-metrics-doc-link">
+          Full field reference:{" "}
+          <a href={`${GH_BLOB}/docs/METRICS.md`} target="_blank" rel="noreferrer">
+            docs/METRICS.md
+          </a>{" "}
+          on GitHub.
+        </p>
+        <dl className="about-metric-glossary">
+          {ABOUT_METRIC_KEYS.map((key) => {
+            const def = METRIC_DEFINITIONS[key];
+            if (!def) {
+              return null;
+            }
+            return (
+              <div key={key} className="about-metric-glossary-row">
+                <dt>
+                  <code>{key}</code>
+                  <span>{def.label}</span>
+                </dt>
+                <dd>{def.description}</dd>
+              </div>
+            );
+          })}
+        </dl>
       </section>
 
       <section className="about-section">

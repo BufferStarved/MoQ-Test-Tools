@@ -721,7 +721,7 @@ function App() {
           <p className="eyebrow">Streaming benchmark platform</p>
           <h1>MoQ Test Tools</h1>
           <p className="subtitle">
-            Compare two or more ingest protocols side by side using the same source media.
+            Compare two or more live ingest protocols side by side.
           </p>
         </div>
         <nav className="tabs">

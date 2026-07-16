@@ -272,6 +272,15 @@ class UploadService:
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
         )
+        # RTMP has no libsrt RTT; prefer Zixi receiver stats when available,
+        # otherwise TCP-connect probe to the RTMP host:port as net_rtt / jitter.
+        path_rtt_probe: Optional[PathRttProbe] = None
+        if job.destination.protocol == "rtmp":
+            rtmp_parsed = urlparse(job.destination.url)
+            path_rtt_probe = PathRttProbe(
+                job.destination.url,
+                port=rtmp_parsed.port or 1935,
+            )
         start_time = time.time()
 
         try:
@@ -290,6 +299,7 @@ class UploadService:
 
                 status = progress_reader.get_status()
                 zixi_stats = zixi_poller.poll()
+                path_rtt = path_rtt_probe.poll() if path_rtt_probe and path_rtt_probe.enabled else None
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 elapsed = int(time.time() - start_time)
@@ -297,6 +307,8 @@ class UploadService:
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
                 encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                net_rtt_ms = zixi_stats.rtt_ms or (path_rtt.rtt_ms if path_rtt else 0.0)
+                net_jitter_ms = zixi_stats.jitter_ms or (path_rtt.jitter_ms if path_rtt else 0.0)
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
@@ -308,10 +320,10 @@ class UploadService:
                     cpu_percent=cpu,
                     memory_mb=mem,
                     progress=status.progress,
-                    transport_rtt_ms=zixi_stats.rtt_ms,
-                    transport_rtt_jitter_ms=zixi_stats.jitter_ms,
-                    net_rtt_ms=zixi_stats.rtt_ms,
-                    net_jitter_ms=zixi_stats.jitter_ms,
+                    transport_rtt_ms=net_rtt_ms,
+                    transport_rtt_jitter_ms=net_jitter_ms,
+                    net_rtt_ms=net_rtt_ms,
+                    net_jitter_ms=net_jitter_ms,
                     net_send_mbps=send_mbps,
                     encode_lag_ms=encode_lag_ms,
                     ts_continuity_counter_errors=zixi_stats.cc_errors,

@@ -9,6 +9,9 @@ import {
   showMoqUrlFields,
 } from "./playbackUrls";
 
+/** Upload protocols not ready for benchmark comparisons yet. */
+const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "webrtc"]);
+
 interface EndpointSectionProps {
   index: number;
   endpoint: EndpointConfig;
@@ -97,6 +100,9 @@ export function EndpointSection({
           value={endpoint.protocol}
           onChange={(e) => {
             const protocol = e.target.value;
+            if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol)) {
+              return;
+            }
             const patch: Partial<EndpointConfig> = {
               protocol,
               playbackMode: defaultPlaybackModeForProtocol(protocol),
@@ -114,12 +120,19 @@ export function EndpointSection({
           }}
           disabled={controlsLocked}
         >
-          {protocols.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
+          {protocols.map((item) => {
+            const comingSoon = UPLOAD_PROTOCOLS_COMING_SOON.has(item.id);
+            return (
+              <option key={item.id} value={item.id} disabled={comingSoon}>
+                {item.label}
+                {comingSoon ? " (coming soon)" : ""}
+              </option>
+            );
+          })}
         </select>
+        {UPLOAD_PROTOCOLS_COMING_SOON.has(endpoint.protocol) && (
+          <span className="hint">This upload protocol is coming soon and is not available for comparisons yet.</span>
+        )}
       </label>
 
       <label>

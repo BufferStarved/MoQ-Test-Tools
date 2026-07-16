@@ -42,12 +42,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   net_rtt_ms: {
     label: "Network RTT",
     description:
-      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
+      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; RTMP → Zixi receiver RTT when available, otherwise TCP connect probe to the RTMP host:port; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
   },
   net_jitter_ms: {
     label: "Network jitter",
     description:
-      "Normalized RTT jitter (ms) from successive RTT samples. SRT → libsrt; MoQ → path-probe RTT variance (same estimator).",
+      "Normalized RTT jitter (ms) from successive RTT samples. SRT → libsrt; RTMP/MoQ → path-probe or Zixi RTT variance (same estimator).",
   },
   net_send_mbps: {
     label: "Network send rate",
