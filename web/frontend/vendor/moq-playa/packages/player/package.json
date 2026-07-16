@@ -1,0 +1,32 @@
+{
+  "name": "@moqt/player",
+  "version": "0.5.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "import": "./dist/browser/index.js",
+      "default": "./dist/browser/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@moqt/transport": "file:../transport",
+    "@moqt/webtransport": "file:../webtransport",
+    "@moqt/loc": "file:../loc",
+    "@moqt/msf": "file:../msf",
+    "@moqt/playback": "file:../playback"
+  },
+  "scripts": {
+    "build": "tsc && tsup",
+    "build:browser": "tsup"
+  }
+}

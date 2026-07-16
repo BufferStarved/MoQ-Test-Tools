@@ -1,0 +1,45 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+node_modules/
+dist/
+web/frontend/dist/
+web/frontend/node_modules/
+web/frontend/node_modules/.vite/
+
+# Local package stores / caches
+.pnpm-store/
+.tmp.dprobes.h
+digest.txt
+58b/
+
+# Benchmark run artifacts
+results/
+!results/.gitkeep
+
+# Built/native tool trees (install scripts recreate these)
+tools/moq5/
+tools/deps/
+tools/moq5-publisher/bin/
+tools/moq5-recorder/bin/
+tools/openmoq-publisher/bin/
+tools/*/node_modules/
+tools/openmoq-recorder/node_modules/
+
+# Vendor package install trees (keep source/dist; drop nested deps)
+web/frontend/vendor/**/node_modules/
+
+.DS_Store
+*.log
+*.tsbuildinfo
+
+# Terraform plugin cache
+**/.terraform/
+*.tfstate
+*.tfstate.*

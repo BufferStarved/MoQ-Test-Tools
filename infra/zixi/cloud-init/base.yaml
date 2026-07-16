@@ -1,0 +1,41 @@
+#cloud-config
+# Baseline OS hardening and packages for Zixi Broadcaster.
+# Zixi itself is installed manually from your Zixi-provided installer package.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - wget
+  - jq
+  - htop
+  - iperf3
+  - net-tools
+  - tcpdump
+  - unzip
+  - python3
+  - python3-pip
+
+write_files:
+  - path: /etc/motd
+    content: |
+      MoQ Test Tools — Zixi Broadcaster host
+      --------------------------------------
+      1. Install Zixi Broadcaster using the installer from your Zixi account rep.
+      2. Open the web UI on port 4444 after install.
+      3. Configure an SRT push input on the SRT listen port defined in infra.
+      4. Point moq-test-tools benchmarks at: srt://<this-host>:<srt_port>?mode=caller&latency=200000
+
+  - path: /opt/moq-test-tools/zixi-ports.env
+    content: |
+      ZIXI_WEB_PORT=4444
+      ZIXI_RTMP_PORT=1935
+      ZIXI_HLS_PORT=7777
+      ZIXI_UDP_INPUT_PORT=2088
+      ZIXI_UDP_OUTPUT_PORT=2077
+      ZIXI_SRT_LISTEN_PORT=${srt_listen_port}
+
+runcmd:
+  - timedatectl set-timezone UTC || true
+  - echo "Zixi host ready. Install Zixi Broadcaster next." > /var/log/moq-zixi-bootstrap.log

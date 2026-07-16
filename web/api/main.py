@@ -1,13 +1,19 @@
 import asyncio
 import json
 import os
+import re
+import shutil
 import sys
+import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -20,17 +26,27 @@ from destinations import (  # noqa: E402
     PROTOCOL_LABELS,
     SYNTAX_BY_PROTOCOL,
     SUPPORTED_PROTOCOLS,
+    PRESET_BY_ID,
     DestinationConfigError,
+    ingest_agent_url_for_preset,
     presets_for_api,
+    recording_dir_for_preset,
     resolve_destination_request,
 )
+from endpoint_probe import probe_endpoint  # noqa: E402
+from ingest_agent_client import IngestAgentClient, resolve_ingest_agent, vmaf_available_for_endpoint  # noqa: E402
+from vmaf_score import libvmaf_available  # noqa: E402
 from upload_service import UploadJob  # noqa: E402
 from job_manager import (  # noqa: E402
     JobManager,
     JobStatus,
+    VmafStatus,
     list_result_files,
     read_result_summary,
 )
+
+UPLOADS_DIR = ROOT_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="MoQ Test Tools", version="1.0.0")
 job_manager = JobManager()
@@ -50,6 +66,27 @@ class CreateUploadRequest(BaseModel):
     preset_id: Optional[str] = None
     protocol: Optional[str] = None
     endpoint_url: Optional[str] = None
+    compute_vmaf_on_ingest: bool = False
+    compute_vmaf_encoder: bool = False
+    comparison_id: Optional[str] = None
+    stream_index: int = Field(default=0, ge=0, le=9)
+    stream_label: str = ""
+
+
+class PlaybackSampleRequest(BaseModel):
+    elapsed_sec: int = Field(ge=0)
+    engine: str = ""
+    playback_stats_events: int = 0
+    playback_stall_count: int = 0
+    playback_frames_rendered: int = 0
+    playback_frames_dropped: int = 0
+    playback_bitrate_bps: float = 0.0
+    playback_ttff_ms: float = 0.0
+    playback_hls_errors: int = 0
+    playback_hls_fatal_errors: int = 0
+    playback_hls_buffer_stalls: int = 0
+    playback_hls_frag_loads: int = 0
+    playback_video_time_sec: float = 0.0
 
 
 def job_to_dict(job) -> dict:
@@ -61,16 +98,212 @@ def job_to_dict(job) -> dict:
         "media_path": job.media_path,
         "duration_sec": job.duration_sec,
         "preset_id": job.preset_id,
+        "moq_namespace": job.moq_namespace,
         "created_at": job.created_at,
         "csv_path": job.csv_path,
+        "summary_path": job.summary_path,
         "error": job.error,
         "samples": job.samples,
+        "compute_vmaf_on_ingest": job.compute_vmaf_on_ingest,
+        "compute_vmaf_encoder": job.compute_vmaf_encoder,
+        "vmaf_status": job.vmaf_status,
+        "vmaf_score": job.vmaf_score,
+        "vmaf_error": job.vmaf_error,
+        "encoder_vmaf_status": job.encoder_vmaf_status,
+        "encoder_vmaf_score": job.encoder_vmaf_score,
+        "encoder_vmaf_error": job.encoder_vmaf_error,
+        "started_at_epoch": job.started_at_epoch,
     }
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/api/media/upload")
+async def upload_media(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    suffix = Path(file.filename).suffix or ".mp4"
+    media_id = str(uuid.uuid4())
+    target_name = f"{media_id}{suffix}"
+    target_path = UPLOADS_DIR / target_name
+
+    try:
+        with open(target_path, "wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save upload: {exc}") from exc
+
+    return {
+        "media_id": media_id,
+        "filename": file.filename,
+        "media_path": str(target_path),
+        "size_bytes": target_path.stat().st_size,
+    }
+
+
+@app.get("/api/endpoints/probe")
+def endpoint_probe(
+    endpoint_url: str = "",
+    preset_id: str = "",
+    media_path: str = "",
+):
+    resolved_url = endpoint_url.strip()
+    protocol = ""
+    if preset_id:
+        try:
+            destination = resolve_destination_request(preset_id=preset_id)
+            resolved_url = destination.url
+            protocol = destination.protocol
+        except DestinationConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif endpoint_url:
+        from urllib.parse import urlparse
+
+        protocol = urlparse(endpoint_url).scheme
+        if protocol == "rtmp":
+            protocol = "rtmp"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide preset_id or an rtmp:// endpoint_url for probe",
+            )
+    else:
+        raise HTTPException(status_code=400, detail="Provide endpoint_url or preset_id")
+
+    media = media_path.strip() or str(ROOT_DIR / "dummy.mp4")
+    if not os.path.isabs(media):
+        media = str(ROOT_DIR / media)
+    if not os.path.exists(media):
+        raise HTTPException(status_code=400, detail=f"Media file not found: {media}")
+
+    ok, error = probe_endpoint(protocol, resolved_url, media)
+    return {
+        "ok": ok,
+        "protocol": protocol,
+        "endpoint_url": resolved_url,
+        "error": error,
+    }
+
+
+@app.get("/api/vmaf/available")
+def vmaf_available(
+    endpoint_url: str = "",
+    preset_id: str = "",
+):
+    resolved_url = endpoint_url.strip()
+    if preset_id:
+        try:
+            resolved_url = resolve_destination_request(preset_id=preset_id).url
+        except DestinationConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not resolved_url:
+        raise HTTPException(status_code=400, detail="Provide endpoint_url or preset_id")
+
+    preset = PRESET_BY_ID.get(preset_id) if preset_id else None
+    if preset is not None and not preset.supports_vmaf:
+        return {
+            "available": False,
+            "endpoint_url": resolved_url,
+            "reason": "This preset does not support ingest VMAF",
+        }
+
+    available = vmaf_available_for_endpoint(
+        resolved_url,
+        preset_id=preset_id,
+    )
+    return {
+        "available": available,
+        "endpoint_url": resolved_url,
+        "reason": (
+            ""
+            if available
+            else "VMAF is not configured for this destination on the server"
+        ),
+    }
+
+
+@app.get("/api/quality/available")
+def quality_available(
+    endpoint_url: str = "",
+    preset_id: str = "",
+):
+    encoder_available = libvmaf_available()
+    encoder_reason = (
+        ""
+        if encoder_available
+        else "ffmpeg libvmaf filter is not available on this machine"
+    )
+
+    resolved_url = endpoint_url.strip()
+    if preset_id:
+        try:
+            resolved_url = resolve_destination_request(preset_id=preset_id).url
+        except DestinationConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    ingest_available = False
+    ingest_reason = "Provide endpoint_url or preset_id to check ingest VMAF"
+    if resolved_url:
+        preset = PRESET_BY_ID.get(preset_id) if preset_id else None
+        if preset is not None and not preset.supports_vmaf:
+            ingest_reason = "This preset does not support ingest VMAF"
+        elif vmaf_available_for_endpoint(resolved_url, preset_id=preset_id):
+            ingest_available = True
+            ingest_reason = ""
+        else:
+            ingest_reason = "VMAF is not configured for this destination on the server"
+
+    return {
+        "encoder": {
+            "available": encoder_available,
+            "reason": encoder_reason,
+        },
+        "ingest": {
+            "available": ingest_available,
+            "endpoint_url": resolved_url,
+            "reason": ingest_reason,
+        },
+    }
+
+
+@app.get("/api/ingest-agent/health")
+def ingest_agent_health(
+    endpoint_url: str,
+    preset_id: str = "",
+):
+    resolved_url = endpoint_url.strip()
+    if preset_id:
+        try:
+            resolved_url = resolve_destination_request(preset_id=preset_id).url
+        except DestinationConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    config = resolve_ingest_agent(
+        resolved_url,
+        agent_url=ingest_agent_url_for_preset(preset_id) if preset_id else "",
+        recording_dir=recording_dir_for_preset(preset_id) if preset_id else "",
+    )
+    if config is None:
+        raise HTTPException(
+            status_code=400,
+            detail="VMAF ingest agent is not configured for this destination",
+        )
+
+    try:
+        payload = IngestAgentClient(config).health()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "agent_url": config.base_url,
+        "recording_dir": config.recording_dir,
+        **payload,
+    }
 
 
 @app.get("/api/protocols")
@@ -89,7 +322,7 @@ def protocols():
 
 @app.get("/api/presets")
 def presets(protocol: Optional[str] = None):
-    items = presets_for_api()
+    items = presets_for_api(web_only=True)
     if protocol:
         items = [item for item in items if item["protocol"] == protocol]
     return {"presets": items}
@@ -113,10 +346,35 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if request.compute_vmaf_on_ingest:
+        preset = PRESET_BY_ID.get(request.preset_id or destination.preset_id)
+        if preset is not None and not preset.supports_vmaf:
+            raise HTTPException(
+                status_code=400,
+                detail="Ingest VMAF is not supported for this preset.",
+            )
+        preset_id = request.preset_id or destination.preset_id
+        if not vmaf_available_for_endpoint(destination.url, preset_id=preset_id):
+            raise HTTPException(
+                status_code=400,
+                detail="VMAF is not available for this destination. Use a managed ingest endpoint.",
+            )
+
+    if request.compute_vmaf_encoder and not libvmaf_available():
+        raise HTTPException(
+            status_code=400,
+            detail="Encoder VMAF requires ffmpeg with libvmaf on this machine.",
+        )
+
     job = UploadJob(
         media_path=media_path,
         destination=destination,
         duration_sec=request.duration_sec,
+        compute_vmaf_on_ingest=request.compute_vmaf_on_ingest,
+        compute_vmaf_encoder=request.compute_vmaf_encoder,
+        comparison_id=request.comparison_id or "",
+        stream_index=request.stream_index,
+        stream_label=request.stream_label,
     )
     record = job_manager.create_job(job, preset_id=request.preset_id or destination.preset_id)
     return job_to_dict(record)
@@ -133,6 +391,20 @@ def get_upload(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job_to_dict(job)
+
+
+@app.post("/api/uploads/{job_id}/playback-sample")
+def post_playback_sample(job_id: str, request: PlaybackSampleRequest):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="Upload is not active")
+
+    accepted = job_manager.record_playback_sample(job_id, request.model_dump())
+    if not accepted:
+        raise HTTPException(status_code=400, detail="Invalid playback sample")
+    return {"ok": True}
 
 
 @app.get("/api/uploads/{job_id}/events")
@@ -155,16 +427,331 @@ async def upload_events(job_id: str):
             payload = {
                 "status": current.status.value,
                 "csv_path": current.csv_path,
+                "summary_path": current.summary_path,
                 "error": current.error,
+                "moq_namespace": current.moq_namespace,
+                "vmaf_status": current.vmaf_status,
+                "vmaf_score": current.vmaf_score,
+                "vmaf_error": current.vmaf_error,
+                "encoder_vmaf_status": current.encoder_vmaf_status,
+                "encoder_vmaf_score": current.encoder_vmaf_score,
+                "encoder_vmaf_error": current.encoder_vmaf_error,
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
 
             if current.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
-                break
+                if current.status == JobStatus.FAILED:
+                    break
+                if not current.compute_vmaf_on_ingest:
+                    break
+                if current.vmaf_status in {
+                    VmafStatus.COMPLETED.value,
+                    VmafStatus.FAILED.value,
+                    VmafStatus.DISABLED.value,
+                }:
+                    break
 
             await asyncio.sleep(1)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+_M3U8_URI_ATTR_RE = re.compile(r'URI="([^"]+)"')
+
+
+def _is_m3u8_manifest(url: str, media_type: str, content: bytes) -> bool:
+    if ".m3u8" in urlparse(url).path.lower():
+        return True
+    if "mpegurl" in media_type.lower() or "m3u8" in media_type.lower():
+        return True
+    stripped = content.lstrip()
+    return stripped.startswith(b"#EXTM3U")
+
+
+def _sanitize_fetch_url(url: str) -> str:
+    """Encode query/path so urllib can fetch Zixi URLs with spaces (e.g. stream=SRT Test).
+
+    Must use %20 (not urlencode's default '+') for spaces — Zixi's HTTP origin
+    does not decode '+' as a space and will 403 on a literal 'SRT+Test' lookup.
+    """
+    parsed = urlparse(url)
+    query = urlencode(parse_qsl(parsed.query, keep_blank_values=True), quote_via=quote)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
+
+
+def _proxied_playback_path(remote_url: str) -> str:
+    return f"/api/playback/fetch?url={quote(_sanitize_fetch_url(remote_url), safe='')}"
+
+
+def _rewrite_m3u8_manifest(manifest_url: str, content: bytes) -> bytes:
+    text = content.decode("utf-8", errors="replace")
+    rewritten: list[str] = []
+
+    for line in text.splitlines():
+        if 'URI="' in line:
+            def replace_uri(match: re.Match[str]) -> str:
+                absolute = urljoin(manifest_url, match.group(1))
+                return f'URI="{_proxied_playback_path(absolute)}"'
+
+            rewritten.append(_M3U8_URI_ATTR_RE.sub(replace_uri, line))
+            continue
+
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            absolute = urljoin(manifest_url, stripped)
+            rewritten.append(_proxied_playback_path(absolute))
+            continue
+
+        rewritten.append(line)
+
+    body = "\n".join(rewritten)
+    if text.endswith("\n"):
+        body += "\n"
+    return body.encode("utf-8")
+
+
+@app.get("/api/playback/fetch")
+def playback_fetch(url: str):
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Only http(s) playback URLs are allowed")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid playback URL")
+
+    safe_url = _sanitize_fetch_url(url)
+    request = urllib.request.Request(safe_url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            content = response.read()
+            media_type = response.headers.get("Content-Type", "application/octet-stream")
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=exc.code, detail=f"Playback upstream error: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc.reason}") from exc
+
+    if _is_m3u8_manifest(url, media_type, content):
+        content = _rewrite_m3u8_manifest(url, content)
+        media_type = "application/vnd.apple.mpegurl"
+
+    return Response(content=content, media_type=media_type)
+
+
+@app.get("/api/playback/probe")
+def playback_probe(url: str):
+    """Fetch manifest + first media segment and return structured playback diagnostics."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="Only http(s) playback URLs are allowed")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid playback URL")
+
+    safe_manifest_url = _sanitize_fetch_url(url)
+    result: dict = {
+        "manifest_url": safe_manifest_url,
+        "manifest_ok": False,
+        "manifest_bytes": 0,
+        "segment_url": None,
+        "segment_ok": False,
+        "segment_bytes": 0,
+        "checks": [],
+    }
+
+    try:
+        with urllib.request.urlopen(urllib.request.Request(safe_manifest_url, method="GET"), timeout=15) as response:
+            manifest = response.read()
+    except urllib.error.HTTPError as exc:
+        result["checks"].append(f"manifest_http_{exc.code}")
+        return result
+    except urllib.error.URLError as exc:
+        result["checks"].append(f"manifest_fetch_failed:{exc.reason}")
+        return result
+
+    if not _is_m3u8_manifest(url, "application/vnd.apple.mpegurl", manifest):
+        result["checks"].append("manifest_not_m3u8")
+        return result
+
+    result["manifest_ok"] = True
+    result["manifest_bytes"] = len(manifest)
+    rewritten = _rewrite_m3u8_manifest(url, manifest).decode("utf-8", errors="replace")
+    segment_line = ""
+    for line in rewritten.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            segment_line = stripped
+            break
+
+    if not segment_line:
+        result["checks"].append("manifest_has_no_segment_lines")
+        return result
+
+    if segment_line.startswith("/api/playback/fetch"):
+        result["checks"].append("manifest_segments_proxied_ok")
+        upstream_line = ""
+        for raw_line in manifest.decode("utf-8", errors="replace").splitlines():
+            raw_stripped = raw_line.strip()
+            if raw_stripped and not raw_stripped.startswith("#"):
+                upstream_line = urljoin(url, raw_stripped)
+                break
+        segment_url = _sanitize_fetch_url(upstream_line)
+    else:
+        segment_url = _sanitize_fetch_url(urljoin(url, segment_line))
+
+    result["segment_url"] = segment_url
+    try:
+        with urllib.request.urlopen(urllib.request.Request(segment_url, method="GET"), timeout=15) as response:
+            segment = response.read()
+    except urllib.error.HTTPError as exc:
+        result["checks"].append(f"segment_http_{exc.code}")
+        return result
+    except urllib.error.URLError as exc:
+        result["checks"].append(f"segment_fetch_failed:{exc.reason}")
+        return result
+
+    result["segment_ok"] = len(segment) > 0
+    result["segment_bytes"] = len(segment)
+    if result["segment_ok"]:
+        result["checks"].append("segment_download_ok")
+        decode_check = _probe_segment_decodable(segment)
+        result["segment_decodable"] = decode_check["decodable"]
+        result["segment_video"] = decode_check.get("video")
+        if decode_check["decodable"]:
+            result["checks"].append("segment_ffprobe_ok")
+        else:
+            result["checks"].append(f"segment_ffprobe_failed:{decode_check.get('reason', 'unknown')}")
+    else:
+        result["checks"].append("segment_empty")
+        result["segment_decodable"] = False
+    return result
+
+
+def _probe_segment_decodable(segment: bytes) -> dict:
+    import subprocess
+    import tempfile
+
+    if not shutil.which("ffprobe"):
+        return {"decodable": None, "reason": "ffprobe_not_installed"}
+
+    with tempfile.NamedTemporaryFile(suffix=".ts", delete=True) as tmp:
+        tmp.write(segment)
+        tmp.flush()
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-hide_banner",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_name,profile,pix_fmt,width,height",
+                    "-of",
+                    "csv=p=0",
+                    tmp.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return {"decodable": False, "reason": str(exc)}
+
+    stderr = (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not stdout or "no frame" in stderr.lower() or "pps" in stderr.lower():
+        reason = stderr.splitlines()[-1] if stderr else "no_video_stream"
+        return {"decodable": False, "reason": reason, "video": stdout or None}
+    return {"decodable": True, "video": stdout}
+
+
+# SHA-256 hashes of relay TLS leaf certs (hex, no colons).
+# moqx serves QUIC/WebTransport only on UDP :4433 — browsers cannot fetch
+# https://relay:4433/fingerprint over TCP. Serve hashes from our API instead.
+MOQ_RELAY_CERT_SHA256: dict[str, str] = {
+    # ECDSA self-signed cert (14-day) for WebTransport browser pinning — see
+    # infra/moqx/scripts/configure-webtransport-cert.sh
+    "34-28-164-90.sslip.io": "7115b12274dcf092c3e77d763111f0a2088a0f2029efc8e1f223a9584b1f5b54",
+}
+
+
+@app.get("/api/moq/probe")
+def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
+    """Fetch moqx relay subscribe/publish metrics for playback diagnostics."""
+    metrics_url = f"{relay_admin.rstrip('/')}/metrics"
+    result: dict = {
+        "relay_admin": metrics_url,
+        "reachable": False,
+        "subscribe_success": None,
+        "subscribe_error": None,
+        "subscribe_error_track_not_exist": None,
+        "publish_namespace_success": None,
+        "checks": [],
+    }
+    try:
+        with urllib.request.urlopen(urllib.request.Request(metrics_url, method="GET"), timeout=10) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        result["checks"].append(f"metrics_unreachable:{exc.reason}")
+        return result
+
+    result["reachable"] = True
+
+    def metric_value(name: str, labels: str = "") -> int | None:
+        needle = name
+        if labels:
+            needle = f'{name}{{{labels}}}'
+        for line in body.splitlines():
+            if line.startswith("#") or not line.strip():
+                continue
+            if needle in line or line.startswith(f"{name} "):
+                try:
+                    return int(float(line.rsplit(" ", 1)[-1]))
+                except ValueError:
+                    return None
+        return None
+
+    result["subscribe_success"] = metric_value("moqx_pubSubscribeSuccess_total")
+    result["subscribe_error"] = metric_value("moqx_pubSubscribeError_total")
+    result["subscribe_error_track_not_exist"] = metric_value(
+        "moqx_pubSubscribeError_by_code_total",
+        'code="track_not_exist"',
+    )
+    result["publish_namespace_success"] = metric_value("moqx_pubPublishNamespaceSuccess_total")
+    result["publish_received"] = metric_value("moqx_moqPublishReceived_total")
+    result["publish_done"] = metric_value("moqx_pubPublishDone_total")
+
+    publish_seen = (result["publish_received"] or 0) > 0 or (result["publish_done"] or 0) > 0
+    if (result["subscribe_error_track_not_exist"] or 0) > 0 and not publish_seen:
+        result["checks"].append("subscribe_track_not_exist")
+    if (result["publish_namespace_success"] or 0) == 0 and not publish_seen:
+        result["checks"].append("publish_never_received")
+    if (result["subscribe_success"] or 0) == 0 and (result["subscribe_error"] or 0) > 0 and not publish_seen:
+        result["checks"].append("subscribe_always_fails")
+    if result["checks"]:
+        result["checks"].append("relay_playback_broken")
+    else:
+        result["checks"].append("relay_metrics_look_healthy")
+    return result
+
+
+@app.get("/api/moq/fingerprint")
+def moq_fingerprint(relay: str):
+    parsed = urlparse(relay)
+    if parsed.scheme not in {"https", "http"}:
+        raise HTTPException(status_code=400, detail="Relay URL must be http(s)")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid relay URL")
+
+    fingerprint = MOQ_RELAY_CERT_SHA256.get(host)
+    if not fingerprint:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No TLS fingerprint configured for relay host '{host}'",
+        )
+
+    return Response(content=fingerprint, media_type="text/plain")
 
 
 @app.get("/api/results")

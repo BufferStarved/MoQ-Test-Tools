@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run openmoq-fmp4-record inside Docker (glibc >= 2.38 for quiche prebuild).
+set -euo pipefail
+
+RECORDER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+IMAGE="${MOQ_RECORDER_IMAGE:-openmoq-recorder:latest}"
+
+if [[ $# -ge 1 && "$1" == "--probe" ]]; then
+  docker run --rm --network host "$IMAGE" --probe
+  exit 0
+fi
+
+if [[ $# -lt 3 ]]; then
+  echo "usage: openmoq-fmp4-record <relay-url> <namespace> <output.mp4> [--duration SEC]" >&2
+  exit 2
+fi
+
+RELAY_URL="$1"
+NAMESPACE="$2"
+OUTPUT="$3"
+shift 3
+
+OUTPUT_DIR="$(dirname "$OUTPUT")"
+OUTPUT_BASE="$(basename "$OUTPUT")"
+mkdir -p "$OUTPUT_DIR"
+
+docker run --rm --network host \
+  -e MOQ_RELAY_CERT_SHA256="${MOQ_RELAY_CERT_SHA256:-}" \
+  -v "$OUTPUT_DIR:/out" \
+  "$IMAGE" "$RELAY_URL" "$NAMESPACE" "/out/$OUTPUT_BASE" "$@"

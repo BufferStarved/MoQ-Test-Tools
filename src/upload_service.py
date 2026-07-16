@@ -1,14 +1,53 @@
+import os
+import shutil
+import socket
 import subprocess
+import tempfile
+import threading
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
+from urllib.parse import urlparse
 
 import psutil
 
 from destinations import DestinationProfile
+from endpoint_probe import probe_endpoint
+from ingest_host_metrics import IngestHostMetricsPoller
 from metrics import MetricsCollector
-from network_metrics import FfmpegProgressReader
+from moq_publish import (
+    BROWSER_COMPAT_AUDIO_ARGS,
+    BROWSER_COMPAT_VIDEO_ARGS,
+    MPEGTS_VIDEO_BSF,
+    build_ffmpeg_moq_cmd,
+    build_moq_publisher_cmd,
+    find_ffmpeg,
+    find_moq_publisher,
+    with_srt_stream_id,
+    zixi_srt_stream_id_for_preset,
+)
+from moqx_stats import MoqxStatsPoller
+from picoquic_qlog import PicoquicQlogTailer
+from zixi_input_reset import reset_zixi_srt_input
+from network_metrics import (
+    FfmpegProgressFileReader,
+    FfmpegProgressReader,
+    find_srt_live_transmit,
+)
+from srt_stats import SrtStatsReader
+from system_metrics import read_client_host_metrics
+from encoder_capture import (
+    build_tee_output_args,
+    encoder_capture_path,
+    start_moq_capture_tee,
+)
+from quality_metrics import (
+    build_quality_payload,
+    quality_leg_from_vmaf_result,
+)
+from vmaf_score import compute_vmaf
+from zixi_stats import ZixiStatsPoller
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
@@ -18,41 +57,136 @@ class UploadJob:
     media_path: str
     destination: DestinationProfile
     duration_sec: int
+    job_id: str = ""
+    comparison_id: str = ""
+    stream_index: int = 0
+    stream_label: str = ""
+    compute_vmaf_on_ingest: bool = False
+    compute_vmaf_encoder: bool = False
+    ingest_recording_dir: str = ""
+    ingest_agent_url: str = ""
+    ingest_agent_token: str = ""
+    distorted_path: str = ""
+    encoder_capture_path: str = ""
+    compute_vmaf: bool = False
     ffmpeg_cmd: List[str] = field(default_factory=list, init=False)
 
     def __post_init__(self):
         if not self.ffmpeg_cmd:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
 
-    def _build_ffmpeg_cmd(self) -> List[str]:
+    def _build_ffmpeg_cmd(
+        self,
+        *,
+        progress_path: str = "pipe:1",
+        udp_url: str = "",
+        capture_path: str = "",
+    ) -> List[str]:
+        if capture_path:
+            if udp_url:
+                network_url = udp_url
+            elif self.destination.protocol == "srt":
+                network_url = self._resolved_srt_destination_url()
+            else:
+                network_url = self.destination.url
+            output_args = build_tee_output_args(
+                self.destination.protocol,
+                network_url,
+                capture_path,
+            )
+        elif udp_url:
+            output_args = ["-bsf:v", MPEGTS_VIDEO_BSF, "-f", "mpegts", udp_url]
+        else:
+            output_args = self._browser_compat_output_args()
         return [
-            "ffmpeg", "-re", "-i", self.media_path,
-            "-c:v", "copy", "-c:a", "copy",
-            "-progress", "pipe:1", "-nostats",
-            *self.destination.ffmpeg_output_args(),
+            find_ffmpeg(),
+            "-re",
+            "-i",
+            self.media_path,
+            *BROWSER_COMPAT_VIDEO_ARGS,
+            *BROWSER_COMPAT_AUDIO_ARGS,
+            "-progress",
+            progress_path,
+            "-nostats",
+            *output_args,
         ]
+
+    def _browser_compat_output_args(self) -> List[str]:
+        if self.destination.protocol == "srt":
+            return [
+                "-bsf:v",
+                MPEGTS_VIDEO_BSF,
+                "-f",
+                "mpegts",
+                self._resolved_srt_destination_url(),
+            ]
+        return self.destination.ffmpeg_output_args()
+
+    def _resolved_srt_destination_url(self) -> str:
+        stream_id = zixi_srt_stream_id_for_preset(self.destination.preset_id)
+        if stream_id:
+            return with_srt_stream_id(self.destination.url, stream_id)
+        return self.destination.url
 
 
 @dataclass
 class UploadSample:
     elapsed_sec: int
-    bitrate_kbps: float
+    encoded_bitrate_kbps: float
     fps: float
+    fps_stability: float
     speed: float
     out_time: str
     cpu_percent: float
     memory_mb: float
     progress: str
+    transport_rtt_ms: float = 0.0
+    transport_rtt_jitter_ms: float = 0.0
+    pkt_rcv_drop: int = 0
+    pkt_snd_drop: int = 0
+    pkt_snd_loss: int = 0
+    pkt_retrans: int = 0
+    pkt_fec_extra: int = 0
+    ts_continuity_counter_errors: int = 0
+    vmaf_score: Optional[float] = None
+    psnr_db: Optional[float] = None
+    ssim: Optional[float] = None
+    encoder_send_rate_mbps: float = 0.0
+    transport_recv_rate_mbps: float = 0.0
+    client_memory_percent: float = 0.0
+    client_disk_percent: float = 0.0
+    server_cpu_percent: float = 0.0
+    server_memory_percent: float = 0.0
+    server_disk_percent: float = 0.0
+    moqx_subscribe_success: int = 0
+    moqx_subscribe_error: int = 0
+    moqx_publish_namespace_success: int = 0
+    moqx_publish_received: int = 0
+    moqx_publish_done: int = 0
+    quic_rtt_ms: float = 0.0
+    quic_cwnd_bytes: int = 0
+    quic_packets_lost: int = 0
 
 
 @dataclass
 class UploadResult:
     success: bool
     csv_path: Optional[str] = None
+    summary_path: Optional[str] = None
+    vmaf_score: Optional[float] = None
+    encoder_vmaf_status: str = "disabled"
+    encoder_vmaf_score: Optional[float] = None
+    encoder_vmaf_error: Optional[str] = None
     error: Optional[str] = None
 
 
 SampleCallback = Callable[[UploadSample], None]
+
+
+def _pick_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class UploadService:
@@ -61,14 +195,44 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
+        if job.destination.protocol == "srt":
+            return self._run_srt_pipeline(job, on_sample=on_sample)
+        if job.destination.protocol == "moq":
+            return self._run_moq_pipeline(job, on_sample=on_sample)
+        return self._run_direct_ffmpeg(job, on_sample=on_sample)
+
+    def _run_direct_ffmpeg(
+        self,
+        job: UploadJob,
+        on_sample: Optional[SampleCallback] = None,
+    ) -> UploadResult:
+        if job.destination.protocol in {"rtmp", "hls", "dash"}:
+            ok, probe_error = probe_endpoint(
+                job.destination.protocol,
+                job.destination.url,
+                job.media_path,
+            )
+            if not ok:
+                return UploadResult(success=False, error=probe_error)
+
         process: Optional[subprocess.Popen] = None
         progress_reader: Optional[FfmpegProgressReader] = None
+        temp_dir = ""
+        ffmpeg_cmd = job.ffmpeg_cmd
+
+        if job.compute_vmaf_encoder:
+            temp_dir = tempfile.mkdtemp(prefix="moq-bench-")
+            job.encoder_capture_path = encoder_capture_path(
+                temp_dir,
+                job.destination.protocol,
+            )
+            ffmpeg_cmd = job._build_ffmpeg_cmd(capture_path=job.encoder_capture_path)
 
         try:
             process = subprocess.Popen(
-                job.ffmpeg_cmd,
+                ffmpeg_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
             return UploadResult(success=False, error="ffmpeg not found in PATH")
@@ -77,6 +241,12 @@ class UploadService:
         collector = MetricsCollector(
             protocol=job.destination.protocol,
             endpoint_url=job.destination.url,
+            run_id=job.job_id,
+        )
+        zixi_poller = ZixiStatsPoller(job.destination.url)
+        ingest_poller = IngestHostMetricsPoller(
+            job.destination.url,
+            agent_url=job.ingest_agent_url,
         )
         start_time = time.time()
 
@@ -85,47 +255,705 @@ class UploadService:
                 if process.poll() is not None:
                     return UploadResult(
                         success=False,
-                        error=f"ffmpeg exited with code {process.returncode}",
+                        error=self._ffmpeg_failure_message(process),
                     )
 
                 status = progress_reader.get_status()
+                zixi_stats = zixi_poller.poll()
+                client_host = read_client_host_metrics()
+                server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 elapsed = int(time.time() - start_time)
-
-                try:
-                    proc = psutil.Process(process.pid)
-                    cpu = proc.cpu_percent(interval=None)
-                    mem = proc.memory_info().rss / (1024 * 1024)
-                except (psutil.NoSuchProcess, psutil.Error):
-                    cpu, mem = 0.0, 0.0
+                cpu, mem = self._process_usage([process.pid])
+                send_mbps = status.bitrate_kbps / 1000.0
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
-                    bitrate_kbps=status.bitrate_kbps,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
                     fps=status.fps,
+                    fps_stability=0.0,
                     speed=status.speed,
                     out_time=status.out_time,
                     cpu_percent=cpu,
                     memory_mb=mem,
                     progress=status.progress,
+                    transport_rtt_ms=zixi_stats.rtt_ms,
+                    transport_rtt_jitter_ms=zixi_stats.jitter_ms,
+                    ts_continuity_counter_errors=zixi_stats.cc_errors,
+                    encoder_send_rate_mbps=send_mbps,
+                    client_memory_percent=client_host.memory_percent,
+                    client_disk_percent=client_host.disk_percent,
+                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_memory_percent=server_host.memory_percent if server_host else 0.0,
+                    server_disk_percent=server_host.disk_percent if server_host else 0.0,
+                )
+                sample.fps_stability = collector.record_sample(
+                    pid=process.pid,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    fps=status.fps,
+                    speed=status.speed,
+                    out_time=status.out_time,
+                    transport_rtt_ms=sample.transport_rtt_ms,
+                    transport_rtt_jitter_ms=sample.transport_rtt_jitter_ms,
+                    ts_continuity_counter_errors=sample.ts_continuity_counter_errors,
+                    encoder_send_rate_mbps=send_mbps,
+                    client_memory_percent=sample.client_memory_percent,
+                    client_disk_percent=sample.client_disk_percent,
+                    server_cpu_percent=sample.server_cpu_percent,
+                    server_memory_percent=sample.server_memory_percent,
+                    server_disk_percent=sample.server_disk_percent,
                 )
 
                 if on_sample:
                     on_sample(sample)
-
-                collector.record_sample(
-                    pid=process.pid,
-                    bitrate_kbps=status.bitrate_kbps,
-                    fps=status.fps,
-                    speed=status.speed,
-                    out_time=status.out_time,
-                )
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
         finally:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
+            self._terminate_process(process)
 
-        return UploadResult(success=True, csv_path=collector.filename)
+        return self._finalize_result(
+            job,
+            collector,
+            zixi_enabled=zixi_poller.enabled,
+            server_metrics_enabled=ingest_poller.enabled,
+        )
+
+    def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
+        """Best-effort delete+recreate of the Zixi SRT push input before pushing.
+
+        Zixi's SRT push input HLS segmenter only cuts segments for the first
+        source connection in the input object's lifetime — a plain service
+        restart does not clear that per-stream state, only recreating the
+        stream object does. See src/zixi_input_reset.py for the full story.
+        """
+        stream_id = zixi_srt_stream_id_for_preset(job.destination.preset_id)
+        if not stream_id:
+            return
+        try:
+            port = urlparse(job.destination.url).port or 10080
+        except ValueError:
+            port = 10080
+        try:
+            reset_zixi_srt_input(stream_id, port=port)
+        except Exception:
+            logger.warning("Zixi SRT input reset failed; continuing with push anyway.", exc_info=True)
+
+    def _run_srt_pipeline(
+        self,
+        job: UploadJob,
+        on_sample: Optional[SampleCallback] = None,
+    ) -> UploadResult:
+        """Push MPEG-TS to Zixi over SRT.
+
+        Prefer native ffmpeg→SRT (stable single session, HLS segments roll reliably).
+        Set SRT_USE_LIVE_TRANSMIT=1 to use srt-live-transmit for extra SRT CSV stats.
+        """
+        self._reset_zixi_srt_input_if_managed(job)
+
+        if os.environ.get("SRT_USE_LIVE_TRANSMIT", "").strip() != "1":
+            resolved = job._resolved_srt_destination_url()
+            ffmpeg_bin = find_ffmpeg()
+            if not shutil.which(ffmpeg_bin) and not os.path.isfile(ffmpeg_bin):
+                return UploadResult(success=False, error="ffmpeg not found in PATH")
+            try:
+                probe = subprocess.run(
+                    [ffmpeg_bin, "-protocols"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if "srt" not in (probe.stdout or "").split():
+                    return UploadResult(
+                        success=False,
+                        error=(
+                            f"{ffmpeg_bin} lacks SRT support. Install ffmpeg-full "
+                            "(brew install ffmpeg-full) and restart ./scripts/dev.sh"
+                        ),
+                    )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            logger.info("SRT destination (direct ffmpeg): %s", resolved)
+            return self._run_direct_ffmpeg(job, on_sample=on_sample)
+
+        srt_bin = find_srt_live_transmit()
+        if not srt_bin:
+            logger.warning(
+                "srt-live-transmit not found; falling back to direct ffmpeg SRT without network stats"
+            )
+            return self._run_direct_ffmpeg(job, on_sample=on_sample)
+
+        udp_port = _pick_udp_port()
+        udp_url = f"udp://127.0.0.1:{udp_port}?pkt_size=1316"
+        temp_dir = tempfile.mkdtemp(prefix="moq-bench-")
+        progress_path = os.path.join(temp_dir, "ffmpeg-progress.txt")
+        stats_path = os.path.join(temp_dir, "srt-stats.csv")
+
+        capture_path = ""
+        if job.compute_vmaf_encoder:
+            job.encoder_capture_path = encoder_capture_path(temp_dir, job.destination.protocol)
+            capture_path = job.encoder_capture_path
+
+        ffmpeg_cmd = job._build_ffmpeg_cmd(
+            progress_path=progress_path,
+            udp_url=udp_url,
+            capture_path=capture_path,
+        )
+        srt_cmd = [
+            srt_bin,
+            "-statsout:" + stats_path,
+            "-statspf:csv",
+            "-s:50",
+            f"udp://:@127.0.0.1:{udp_port}",
+            job._resolved_srt_destination_url(),
+        ]
+
+        ffmpeg_proc: Optional[subprocess.Popen] = None
+        srt_proc: Optional[subprocess.Popen] = None
+
+        try:
+            ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            time.sleep(0.5)
+            srt_proc = subprocess.Popen(
+                srt_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            self._terminate_process(ffmpeg_proc)
+            return UploadResult(success=False, error="ffmpeg not found in PATH")
+
+        progress_reader = FfmpegProgressFileReader(progress_path)
+        srt_reader = SrtStatsReader(stats_path)
+        resolved_srt_url = job._resolved_srt_destination_url()
+        logger.info("SRT destination: %s", resolved_srt_url)
+        collector = MetricsCollector(
+            protocol=job.destination.protocol,
+            endpoint_url=resolved_srt_url,
+            run_id=job.job_id,
+        )
+        zixi_poller = ZixiStatsPoller(job.destination.url)
+        ingest_poller = IngestHostMetricsPoller(
+            job.destination.url,
+            agent_url=job.ingest_agent_url,
+        )
+        start_time = time.time()
+
+        try:
+            while time.time() - start_time < job.duration_sec:
+                if ffmpeg_proc.poll() is not None:
+                    return UploadResult(
+                        success=False,
+                        error=self._ffmpeg_failure_message(ffmpeg_proc),
+                    )
+                if srt_proc.poll() is not None and srt_proc.returncode not in (0, None):
+                    stderr = ""
+                    if srt_proc.stderr:
+                        stderr = srt_proc.stderr.read().decode("utf-8", errors="replace").strip()
+                    detail = stderr.splitlines()[-1] if stderr else "unknown error"
+                    return UploadResult(
+                        success=False,
+                        error=f"srt-live-transmit exited with code {srt_proc.returncode}: {detail}",
+                    )
+
+                status = progress_reader.get_status()
+                srt_stats = srt_reader.poll()
+                zixi_stats = zixi_poller.poll()
+                client_host = read_client_host_metrics()
+                server_host = ingest_poller.poll() if ingest_poller.enabled else None
+                elapsed = int(time.time() - start_time)
+                pids = [pid for pid in (ffmpeg_proc.pid, srt_proc.pid if srt_proc else None) if pid]
+                cpu, mem = self._process_usage(pids)
+
+                transport_rtt_ms = srt_stats.rtt_ms or zixi_stats.rtt_ms
+                transport_rtt_jitter_ms = srt_stats.rtt_jitter_ms or zixi_stats.jitter_ms
+                ts_continuity_counter_errors = zixi_stats.cc_errors
+                send_mbps = srt_stats.mbps_send_rate or (status.bitrate_kbps / 1000.0)
+                recv_mbps = srt_stats.mbps_recv_rate
+
+                sample = UploadSample(
+                    elapsed_sec=elapsed,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    fps=status.fps,
+                    fps_stability=0.0,
+                    speed=status.speed,
+                    out_time=status.out_time,
+                    cpu_percent=cpu,
+                    memory_mb=mem,
+                    progress=status.progress,
+                    transport_rtt_ms=transport_rtt_ms,
+                    transport_rtt_jitter_ms=transport_rtt_jitter_ms,
+                    pkt_rcv_drop=srt_stats.pkt_rcv_drop,
+                    pkt_snd_drop=srt_stats.pkt_snd_drop,
+                    pkt_snd_loss=srt_stats.pkt_snd_loss,
+                    pkt_retrans=srt_stats.pkt_retrans,
+                    pkt_fec_extra=srt_stats.pkt_fec_extra,
+                    ts_continuity_counter_errors=ts_continuity_counter_errors,
+                    encoder_send_rate_mbps=send_mbps,
+                    transport_recv_rate_mbps=recv_mbps,
+                    client_memory_percent=client_host.memory_percent,
+                    client_disk_percent=client_host.disk_percent,
+                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_memory_percent=server_host.memory_percent if server_host else 0.0,
+                    server_disk_percent=server_host.disk_percent if server_host else 0.0,
+                )
+                sample.fps_stability = collector.record_sample(
+                    pid=ffmpeg_proc.pid,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    fps=status.fps,
+                    speed=status.speed,
+                    out_time=status.out_time,
+                    extra_pids=[srt_proc.pid] if srt_proc else None,
+                    transport_rtt_ms=transport_rtt_ms,
+                    transport_rtt_jitter_ms=transport_rtt_jitter_ms,
+                    pkt_rcv_drop=sample.pkt_rcv_drop,
+                    pkt_snd_drop=sample.pkt_snd_drop,
+                    pkt_snd_loss=sample.pkt_snd_loss,
+                    pkt_retrans=sample.pkt_retrans,
+                    pkt_fec_extra=sample.pkt_fec_extra,
+                    ts_continuity_counter_errors=ts_continuity_counter_errors,
+                    encoder_send_rate_mbps=send_mbps,
+                    transport_recv_rate_mbps=recv_mbps,
+                    client_memory_percent=sample.client_memory_percent,
+                    client_disk_percent=sample.client_disk_percent,
+                    server_cpu_percent=sample.server_cpu_percent,
+                    server_memory_percent=sample.server_memory_percent,
+                    server_disk_percent=sample.server_disk_percent,
+                )
+
+                if on_sample:
+                    on_sample(sample)
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Upload interrupted.")
+            return UploadResult(success=False, error="Upload interrupted")
+        finally:
+            self._terminate_process(srt_proc)
+            self._terminate_process(ffmpeg_proc)
+
+        return self._finalize_result(
+            job,
+            collector,
+            zixi_enabled=zixi_poller.enabled,
+            server_metrics_enabled=ingest_poller.enabled,
+        )
+
+    @staticmethod
+    def _tail_file(path: str, max_lines: int = 5) -> str:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return ""
+        return "".join(lines[-max_lines:]).strip()
+
+    @staticmethod
+    def _drain_stream_to_file(stream, path: str) -> None:
+        """Continuously drain a subprocess pipe to a file.
+
+        Without this, an unread stderr PIPE can fill its OS buffer and block
+        the publisher's write() calls indefinitely once verbose per-object
+        logging accumulates, silently stalling media sends after subscribe.
+        """
+        try:
+            with open(path, "wb") as fh:
+                for chunk in iter(lambda: stream.read(4096), b""):
+                    fh.write(chunk)
+                    fh.flush()
+        except (ValueError, OSError):
+            pass
+
+    def _run_moq_pipeline(
+        self,
+        job: UploadJob,
+        on_sample: Optional[SampleCallback] = None,
+    ) -> UploadResult:
+        publisher_bin, publisher_backend = find_moq_publisher()
+        if not publisher_bin:
+            return UploadResult(
+                success=False,
+                error=(
+                    "MoQ publisher not found. Install moq5 with ./scripts/install-moq5.sh "
+                    "or openmoq with ./scripts/install-openmoq-publisher.sh."
+                ),
+            )
+
+        target = job.destination.moq_target
+        if target is None:
+            return UploadResult(success=False, error="MOQ destination is missing publish settings.")
+
+        temp_dir = tempfile.mkdtemp(prefix="moq-bench-")
+        progress_path = os.path.join(temp_dir, "ffmpeg-progress.txt")
+        qlog_dir = ""
+        if publisher_backend == "moq5":
+            qlog_dir = os.path.join(temp_dir, "qlog")
+            os.makedirs(qlog_dir, exist_ok=True)
+
+        ffmpeg_cmd = build_ffmpeg_moq_cmd(job.media_path, progress_path=progress_path)
+        publisher_cmd = build_moq_publisher_cmd(
+            publisher_bin,
+            publisher_backend,
+            target,
+            duration_sec=job.duration_sec,
+            qlog_dir=qlog_dir,
+        )
+        logger.info(
+            "MoQ publish via %s (%s) → %s namespace=%s forward=%s",
+            publisher_backend,
+            publisher_bin,
+            target.endpoint,
+            target.namespace,
+            target.forward,
+        )
+        publisher_log_path = os.path.join(temp_dir, "publisher-stderr.log")
+        print(
+            f"MoQ publish via {publisher_backend}: namespace={target.namespace} "
+            f"log={publisher_log_path} cmd={' '.join(publisher_cmd)}",
+            flush=True,
+        )
+
+        ffmpeg_proc: Optional[subprocess.Popen] = None
+        publisher_proc: Optional[subprocess.Popen] = None
+        drain_thread: Optional[threading.Thread] = None
+        fanout_thread: Optional[threading.Thread] = None
+        tee_proc: Optional[subprocess.Popen] = None
+
+        capture_for_vmaf = job.compute_vmaf_encoder
+        if capture_for_vmaf:
+            job.encoder_capture_path = encoder_capture_path(temp_dir, "moq")
+
+        try:
+            ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if capture_for_vmaf and ffmpeg_proc.stdout is not None:
+                tee_proc = start_moq_capture_tee(
+                    ffmpeg_proc.stdout,
+                    job.encoder_capture_path,
+                )
+                ffmpeg_proc.stdout.close()
+                publisher_proc = subprocess.Popen(
+                    publisher_cmd,
+                    stdin=tee_proc.stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if tee_proc.stdout is not None:
+                    tee_proc.stdout.close()
+            else:
+                publisher_proc = subprocess.Popen(
+                    publisher_cmd,
+                    stdin=ffmpeg_proc.stdout,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if ffmpeg_proc.stdout is not None:
+                    ffmpeg_proc.stdout.close()
+            # Drain continuously — an unread stderr PIPE can fill its OS
+            # buffer and block the publisher's writes once it logs enough,
+            # silently stalling media sends well after SUBSCRIBE succeeds.
+            if publisher_proc.stderr is not None:
+                drain_thread = threading.Thread(
+                    target=self._drain_stream_to_file,
+                    args=(publisher_proc.stderr, publisher_log_path),
+                    daemon=True,
+                )
+                drain_thread.start()
+        except FileNotFoundError:
+            self._terminate_process(ffmpeg_proc)
+            return UploadResult(success=False, error="ffmpeg not found in PATH")
+
+        progress_reader = FfmpegProgressFileReader(progress_path)
+        collector = MetricsCollector(
+            protocol=job.destination.protocol,
+            endpoint_url=job.destination.url,
+            run_id=job.job_id,
+        )
+        # IngestHostMetricsPoller reports the VMAF worker host when ingest_agent_url
+        # is set (MoQ relay uploads use the shared GCP ingest worker).
+        ingest_poller = IngestHostMetricsPoller(
+            job.destination.url,
+            agent_url=job.ingest_agent_url,
+        )
+        moqx_poller = MoqxStatsPoller(job.destination.url)
+        qlog_tailer = PicoquicQlogTailer(qlog_dir) if qlog_dir else None
+        start_time = time.time()
+
+        try:
+            while time.time() - start_time < job.duration_sec:
+                if ffmpeg_proc.poll() is not None:
+                    return UploadResult(
+                        success=False,
+                        error=self._ffmpeg_failure_message(ffmpeg_proc),
+                    )
+                if publisher_proc.poll() is not None:
+                    if drain_thread is not None:
+                        drain_thread.join(timeout=2)
+                    detail = self._tail_file(publisher_log_path) or "unknown error"
+                    code = publisher_proc.returncode
+                    if code not in (0, None):
+                        return UploadResult(
+                            success=False,
+                            error=f"{publisher_backend} publisher exited with code {code}: {detail}",
+                        )
+                    return UploadResult(
+                        success=False,
+                        error=f"{publisher_backend} publisher exited early ({detail})",
+                    )
+
+                status = progress_reader.get_status()
+                client_host = read_client_host_metrics()
+                server_host = ingest_poller.poll() if ingest_poller.enabled else None
+                moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
+                quic_stats = qlog_tailer.poll() if qlog_tailer and qlog_tailer.enabled else None
+                elapsed = int(time.time() - start_time)
+                pids = [pid for pid in (ffmpeg_proc.pid, publisher_proc.pid if publisher_proc else None) if pid]
+                cpu, mem = self._process_usage(pids)
+                send_mbps = status.bitrate_kbps / 1000.0
+
+                sample = UploadSample(
+                    elapsed_sec=elapsed,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    fps=status.fps,
+                    fps_stability=0.0,
+                    speed=status.speed,
+                    out_time=status.out_time,
+                    cpu_percent=cpu,
+                    memory_mb=mem,
+                    progress=status.progress,
+                    encoder_send_rate_mbps=send_mbps,
+                    client_memory_percent=client_host.memory_percent,
+                    client_disk_percent=client_host.disk_percent,
+                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_memory_percent=server_host.memory_percent if server_host else 0.0,
+                    server_disk_percent=server_host.disk_percent if server_host else 0.0,
+                    moqx_subscribe_success=moqx_stats.subscribe_success if moqx_stats else 0,
+                    moqx_subscribe_error=moqx_stats.subscribe_error if moqx_stats else 0,
+                    moqx_publish_namespace_success=(
+                        moqx_stats.publish_namespace_success if moqx_stats else 0
+                    ),
+                    moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
+                    moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,
+                    quic_rtt_ms=quic_stats.rtt_ms if quic_stats else 0.0,
+                    quic_cwnd_bytes=quic_stats.cwnd_bytes if quic_stats else 0,
+                    quic_packets_lost=quic_stats.packets_lost if quic_stats else 0,
+                )
+                sample.fps_stability = collector.record_sample(
+                    pid=ffmpeg_proc.pid,
+                    encoded_bitrate_kbps=status.bitrate_kbps,
+                    fps=status.fps,
+                    speed=status.speed,
+                    out_time=status.out_time,
+                    extra_pids=[publisher_proc.pid] if publisher_proc else None,
+                    encoder_send_rate_mbps=send_mbps,
+                    client_memory_percent=sample.client_memory_percent,
+                    client_disk_percent=sample.client_disk_percent,
+                    server_cpu_percent=sample.server_cpu_percent,
+                    server_memory_percent=sample.server_memory_percent,
+                    server_disk_percent=sample.server_disk_percent,
+                    moqx_subscribe_success=sample.moqx_subscribe_success,
+                    moqx_subscribe_error=sample.moqx_subscribe_error,
+                    moqx_publish_namespace_success=sample.moqx_publish_namespace_success,
+                    moqx_publish_received=sample.moqx_publish_received,
+                    moqx_publish_done=sample.moqx_publish_done,
+                    quic_rtt_ms=sample.quic_rtt_ms,
+                    quic_cwnd_bytes=sample.quic_cwnd_bytes,
+                    quic_packets_lost=sample.quic_packets_lost,
+                )
+
+                if on_sample:
+                    on_sample(sample)
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Upload interrupted.")
+            return UploadResult(success=False, error="Upload interrupted")
+        finally:
+            self._terminate_process(publisher_proc)
+            self._terminate_process(ffmpeg_proc)
+            if tee_proc is not None:
+                tee_proc.wait(timeout=5)
+            if fanout_thread is not None:
+                fanout_thread.join(timeout=5)
+            if drain_thread is not None:
+                drain_thread.join(timeout=2)
+            tail = self._tail_file(publisher_log_path, max_lines=15)
+            if tail:
+                print(f"MoQ publisher log tail ({publisher_log_path}):\n{tail}", flush=True)
+
+        return self._finalize_result(
+            job,
+            collector,
+            server_metrics_enabled=ingest_poller.enabled,
+            moqx_metrics_enabled=moqx_poller.enabled,
+            quic_qlog_enabled=bool(qlog_tailer and qlog_tailer.enabled),
+            quic_qlog_dir=qlog_dir,
+        )
+
+    def _finalize_result(
+        self,
+        job: UploadJob,
+        collector: MetricsCollector,
+        *,
+        zixi_enabled: bool = False,
+        server_metrics_enabled: bool = False,
+        moqx_metrics_enabled: bool = False,
+        quic_qlog_enabled: bool = False,
+        quic_qlog_dir: str = "",
+    ) -> UploadResult:
+        vmaf_score = None
+        psnr_db = None
+        ssim = None
+        encoder_vmaf_status = "disabled"
+        encoder_vmaf_score = None
+        encoder_vmaf_error = None
+        quality_legs: dict = {}
+        should_compute_legacy_local_vmaf = (
+            not job.compute_vmaf_on_ingest
+            and not job.compute_vmaf_encoder
+            and (job.compute_vmaf or bool(os.environ.get("MOQ_COMPUTE_VMAF")))
+        )
+        distorted_path = job.distorted_path or os.environ.get("MOQ_VMAF_DISTORTED", "")
+
+        if should_compute_legacy_local_vmaf and distorted_path:
+            vmaf_result = compute_vmaf(job.media_path, distorted_path)
+            if vmaf_result is not None:
+                vmaf_score = vmaf_result.vmaf_score
+                psnr_db = vmaf_result.psnr_db
+                ssim = vmaf_result.ssim
+
+        if job.compute_vmaf_encoder:
+            capture_path = job.encoder_capture_path
+            if capture_path and os.path.exists(capture_path) and os.path.getsize(capture_path) > 0:
+                encoder_result = compute_vmaf(job.media_path, capture_path)
+                if encoder_result is not None:
+                    quality_legs["encoder"] = quality_leg_from_vmaf_result(
+                        encoder_result,
+                        status="completed",
+                        computed_on="local",
+                        distorted_path=capture_path,
+                    )
+                    encoder_vmaf_status = "completed"
+                    encoder_vmaf_score = encoder_result.vmaf_score
+                else:
+                    encoder_vmaf_error = "Encoder VMAF calculation failed"
+                    quality_legs["encoder"] = quality_leg_from_vmaf_result(
+                        None,
+                        status="failed",
+                        computed_on="local",
+                        distorted_path=capture_path,
+                        error=encoder_vmaf_error,
+                    )
+                    encoder_vmaf_status = "failed"
+            else:
+                encoder_vmaf_error = "Encoder capture file missing or empty"
+                quality_legs["encoder"] = quality_leg_from_vmaf_result(
+                    None,
+                    status="failed",
+                    computed_on="local",
+                    distorted_path=capture_path,
+                    error=encoder_vmaf_error,
+                )
+                encoder_vmaf_status = "failed"
+
+        if job.compute_vmaf_on_ingest:
+            quality_legs["ingest"] = {
+                "status": "pending",
+                "computed_on": "ingest_agent",
+            }
+
+        quality_payload = build_quality_payload(
+            encoder=quality_legs.get("encoder"),
+            ingest=quality_legs.get("ingest"),
+        )
+
+        srt_summary = collector.summarize_srt() if job.destination.protocol == "srt" else None
+        summary_path = collector.write_summary(
+            vmaf_score=vmaf_score,
+            psnr_db=psnr_db,
+            ssim=ssim,
+            srt_summary=srt_summary,
+            quality=quality_payload or None,
+            extra={
+                "comparison_id": job.comparison_id,
+                "stream_index": job.stream_index,
+                "stream_label": job.stream_label,
+                "vmaf_available": vmaf_score is not None,
+                "vmaf_computed_on": "local" if vmaf_score is not None else "",
+                "vmaf_pending_on_ingest": job.compute_vmaf_on_ingest,
+                "vmaf_via": "ingest_agent" if job.compute_vmaf_on_ingest else "",
+                "encoder_vmaf_requested": job.compute_vmaf_encoder,
+                "encoder_capture_path": job.encoder_capture_path,
+                "zixi_poller_enabled": zixi_enabled,
+                "server_metrics_enabled": server_metrics_enabled,
+                "moqx_metrics_enabled": moqx_metrics_enabled,
+                "quic_qlog_enabled": quic_qlog_enabled,
+                "quic_qlog_dir": quic_qlog_dir,
+                "vmaf_note": (
+                    "Ingest VMAF will be computed on the ingest host after the upload completes."
+                    if job.compute_vmaf_on_ingest
+                    else (
+                        "VMAF requires a recorded output file (MOQ_VMAF_DISTORTED or job.distorted_path)."
+                        if should_compute_legacy_local_vmaf and vmaf_score is None
+                        else ""
+                    )
+                ),
+            },
+        )
+
+        return UploadResult(
+            success=True,
+            csv_path=collector.filename,
+            summary_path=summary_path,
+            vmaf_score=vmaf_score,
+            encoder_vmaf_status=encoder_vmaf_status,
+            encoder_vmaf_score=encoder_vmaf_score,
+            encoder_vmaf_error=encoder_vmaf_error,
+        )
+
+    def _ffmpeg_failure_message(self, process: subprocess.Popen) -> str:
+        stderr = ""
+        if process.stderr:
+            stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+        detail = stderr.splitlines()[-1] if stderr else "unknown error"
+        message = f"ffmpeg exited with code {process.returncode}: {detail}"
+        if "Input/output error" in stderr and "rtmp://" in stderr.lower():
+            message += (
+                " Zixi RTMP push requires an ONLINE push input whose Stream ID matches "
+                "the URL stream key (benchmark for rtmp://host:1935/live/benchmark). "
+                "Re-run infra/zixi/scripts/configure-zixi-rtmp-input.sh on the ingest host."
+            )
+        return message
+
+    def _process_usage(self, pids: List[int]) -> tuple[float, float]:
+        cpu_total = 0.0
+        mem_total = 0.0
+        for pid in pids:
+            try:
+                proc = psutil.Process(pid)
+                cpu_total += proc.cpu_percent(interval=None)
+                mem_total += proc.memory_info().rss / (1024 * 1024)
+            except Exception:
+                # Best-effort resource sampling: a sandboxed/restricted environment can
+                # make psutil's underlying syscalls (e.g. sysctlbyname on macOS) raise
+                # PermissionError/SystemError instead of a psutil.Error subclass. Never
+                # let sampling failures kill the benchmark job thread.
+                continue
+        return cpu_total, mem_total
+
+    def _terminate_process(self, process: Optional[subprocess.Popen]) -> None:
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)

@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/sean/Developer/moq-test-tools/tools/moq5-recorder/build/cmake_install.cmake",
+		"/Users/sean/Developer/moq-test-tools/tools/moq5-recorder/build/_deps/picoquic/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

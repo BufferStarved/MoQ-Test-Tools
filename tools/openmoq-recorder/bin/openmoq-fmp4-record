@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "$(cd "$(dirname "$0")" && pwd)/openmoq-fmp4-record-docker" "$@"

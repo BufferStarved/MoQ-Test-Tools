@@ -1,0 +1,10 @@
+{
+  "name": "moq-test-tools",
+  "private": true,
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "dev:api": "./scripts/start-api.sh",
+    "dev:web": "npm run dev --prefix web/frontend",
+    "build:web": "npm run build --prefix web/frontend"
+  }
+}

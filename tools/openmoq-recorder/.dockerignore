@@ -1,0 +1,8 @@
+*
+!web/frontend/vendor/moq-playa/packages/msf/package.json
+!web/frontend/vendor/moq-playa/packages/msf/dist/**
+!web/frontend/vendor/moq-playa/packages/transport/package.json
+!web/frontend/vendor/moq-playa/packages/transport/dist/**
+!web/frontend/vendor/moq-playa/packages/webtransport/package.json
+!web/frontend/vendor/moq-playa/packages/webtransport/dist/**
+!tools/openmoq-recorder/**

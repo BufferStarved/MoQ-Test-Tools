@@ -1,0 +1,7 @@
+project_name = "moq-zixi"
+region       = "us-east"
+instance_type = "g6-standard-8"
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+allowed_ssh_cidr = "YOUR.IP.ADDRESS.HERE/32"
+allowed_ingest_cidr = "0.0.0.0/0"
+srt_listen_port = 2088

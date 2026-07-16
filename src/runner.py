@@ -47,7 +47,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preset", help="Preset endpoint ID (see --list-presets)")
     parser.add_argument(
         "--protocol",
-        choices=["srt", "rtmp", "http", "webrtc"],
+        choices=["srt", "rtmp", "hls", "dash", "http", "webrtc"],
         help="Protocol for --endpoint-url",
     )
     parser.add_argument("--endpoint-url", help="Custom endpoint URL")
@@ -89,14 +89,22 @@ if __name__ == "__main__":
     def on_sample(sample):
         from network_metrics import UploadStatus
         status = UploadStatus(
-            bitrate_kbps=sample.bitrate_kbps,
+            bitrate_kbps=sample.encoded_bitrate_kbps,
             fps=sample.fps,
             speed=sample.speed,
             out_time=sample.out_time,
             progress=sample.progress,
         )
         print(
-            status.display_line(sample.elapsed_sec, sample.cpu_percent, sample.memory_mb),
+            status.display_line_extended(
+                sample.elapsed_sec,
+                sample.cpu_percent,
+                sample.memory_mb,
+                rtt_ms=sample.transport_rtt_ms,
+                rtt_jitter_ms=sample.transport_rtt_jitter_ms,
+                pkt_retrans=sample.pkt_retrans,
+                fps_stability=sample.fps_stability,
+            ),
             end="\r",
             flush=True,
         )

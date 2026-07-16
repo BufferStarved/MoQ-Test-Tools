@@ -1,0 +1,31 @@
+{
+  "name": "@playa/player",
+  "version": "0.5.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "import": "./dist/browser/index.js",
+      "default": "./dist/browser/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@moqt/player": "file:../player",
+    "@moqt/msf": "file:../msf",
+    "@moqt/browser": "file:../browser",
+    "@moqt/webtransport": "file:../webtransport"
+  },
+  "scripts": {
+    "build": "tsc && tsup",
+    "build:browser": "tsup"
+  }
+}

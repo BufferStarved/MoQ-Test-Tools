@@ -1,28 +1,34 @@
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+from moq_publish import MoqPublishTarget, parse_moq_publish_url
 
 
 class DestinationConfigError(Exception):
     """Raised when a destination URL or preset cannot be resolved."""
 
 
-SUPPORTED_PROTOCOLS = ("srt", "rtmp", "http", "webrtc")
+SUPPORTED_PROTOCOLS = ("srt", "rtmp", "hls", "dash", "webrtc", "moq")
 
 SYNTAX_BY_PROTOCOL = {
     "srt": "srt://<host>:<port>?mode=caller&latency=<microseconds>[&streamid=<id>]",
     "rtmp": "rtmp://<host>[:<port>]/<application>/<stream-key>",
-    "http": "https://<host>/<path> (presigned PUT URL) or http://127.0.0.1:9000/<bucket>/<object-key>",
+    "hls": "http(s)://<host>:<port>/<stream-id> (TS over HTTP push ingest; Zixi serves HLS output)",
+    "dash": "http(s)://<host>:<port>/<stream-id> (TS over HTTP push ingest; Zixi serves DASH output)",
     "webrtc": "https://<host>/<whip-path> or whip://<host>/<path>",
+    "moq": "https://<relay-host>:4433/moq-relay?namespace=benchmark (OpenMOQ moqx via openmoq-publisher)",
 }
 
 PROTOCOL_LABELS = {
-    "srt": "SRT ingest",
-    "rtmp": "RTMP ingest",
-    "http": "HTTP upload (presigned PUT)",
+    "srt": "SRT",
+    "rtmp": "RTMP",
+    "hls": "HLS",
+    "dash": "DASH",
     "webrtc": "WebRTC (WHIP)",
+    "moq": "MOQ (MoQT)",
 }
 
 
@@ -35,6 +41,12 @@ class ServicePreset:
     url_template: str = ""
     env_vars: Tuple[str, ...] = ()
     notes: str = ""
+    supports_vmaf: bool = False
+    ingest_agent_url: str = ""
+    ingest_recording_dir: str = ""
+    ingest_provider: str = ""
+    web_visible: bool = True
+    web_available: bool = True
 
 
 @dataclass
@@ -43,12 +55,31 @@ class DestinationProfile:
     url: str
     label: str = ""
     preset_id: str = ""
+    moq_target: Optional[MoqPublishTarget] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.protocol == "moq" and self.moq_target is None:
+            self.moq_target = parse_moq_publish_url(self.url)
 
     def ffmpeg_output_args(self) -> List[str]:
         if self.protocol == "srt":
             return ["-f", "mpegts", self.url]
         if self.protocol == "rtmp":
-            return ["-f", "flv", self.url]
+            return [
+                "-f",
+                "flv",
+                "-flvflags",
+                "no_duration_filesize",
+                self.url,
+            ]
+        if self.protocol in {"hls", "dash"}:
+            return [
+                "-f",
+                "mpegts",
+                "-method",
+                "PUT",
+                self.url,
+            ]
         if self.protocol == "http":
             return [
                 "-f", "mp4",
@@ -58,16 +89,165 @@ class DestinationProfile:
             ]
         if self.protocol == "webrtc":
             return ["-f", "whip", self.url]
+        if self.protocol == "moq":
+            return [
+                "-f",
+                "mp4",
+                "-movflags",
+                "+frag_keyframe+empty_moov+default_base_moof+separate_moof",
+                "pipe:1",
+            ]
         raise DestinationConfigError(f"Unsupported protocol: {self.protocol}")
 
 
 SERVICE_PRESETS: List[ServicePreset] = [
+    ServicePreset(
+        id="moq_zixi_gcp",
+        name="GCP Zixi",
+        protocol="srt",
+        url="srt://35.222.33.58:10080?mode=caller&latency=200000",
+        notes=(
+            "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
+            "upload adds streamid=#!::r=SRT Test,m=publish automatically. "
+            "HLS playback uses playback.m3u8?stream=SRT%20Test. "
+            "Upload transcodes to H.264 Main yuv420p for browser playback."
+        ),
+        supports_vmaf=True,
+        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+        ingest_provider="gcp_zixi",
+    ),
+    ServicePreset(
+        id="moq_zixi_gcp_rtmp",
+        name="GCP Zixi",
+        protocol="rtmp",
+        url="rtmp://35.222.33.58:1935/live/benchmark",
+        notes="Managed Zixi RTMP ingest on GCP. Zixi stream ID must be benchmark.",
+        supports_vmaf=True,
+        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+        ingest_provider="gcp_zixi",
+    ),
+    ServicePreset(
+        id="moq_zixi_gcp_hls",
+        name="GCP Zixi",
+        protocol="hls",
+        url="http://35.222.33.58:7777/benchmark",
+        notes=(
+            "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
+            "Live HLS playback: http://35.222.33.58:7777/playback.m3u8?stream=benchmark. "
+            "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
+        ),
+        supports_vmaf=True,
+        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+        ingest_provider="gcp_zixi",
+    ),
+    ServicePreset(
+        id="moq_zixi_gcp_dash",
+        name="GCP Zixi",
+        protocol="dash",
+        url="http://35.222.33.58:7777/benchmark",
+        notes=(
+            "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
+            "Live DASH playback: http://35.222.33.58:7777/playback.mpd?stream=benchmark. "
+            "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
+        ),
+        supports_vmaf=True,
+        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+        ingest_provider="gcp_zixi",
+    ),
+    ServicePreset(
+        id="moq_gcp_relay",
+        name="GCP MoQ Relay",
+        protocol="moq",
+        url="https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark",
+        notes=(
+            "Publishes fragmented MP4 from ffmpeg to the GCP OpenMOQ moqx relay via "
+            "openmoq-publisher (WebTransport, draft 16). "
+            "Ingest VMAF subscribes on the ingest worker and records post-relay fMP4 "
+            "for libvmaf scoring. Install recorder (Docker): "
+            "./scripts/install-openmoq-recorder.sh or "
+            "sudo bash infra/zixi/scripts/install-openmoq-recorder.sh on the worker; "
+            "publisher: ./scripts/install-openmoq-publisher.sh"
+        ),
+        supports_vmaf=True,
+        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_recording_dir="/var/lib/moq-relay-recordings",
+        ingest_provider="gcp_moq_relay",
+    ),
+    ServicePreset(
+        id="zixi_aws_srt",
+        name="AWS Zixi",
+        protocol="srt",
+        notes="AWS Zixi SRT ingest (coming soon).",
+        ingest_provider="aws_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_aws_rtmp",
+        name="AWS Zixi",
+        protocol="rtmp",
+        notes="AWS Zixi RTMP ingest (coming soon).",
+        ingest_provider="aws_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_aws_hls",
+        name="AWS Zixi",
+        protocol="hls",
+        notes="AWS Zixi HLS ingest (coming soon).",
+        ingest_provider="aws_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_aws_dash",
+        name="AWS Zixi",
+        protocol="dash",
+        notes="AWS Zixi DASH ingest (coming soon).",
+        ingest_provider="aws_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_linode_srt",
+        name="Linode Zixi",
+        protocol="srt",
+        notes="Linode Zixi SRT ingest (coming soon).",
+        ingest_provider="linode_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_linode_rtmp",
+        name="Linode Zixi",
+        protocol="rtmp",
+        notes="Linode Zixi RTMP ingest (coming soon).",
+        ingest_provider="linode_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_linode_hls",
+        name="Linode Zixi",
+        protocol="hls",
+        notes="Linode Zixi HLS ingest (coming soon).",
+        ingest_provider="linode_zixi",
+        web_available=False,
+    ),
+    ServicePreset(
+        id="zixi_linode_dash",
+        name="Linode Zixi",
+        protocol="dash",
+        notes="Linode Zixi DASH ingest (coming soon).",
+        ingest_provider="linode_zixi",
+        web_available=False,
+    ),
     ServicePreset(
         id="local_srs_srt",
         name="Local SRS SRT listener",
         protocol="srt",
         url="srt://127.0.0.1:10080?mode=caller&latency=200000",
         notes="Run: docker run -p 10080:10080 ossrs/srs:5",
+        web_visible=False,
     ),
     ServicePreset(
         id="nanocosmos_srt_global",
@@ -80,6 +260,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         ),
         env_vars=("NANO_SRT_STREAM_ID",),
         notes="Set NANO_SRT_STREAM_ID to your Bintu stream ID.",
+        web_visible=False,
     ),
     ServicePreset(
         id="gcore_srt",
@@ -88,6 +269,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url_template="{gcore_srt_push_url}",
         env_vars=("GCORE_SRT_PUSH_URL",),
         notes="Set GCORE_SRT_PUSH_URL to the full srt:// URL from Gcore.",
+        web_visible=False,
     ),
     ServicePreset(
         id="local_rtmp",
@@ -95,6 +277,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="rtmp",
         url="rtmp://127.0.0.1:1935/live/benchmark",
         notes="Requires a local RTMP listener on port 1935.",
+        web_visible=False,
     ),
     ServicePreset(
         id="antmedia_rtmp",
@@ -103,6 +286,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url_template="{ant_media_rtmp_url}",
         env_vars=("ANT_MEDIA_RTMP_URL",),
         notes="Example: rtmp://your-server/LiveApp/streamId",
+        web_visible=False,
     ),
     ServicePreset(
         id="minio_put",
@@ -111,6 +295,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url_template="{minio_put_url}",
         env_vars=("MINIO_PUT_URL",),
         notes="Set MINIO_PUT_URL to a presigned PUT URL.",
+        web_visible=False,
     ),
     ServicePreset(
         id="s3_presigned_put",
@@ -118,6 +303,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="http",
         url_template="{s3_presigned_put_url}",
         env_vars=("S3_PRESIGNED_PUT_URL",),
+        web_visible=False,
     ),
     ServicePreset(
         id="r2_presigned_put",
@@ -125,6 +311,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="http",
         url_template="{r2_presigned_put_url}",
         env_vars=("R2_PRESIGNED_PUT_URL",),
+        web_visible=False,
     ),
     ServicePreset(
         id="local_whip",
@@ -132,6 +319,7 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="webrtc",
         url="http://127.0.0.1:8080/whip/endpoint",
         notes="Requires a local WHIP-capable server.",
+        web_visible=False,
     ),
     ServicePreset(
         id="whip_env",
@@ -139,10 +327,32 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="webrtc",
         url_template="{whip_url}",
         env_vars=("WHIP_URL",),
+        web_visible=False,
     ),
 ]
 
 PRESET_BY_ID: Dict[str, ServicePreset] = {preset.id: preset for preset in SERVICE_PRESETS}
+
+
+def recording_dir_for_preset(preset_id: str) -> str:
+    preset = PRESET_BY_ID.get(preset_id)
+    if preset is not None and preset.ingest_recording_dir:
+        return preset.ingest_recording_dir
+    return os.environ.get("INGEST_RECORDING_DIR", "/opt/zixi_broadcaster-linux64")
+
+
+def ingest_agent_url_for_preset(preset_id: str) -> str:
+    preset = PRESET_BY_ID.get(preset_id)
+    if preset is not None and preset.ingest_agent_url:
+        return preset.ingest_agent_url
+    return os.environ.get("INGEST_AGENT_BASE_URL", "").strip()
+
+
+def ingest_settings_for_preset(preset_id: str) -> tuple[str, str]:
+    return (
+        ingest_agent_url_for_preset(preset_id),
+        recording_dir_for_preset(preset_id),
+    )
 
 
 def list_presets_text() -> str:
@@ -162,7 +372,7 @@ def list_presets_text() -> str:
     for protocol, syntax in SYNTAX_BY_PROTOCOL.items():
         lines.append(f"  {protocol}: {syntax}")
     lines.append("")
-    lines.append("MoQ support is planned for a future release.")
+    lines.append("MOQ upload pipes fragmented MP4 from ffmpeg into openmoq-publisher.")
     return "\n".join(lines)
 
 
@@ -178,6 +388,10 @@ def resolve_preset(preset_id: str) -> DestinationProfile:
     if preset.url:
         url = preset.url
     else:
+        if not preset.web_available:
+            raise DestinationConfigError(
+                f"Ingest endpoint '{preset.name}' is not configured yet for {preset.protocol.upper()}."
+            )
         values = {env_var: os.environ.get(env_var, "").strip() for env_var in preset.env_vars}
         missing = [env_var for env_var, value in values.items() if not value]
         if missing:
@@ -204,8 +418,11 @@ def validate_destination_url(protocol: str, url: str) -> None:
     expected_schemes = {
         "srt": {"srt"},
         "rtmp": {"rtmp"},
+        "hls": {"http", "https"},
+        "dash": {"http", "https"},
         "http": {"http", "https"},
         "webrtc": {"http", "https", "whip"},
+        "moq": {"https", "moqt"},
     }
     allowed = expected_schemes[protocol]
     if parsed.scheme not in allowed:
@@ -221,11 +438,17 @@ def validate_destination_url(protocol: str, url: str) -> None:
             f"Required syntax: {SYNTAX_BY_PROTOCOL[protocol]}"
         )
 
-    if protocol in {"http", "webrtc"} and not parsed.netloc:
+    if protocol in {"hls", "dash", "http", "webrtc"} and not parsed.netloc:
         raise DestinationConfigError(
             f"Invalid {protocol} URL (missing host). "
             f"Required syntax: {SYNTAX_BY_PROTOCOL[protocol]}"
         )
+
+    if protocol == "moq":
+        try:
+            parse_moq_publish_url(url)
+        except ValueError as exc:
+            raise DestinationConfigError(str(exc)) from exc
 
 
 def destination_from_custom(protocol: str, url: str, label: str = "Custom") -> DestinationProfile:
@@ -258,7 +481,7 @@ def _prompt_protocol() -> str:
     print("Select upload protocol:")
     for index, protocol in enumerate(SUPPORTED_PROTOCOLS, start=1):
         print(f"  {index}) {PROTOCOL_LABELS[protocol]}")
-    choice = _read_choice("Selection [1-4]: ", {"1", "2", "3", "4"})
+    choice = _read_choice(f"Selection [1-{len(SUPPORTED_PROTOCOLS)}]: ", {str(i) for i in range(1, len(SUPPORTED_PROTOCOLS) + 1)})
     return SUPPORTED_PROTOCOLS[int(choice) - 1]
 
 
@@ -304,17 +527,24 @@ def prompt_destination() -> DestinationProfile:
     return _prompt_endpoint_for_protocol(protocol)
 
 
-def presets_for_api() -> List[dict]:
+def presets_for_api(*, web_only: bool = False) -> List[dict]:
+    presets = SERVICE_PRESETS
+    if web_only:
+        presets = [preset for preset in SERVICE_PRESETS if preset.web_visible]
     return [
         {
             "id": preset.id,
             "name": preset.name,
             "protocol": preset.protocol,
+            "url": preset.url,
             "notes": preset.notes,
             "env_vars": list(preset.env_vars),
             "requires_env": bool(preset.env_vars),
+            "supports_vmaf": preset.supports_vmaf,
+            "ingest_provider": preset.ingest_provider,
+            "web_available": preset.web_available,
         }
-        for preset in SERVICE_PRESETS
+        for preset in presets
     ]
 
 

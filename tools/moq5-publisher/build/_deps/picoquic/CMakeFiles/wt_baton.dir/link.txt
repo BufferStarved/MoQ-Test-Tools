@@ -1,0 +1,2 @@
+/usr/bin/ar qc libwt_baton.a CMakeFiles/wt_baton.dir/picohttp/wt_baton.c.o
+/usr/bin/ranlib libwt_baton.a

@@ -1,0 +1,17 @@
+{
+  "name": "openmoq-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Subscribe to an OpenMOQ/moqx relay and write received CMAF fMP4 to disk for ingest VMAF.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fails-components/webtransport": "1.6.3",
+    "@fails-components/webtransport-transport-http3-quiche": "1.6.3",
+    "@moqt/msf": "file:../../web/frontend/vendor/moq-playa/packages/msf",
+    "@moqt/transport": "file:../../web/frontend/vendor/moq-playa/packages/transport",
+    "@moqt/webtransport": "file:../../web/frontend/vendor/moq-playa/packages/webtransport"
+  }
+}

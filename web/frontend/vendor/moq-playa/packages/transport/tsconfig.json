@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"],
+  "comment": "src/vectors holds test-only golden-vector helpers (node:fs loader) and src/testkit holds test-only fast-check arbitraries; both are excluded from the published build and run via vitest.",
+  "exclude": ["src/**/*.test.ts", "src/vectors/**", "src/testkit/**"]
+}
