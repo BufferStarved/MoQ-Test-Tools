@@ -58,7 +58,7 @@ export default function DashPlayer({ url, label }: DashPlayerProps) {
 
   return (
     <div className="player-surface">
-      <video ref={videoRef} className="player-video" controls playsInline muted />
+      <video ref={videoRef} className="player-video" controls playsInline muted autoPlay />
       <div className="player-meta">
         <span>{label}</span>
         <span className="hint">{status}</span>

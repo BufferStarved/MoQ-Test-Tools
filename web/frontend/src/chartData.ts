@@ -21,25 +21,19 @@ export interface ChartGroup {
 export const CHART_GROUPS: ChartGroup[] = [
   {
     id: "encode",
-    title: "Encode",
+    title: "Encode/Publish",
     series: [
-      { key: "encoded_bitrate_kbps", label: "Encoded bitrate", color: "#22d3ee", unit: "kbps" },
+      { key: "encoded_bitrate_kbps", label: "Bitrate", color: "#22d3ee", unit: "kbps" },
       { key: "fps", label: "Frame rate", color: "#4ade80", unit: "fps" },
+      { key: "net_send_mbps", label: "Send rate", color: "#38bdf8", unit: "Mbps" },
+      { key: "memory_mb", label: "Client memory", color: "#f472b6", unit: "MB" },
+      { key: "net_jitter_ms", label: "Client network jitter", color: "#fb923c", unit: "ms" },
       { key: "encode_lag_ms", label: "Encode lag", color: "#fbbf24", unit: "ms" },
       { key: "fps_stability", label: "FPS stability", color: "#a3e635", unit: "cv" },
       { key: "speed", label: "Speed", color: "#38bdf8", unit: "x" },
-    ],
-  },
-  {
-    id: "transport",
-    title: "Network transport",
-    series: [
-      { key: "net_rtt_ms", label: "RTT (net)", color: "#fbbf24", unit: "ms" },
-      { key: "net_jitter_ms", label: "Jitter (net)", color: "#fb923c", unit: "ms" },
-      { key: "net_send_mbps", label: "Send rate (net)", color: "#38bdf8", unit: "Mbps" },
-      { key: "net_recv_mbps", label: "Receive rate (net)", color: "#818cf8", unit: "Mbps" },
-      { key: "net_loss_pct", label: "Loss %", color: "#f87171", unit: "%" },
-      { key: "net_retrans_pct", label: "Retransmit %", color: "#ef4444", unit: "%" },
+      { key: "vmaf_score_encoder", label: "VMAF", color: "#34d399", unit: "score" },
+      { key: "psnr_db_encoder", label: "PSNR", color: "#2dd4bf", unit: "dB" },
+      { key: "ssim_encoder", label: "SSIM", color: "#22d3ee", unit: "score" },
     ],
   },
   {
@@ -56,22 +50,23 @@ export const CHART_GROUPS: ChartGroup[] = [
     id: "ingest",
     title: "Ingest",
     series: [
-      // Normalized (all protocols): host health + path recovery
-      { key: "server_cpu_percent", label: "Ingest host CPU", color: "#60a5fa", unit: "%" },
-      { key: "server_memory_percent", label: "Ingest host memory", color: "#34d399", unit: "%" },
-      { key: "server_disk_percent", label: "Ingest host disk", color: "#fbbf24", unit: "%" },
+      // Normalized (all protocols): path health + host health
+      { key: "net_rtt_ms", label: "RTT", color: "#fbbf24", unit: "ms" },
+      { key: "net_jitter_ms", label: "Server network jitter", color: "#fb923c", unit: "ms" },
+      { key: "server_cpu_percent", label: "Server CPU", color: "#60a5fa", unit: "%" },
+      { key: "server_memory_percent", label: "Server memory", color: "#34d399", unit: "%" },
+      { key: "server_disk_percent", label: "Server disk", color: "#fbbf24", unit: "%" },
       { key: "net_loss_pct", label: "Path loss %", color: "#f87171", unit: "%" },
-      { key: "net_retrans_pct", label: "Path retransmit %", color: "#ef4444", unit: "%" },
+      { key: "net_retrans_pct", label: "Retransmit %", color: "#ef4444", unit: "%" },
       // Protocol detail — MoQ relay
-      { key: "moqx_subscribe_success", label: "MoQ subscribe OK (Δ)", color: "#60a5fa", unit: "count" },
-      { key: "moqx_subscribe_error", label: "MoQ subscribe errors (Δ)", color: "#f87171", unit: "count" },
-      { key: "moqx_publish_received", label: "MoQ objects received (Δ)", color: "#a3e635", unit: "count" },
-      { key: "moqx_publish_namespace_success", label: "MoQ publish OK (Δ)", color: "#4ade80", unit: "count" },
       { key: "quic_cwnd_bytes", label: "QUIC cwnd", color: "#818cf8", unit: "bytes" },
+      { key: "quic_packets_lost", label: "Receive loss", color: "#ef4444", unit: "pkts" },
       // Protocol detail — SRT / Zixi edge
-      { key: "pkt_retrans", label: "SRT retransmits", color: "#f87171", unit: "pkts" },
       { key: "pkt_fec_extra", label: "FEC extra", color: "#c084fc", unit: "pkts" },
-      { key: "pkt_snd_loss", label: "Send loss", color: "#ef4444", unit: "pkts" },
+      // Ingest-side video quality (post-ingest recording)
+      { key: "vmaf_score_ingest", label: "VMAF (ingest)", color: "#34d399", unit: "score" },
+      { key: "psnr_db_ingest", label: "PSNR (ingest)", color: "#2dd4bf", unit: "dB" },
+      { key: "ssim_ingest", label: "SSIM (ingest)", color: "#22d3ee", unit: "score" },
     ],
   },
   {
@@ -92,22 +87,14 @@ export const CHART_GROUPS: ChartGroup[] = [
     ],
   },
   {
-    id: "video_quality",
-    title: "Video Quality",
-    series: [
-      { key: "vmaf_score", label: "VMAF", color: "#34d399", unit: "score" },
-      { key: "psnr_db", label: "PSNR", color: "#2dd4bf", unit: "dB" },
-      { key: "ssim", label: "SSIM", color: "#22d3ee", unit: "score" },
-    ],
-  },
-  {
     id: "playback",
     title: "Browser playback",
     series: [
       { key: "e2e_latency_ms", label: "E2E latency (est.)", color: "#f472b6", unit: "ms" },
       { key: "playback_ttff_ms", label: "Time to first frame", color: "#22d3ee", unit: "ms" },
       { key: "playback_stall_count", label: "Stalls", color: "#f87171", unit: "count" },
-      { key: "playback_buffer_sec", label: "Buffer duration", color: "#a78bfa", unit: "s" },
+      { key: "playback_rebuffer_sec", label: "Rebuffer time", color: "#fb7185", unit: "s" },
+      { key: "playback_buffer_sec", label: "Buffer size", color: "#a78bfa", unit: "s" },
       { key: "playback_bitrate_bps", label: "Playback bitrate", color: "#38bdf8", unit: "bps" },
       { key: "playback_frames_rendered", label: "Frames rendered", color: "#4ade80", unit: "frames" },
       { key: "playback_frames_dropped", label: "Frames dropped", color: "#fb923c", unit: "frames" },
@@ -117,17 +104,19 @@ export const CHART_GROUPS: ChartGroup[] = [
   },
 ];
 
-/** @deprecated Use id transport / client / ingest / video_quality */
+/** @deprecated Use id encode / client / ingest */
 export const LEGACY_CHART_GROUP_ALIASES: Record<string, string> = {
-  network: "transport",
-  bandwidth: "transport",
+  network: "encode",
+  bandwidth: "encode",
   system: "client",
   server: "ingest",
   quic: "ingest",
   moqx: "ingest",
   edge_relay: "ingest",
   edge_zixi: "ingest",
-  quality: "video_quality",
+  transport: "ingest",
+  quality: "encode",
+  video_quality: "encode",
 };
 
 function parseNumber(value: string | undefined): number {
@@ -223,8 +212,15 @@ export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] 
       playback_hls_frag_loads: rowMetric(row, "playback_hls_frag_loads"),
       playback_video_time_sec: rowMetric(row, "playback_video_time_sec"),
       playback_buffer_sec: rowMetric(row, "playback_buffer_sec"),
+      playback_rebuffer_sec: rowMetric(row, "playback_rebuffer_sec"),
       playback_error_count: rowMetric(row, "playback_error_count") || hlsErrors + hlsFatal,
       e2e_latency_ms: rowMetric(row, "e2e_latency_ms"),
+      vmaf_score_encoder: 0,
+      psnr_db_encoder: 0,
+      ssim_encoder: 0,
+      vmaf_score_ingest: 0,
+      psnr_db_ingest: 0,
+      ssim_ingest: 0,
     };
   });
 }
@@ -241,6 +237,34 @@ export function applyQualityScores(
     ...(scores.vmafScore != null && scores.vmafScore > 0 ? { vmaf_score: scores.vmafScore } : {}),
     ...(scores.psnrDb != null && scores.psnrDb > 0 ? { psnr_db: scores.psnrDb } : {}),
     ...(scores.ssim != null && scores.ssim > 0 ? { ssim: scores.ssim } : {}),
+  }));
+}
+
+/** Paint distinct encoder-capture vs post-ingest-recording quality scores onto every point. */
+export function applyStagedQualityScores(
+  points: ChartPoint[],
+  scores: {
+    encoder?: { vmafScore?: number | null; psnrDb?: number | null; ssim?: number | null };
+    ingest?: { vmafScore?: number | null; psnrDb?: number | null; ssim?: number | null };
+  },
+): ChartPoint[] {
+  if (points.length === 0) {
+    return points;
+  }
+  const encoder = scores.encoder ?? {};
+  const ingest = scores.ingest ?? {};
+  return points.map((point) => ({
+    ...point,
+    ...(encoder.vmafScore != null && encoder.vmafScore > 0
+      ? { vmaf_score_encoder: encoder.vmafScore }
+      : {}),
+    ...(encoder.psnrDb != null && encoder.psnrDb > 0 ? { psnr_db_encoder: encoder.psnrDb } : {}),
+    ...(encoder.ssim != null && encoder.ssim > 0 ? { ssim_encoder: encoder.ssim } : {}),
+    ...(ingest.vmafScore != null && ingest.vmafScore > 0
+      ? { vmaf_score_ingest: ingest.vmafScore }
+      : {}),
+    ...(ingest.psnrDb != null && ingest.psnrDb > 0 ? { psnr_db_ingest: ingest.psnrDb } : {}),
+    ...(ingest.ssim != null && ingest.ssim > 0 ? { ssim_ingest: ingest.ssim } : {}),
   }));
 }
 
@@ -300,6 +324,27 @@ export function qualityScoresFromResult(result: ResultSummary): {
     vmafScore: pick(result.averages.vmaf_score, ingest?.vmaf_score, encoder?.vmaf_score),
     psnrDb: pick(result.averages.psnr_db, ingest?.psnr_db, encoder?.psnr_db),
     ssim: pick(result.averages.ssim, ingest?.ssim, encoder?.ssim),
+  };
+}
+
+/** Distinct encoder-capture vs post-ingest-recording quality scores (no cross-stage fallback). */
+export function stagedQualityScoresFromResult(result: ResultSummary): {
+  encoder: { vmafScore?: number | null; psnrDb?: number | null; ssim?: number | null };
+  ingest: { vmafScore?: number | null; psnrDb?: number | null; ssim?: number | null };
+} {
+  const ingest = result.quality?.ingest;
+  const encoder = result.quality?.encoder;
+  return {
+    encoder: {
+      vmafScore: encoder?.vmaf_score ?? null,
+      psnrDb: encoder?.psnr_db ?? null,
+      ssim: encoder?.ssim ?? null,
+    },
+    ingest: {
+      vmafScore: ingest?.vmaf_score ?? null,
+      psnrDb: ingest?.psnr_db ?? null,
+      ssim: ingest?.ssim ?? null,
+    },
   };
 }
 
@@ -388,7 +433,14 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
     playback_error_count: sample.playback_error_count ?? hlsErrors + hlsFatal,
     playback_video_time_sec: sample.playback_video_time_sec ?? 0,
     playback_buffer_sec: sample.playback_buffer_sec ?? 0,
+    playback_rebuffer_sec: sample.playback_rebuffer_sec ?? 0,
     e2e_latency_ms: sample.e2e_latency_ms ?? 0,
+    vmaf_score_encoder: 0,
+    psnr_db_encoder: 0,
+    ssim_encoder: 0,
+    vmaf_score_ingest: 0,
+    psnr_db_ingest: 0,
+    ssim_ingest: 0,
   };
 }
 
@@ -414,10 +466,9 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
         points.length > 0 &&
         (hasSeriesData(points, "server_cpu_percent") ||
           hasSeriesData(points, "server_memory_percent") ||
+          hasSeriesData(points, "net_rtt_ms") ||
           hasSeriesData(points, "net_loss_pct") ||
           hasSeriesData(points, "net_retrans_pct") ||
-          hasSeriesData(points, "moqx_subscribe_success") ||
-          hasSeriesData(points, "moqx_publish_received") ||
           hasSeriesData(points, "quic_cwnd_bytes") ||
           proto === "moq" ||
           proto === "srt" ||
@@ -433,7 +484,7 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
         hasSeriesData(points, "cmaf_parse_errors")
       );
     }
-    if (group.id === "playback" || group.id === "video_quality") {
+    if (group.id === "playback") {
       return group.series.some((series) => hasSeriesData(points, series.key));
     }
     return group.series.some((series) => hasSeriesData(points, series.key));
@@ -441,7 +492,8 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
 }
 
 export function resultToChartPoints(result: ResultSummary): ChartPoint[] {
-  const points = applyQualityScores(rowsToChartPoints(result.rows), qualityScoresFromResult(result));
+  let points = applyQualityScores(rowsToChartPoints(result.rows), qualityScoresFromResult(result));
+  points = applyStagedQualityScores(points, stagedQualityScoresFromResult(result));
   return applyMediaHealthScores(points, {
     cmaf_seq_gap_count: result.averages.cmaf_seq_gap_count,
     cmaf_tfdt_gap_count: result.averages.cmaf_tfdt_gap_count,
@@ -471,6 +523,12 @@ export interface SavedStreamData {
   vmafScore?: number | null;
   psnrDb?: number | null;
   ssim?: number | null;
+  vmafScoreEncoder?: number | null;
+  psnrDbEncoder?: number | null;
+  ssimEncoder?: number | null;
+  vmafScoreIngest?: number | null;
+  psnrDbIngest?: number | null;
+  ssimIngest?: number | null;
 }
 
 export function resultToSavedStream(result: ResultSummary, index: number): SavedStreamData {
@@ -480,6 +538,7 @@ export function resultToSavedStream(result: ResultSummary, index: number): Saved
     typeof streamIndex === "number" && streamIndex >= 0 ? streamIndex + 1 : index + 1;
   const label = endpoint ? `Stream ${streamNumber} (${endpoint})` : `Stream ${streamNumber}`;
   const scores = qualityScoresFromResult(result);
+  const staged = stagedQualityScoresFromResult(result);
   return {
     id: result.filename,
     label,
@@ -488,6 +547,12 @@ export function resultToSavedStream(result: ResultSummary, index: number): Saved
     vmafScore: scores.vmafScore,
     psnrDb: scores.psnrDb,
     ssim: scores.ssim,
+    vmafScoreEncoder: staged.encoder.vmafScore,
+    psnrDbEncoder: staged.encoder.psnrDb,
+    ssimEncoder: staged.encoder.ssim,
+    vmafScoreIngest: staged.ingest.vmafScore,
+    psnrDbIngest: staged.ingest.psnrDb,
+    ssimIngest: staged.ingest.ssim,
   };
 }
 
@@ -524,6 +589,24 @@ export function buildComparisonPointsFromResults(streams: SavedStreamData[]): Ch
       if (stream.ssim != null && stream.ssim > 0) {
         point[`ssim${suffix}`] = stream.ssim;
       }
+      if (stream.vmafScoreEncoder != null && stream.vmafScoreEncoder > 0) {
+        point[`vmaf_score_encoder${suffix}`] = stream.vmafScoreEncoder;
+      }
+      if (stream.psnrDbEncoder != null && stream.psnrDbEncoder > 0) {
+        point[`psnr_db_encoder${suffix}`] = stream.psnrDbEncoder;
+      }
+      if (stream.ssimEncoder != null && stream.ssimEncoder > 0) {
+        point[`ssim_encoder${suffix}`] = stream.ssimEncoder;
+      }
+      if (stream.vmafScoreIngest != null && stream.vmafScoreIngest > 0) {
+        point[`vmaf_score_ingest${suffix}`] = stream.vmafScoreIngest;
+      }
+      if (stream.psnrDbIngest != null && stream.psnrDbIngest > 0) {
+        point[`psnr_db_ingest${suffix}`] = stream.psnrDbIngest;
+      }
+      if (stream.ssimIngest != null && stream.ssimIngest > 0) {
+        point[`ssim_ingest${suffix}`] = stream.ssimIngest;
+      }
     });
     points.push(point);
   }
@@ -537,9 +620,16 @@ export function savedStreamsToLegs(streams: SavedStreamData[]): ComparisonLegDat
     label: stream.label,
     protocol: stream.protocol,
     samples: [],
+    result: stream.result,
     vmafScore: stream.vmafScore,
     psnrDb: stream.psnrDb,
     ssim: stream.ssim,
+    vmafScoreEncoder: stream.vmafScoreEncoder,
+    psnrDbEncoder: stream.psnrDbEncoder,
+    ssimEncoder: stream.ssimEncoder,
+    vmafScoreIngest: stream.vmafScoreIngest,
+    psnrDbIngest: stream.psnrDbIngest,
+    ssimIngest: stream.ssimIngest,
   }));
 }
 
@@ -564,9 +654,7 @@ const COMPARISON_METRIC_KEYS = [
   "net_recv_mbps",
   "net_loss_pct",
   "net_retrans_pct",
-  "pkt_retrans",
   "pkt_fec_extra",
-  "pkt_snd_loss",
   "ts_continuity_counter_errors",
   "cmaf_seq_gap_count",
   "cmaf_tfdt_gap_count",
@@ -574,10 +662,6 @@ const COMPARISON_METRIC_KEYS = [
   "cmaf_tfdt_overlap_count",
   "cmaf_parse_errors",
   "cmaf_fragment_count",
-  "moqx_subscribe_success",
-  "moqx_subscribe_error",
-  "moqx_publish_namespace_success",
-  "moqx_publish_received",
   "quic_rtt_ms",
   "quic_cwnd_bytes",
   "quic_packets_lost",
@@ -589,6 +673,7 @@ const COMPARISON_METRIC_KEYS = [
   "playback_error_count",
   "playback_video_time_sec",
   "playback_buffer_sec",
+  "playback_rebuffer_sec",
   "e2e_latency_ms",
   "vmaf_score",
   "psnr_db",
@@ -600,9 +685,17 @@ export interface ComparisonLegData {
   label: string;
   protocol: string;
   samples: UploadSample[];
+  /** When samples are empty (saved session), charts are built from this summary. */
+  result?: ResultSummary;
   vmafScore?: number | null;
   psnrDb?: number | null;
   ssim?: number | null;
+  vmafScoreEncoder?: number | null;
+  psnrDbEncoder?: number | null;
+  ssimEncoder?: number | null;
+  vmafScoreIngest?: number | null;
+  psnrDbIngest?: number | null;
+  ssimIngest?: number | null;
 }
 
 export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
@@ -612,7 +705,12 @@ export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
 
   const normalizedLegs = legs.map((leg) => ({
     ...leg,
-    points: samplesToChartPoints(leg.samples),
+    points:
+      leg.samples.length > 0
+        ? samplesToChartPoints(leg.samples)
+        : leg.result
+          ? resultToChartPoints(leg.result)
+          : [],
   }));
 
   const maxSecond = Math.max(
@@ -640,6 +738,24 @@ export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
       }
       if (leg.ssim != null && leg.ssim > 0) {
         point[`ssim${suffix}`] = leg.ssim;
+      }
+      if (leg.vmafScoreEncoder != null && leg.vmafScoreEncoder > 0) {
+        point[`vmaf_score_encoder${suffix}`] = leg.vmafScoreEncoder;
+      }
+      if (leg.psnrDbEncoder != null && leg.psnrDbEncoder > 0) {
+        point[`psnr_db_encoder${suffix}`] = leg.psnrDbEncoder;
+      }
+      if (leg.ssimEncoder != null && leg.ssimEncoder > 0) {
+        point[`ssim_encoder${suffix}`] = leg.ssimEncoder;
+      }
+      if (leg.vmafScoreIngest != null && leg.vmafScoreIngest > 0) {
+        point[`vmaf_score_ingest${suffix}`] = leg.vmafScoreIngest;
+      }
+      if (leg.psnrDbIngest != null && leg.psnrDbIngest > 0) {
+        point[`psnr_db_ingest${suffix}`] = leg.psnrDbIngest;
+      }
+      if (leg.ssimIngest != null && leg.ssimIngest > 0) {
+        point[`ssim_ingest${suffix}`] = leg.ssimIngest;
       }
     });
     points.push(point);
@@ -691,19 +807,16 @@ export function comparisonVisibleGroups(
 ): Array<{ id: string; title: string }> {
   const hasSrtOrRtmp = legs.some((leg) => leg.protocol === "srt" || leg.protocol === "rtmp");
   const hasMoq = legs.some((leg) => leg.protocol === "moq");
-  const groups: Array<{ id: string; title: string }> = [{ id: "encode", title: "Encode" }];
+  const groups: Array<{ id: string; title: string }> = [
+    { id: "encode", title: "Encode/Publish" },
+  ];
 
-  if (
-    comparisonHasMetric(points, "net_rtt_ms", legs.length) ||
-    comparisonHasMetric(points, "net_send_mbps", legs.length)
-  ) {
-    groups.push({ id: "transport", title: "Network transport" });
-  }
   if (comparisonHasMetric(points, "cpu_percent", legs.length)) {
     groups.push({ id: "client", title: "Client" });
   }
   if (
     comparisonHasMetric(points, "server_cpu_percent", legs.length) ||
+    comparisonHasMetric(points, "net_rtt_ms", legs.length) ||
     hasMoq ||
     hasSrtOrRtmp
   ) {
@@ -717,13 +830,6 @@ export function comparisonVisibleGroups(
     comparisonHasMetric(points, "cmaf_parse_errors", legs.length)
   ) {
     groups.push({ id: "media_health", title: "Media Health" });
-  }
-  if (
-    comparisonHasMetric(points, "vmaf_score", legs.length) ||
-    comparisonHasMetric(points, "psnr_db", legs.length) ||
-    comparisonHasMetric(points, "ssim", legs.length)
-  ) {
-    groups.push({ id: "video_quality", title: "Video Quality" });
   }
   if (
     comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||

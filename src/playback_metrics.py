@@ -19,6 +19,7 @@ PLAYBACK_FIELD_NAMES = [
     "playback_hls_frag_loads",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
 ]
@@ -138,6 +139,12 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
         value = int(float(rows[-1].get(key, 0) or 0))
         if value > 0:
             averages[key] = value
+
+    # Cumulative seconds (not a plain count) — keep sub-second precision.
+    if "playback_rebuffer_sec" in rows[-1]:
+        rebuffer_sec = round(float(rows[-1].get("playback_rebuffer_sec", 0) or 0), 3)
+        if rebuffer_sec > 0:
+            averages["playback_rebuffer_sec"] = rebuffer_sec
 
     return averages
 

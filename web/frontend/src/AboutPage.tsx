@@ -18,8 +18,8 @@ const ABOUT_METRIC_KEYS = [
   "net_loss_pct",
   "net_retrans_pct",
   "pkt_retrans",
-  "pkt_snd_loss",
   "pkt_fec_extra",
+  "quic_packets_lost",
   "ts_continuity_counter_errors",
   "cmaf_seq_gap_count",
   "cmaf_tfdt_gap_count",
@@ -28,14 +28,15 @@ const ABOUT_METRIC_KEYS = [
   "playback_ttff_ms",
   "playback_stall_count",
   "playback_buffer_sec",
+  "playback_rebuffer_sec",
   "playback_frames_dropped",
   "vmaf_score",
   "psnr_db",
   "ssim",
+  "vmaf_score_encoder",
+  "vmaf_score_ingest",
   "total_bytes_sent",
   "peak_bandwidth_sent_mbps",
-  "moqx_subscribe_success",
-  "moqx_publish_received",
 ] as const;
 
 function FlowArrow() {
@@ -86,7 +87,7 @@ export function AboutPage() {
     <section className="panel about-panel">
       <header className="about-header">
         <div>
-          <h2>About MoQ Test Tools</h2>
+          <h2>About MOQ Ingest Testing</h2>
           <p className="about-lede">
             An open benchmark platform for comparing live video ingest — especially{" "}
             <strong>MoQ over WebTransport</strong> against traditional paths such as{" "}
@@ -329,23 +330,21 @@ export function AboutPage() {
         <h3>Metric model</h3>
         <ol className="about-list numbered">
           <li>
-            <strong>Encode</strong> — bitrate, FPS, speed, encode lag
+            <strong>Encode/Publish</strong> — bitrate, frame rate, send rate, client memory,
+            client network jitter, encode lag / speed / FPS stability, and encoder-side VMAF /
+            PSNR / SSIM when enabled
           </li>
           <li>
-            <strong>Network transport</strong> — normalized RTT / jitter / send / loss / retrans
-            (SRT libsrt; RTMP Zixi or TCP path probe; MoQ qlog or TCP path probe)
-          </li>
-          <li>
-            <strong>Edge & relay</strong> — Zixi/libsrt recovery; moqx subscribe & object counters
+            <strong>Ingest</strong> — path RTT / jitter / loss / retrans, server CPU/memory,
+            protocol-native recovery (receive loss, FEC), and ingest-side VMAF / PSNR / SSIM when
+            enabled
           </li>
           <li>
             <strong>Media health</strong> — TS continuity vs CMAF sequence / decode-time gaps
           </li>
           <li>
-            <strong>Playback</strong> — TTFF, stalls, estimated glass-to-glass latency
-          </li>
-          <li>
-            <strong>Video quality</strong> — encoder and ingest VMAF / PSNR / SSIM when enabled
+            <strong>Playback</strong> — TTFF, stalls, rebuffer time, buffer size, estimated
+            glass-to-glass latency
           </li>
         </ol>
         <p className="hint about-metrics-doc-link">

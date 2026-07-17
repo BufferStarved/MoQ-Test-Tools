@@ -21,14 +21,21 @@ This document describes the normalized metrics model used for cross-protocol com
 |-------|-------------|------------------|
 | Metadata | (summary only) | Protocol, endpoint, sample count |
 | Client | `client` | Publisher host (ffmpeg / openmoq-publisher) |
-| Encode | `encode` | Encoder output before the network path |
-| Video Quality | `video_quality` | VMAF / PSNR / SSIM |
-| Network transport | `transport` | Normalized `net_*` fields |
-| Server | `server` | Ingest or relay VM health |
-| Relay health (MoQ) | `edge_relay` | moqx / QUIC job-window deltas |
-| Edge (Zixi) | `edge_zixi` | SRT recovery (retransmits, FEC) — transport |
+| Encode | `encode` | Encoder output before the network path: bitrate, frame rate, send rate, client memory/jitter, encode lag, **encoder-side** VMAF / PSNR / SSIM |
+| Ingest | `ingest` | Normalized path health (`net_rtt_ms`, `net_jitter_ms`, merged `net_retrans_pct`, `net_loss_pct`) + ingest-host CPU/memory/disk, protocol-native recovery (moqx relay Δ, Zixi/libsrt, **receive loss** `quic_packets_lost`, **send loss** `pkt_snd_loss`), and **ingest-side** VMAF / PSNR / SSIM |
 | Media Health | `media_health` | Container/timeline integrity (not transport) |
-| Browser playback | `playback` | TTFF, stalls, **E2E latency estimate** |
+| Browser playback | `playback` | TTFF, stalls, **rebuffer time**, buffer size, **E2E latency estimate** |
+
+Encode and Ingest each chart **stage-specific** VMAF/PSNR/SSIM (`vmaf_score_encoder`/`psnr_db_encoder`/`ssim_encoder`
+vs. `vmaf_score_ingest`/`psnr_db_ingest`/`ssim_ingest`) rather than one combined score, so a quality
+drop introduced by the network/ingest path is visible separately from encode-time loss. The combined
+`vmaf_score`/`psnr_db`/`ssim` fields still exist in the CSV/summary (picking whichever stage ran) for
+backward compatibility.
+
+`net_retrans_pct` is a **merged, cross-protocol** retransmit metric — it carries SRT's ARQ retransmit
+rate and MoQ's `moqx_quicPacketRetransmissions_total` job-window rate on one series, so the Ingest tab
+needs only one retransmit chart instead of a protocol-specific one. The raw `pkt_retrans` (SRT-only)
+counter still exists in the CSV but is no longer charted on its own.
 
 When a metric cannot be produced for the active protocol, the UI shows:
 
@@ -64,9 +71,13 @@ Today MPEG-TS Media Health still comes from **Zixi TR101**. An OSS TSDuck leg re
 
 Unsupported cells show **Not available with protocol X** rather than fake zeros.
 
-### 3. Encode quality → Video Quality
+### 3. Encode quality vs. ingest quality
 
-The former “encode quality” / `quality` chart group is now **`video_quality`** (“Video Quality”) for VMAF / PSNR / SSIM on encoder and/or ingest recordings.
+VMAF / PSNR / SSIM are no longer a standalone “Video Quality” tab — they're split across the two
+pipeline stages that can each introduce quality loss: **Encode** charts the encoder-side score
+(`vmaf_score_encoder`/etc., against the encoder's own capture) and **Ingest** charts the ingest-side
+score (`vmaf_score_ingest`/etc., against the post-network recording). Comparing the two isolates
+network/transport quality loss from encode-time loss.
 
 ### 4. End-to-end latency across protocols
 
@@ -171,6 +182,16 @@ These are intentionally **not** `net_*` / QUIC / SRT packet metrics.
 
 Prometheus counters from moqx are absolute since relay restart. The UI charts **deltas from the first sample of the job** so comparisons stay meaningful.
 
+**Receive loss (`quic_packets_lost`)** is MoQ's ingest-side counterpart to SRT's Send loss
+(`pkt_snd_loss`) — a cumulative count of lost QUIC packets. It cannot be a *sender*-side counter
+because the default `openmoq-publisher` backend exposes no transport telemetry at all (no qlog,
+no stats output on the CLI); its `stats()` API only reports bytes/objects/groups published, not
+loss. Instead it's sourced from the **moqx relay's own QUIC stack** (`moqx_quicPacketLoss_total`,
+job-window delta) — i.e. loss as observed on the receive side of the connection — falling back to
+the publisher's own picoquic `packet_lost` qlog events when running the experimental `moq5`
+backend. It is intentionally **not** available for SRT/RTMP, and `pkt_snd_loss` is intentionally
+not available for MoQ; they are complementary, protocol-native views rather than the same metric.
+
 ---
 
 ## Browser playback
@@ -180,6 +201,8 @@ Prometheus counters from moqx are absolute since relay restart. The UI charts **
 | `e2e_latency_ms` | Estimated glass-to-glass (see above) |
 | `playback_ttff_ms` | Time to first frame after player start |
 | `playback_stall_count` | Stalls (MoQ playa / HLS buffer stalled) |
+| `playback_rebuffer_sec` | Cumulative seconds spent rebuffering, from each `<video>` `waiting`→`playing` bracket (MoQ: `@playa/player` stall `durationMs`) |
+| `playback_buffer_sec` | Seconds of media buffered ahead of the playhead (renamed from "Buffer duration" to "Buffer size" in the UI) |
 | `playback_video_time_sec` | Max `<video>.currentTime` |
 | `playback_error_count` | Normalized player errors |
 
@@ -187,7 +210,9 @@ Prometheus counters from moqx are absolute since relay restart. The UI charts **
 
 ## Video Quality (VMAF)
 
-Optional post-run libvmaf on encoder capture and/or ingest recording. See the ingest-agent sections in this repo’s Zixi / web runbooks.
+Optional post-run libvmaf on encoder capture and/or ingest recording. Charted separately per stage
+(see “Encode quality vs. ingest quality” above) rather than in one combined tab. See the ingest-agent
+sections in this repo’s Zixi / web runbooks.
 
 ---
 

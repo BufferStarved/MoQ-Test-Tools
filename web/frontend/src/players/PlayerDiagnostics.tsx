@@ -61,6 +61,26 @@ export function PlayerDiagnostics({
     ...lines,
   ].filter(Boolean) as string[];
 
+  const [copied, setCopied] = useState(false);
+
+  async function copyDiagnostics() {
+    const text = [
+      ...entries,
+      error ? `last_error=${error}` : null,
+      probeResult ? `server_probe=${probeResult}` : null,
+      manifestUrl ? `manifest=${manifestUrl}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  }
+
   return (
     <details className="player-diagnostics">
       <summary>Playback diagnostics ({engine.toUpperCase()})</summary>
@@ -76,14 +96,17 @@ export function PlayerDiagnostics({
           <strong>Last error:</strong> {error}
         </p>
       )}
-      {engine === "hls" && manifestUrl && (
-        <p>
+      <p className="player-diagnostics-actions">
+        <button type="button" className="ghost-button" onClick={() => void copyDiagnostics()}>
+          {copied ? "Copied" : "Copy diagnostics"}
+        </button>
+        {engine === "hls" && manifestUrl && (
           <button type="button" className="ghost-button" disabled={probeBusy} onClick={() => void runProbe()}>
             {probeBusy ? "Probing…" : "Run server probe"}
           </button>
-          {probeResult && <span className="hint"> {probeResult}</span>}
-        </p>
-      )}
+        )}
+        {probeResult && <span className="hint"> {probeResult}</span>}
+      </p>
       <p className="hint">
         Open DevTools → Network and filter <code>playback/fetch</code> during a live encode. Each
         segment should return HTTP 200 with a non-zero body.

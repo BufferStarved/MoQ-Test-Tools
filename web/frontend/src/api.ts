@@ -144,6 +144,8 @@ export interface PlaybackMetricsSnapshot {
   playback_video_time_sec: number;
   /** Seconds of media buffered ahead of the playhead. */
   playback_buffer_sec: number;
+  /** Cumulative seconds the player spent in a rebuffer/stalled state. */
+  playback_rebuffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
 }

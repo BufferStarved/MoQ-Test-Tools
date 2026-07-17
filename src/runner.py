@@ -110,6 +110,7 @@ if __name__ == "__main__":
         )
 
     result = service.run(job, on_sample=on_sample)
+    service.cleanup_zixi_srt_input_if_managed(job)
     print("")
 
     if result.success and result.csv_path:

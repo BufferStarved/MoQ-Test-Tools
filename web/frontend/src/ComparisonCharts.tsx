@@ -10,10 +10,13 @@ import {
   type ComparisonLegData,
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
+import { ChartSectionNote } from "./ChartSectionNote";
 import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
 
 interface ComparisonChartsProps {
   legs: ComparisonLegData[];
+  /** Minimum legs with data before charts render (default 2 for live compare). */
+  minLegs?: number;
 }
 
 function ProtocolAvailabilityNote({
@@ -37,8 +40,10 @@ function ProtocolAvailabilityNote({
   );
 }
 
-export function ComparisonCharts({ legs }: ComparisonChartsProps) {
-  const activeLegs = legs.filter((leg) => leg.samples.length > 0);
+export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
+  const activeLegs = legs.filter(
+    (leg) => leg.samples.length > 0 || (leg.result?.rows?.length ?? 0) > 0,
+  );
   const points = useMemo(() => buildComparisonPoints(activeLegs), [activeLegs]);
   const groups = useMemo(
     () => comparisonVisibleGroups(points, activeLegs),
@@ -54,18 +59,16 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
 
   const currentGroup = groups.find((group) => group.id === activeGroup) ?? groups[0];
   const encodeGroup = chartGroupById("encode");
-  const transportGroup = chartGroupById("transport");
   const clientGroup = chartGroupById("client");
   const ingestGroup = chartGroupById("ingest");
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
-  const qualityGroup = chartGroupById("video_quality");
   const hasMoqLeg = activeLegs.some((leg) => leg.protocol === "moq");
   const hasSrtOrRtmpLeg = activeLegs.some(
     (leg) => leg.protocol === "srt" || leg.protocol === "rtmp",
   );
 
-  if (activeLegs.length < 2) {
+  if (activeLegs.length < minLegs) {
     return (
       <div className="charts-empty muted">Waiting for uploads to produce telemetry...</div>
     );
@@ -109,19 +112,54 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
       <div className="charts-grid">
         {currentGroup.id === "encode" && encodeGroup && (
           <>
+            <ChartSectionNote
+              title="Encode / publish (this host)"
+              items={[
+                "Bitrate and frame rate come from ffmpeg while publishing.",
+                "Send rate is outbound publish throughput.",
+                "Client memory is ffmpeg / publisher RSS on this machine.",
+                "Client network jitter is RTT variation on the publisher side of the path.",
+                "Encode lag, speed, and FPS stability come from ffmpeg progress while publishing.",
+                "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
+              ]}
+            />
             <MetricChart
               title="Bitrate"
               metricKey="encoded_bitrate_kbps"
               data={points}
               series={comparisonSeries(activeLegs, "encoded_bitrate_kbps", "kbps")}
-              height={260}
+              height={280}
             />
             <MetricChart
               title="Frame rate"
               metricKey="fps"
               data={points}
               series={comparisonSeries(activeLegs, "fps", "fps")}
+              height={280}
+            />
+            <MetricChart
+              title="Send rate"
+              metricKey="net_send_mbps"
+              data={points}
+              series={comparisonSeries(activeLegs, "net_send_mbps", "Mbps")}
+              height={280}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="Client memory"
+              metricKey="memory_mb"
+              data={points}
+              series={comparisonSeries(activeLegs, "memory_mb", "MB")}
               height={260}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="Client network jitter"
+              metricKey="net_jitter_ms"
+              data={points}
+              series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
+              height={260}
+              keepZeroSeries
             />
             {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) && (
               <MetricChart
@@ -129,53 +167,52 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
                 metricKey="encode_lag_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
-                height={220}
+                height={260}
               />
             )}
-          </>
-        )}
-
-        {currentGroup.id === "transport" && transportGroup && (
-          <>
-            <p className="hint chart-availability-note">
-              Normalized transport: SRT uses libsrt/Zixi RTT; RTMP uses Zixi receiver RTT when
-              available, otherwise a TCP path probe to the RTMP host:port; MoQ uses QUIC qlog RTT
-              when available, otherwise a TCP path probe to the relay (same host as WebTransport).
-            </p>
+            {comparisonHasMetric(points, "fps_stability", activeLegs.length) && (
+              <MetricChart
+                title="FPS stability"
+                metricKey="fps_stability"
+                data={points}
+                series={comparisonSeries(activeLegs, "fps_stability", "cv")}
+                height={260}
+              />
+            )}
+            {comparisonHasMetric(points, "speed", activeLegs.length) && (
+              <MetricChart
+                title="Speed"
+                metricKey="speed"
+                data={points}
+                series={comparisonSeries(activeLegs, "speed", "x")}
+                height={260}
+              />
+            )}
             <MetricChart
-              title="RTT (normalized)"
-              metricKey="net_rtt_ms"
+              title="VMAF"
+              metricKey="vmaf_score_encoder"
               data={points}
-              series={comparisonSeries(activeLegs, "net_rtt_ms", "ms")}
-              height={260}
+              series={comparisonSeries(activeLegs, "vmaf_score_encoder", "score")}
+              height={280}
+              yDomain={[0, 100]}
+              keepZeroSeries
             />
             <MetricChart
-              title="Jitter (normalized)"
-              metricKey="net_jitter_ms"
+              title="PSNR"
+              metricKey="psnr_db_encoder"
               data={points}
-              series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
-              height={220}
+              series={comparisonSeries(activeLegs, "psnr_db_encoder", "dB")}
+              height={280}
+              keepZeroSeries
             />
             <MetricChart
-              title="Send rate (normalized)"
-              metricKey="net_send_mbps"
+              title="SSIM"
+              metricKey="ssim_encoder"
               data={points}
-              series={comparisonSeries(activeLegs, "net_send_mbps", "Mbps")}
-              height={260}
-            />
-            <MetricChart
-              title="Loss %"
-              metricKey="net_loss_pct"
-              data={points}
-              series={comparisonSeries(activeLegs, "net_loss_pct", "%")}
-              height={220}
-            />
-            <MetricChart
-              title="Retransmit %"
-              metricKey="net_retrans_pct"
-              data={points}
-              series={comparisonSeries(activeLegs, "net_retrans_pct", "%")}
-              height={220}
+              series={comparisonSeries(activeLegs, "ssim_encoder", "score")}
+              height={280}
+              yDomain={[0, 1]}
+              keepZeroSeries
             />
           </>
         )}
@@ -201,59 +238,67 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
 
         {currentGroup.id === "ingest" && ingestGroup && (
           <>
-            <p className="hint chart-availability-note">
-              Normalized across MOQ / SRT / RTMP: ingest-host CPU &amp; memory, plus path loss% and
-              retransmit%. Protocol panels below are native counters (MoQ relay Δ, SRT/Zixi recovery).
-            </p>
+            <ChartSectionNote
+              title="Ingest path"
+              items={[
+                "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
+                "SRT RTT: libsrt / Zixi receiver.",
+                "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
+                "MoQ RTT: QUIC qlog when available; otherwise a TCP probe to the relay (same host as WebTransport).",
+                "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
+              ]}
+            />
             <MetricChart
-              title="Ingest host CPU (normalized)"
+              title="RTT"
+              metricKey="net_rtt_ms"
+              data={points}
+              series={comparisonSeries(activeLegs, "net_rtt_ms", "ms")}
+              height={280}
+            />
+            <MetricChart
+              title="Server network jitter"
+              metricKey="net_jitter_ms"
+              data={points}
+              series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
+              height={260}
+            />
+            <MetricChart
+              title="Server CPU"
               metricKey="server_cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_cpu_percent", "%")}
-              height={260}
+              height={280}
             />
             <MetricChart
-              title="Ingest host memory (normalized)"
+              title="Server memory"
               metricKey="server_memory_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_memory_percent", "%")}
-              height={260}
+              height={280}
             />
             <MetricChart
-              title="Path loss % (normalized)"
+              title="Path loss %"
               metricKey="net_loss_pct"
               data={points}
               series={comparisonSeries(activeLegs, "net_loss_pct", "%")}
-              height={220}
+              height={260}
               keepZeroSeries
             />
             <MetricChart
-              title="Path retransmit % (normalized)"
+              title="Retransmit %"
               metricKey="net_retrans_pct"
               data={points}
               series={comparisonSeries(activeLegs, "net_retrans_pct", "%")}
-              height={220}
+              height={260}
               keepZeroSeries
             />
             {hasMoqLeg && (
               <>
-                <ProtocolAvailabilityNote metricKey="moqx_subscribe_success" legs={activeLegs} />
-                <p className="hint chart-availability-note">
-                  MoQ relay counters are job-window deltas (not absolute since relay restart).
-                </p>
                 <MetricChart
-                  title="MoQ subscribe OK (Δ)"
-                  metricKey="moqx_subscribe_success"
+                  title="Receive loss"
+                  metricKey="quic_packets_lost"
                   data={points}
-                  series={comparisonSeries(activeLegs, "moqx_subscribe_success", "count")}
-                  height={260}
-                  keepZeroSeries
-                />
-                <MetricChart
-                  title="MoQ objects received (Δ)"
-                  metricKey="moqx_publish_received"
-                  data={points}
-                  series={comparisonSeries(activeLegs, "moqx_publish_received", "count")}
+                  series={comparisonSeries(activeLegs, "quic_packets_lost", "pkts")}
                   height={260}
                   keepZeroSeries
                 />
@@ -263,53 +308,60 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
                     metricKey="quic_cwnd_bytes"
                     data={points}
                     series={comparisonSeries(activeLegs, "quic_cwnd_bytes", "bytes")}
-                    height={220}
+                    height={260}
                   />
                 )}
               </>
             )}
             {hasSrtOrRtmpLeg && (
-              <>
-                <ProtocolAvailabilityNote metricKey="pkt_retrans" legs={activeLegs} />
-                <p className="hint chart-availability-note">
-                  Libsrt recovery counters from the SRT sender. A flat zero line means a clean path
-                  (no retransmits / FEC extras observed).
-                </p>
-                <MetricChart
-                  title="SRT retransmits"
-                  metricKey="pkt_retrans"
-                  data={points}
-                  series={comparisonSeries(activeLegs, "pkt_retrans", "pkts")}
-                  height={220}
-                  keepZeroSeries
-                />
-                <MetricChart
-                  title="Send loss"
-                  metricKey="pkt_snd_loss"
-                  data={points}
-                  series={comparisonSeries(activeLegs, "pkt_snd_loss", "pkts")}
-                  height={220}
-                  keepZeroSeries
-                />
-                <MetricChart
-                  title="FEC extra"
-                  metricKey="pkt_fec_extra"
-                  data={points}
-                  series={comparisonSeries(activeLegs, "pkt_fec_extra", "pkts")}
-                  height={220}
-                  keepZeroSeries
-                />
-              </>
+              <MetricChart
+                title="FEC extra"
+                metricKey="pkt_fec_extra"
+                data={points}
+                series={comparisonSeries(activeLegs, "pkt_fec_extra", "pkts")}
+                height={260}
+                keepZeroSeries
+              />
             )}
+            <MetricChart
+              title="VMAF (ingest)"
+              metricKey="vmaf_score_ingest"
+              data={points}
+              series={comparisonSeries(activeLegs, "vmaf_score_ingest", "score")}
+              height={280}
+              yDomain={[0, 100]}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="PSNR (ingest)"
+              metricKey="psnr_db_ingest"
+              data={points}
+              series={comparisonSeries(activeLegs, "psnr_db_ingest", "dB")}
+              height={280}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="SSIM (ingest)"
+              metricKey="ssim_ingest"
+              data={points}
+              series={comparisonSeries(activeLegs, "ssim_ingest", "score")}
+              height={280}
+              yDomain={[0, 1]}
+              keepZeroSeries
+            />
           </>
         )}
 
         {currentGroup.id === "media_health" && mediaHealthGroup && (
           <>
-            <p className="hint chart-availability-note">
-              Media Health is container/timeline integrity — not transport. MPEG-TS uses Zixi TR101
-              continuity; MoQ uses CMAF fragment sequence and decode-time checks.
-            </p>
+            <ChartSectionNote
+              title="Media container integrity"
+              items={[
+                "Measures timeline and container health — not network transport.",
+                "MPEG-TS (SRT/RTMP): Zixi TR101 continuity-counter errors.",
+                "MoQ CMAF: fragment sequence gaps, decode-time gaps, and parse errors.",
+              ]}
+            />
             <ProtocolAvailabilityNote metricKey="ts_continuity_counter_errors" legs={activeLegs} />
             <ProtocolAvailabilityNote metricKey="cmaf_seq_gap_count" legs={activeLegs} />
             {comparisonHasMetric(points, "ts_continuity_counter_errors", activeLegs.length) && (
@@ -392,9 +444,19 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
                 keepZeroSeries
               />
             )}
+            {comparisonHasMetric(points, "playback_rebuffer_sec", activeLegs.length) && (
+              <MetricChart
+                title="Rebuffer time"
+                metricKey="playback_rebuffer_sec"
+                data={points}
+                series={comparisonSeries(activeLegs, "playback_rebuffer_sec", "s")}
+                height={220}
+                keepZeroSeries
+              />
+            )}
             {comparisonHasMetric(points, "playback_buffer_sec", activeLegs.length) && (
               <MetricChart
-                title="Buffer duration"
+                title="Buffer size"
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_buffer_sec", "s")}
@@ -408,40 +470,6 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_video_time_sec", "s")}
                 height={220}
-              />
-            )}
-          </>
-        )}
-
-        {currentGroup.id === "video_quality" && qualityGroup && (
-          <>
-            {comparisonHasMetric(points, "vmaf_score", activeLegs.length) && (
-              <MetricChart
-                title="VMAF score"
-                metricKey="vmaf_score"
-                data={points}
-                series={comparisonSeries(activeLegs, "vmaf_score", "score")}
-                height={260}
-                yDomain={[0, 100]}
-              />
-            )}
-            {comparisonHasMetric(points, "psnr_db", activeLegs.length) && (
-              <MetricChart
-                title="PSNR"
-                metricKey="psnr_db"
-                data={points}
-                series={comparisonSeries(activeLegs, "psnr_db", "dB")}
-                height={260}
-              />
-            )}
-            {comparisonHasMetric(points, "ssim", activeLegs.length) && (
-              <MetricChart
-                title="SSIM"
-                metricKey="ssim"
-                data={points}
-                series={comparisonSeries(activeLegs, "ssim", "score")}
-                height={260}
-                yDomain={[0, 1]}
               />
             )}
           </>

@@ -12,7 +12,7 @@ import {
   resetMoqPlaybackOutcome,
   getMoqPlaybackOutcome,
 } from "../moqPlaybackOutcome";
-import { bufferedAheadSec, seekNearLiveEdge } from "../playbackBuffer";
+import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playbackBuffer";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -84,6 +84,7 @@ export default function MoqPlayer({
     videoTimeSec: 0,
     playerLatencyMs: 0,
   });
+  const rebufferRef = useRef(new RebufferTracker());
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
   // more than once for this component instance — e.g. because `namespace`
@@ -118,6 +119,7 @@ export default function MoqPlayer({
       playback_hls_frag_loads: 0,
       playback_video_time_sec: sessionRef.current.videoTimeSec,
       playback_buffer_sec: bufferedAheadSec(videoRef.current),
+      playback_rebuffer_sec: rebufferRef.current.totalSec,
       // Prefer CaptureTimestamp latency from the player when present.
       e2e_latency_ms: sessionRef.current.playerLatencyMs || undefined,
     }),
@@ -202,6 +204,7 @@ export default function MoqPlayer({
       videoTimeSec: 0,
       playerLatencyMs: 0,
     };
+    rebufferRef.current.reset();
 
     function pushDiag(line: string, pin = false) {
       if (destroyed) {
@@ -430,6 +433,7 @@ export default function MoqPlayer({
 
         player.on("stall", ({ durationMs }) => {
           sessionRef.current.stallCount += 1;
+          rebufferRef.current.addSec(durationMs / 1000);
           pushDiag(`stall_ms=${durationMs}`);
         });
 
@@ -667,7 +671,7 @@ export default function MoqPlayer({
   return (
     <div className="player-surface">
       <canvas ref={canvasRef} className="player-canvas" />
-      <video ref={videoRef} className="player-video" controls playsInline muted hidden />
+      <video ref={videoRef} className="player-video" controls playsInline muted autoPlay hidden />
       <div className="player-controls">
         <button
           type="button"

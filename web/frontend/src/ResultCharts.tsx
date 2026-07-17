@@ -8,6 +8,7 @@ import {
   type ChartPoint,
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
+import { ChartSectionNote } from "./ChartSectionNote";
 import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
 import type { ResultSummary, UploadSample } from "./types";
 
@@ -55,12 +56,10 @@ export function ResultCharts({
 
   const currentGroup = groups.find((group) => group.id === activeGroup) ?? groups[0];
   const encodeGroup = chartGroupById("encode");
-  const transportGroup = chartGroupById("transport");
   const clientGroup = chartGroupById("client");
   const ingestGroup = chartGroupById("ingest");
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
-  const qualityGroup = chartGroupById("video_quality");
   const isMoq = resolvedProtocol === "moq";
   const isSrtOrRtmp = resolvedProtocol === "srt" || resolvedProtocol === "rtmp";
 
@@ -96,62 +95,97 @@ export function ResultCharts({
       <div className="charts-grid">
         {currentGroup.id === "encode" && encodeGroup && (
           <>
+            <ChartSectionNote
+              title="Encode / publish (this host)"
+              items={[
+                "Bitrate and frame rate come from ffmpeg while publishing.",
+                "Send rate is outbound publish throughput.",
+                "Client memory is ffmpeg / publisher RSS on this machine.",
+                "Client network jitter is RTT variation on the publisher side of the path.",
+                "Encode lag, speed, and FPS stability come from ffmpeg progress while publishing.",
+                "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
+              ]}
+            />
             <MetricChart
-              title="Bitrate & frame rate"
+              title="Bitrate"
               metricKey="encoded_bitrate_kbps"
               data={points}
-              series={encodeGroup.series.filter(
-                (series) => series.key === "encoded_bitrate_kbps" || series.key === "fps",
-              )}
-              height={260}
+              series={encodeGroup.series.filter((series) => series.key === "encoded_bitrate_kbps")}
+              height={280}
             />
             <MetricChart
-              title="Speed & lag"
-              metricKey="encode_lag_ms"
+              title="Frame rate"
+              metricKey="fps"
               data={points}
-              series={encodeGroup.series.filter(
-                (series) =>
-                  series.key === "speed" ||
-                  series.key === "fps_stability" ||
-                  series.key === "encode_lag_ms",
-              )}
-              height={260}
-            />
-          </>
-        )}
-
-        {currentGroup.id === "transport" && transportGroup && (
-          <>
-            <AvailabilityNote metricKey="net_rtt_ms" protocol={resolvedProtocol} />
-            <MetricChart
-              title="RTT & jitter (normalized)"
-              metricKey="net_rtt_ms"
-              data={points}
-              series={transportGroup.series.filter(
-                (series) => series.key === "net_rtt_ms" || series.key === "net_jitter_ms",
-              )}
-              height={260}
+              series={encodeGroup.series.filter((series) => series.key === "fps")}
+              height={280}
             />
             <MetricChart
-              title="Send & receive rate"
+              title="Send rate"
               metricKey="net_send_mbps"
               data={points}
-              series={transportGroup.series.filter(
-                (series) => series.key === "net_send_mbps" || series.key === "net_recv_mbps",
-              )}
-              height={260}
+              series={encodeGroup.series.filter((series) => series.key === "net_send_mbps")}
+              height={280}
+              keepZeroSeries
             />
-            {(hasData(points, "net_loss_pct") || hasData(points, "net_retrans_pct")) && (
+            <MetricChart
+              title="Client memory"
+              metricKey="memory_mb"
+              data={points}
+              series={encodeGroup.series.filter((series) => series.key === "memory_mb")}
+              height={260}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="Client network jitter"
+              metricKey="net_jitter_ms"
+              data={points}
+              series={encodeGroup.series.filter((series) => series.key === "net_jitter_ms")}
+              height={260}
+              keepZeroSeries
+            />
+            {(hasData(points, "encode_lag_ms") ||
+              hasData(points, "fps_stability") ||
+              hasData(points, "speed")) && (
               <MetricChart
-                title="Loss & retransmit %"
-                metricKey="net_loss_pct"
+                title="Encode lag / speed / FPS stability"
+                metricKey="encode_lag_ms"
                 data={points}
-                series={transportGroup.series.filter(
-                  (series) => series.key === "net_loss_pct" || series.key === "net_retrans_pct",
+                series={encodeGroup.series.filter(
+                  (series) =>
+                    series.key === "encode_lag_ms" ||
+                    series.key === "fps_stability" ||
+                    series.key === "speed",
                 )}
-                height={220}
+                height={280}
               />
             )}
+            <MetricChart
+              title="VMAF"
+              metricKey="vmaf_score_encoder"
+              data={points}
+              series={encodeGroup.series.filter((series) => series.key === "vmaf_score_encoder")}
+              height={280}
+              yDomain={[0, 100]}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="PSNR"
+              metricKey="psnr_db_encoder"
+              data={points}
+              series={encodeGroup.series.filter((series) => series.key === "psnr_db_encoder")}
+              height={280}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="SSIM"
+              metricKey="ssim_encoder"
+              data={points}
+              series={encodeGroup.series.filter((series) => series.key === "ssim_encoder")}
+              height={280}
+              yDomain={[0, 1]}
+              keepZeroSeries
+            />
           </>
         )}
 
@@ -161,12 +195,33 @@ export function ResultCharts({
 
         {currentGroup.id === "ingest" && ingestGroup && (
           <>
-            <p className="hint chart-availability-note">
-              Normalized ingest: host CPU/memory/disk and path loss/retransmit %. Protocol detail
-              below depends on the publish path (MoQ relay or SRT/Zixi).
-            </p>
+            <ChartSectionNote
+              title="Ingest path"
+              items={[
+                "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
+                "SRT RTT: libsrt / Zixi receiver.",
+                "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
+                "MoQ RTT: QUIC qlog when available; otherwise a TCP probe to the relay (same host as WebTransport).",
+                "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
+              ]}
+            />
+            <AvailabilityNote metricKey="net_rtt_ms" protocol={resolvedProtocol} />
             <MetricChart
-              title="Ingest host (normalized)"
+              title="RTT"
+              metricKey="net_rtt_ms"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "net_rtt_ms")}
+              height={280}
+            />
+            <MetricChart
+              title="Server network jitter"
+              metricKey="net_jitter_ms"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "net_jitter_ms")}
+              height={260}
+            />
+            <MetricChart
+              title="Ingest host"
               metricKey="server_cpu_percent"
               data={points}
               series={ingestGroup.series.filter(
@@ -175,47 +230,31 @@ export function ResultCharts({
                   series.key === "server_memory_percent" ||
                   series.key === "server_disk_percent",
               )}
-              height={260}
+              height={280}
             />
-            {(hasData(points, "net_loss_pct") || hasData(points, "net_retrans_pct")) && (
-              <MetricChart
-                title="Path recovery (normalized)"
-                metricKey="net_loss_pct"
-                data={points}
-                series={ingestGroup.series.filter(
-                  (series) => series.key === "net_loss_pct" || series.key === "net_retrans_pct",
-                )}
-                height={220}
-                keepZeroSeries
-              />
-            )}
+            <MetricChart
+              title="Path loss %"
+              metricKey="net_loss_pct"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "net_loss_pct")}
+              height={260}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="Retransmit %"
+              metricKey="net_retrans_pct"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "net_retrans_pct")}
+              height={260}
+              keepZeroSeries
+            />
             {isMoq && (
               <>
-                <AvailabilityNote metricKey="moqx_subscribe_success" protocol={resolvedProtocol} />
-                <p className="hint chart-availability-note">
-                  MoQ relay counters are job-window deltas (not absolute since relay restart).
-                </p>
                 <MetricChart
-                  title="MoQ relay subscribe (Δ)"
-                  metricKey="moqx_subscribe_success"
+                  title="Receive loss"
+                  metricKey="quic_packets_lost"
                   data={points}
-                  series={ingestGroup.series.filter(
-                    (series) =>
-                      series.key === "moqx_subscribe_success" ||
-                      series.key === "moqx_subscribe_error",
-                  )}
-                  height={260}
-                  keepZeroSeries
-                />
-                <MetricChart
-                  title="MoQ relay publish (Δ)"
-                  metricKey="moqx_publish_received"
-                  data={points}
-                  series={ingestGroup.series.filter(
-                    (series) =>
-                      series.key === "moqx_publish_namespace_success" ||
-                      series.key === "moqx_publish_received",
-                  )}
+                  series={ingestGroup.series.filter((series) => series.key === "quic_packets_lost")}
                   height={260}
                   keepZeroSeries
                 />
@@ -225,31 +264,47 @@ export function ResultCharts({
                     metricKey="quic_cwnd_bytes"
                     data={points}
                     series={ingestGroup.series.filter((series) => series.key === "quic_cwnd_bytes")}
-                    height={220}
+                    height={260}
                   />
                 )}
               </>
             )}
             {isSrtOrRtmp && (
-              <>
-                <p className="hint chart-availability-note">
-                  Libsrt recovery counters from the SRT sender. Flat zeros mean a clean path.
-                </p>
-                <MetricChart
-                  title="SRT / Zixi recovery"
-                  metricKey="pkt_retrans"
-                  data={points}
-                  series={ingestGroup.series.filter(
-                    (series) =>
-                      series.key === "pkt_retrans" ||
-                      series.key === "pkt_fec_extra" ||
-                      series.key === "pkt_snd_loss",
-                  )}
-                  height={260}
-                  keepZeroSeries
-                />
-              </>
+              <MetricChart
+                title="FEC extra"
+                metricKey="pkt_fec_extra"
+                data={points}
+                series={ingestGroup.series.filter((series) => series.key === "pkt_fec_extra")}
+                height={260}
+                keepZeroSeries
+              />
             )}
+            <MetricChart
+              title="VMAF (ingest)"
+              metricKey="vmaf_score_ingest"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "vmaf_score_ingest")}
+              height={280}
+              yDomain={[0, 100]}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="PSNR (ingest)"
+              metricKey="psnr_db_ingest"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "psnr_db_ingest")}
+              height={280}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="SSIM (ingest)"
+              metricKey="ssim_ingest"
+              data={points}
+              series={ingestGroup.series.filter((series) => series.key === "ssim_ingest")}
+              height={280}
+              yDomain={[0, 1]}
+              keepZeroSeries
+            />
           </>
         )}
 
@@ -257,9 +312,14 @@ export function ResultCharts({
           <>
             <AvailabilityNote metricKey="ts_continuity_counter_errors" protocol={resolvedProtocol} />
             <AvailabilityNote metricKey="cmaf_seq_gap_count" protocol={resolvedProtocol} />
-            <p className="hint chart-availability-note">
-              Media Health is container/timeline integrity — not transport.
-            </p>
+            <ChartSectionNote
+              title="Media container integrity"
+              items={[
+                "Measures timeline and container health — not network transport.",
+                "MPEG-TS (SRT/RTMP): Zixi TR101 continuity-counter errors.",
+                "MoQ CMAF: fragment sequence gaps, decode-time gaps, and parse errors.",
+              ]}
+            />
             <MetricChart
               title="Media Health"
               metricKey="ts_continuity_counter_errors"
@@ -295,9 +355,19 @@ export function ResultCharts({
               height={260}
               keepZeroSeries
             />
+            {hasData(points, "playback_rebuffer_sec") && (
+              <MetricChart
+                title="Rebuffer time"
+                metricKey="playback_rebuffer_sec"
+                data={points}
+                series={playbackGroup.series.filter((series) => series.key === "playback_rebuffer_sec")}
+                height={220}
+                keepZeroSeries
+              />
+            )}
             {hasData(points, "playback_buffer_sec") && (
               <MetricChart
-                title="Buffer duration"
+                title="Buffer size"
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_buffer_sec")}
@@ -311,40 +381,6 @@ export function ResultCharts({
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_video_time_sec")}
                 height={220}
-              />
-            )}
-          </>
-        )}
-
-        {currentGroup.id === "video_quality" && qualityGroup && (
-          <>
-            {hasData(points, "vmaf_score") && (
-              <MetricChart
-                title="VMAF score"
-                metricKey="vmaf_score"
-                data={points}
-                series={qualityGroup.series.filter((series) => series.key === "vmaf_score")}
-                height={260}
-                yDomain={[0, 100]}
-              />
-            )}
-            {hasData(points, "psnr_db") && (
-              <MetricChart
-                title="PSNR"
-                metricKey="psnr_db"
-                data={points}
-                series={qualityGroup.series.filter((series) => series.key === "psnr_db")}
-                height={260}
-              />
-            )}
-            {hasData(points, "ssim") && (
-              <MetricChart
-                title="SSIM"
-                metricKey="ssim"
-                data={points}
-                series={qualityGroup.series.filter((series) => series.key === "ssim")}
-                height={260}
-                yDomain={[0, 1]}
               />
             )}
           </>

@@ -4,7 +4,7 @@ import { proxiedPlaybackUrl } from "../playbackUrls";
 import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
-import { bufferedAheadSec } from "../playbackBuffer";
+import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -70,6 +70,37 @@ function playlistTargetDurationSec(body: string): number {
   return Number.isFinite(value) && value > 0 ? value : 2;
 }
 
+/**
+ * Zixi often advertises playback.ts?chunk=N in the playlist before that
+ * chunk is actually readable (HTTP 400 Bad Request). Starting hls.js then
+ * loops fragLoadError forever. Require a real MPEG-TS body before go-live.
+ *
+ * Playlists rewritten by /api/playback/fetch already contain
+ * `/api/playback/fetch?url=...` segment lines — resolve those against the
+ * local app origin. Never resolve them against the Zixi host (that produces
+ * http://zixi/api/playback/fetch?... and a 500 double-proxy loop).
+ */
+async function segmentFetchable(manifestRemoteUrl: string, segmentLine: string): Promise<boolean> {
+  try {
+    const fetchUrl = resolvePlaybackXhrUrl(
+      segmentLine.includes("/api/playback/fetch")
+        ? segmentLine.startsWith("http")
+          ? segmentLine
+          : new URL(segmentLine, window.location.origin).href
+        : new URL(segmentLine, manifestRemoteUrl).href,
+    );
+    const response = await fetch(fetchUrl, { cache: "no-store" });
+    if (!response.ok) {
+      return false;
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // MPEG-TS packets start with sync byte 0x47; require at least one packet.
+    return bytes.byteLength >= 188 && bytes[0] === 0x47;
+  } catch {
+    return false;
+  }
+}
+
 /** Live sync in seconds, clamped to what the playlist depth can actually hold. */
 function hlsSyncDurationForPlaylist(body: string, requestedSec: number): number {
   const depth = playlistDepth(body);
@@ -92,7 +123,6 @@ async function waitForManifest(
   let previousSequence: string | null = null;
   let previousSegment: string | null = null;
   let unchangedPolls = 0;
-  let lastBody: string | null = null;
   for (let attempt = 1; attempt <= MANIFEST_POLL_MAX; attempt += 1) {
     if (!shouldContinue()) {
       return null;
@@ -102,29 +132,33 @@ async function waitForManifest(
       if (response.ok) {
         const body = await response.text();
         if (body.includes("#EXTM3U")) {
-          lastBody = body;
           const sequence = mediaSequence(body);
           const segment = segmentUri(body);
           const depth = playlistDepth(body);
+          const candidate =
+            depth >= 2 ||
+            (Boolean(sequence && previousSequence && sequence !== previousSequence)) ||
+            (Boolean(segment && previousSegment && segment !== previousSegment)) ||
+            (Boolean(segment && attempt >= MANIFEST_START_POLLS));
+
+          let segmentReady = false;
+          if (candidate && segment) {
+            segmentReady = await segmentFetchable(url, segment);
+          }
+
           onAttempt(
             attempt,
             [
               sequence ? `media_sequence=${sequence}` : "media_sequence=unknown",
               `depth=${depth}`,
+              segment ? `segment_ready=${segmentReady ? "yes" : "no"}` : "segment=none",
             ].join(" "),
           );
-          if (depth >= 2) {
+
+          if (candidate && segmentReady) {
             return body;
           }
-          if (sequence && previousSequence && sequence !== previousSequence) {
-            return body;
-          }
-          if (segment && previousSegment && segment !== previousSegment) {
-            return body;
-          }
-          if (segment && attempt >= MANIFEST_START_POLLS) {
-            return body;
-          }
+
           if (
             (sequence && previousSequence && sequence === previousSequence) ||
             (segment && previousSegment && segment === previousSegment)
@@ -134,6 +168,8 @@ async function waitForManifest(
               onStuck?.(sequence ?? "unknown");
               return null;
             }
+          } else {
+            unchangedPolls = 0;
           }
           previousSequence = sequence ?? previousSequence;
           previousSegment = segment ?? previousSegment;
@@ -144,7 +180,7 @@ async function waitForManifest(
     }
     await sleep(MANIFEST_POLL_MS);
   }
-  return lastBody;
+  return null;
 }
 
 export default function HlsPlayer({
@@ -180,6 +216,7 @@ export default function HlsPlayer({
     liveStartedAtMs: 0,
     bufferSec: 0,
   });
+  const rebufferRef = useRef(new RebufferTracker());
 
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => ({
@@ -195,6 +232,7 @@ export default function HlsPlayer({
       playback_hls_frag_loads: sessionRef.current.fragmentLoads,
       playback_video_time_sec: sessionRef.current.maxVideoTime,
       playback_buffer_sec: sessionRef.current.bufferSec,
+      playback_rebuffer_sec: rebufferRef.current.totalSec,
     }),
     [],
   );
@@ -291,6 +329,7 @@ export default function HlsPlayer({
       liveStartedAtMs: Date.now(),
       bufferSec: 0,
     };
+    rebufferRef.current.reset();
 
     function pushDiag(line: string) {
       if (!destroyed) {
@@ -336,7 +375,7 @@ export default function HlsPlayer({
           if (!destroyed) {
             pushDiag(`manifest_stuck=sequence_${sequence}`);
             fail(
-              `Zixi HLS media_sequence stayed at ${sequence} for ~${Math.round((MANIFEST_STUCK_POLLS * MANIFEST_POLL_MS) / 1000)}s during the encode. Ingest may be live (check Zixi Connected + packets) — Zixi HLS packaging is slow or stalled. Restart ./scripts/dev.sh so uploads use direct ffmpeg→SRT.`,
+              `Zixi HLS never served a readable MPEG-TS segment while the playlist listed chunk N (HTTP 400). For SRT, confirm the shared "SRT Test" input was reset and that media_sequence advances — check diagnostics for segment_ready=yes.`,
             );
           }
         },
@@ -347,7 +386,7 @@ export default function HlsPlayer({
       }
       if (!manifestBody) {
         fail(
-          "HLS manifest never advanced during the encode. Zixi needs ~30s of stable SRT ingest before segments roll — ensure ./scripts/dev.sh was restarted after the latest upload fix.",
+          "HLS never became playable during the encode (playlist appeared but segments stayed HTTP 400). Zixi needs a few seconds after the first SRT packets before chunk N is readable — check diagnostics for segment_ready=yes.",
         );
         return;
       }
@@ -393,13 +432,15 @@ export default function HlsPlayer({
         maxBufferLength: shallow ? 30 : Math.max(20, syncSec * 3),
         maxMaxBufferLength: shallow ? 60 : 40,
         backBufferLength: 30,
-        manifestLoadingTimeOut: 4000,
+        // Proxy manifest timeout is 5s (Zixi long-poll) — client timeout must
+        // clear that with margin, or hls.js fires a fatal error mid-request.
+        manifestLoadingTimeOut: 10000,
         manifestLoadingMaxRetry: 6,
-        manifestLoadingRetryDelay: 250,
-        levelLoadingTimeOut: 4000,
+        manifestLoadingRetryDelay: 300,
+        levelLoadingTimeOut: 10000,
         levelLoadingMaxRetry: 6,
-        levelLoadingRetryDelay: 250,
-        fragLoadingTimeOut: 12000,
+        levelLoadingRetryDelay: 300,
+        fragLoadingTimeOut: 15000,
         fragLoadingMaxRetry: 4,
         xhrSetup(xhr, requestUrl) {
           const resolved = resolvePlaybackXhrUrl(requestUrl);
@@ -512,6 +553,26 @@ export default function HlsPlayer({
         if (!data.fatal) {
           return;
         }
+
+        // End-of-stream: Zixi tears down the input; playlist refresh can 404 or
+        // return an unparseable body. If we already played video, treat as EOS.
+        const parseEos =
+          data.details === Hls.ErrorDetails.LEVEL_PARSING_ERROR ||
+          data.details === Hls.ErrorDetails.LEVEL_EMPTY_ERROR ||
+          data.response?.code === 404;
+        if (parseEos && hlsPlaybackOk(sessionRef.current)) {
+          pushDiag("eos_graceful=playlist_gone_after_playback_ok");
+          try {
+            hls.stopLoad();
+          } catch {
+            /* ignore */
+          }
+          setError(null);
+          lastErrorRef.current = null;
+          setStatus("Playback OK");
+          return;
+        }
+
         const detail =
           data.response?.code === 404
             ? "HLS segment or playlist not found. Is the stream still live on Zixi?"
@@ -524,7 +585,13 @@ export default function HlsPlayer({
       });
 
       video.addEventListener("loadeddata", () => noteVideoProgress("loadeddata"));
-      video.addEventListener("playing", () => noteVideoProgress("playing"));
+      video.addEventListener("playing", () => {
+        noteVideoProgress("playing");
+        rebufferRef.current.endWait();
+      });
+      video.addEventListener("waiting", () => {
+        rebufferRef.current.beginWait(sessionRef.current.ttffMs > 0);
+      });
       video.addEventListener("timeupdate", () => {
         if (destroyed) {
           return;
@@ -570,7 +637,7 @@ export default function HlsPlayer({
 
   return (
     <div className="player-surface">
-      <video ref={videoRef} className="player-video" controls playsInline muted />
+      <video ref={videoRef} className="player-video" controls playsInline muted autoPlay />
       <div className="player-meta">
         <span>{label}</span>
         <span className="hint">{status}</span>

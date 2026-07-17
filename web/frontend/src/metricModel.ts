@@ -10,8 +10,6 @@ export type MetricStageId =
   | "metadata"
   | "client"
   | "encode"
-  | "video_quality"
-  | "transport"
   | "ingest"
   | "media_health"
   | "playback";
@@ -37,24 +35,15 @@ export const METRIC_STAGES: MetricStage[] = [
   },
   {
     id: "encode",
-    title: "Encode",
-    description: "Encoder output before the network path.",
-  },
-  {
-    id: "video_quality",
-    title: "Video Quality",
-    description: "VMAF / PSNR / SSIM on encoder output and/or ingest recording.",
-  },
-  {
-    id: "transport",
-    title: "Network transport",
-    description: "Normalized net_* fields filled from SRT, QUIC, or best-effort proxies.",
+    title: "Encode/Publish",
+    description:
+      "Publisher-side metrics: bitrate, frame rate, send rate, client memory/jitter, encode lag/speed/FPS stability, and encoder-side VMAF/PSNR/SSIM.",
   },
   {
     id: "ingest",
     title: "Ingest",
     description:
-      "Normalized ingest host health + path recovery (CPU/mem/disk, loss%, retrans%), plus protocol detail (MoQ relay counters, SRT/Zixi recovery).",
+      "Normalized path health (RTT, jitter, loss%, retrans%) + ingest host health (CPU/mem/disk), protocol detail (MoQ relay counters, SRT/Zixi recovery), and post-ingest-recording VMAF/PSNR/SSIM.",
   },
   {
     id: "media_health",
@@ -89,7 +78,7 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   net_send_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   net_recv_mbps: ["srt"],
   net_loss_pct: ["srt", "moq"],
-  net_retrans_pct: ["srt"],
+  net_retrans_pct: ["srt", "moq"],
   net_fec_pct: ["srt"],
 
   // Legacy aliases (same support as normalized)
@@ -111,10 +100,8 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   pkt_retrans: ["srt"],
   pkt_fec_extra: ["srt"],
   pkt_snd_loss: ["srt"],
-  moqx_subscribe_success: ["moq"],
   moqx_subscribe_error: ["moq"],
   moqx_publish_namespace_success: ["moq"],
-  moqx_publish_received: ["moq"],
   moqx_publish_done: ["moq"],
 
   // Media Health (container/timeline — not transport)
@@ -126,15 +113,22 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   cmaf_parse_errors: ["moq"],
   cmaf_fragment_count: ["moq"],
 
-  // Video quality
+  // Video quality (combined + staged encoder/ingest variants)
   vmaf_score: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   psnr_db: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   ssim: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  vmaf_score_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  psnr_db_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  ssim_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  vmaf_score_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  psnr_db_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  ssim_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Playback (normalized)
   playback_ttff_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_stall_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_buffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  playback_rebuffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_bitrate_bps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_frames_rendered: ["moq", "srt", "hls"],
   playback_frames_dropped: ["moq", "srt", "hls"],
@@ -166,7 +160,7 @@ export function metricUnavailableMessage(metricKey: string, protocol: ProtocolId
   if (!supported || supported.length === 0) {
     return `Not available with protocol ${proto}`;
   }
-  if (metricKey.startsWith("moqx_") || metricKey === "quic_rtt_ms") {
+  if (metricKey.startsWith("moqx_") || metricKey.startsWith("quic_")) {
     return `Not available with protocol ${proto} (MoQ relay / QUIC only)`;
   }
   if (metricKey.startsWith("cmaf_")) {

@@ -9,12 +9,11 @@ import {
   fetchQualityAvailable,
   fetchUpload,
   fetchVmafAvailable,
-  resultDownloadUrl,
   resultFilenameFromPath,
   stopUpload,
   subscribeToUpload,
 } from "./api";
-import { MetricLabel } from "./MetricLabel";
+import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { EndpointSection } from "./EndpointSection";
 import { AboutPage } from "./AboutPage";
@@ -25,7 +24,6 @@ import { playbackGateForJob } from "./playbackGate";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import {
   INGEST_ENDPOINTS,
-  ingestEndpointLabel,
   isCustomIngestEndpoint,
   presetIdForIngest,
   resolveEndpointUrl,
@@ -99,19 +97,15 @@ function buildDefaultEndpoints(): EndpointConfig[] {
 }
 
 function endpointLabel(endpoint: EndpointConfig, index: number): string {
-  if (!isCustomIngestEndpoint(endpoint.ingestEndpointId)) {
-    const ingest = ingestEndpointLabel(endpoint.ingestEndpointId);
-    return `Stream ${index + 1} (${ingest} · ${endpoint.protocol.toUpperCase()})`;
-  }
-  if (endpoint.endpointUrl.trim()) {
-    try {
-      const host = new URL(endpoint.endpointUrl).hostname;
-      return `Stream ${index + 1} (${host})`;
-    } catch {
-      return `Stream ${index + 1} (custom)`;
-    }
-  }
-  return `Stream ${index + 1} (${endpoint.protocol})`;
+  return `Stream ${index + 1} (${endpoint.protocol.toUpperCase()})`;
+}
+
+function sessionDownloadStreams(
+  legs: ComparisonLegState[],
+): { label: string; filename: string }[] {
+  return legs
+    .map((leg) => ({ label: leg.label, filename: resultFilenameFromPath(leg.job.csv_path) }))
+    .filter((entry): entry is { label: string; filename: string } => Boolean(entry.filename));
 }
 
 function resolvePresetId(endpoint: EndpointConfig): string | undefined {
@@ -126,6 +120,10 @@ function isIngestEndpointAvailable(endpoint: EndpointConfig): boolean {
     return true;
   }
   return INGEST_ENDPOINTS.find((item) => item.id === endpoint.ingestEndpointId)?.available ?? false;
+}
+
+function isEncodeFinished(job: UploadJob): boolean {
+  return job.status === "completed" || job.status === "failed";
 }
 
 function isLegFinished(job: UploadJob, ingestVmafRequested: boolean): boolean {
@@ -148,7 +146,7 @@ function App() {
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
   const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
   const [, setMediaPath] = useState("dummy.mp4");
-  const [mediaLabel, setMediaLabel] = useState("Default Color Bar Asset (dummy.mp4)");
+  const [mediaLabel, setMediaLabel] = useState("Default Color Bars");
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
@@ -570,8 +568,10 @@ function App() {
               latestSample: leg.latestSample,
             };
           });
-          if (next.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested))) {
+          if (next.every((leg) => isEncodeFinished(leg.job))) {
             onAllFinished?.();
+          }
+          if (next.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested))) {
             void loadSessionMetricsFromLegs(next);
           }
           return next;
@@ -597,7 +597,7 @@ function App() {
         const details = await Promise.all(entries.map((entry) => fetchResultDetail(entry.filename)));
         setSessionMetrics(details);
         setSessionMetricLabels(entries.map((entry) => entry.label));
-        setTab("metrics");
+        // Stay on Benchmark so player diagnostics remain visible after the run.
         return;
       } catch {
         await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)));
@@ -728,8 +728,10 @@ function App() {
     }
   }
 
-  async function handleStopWebcam() {
-    setWebcamStatus("Stopping live webcam and encoders…");
+  async function handleStopComparison() {
+    setWebcamStatus(
+      mediaSource === "webcam" ? "Stopping live webcam and encoders…" : "Stopping comparison…",
+    );
     liveBroadcastRef.current?.stop();
     liveBroadcastRef.current = null;
     const stream = webcamStreamRef.current;
@@ -762,9 +764,9 @@ function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">Streaming benchmark platform</p>
-          <h1>MoQ Test Tools</h1>
+          <h1>MOQ Ingest Testing</h1>
           <p className="subtitle">
-            Compare two or more live ingest protocols side by side.
+            Compare two or more live ingest protocols and/or network paths side by side.
           </p>
         </div>
         <nav className="tabs">
@@ -791,146 +793,122 @@ function App() {
 
       <main>
         {tab === "benchmark" && (
-          <section className="panel-grid">
-            <div className="panel">
-              <h2>Upload configuration</h2>
+          <>
+            <section className="panel benchmark-shared">
+              <h2>Benchmark</h2>
               <p className="hint">
-                Configure each stream side by side. Shared media and quality options sit below.
-                Choose the playback player under each Preview.
+                Shared encode settings apply to every stream. Configure each stream in its column,
+                then start the comparison.
               </p>
 
-              <div className="endpoints-grid">
-                {endpoints.map((endpoint, index) => (
-                  <EndpointSection
-                    key={endpoint.id}
-                    index={index}
-                    endpoint={endpoint}
-                    protocols={protocols}
-                    presets={presets}
-                    bootstrapping={bootstrapping}
-                    apiOnline={apiOnline}
-                    canRemove={endpoints.length > MIN_ENDPOINTS}
-                    onChange={updateEndpoint}
-                    onRemove={removeEndpoint}
-                  />
-                ))}
-              </div>
-
-              {endpoints.length < MAX_ENDPOINTS && (
-                <button type="button" className="ghost-button add-output-button" onClick={addEndpoint}>
-                  Add another stream ({endpoints.length}/{MAX_ENDPOINTS})
-                </button>
-              )}
-
-              <div className="source-media-section">
-                <h3>Encode profile</h3>
-                <div className="encode-profile-grid">
-                  <label>
-                    Target bitrate / resolution
-                    <select
-                      value={encodeLadder}
-                      onChange={(e) => setEncodeLadder(e.target.value)}
-                      disabled={bootstrapping || !apiOnline || loading}
-                    >
-                      {ENCODE_LADDER_OPTIONS.map((ladder) => (
-                        <option key={ladder.id} value={ladder.id}>
-                          {ladder.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Target latency (ms)
-                    <input
-                      type="number"
-                      min={MIN_TARGET_LATENCY_MS}
-                      max={MAX_TARGET_LATENCY_MS}
-                      step={50}
-                      value={targetLatencyMs}
-                      disabled={bootstrapping || !apiOnline || loading}
-                      onChange={(e) =>
-                        setTargetLatencyMs(clampTargetLatencyMs(Number(e.target.value)))
-                      }
-                    />
-                  </label>
-                </div>
-                <p className="hint">
-                  Latency ({MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS} ms) scales encoder GOP /
-                  VBV, SRT/Zixi latency, MoQ player catch-up, and HLS live buffer (default 2×2s
-                  segments = 4s, down to 1s). Bitrate sets
-                  H.264 scale + target/maxrate for every comparison leg.
-                </p>
-              </div>
-
-              <div className="source-media-section">
-                <h3>Media</h3>
-                <label>
-                  Source
-                  <select
-                    value={mediaSource}
-                    onChange={(e) => {
-                      const next = e.target.value as MediaSourceId;
-                      setMediaSource(next);
-                      if (next === "dummy") {
-                        setMediaPath("dummy.mp4");
-                        setMediaLabel("Default Color Bar Asset (dummy.mp4)");
-                      } else if (next === "bbb") {
-                        setMediaLabel("Big Buck Bunny (coming soon)");
-                      } else {
-                        setMediaLabel("Webcam");
-                      }
-                    }}
-                  >
-                    <option value="dummy">Default Color Bar Asset (dummy.mp4)</option>
-                    <option value="bbb" disabled>
-                      Big Buck Bunny (coming soon)
-                    </option>
-                    <option value="webcam">Webcam</option>
-                  </select>
-                </label>
-                {mediaSource === "dummy" && (
-                  <p className="hint">
-                    Uses the built-in color-bar asset. Encode length matches the file duration
-                    (about 60s).
-                  </p>
-                )}
-                {mediaSource === "webcam" && (
-                  <div className="webcam-preview-block">
-                    <video
-                      ref={webcamPreviewRef}
-                      className="webcam-preview"
-                      muted
-                      playsInline
-                      autoPlay
-                    />
-                    <p className="hint">
-                      {webcamStatus ??
-                        `Live camera → ffmpeg → Zixi/MoQ. Press Stop when finished. Auto-stops after ${webcamCaptureSeconds() / 60} minutes for safety. Preview players show the live encode (not a pre-recorded file). VMAF is disabled for live webcam.`}
-                    </p>
+              <div className="benchmark-shared-grid">
+                <div className="source-media-section">
+                  <h3>Encode profile</h3>
+                  <div className="encode-profile-grid">
+                    <label>
+                      Target bitrate / resolution
+                      <select
+                        value={encodeLadder}
+                        onChange={(e) => setEncodeLadder(e.target.value)}
+                        disabled={bootstrapping || !apiOnline || loading}
+                      >
+                        {ENCODE_LADDER_OPTIONS.map((ladder) => (
+                          <option key={ladder.id} value={ladder.id}>
+                            {ladder.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Target latency (ms)
+                      <input
+                        type="number"
+                        min={MIN_TARGET_LATENCY_MS}
+                        max={MAX_TARGET_LATENCY_MS}
+                        step={50}
+                        value={targetLatencyMs}
+                        disabled={bootstrapping || !apiOnline || loading}
+                        onChange={(e) =>
+                          setTargetLatencyMs(clampTargetLatencyMs(Number(e.target.value)))
+                        }
+                      />
+                      <span className="field-hint">
+                        Latency tunes encoder GOP/VBV, SRT/Zixi latency, MoQ catch-up, and HLS live
+                        buffer.
+                      </span>
+                    </label>
                   </div>
-                )}
-                {mediaSource !== "webcam" && mediaSource !== "dummy" && (
-                  <p className="hint">Using: {mediaLabel}</p>
-                )}
-              </div>
+                </div>
 
-              <div className="vmaf-section">
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={computeVmaf && mediaSource !== "webcam"}
-                    disabled={!vmafSelectable || mediaSource === "webcam"}
-                    onChange={(e) => setComputeVmaf(e.target.checked)}
-                  />
-                  <span>Compute VMAF — encoder + ingest (VMAF, PSNR, SSIM)</span>
-                </label>
-                <p className="hint">
-                  Encoder: scores the ffmpeg output before it leaves this host.
-                  <br />
-                  Ingest: scores the recording after upload. Runs on the ingest server.
-                  Requires the color-bar (or uploaded) file — not live webcam.
-                </p>
-                {vmafUnavailableReason && <p className="hint">{vmafUnavailableReason}</p>}
+                <div className="source-media-section">
+                  <h3>Media</h3>
+                  <label>
+                    Source
+                    <select
+                      value={mediaSource}
+                      onChange={(e) => {
+                        const next = e.target.value as MediaSourceId;
+                        setMediaSource(next);
+                        if (next === "dummy") {
+                          setMediaPath("dummy.mp4");
+                          setMediaLabel("Default Color Bars");
+                        } else if (next === "bbb") {
+                          setMediaLabel("Big Buck Bunny (coming soon)");
+                        } else {
+                          setMediaLabel("Webcam");
+                        }
+                      }}
+                    >
+                      <option value="dummy">Default Color Bars</option>
+                      <option value="bbb" disabled>
+                        Big Buck Bunny (coming soon)
+                      </option>
+                      <option value="webcam">Webcam</option>
+                    </select>
+                    {mediaSource === "dummy" && (
+                      <span className="field-hint">
+                        Color Bars with time counter, 60 second asset
+                      </span>
+                    )}
+                    {mediaSource !== "webcam" && mediaSource !== "dummy" && (
+                      <span className="field-hint">Using: {mediaLabel}</span>
+                    )}
+                  </label>
+                  {mediaSource === "webcam" && (
+                    <div className="webcam-preview-block">
+                      <video
+                        ref={webcamPreviewRef}
+                        className="webcam-preview"
+                        muted
+                        playsInline
+                        autoPlay
+                      />
+                      <span className="field-hint">
+                        {webcamStatus ??
+                          `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="vmaf-section">
+                  <h3>Quality</h3>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={computeVmaf && mediaSource !== "webcam"}
+                      disabled={!vmafSelectable || mediaSource === "webcam"}
+                      onChange={(e) => setComputeVmaf(e.target.checked)}
+                    />
+                    <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
+                  </label>
+                  <span className="field-hint">
+                    Encoder scores local capture; ingest scores the remote recording.
+                  </span>
+                  {vmafUnavailableReason && (
+                    <span className="field-hint">{vmafUnavailableReason}</span>
+                  )}
+                </div>
               </div>
 
               {error && <p className="error">{error}</p>}
@@ -954,222 +932,228 @@ function App() {
                       ? "Running comparison..."
                       : `Start comparison (${endpoints.length} streams)`}
                 </button>
-                {loading && mediaSource === "webcam" && (
-                  <button className="secondary-button stop-webcam-button" onClick={() => void handleStopWebcam()}>
-                    Stop webcam
+                {loading && (
+                  <button
+                    className="secondary-button stop-webcam-button"
+                    onClick={() => void handleStopComparison()}
+                  >
+                    {mediaSource === "webcam" ? "Stop webcam" : "Stop comparison"}
                   </button>
                 )}
               </div>
+            </section>
 
-              <div className="player-grid benchmark-players">
-                {endpoints.map((endpoint, index) => (
-                  <StreamPlayer
-                    key={`${endpoint.id}:${endpoint.playbackMode ?? "auto"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
-                    title={`Stream ${index + 1} Preview`}
-                    protocol={endpoint.protocol}
-                    endpointUrl={resolveEndpointUrl(endpoint, presets)}
-                    ingestEndpointId={endpoint.ingestEndpointId}
-                    playbackMode={endpoint.playbackMode}
-                    playbackDvr={false}
-                    whepPlaybackUrl={endpoint.whepPlaybackUrl}
-                    moqRelayUrl={endpoint.moqRelayUrl}
-                    moqFingerprintUrl={endpoint.moqFingerprintUrl}
-                    moqNamespace={
-                      comparisonLegs[index]?.job.moq_namespace ??
-                      (comparisonLegs[index] ? undefined : endpoint.moqNamespace)
-                    }
-                    playbackGate={playbackGateForJob(comparisonLegs[index]?.job, loading)}
-                    jobId={comparisonLegs[index]?.job.id}
-                    encodeStartedAtEpoch={comparisonLegs[index]?.job.started_at_epoch}
-                    onPlaybackSample={(playback) => {
-                      const jobId = comparisonLegs[index]?.job.id;
-                      if (!jobId) {
-                        return;
-                      }
-                      setComparisonLegs((current) =>
-                        current.map((leg) =>
-                          leg.id === jobId
-                            ? {
-                                ...leg,
-                                samples: mergePlaybackSampleIntoUploadSample(leg.samples, playback),
-                              }
-                            : leg,
-                        ),
-                      );
-                    }}
-                    jobStatus={comparisonLegs[index]?.job.status}
-                    benchmarkLoading={loading}
-                    encodeDurationSec={comparisonLegs[index]?.job.duration_sec ?? 60}
-                    targetLatencyMs={moqPlayerTargetLatencyMs(
-                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
-                    )}
-                    hlsLiveSyncCount={hlsLiveSyncCount(
-                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
-                    )}
-                    hlsLiveSyncDurationSec={hlsLiveSyncDurationSec(
-                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
-                    )}
-                    controlsLocked={bootstrapping || !apiOnline}
-                    onPlaybackModeChange={(mode) =>
-                      updateEndpoint(endpoint.id, { playbackMode: mode })
-                    }
-                    onWhepPlaybackUrlChange={(url) =>
-                      updateEndpoint(endpoint.id, { whepPlaybackUrl: url })
-                    }
-                  />
-                ))}
-              </div>
-            </div>
+            <section className="benchmark-streams">
+              {endpoints.map((endpoint, index) => {
+                const leg = comparisonLegs[index];
+                return (
+                  <article key={endpoint.id} className="stream-column panel">
+                    <EndpointSection
+                      index={index}
+                      endpoint={endpoint}
+                      protocols={protocols}
+                      presets={presets}
+                      bootstrapping={bootstrapping}
+                      apiOnline={apiOnline}
+                      canRemove={endpoints.length > MIN_ENDPOINTS}
+                      onChange={updateEndpoint}
+                      onRemove={removeEndpoint}
+                    />
 
-            <div className="panel status-panel">
-              <h2>Comparison status</h2>
-              {comparisonLegs.length === 0 && (
-                <p className="muted">Start a comparison to see all uploads side by side.</p>
-              )}
-
-              {comparisonLegs.length > 0 && (
-                <div className="comparison-status-grid">
-                  {comparisonLegs.map((leg) => (
-                    <div key={leg.id} className="status-card">
-                      <div className="status-row">
-                        <span>{leg.label}</span>
-                        <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
-                      </div>
-                      <div className="status-row">
-                        <span>Job</span>
-                        <code>{leg.job.id.slice(0, 8)}</code>
-                      </div>
-                      {leg.encoderVmafRequested && (
-                        <div className="status-row">
-                          <span>Encoder quality</span>
-                          <strong className={`pill ${leg.job.encoder_vmaf_status ?? "disabled"}`}>
-                            {formatVmafStatus(leg.job.encoder_vmaf_status)}
-                            {formatQualityScores(
-                              leg.job.encoder_vmaf_score,
-                              leg.job.encoder_psnr_db,
-                              leg.job.encoder_ssim,
-                            )}
-                          </strong>
-                        </div>
-                      )}
-                      {leg.ingestVmafRequested && (
-                        <div className="status-row">
-                          <span>Ingest quality</span>
-                          <strong className={`pill ${leg.job.vmaf_status ?? "disabled"}`}>
-                            {formatVmafStatus(leg.job.vmaf_status)}
-                            {formatQualityScores(leg.job.vmaf_score, leg.job.psnr_db, leg.job.ssim)}
-                          </strong>
-                        </div>
-                      )}
-                      <div className="status-row">
-                        <span>Endpoint</span>
-                        <code>{leg.job.endpoint_url}</code>
-                      </div>
-                      {leg.latestSample && (
-                        <div className="metrics-grid comparison-metrics">
-                          <Metric
-                            metricKey="encoded_bitrate_kbps"
-                            label="Bitrate"
-                            value={`${leg.latestSample.encoded_bitrate_kbps.toFixed(0)} kbps`}
-                          />
-                          <Metric
-                            metricKey="encoder_send_rate_mbps"
-                            label="Send rate"
-                            value={
-                              leg.latestSample.encoder_send_rate_mbps
-                                ? `${leg.latestSample.encoder_send_rate_mbps.toFixed(2)} Mbps`
-                                : "—"
-                            }
-                          />
-                          <Metric
-                            metricKey="transport_rtt_ms"
-                            label="RTT"
-                            value={
-                              leg.latestSample.transport_rtt_ms
-                                ? `${leg.latestSample.transport_rtt_ms.toFixed(1)} ms`
-                                : "—"
-                            }
-                          />
-                          <Metric
-                            metricKey="fps"
-                            label="FPS"
-                            value={leg.latestSample.fps.toFixed(1)}
-                          />
-                          <Metric
-                            metricKey="client_memory_percent"
-                            label="Client mem"
-                            value={
-                              leg.latestSample.client_memory_percent
-                                ? `${leg.latestSample.client_memory_percent.toFixed(1)}%`
-                                : "—"
-                            }
-                          />
-                          {(leg.latestSample.server_cpu_percent ?? 0) > 0 && (
-                            <Metric
-                              metricKey="server_cpu_percent"
-                              label="Server CPU"
-                              value={`${leg.latestSample.server_cpu_percent?.toFixed(1)}%`}
-                            />
-                          )}
-                        </div>
-                      )}
-                      {leg.job.encoder_vmaf_error && <p className="error">{leg.job.encoder_vmaf_error}</p>}
-                      {leg.job.vmaf_error && <p className="error">{leg.job.vmaf_error}</p>}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {!loading &&
-                comparisonLegs.length > 0 &&
-                comparisonLegs.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested)) && (
-                  <div className="session-download-strip">
-                    <p className="hint">
-                      Download this session’s raw metrics, or open Session Details for the scorecard.
-                    </p>
-                    <div className="download-actions">
-                      {comparisonLegs.map((leg) => {
-                        const filename = resultFilenameFromPath(leg.job.csv_path);
-                        if (!filename) {
-                          return null;
+                    <div className="stream-column-preview">
+                      <StreamPlayer
+                        key={`${endpoint.id}:${endpoint.playbackMode ?? "auto"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
+                        title={`Stream ${index + 1}`}
+                        compactHeader
+                        protocol={endpoint.protocol}
+                        endpointUrl={resolveEndpointUrl(endpoint, presets)}
+                        ingestEndpointId={endpoint.ingestEndpointId}
+                        playbackMode={endpoint.playbackMode}
+                        playbackDvr={false}
+                        whepPlaybackUrl={endpoint.whepPlaybackUrl}
+                        moqRelayUrl={endpoint.moqRelayUrl}
+                        moqFingerprintUrl={endpoint.moqFingerprintUrl}
+                        moqNamespace={
+                          leg?.job.moq_namespace ?? (leg ? undefined : endpoint.moqNamespace)
                         }
-                        return (
-                          <div key={leg.id} className="session-download-inline">
-                            <span>{leg.label}</span>
-                            <a className="csv-download" href={resultDownloadUrl(filename, "csv")} download>
-                              CSV
-                            </a>
-                            <a className="csv-download" href={resultDownloadUrl(filename, "json")} download>
-                              JSON
-                            </a>
-                          </div>
-                        );
-                      })}
-                      <button type="button" className="secondary-button" onClick={() => setTab("metrics")}>
-                        Open Session Details
-                      </button>
+                        zixiStreamId={leg?.job.zixi_stream_id ?? undefined}
+                        playbackGate={playbackGateForJob(leg?.job, loading)}
+                        jobId={leg?.job.id}
+                        encodeStartedAtEpoch={leg?.job.started_at_epoch}
+                        onPlaybackSample={(playback) => {
+                          const jobId = comparisonLegs[index]?.job.id;
+                          if (!jobId) {
+                            return;
+                          }
+                          setComparisonLegs((current) =>
+                            current.map((item) =>
+                              item.id === jobId
+                                ? {
+                                    ...item,
+                                    samples: mergePlaybackSampleIntoUploadSample(
+                                      item.samples,
+                                      playback,
+                                    ),
+                                  }
+                                : item,
+                            ),
+                          );
+                        }}
+                        jobStatus={leg?.job.status}
+                        benchmarkLoading={loading}
+                        encodeDurationSec={leg?.job.duration_sec ?? 60}
+                        targetLatencyMs={moqPlayerTargetLatencyMs(
+                          leg?.job.target_latency_ms ?? targetLatencyMs,
+                        )}
+                        hlsLiveSyncCount={hlsLiveSyncCount(
+                          leg?.job.target_latency_ms ?? targetLatencyMs,
+                        )}
+                        hlsLiveSyncDurationSec={hlsLiveSyncDurationSec(
+                          leg?.job.target_latency_ms ?? targetLatencyMs,
+                        )}
+                        controlsLocked={bootstrapping || !apiOnline}
+                        onPlaybackModeChange={(mode) =>
+                          updateEndpoint(endpoint.id, { playbackMode: mode })
+                        }
+                        onWhepPlaybackUrlChange={(url) =>
+                          updateEndpoint(endpoint.id, { whepPlaybackUrl: url })
+                        }
+                      />
                     </div>
-                  </div>
-                )}
 
-              {(loading || comparisonLegs.some((leg) => leg.samples.length > 0)) && (
-                <div className="live-charts">
-                  <h3>Comparison charts</h3>
-                  <ComparisonCharts
-                    legs={comparisonLegs.map((leg) => ({
-                      id: leg.id,
-                      label: leg.label,
-                      protocol: leg.protocol,
-                      samples: leg.samples,
-                      vmafScore: leg.job.vmaf_score,
-                      psnrDb: leg.job.psnr_db,
-                      ssim: leg.job.ssim,
-                    }))}
-                  />
-                </div>
+                    <div className="stream-column-status">
+                      {leg ? (
+                        <>
+                          <div className="status-row">
+                            <span>Status</span>
+                            <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
+                          </div>
+                          <div className="status-row">
+                            <span>Job</span>
+                            <code>{leg.job.id.slice(0, 8)}</code>
+                          </div>
+                          {leg.encoderVmafRequested && (
+                            <div className="status-row">
+                              <span>Encoder quality</span>
+                              <strong className={`pill ${leg.job.encoder_vmaf_status ?? "disabled"}`}>
+                                {formatVmafStatus(leg.job.encoder_vmaf_status)}
+                                {formatQualityScores(
+                                  leg.job.encoder_vmaf_score,
+                                  leg.job.encoder_psnr_db,
+                                  leg.job.encoder_ssim,
+                                )}
+                              </strong>
+                            </div>
+                          )}
+                          {leg.ingestVmafRequested && (
+                            <div className="status-row">
+                              <span>Ingest quality</span>
+                              <strong className={`pill ${leg.job.vmaf_status ?? "disabled"}`}>
+                                {formatVmafStatus(leg.job.vmaf_status)}
+                                {formatQualityScores(leg.job.vmaf_score, leg.job.psnr_db, leg.job.ssim)}
+                              </strong>
+                            </div>
+                          )}
+                          {leg.job.encoder_vmaf_error && (
+                            <p className="error">{leg.job.encoder_vmaf_error}</p>
+                          )}
+                          {leg.job.vmaf_error && <p className="error">{leg.job.vmaf_error}</p>}
+                        </>
+                      ) : (
+                        <p className="muted stream-status-idle">Waiting to start</p>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+
+              {endpoints.length < MAX_ENDPOINTS && (
+                <article className="stream-column-add">
+                  <button
+                    type="button"
+                    className="stream-column-add-button"
+                    onClick={addEndpoint}
+                    disabled={bootstrapping || !apiOnline || loading}
+                    aria-label={`Add another stream (${endpoints.length} of ${MAX_ENDPOINTS})`}
+                  >
+                    <span className="stream-column-add-icon" aria-hidden="true">
+                      +
+                    </span>
+                    <span className="stream-column-add-label">Add stream</span>
+                    <span className="stream-column-add-meta">
+                      {endpoints.length}/{MAX_ENDPOINTS}
+                    </span>
+                  </button>
+                </article>
               )}
-            </div>
-          </section>
+            </section>
+
+            {!loading &&
+              comparisonLegs.length > 0 &&
+              comparisonLegs.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested)) && (
+                <section className="session-download-strip benchmark-download">
+                  <p className="hint">
+                    Download this session’s raw metrics, or open Session Details for the scorecard.
+                  </p>
+                  <div className="download-actions">
+                    <button
+                      type="button"
+                      className="csv-download"
+                      onClick={() =>
+                        void downloadCombinedCsv(
+                          sessionDownloadStreams(comparisonLegs),
+                          "comparison.csv",
+                        )
+                      }
+                    >
+                      Download CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="csv-download"
+                      onClick={() =>
+                        void downloadCombinedJson(
+                          sessionDownloadStreams(comparisonLegs),
+                          "comparison.json",
+                        )
+                      }
+                    >
+                      Download JSON
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setTab("metrics")}
+                    >
+                      Open Session Details
+                    </button>
+                  </div>
+                </section>
+              )}
+
+            {(loading || comparisonLegs.some((leg) => leg.samples.length > 0)) && (
+              <section className="panel live-charts-panel">
+                <h2>Comparison charts</h2>
+                <ComparisonCharts
+                  legs={comparisonLegs.map((leg) => ({
+                    id: leg.id,
+                    label: leg.label,
+                    protocol: leg.protocol,
+                    samples: leg.samples,
+                    vmafScore: leg.job.vmaf_score,
+                    psnrDb: leg.job.psnr_db,
+                    ssim: leg.job.ssim,
+                    vmafScoreEncoder: leg.job.encoder_vmaf_score,
+                    psnrDbEncoder: leg.job.encoder_psnr_db,
+                    ssimEncoder: leg.job.encoder_ssim,
+                    vmafScoreIngest: leg.job.vmaf_score,
+                    psnrDbIngest: leg.job.psnr_db,
+                    ssimIngest: leg.job.ssim,
+                  }))}
+                />
+              </section>
+            )}
+          </>
         )}
 
         {tab === "metrics" && (
@@ -1208,23 +1192,6 @@ function formatQualityScores(
     parts.push(`SSIM ${ssim}`);
   }
   return parts.length > 0 ? ` (${parts.join(" · ")})` : "";
-}
-
-function Metric({
-  metricKey,
-  label,
-  value,
-}: {
-  metricKey: string;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="metric">
-      <MetricLabel metricKey={metricKey} label={label} />
-      <strong>{value}</strong>
-    </div>
-  );
 }
 
 export default App;

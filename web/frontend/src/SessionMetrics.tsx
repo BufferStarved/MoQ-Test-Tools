@@ -1,3 +1,7 @@
+import { useMemo } from "react";
+import { downloadCombinedCsv, downloadCombinedJsonFromSummaries } from "./combinedDownload";
+import { ComparisonCharts } from "./ComparisonCharts";
+import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
 import type { ResultSummary } from "./types";
 
@@ -46,10 +50,6 @@ function streamLabel(result: ResultSummary, index: number, labels?: string[]): s
   return `Stream ${index + 1} (${result.protocol.toUpperCase()})`;
 }
 
-function downloadUrl(filename: string, kind: "csv" | "json"): string {
-  return `/api/results/${encodeURIComponent(filename)}/download?kind=${kind}`;
-}
-
 function healthTone(count?: number | null): "ok" | "warn" | "na" {
   if (count == null) {
     return "na";
@@ -77,6 +77,17 @@ function ScoreCell({
 }
 
 export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
+  const chartLegs = useMemo(() => {
+    const saved = streams.map((result, index) => {
+      const stream = resultToSavedStream(result, index);
+      return {
+        ...stream,
+        label: streamLabel(result, index, labels),
+      };
+    });
+    return savedStreamsToLegs(saved);
+  }, [streams, labels]);
+
   if (streams.length === 0) {
     return (
       <p className="muted">
@@ -92,30 +103,54 @@ export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
         <div>
           <h3>Last comparison · {streams.length} streams</h3>
           <p className="hint">
-            Post-run scorecard for the session that just finished. Download raw samples (CSV) or the
-            summary JSON per stream.
+            Post-run scorecard for the session that just finished. Download raw samples (CSV) or
+            the summary (JSON) for all streams combined into one file.
           </p>
+        </div>
+        <div className="download-actions">
+          <button
+            type="button"
+            className="csv-download"
+            onClick={() =>
+              void downloadCombinedCsv(
+                streams.map((result, index) => ({
+                  label: streamLabel(result, index, labels),
+                  filename: result.filename,
+                })),
+                "comparison.csv",
+              )
+            }
+          >
+            Download CSV
+          </button>
+          <button
+            type="button"
+            className="csv-download"
+            onClick={() =>
+              downloadCombinedJsonFromSummaries(
+                streams.map((result, index) => ({
+                  label: streamLabel(result, index, labels),
+                  summary: result as unknown as Record<string, unknown>,
+                })),
+                "comparison.json",
+              )
+            }
+          >
+            Download JSON
+          </button>
         </div>
       </div>
 
-      <div className="session-download-grid">
-        {streams.map((result, index) => (
-          <div key={result.filename} className="session-download-card">
-            <div>
-              <strong>{streamLabel(result, index, labels)}</strong>
-              <p className="hint endpoint-copy">{result.endpoint}</p>
-            </div>
-            <div className="download-actions">
-              <a className="csv-download" href={downloadUrl(result.filename, "csv")} download>
-                CSV
-              </a>
-              <a className="csv-download" href={downloadUrl(result.filename, "json")} download>
-                JSON
-              </a>
-            </div>
-          </div>
-        ))}
-      </div>
+      {chartLegs.length > 0 && (
+        <section className="scorecard-section session-charts-section">
+          <h4>Session charts</h4>
+          <p className="hint">
+            Same Encode/Publish, Ingest, Media Health, and Playback charts as the Benchmark tab,
+            built from the saved CSV for this session.
+          </p>
+          <ComparisonCharts legs={chartLegs} minLegs={1} />
+        </section>
+      )}
 
       <section className="scorecard-section">
         <h4>Latency & join</h4>

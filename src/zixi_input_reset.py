@@ -19,6 +19,7 @@ Configure with the same environment variables used by ZixiStatsPoller:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import time
@@ -32,6 +33,13 @@ _DEFAULT_REC_DURATION_SEC = 7200
 _DEFAULT_REC_HISTORY_SEC = 259200
 _DEFAULT_SRT_LATENCY_MS = 200
 _DEFAULT_SRT_MAX_BITRATE_BPS = 10_000_000
+# Bound on polling for remove/add to actually take effect before the encoder
+# starts pushing. A blind sleep(1) sometimes raced Zixi's own API (stream
+# still "removing" or not yet bound), which made the encoder connect to a
+# half-recreated input — the segmenter then never gets the fresh-object grace
+# it needs, and HLS silently stays 1-deep / stale for the whole job.
+_POLL_TIMEOUT_SEC = 6.0
+_POLL_INTERVAL_SEC = 0.3
 
 
 def _auth_header(user: str, password: str) -> str:
@@ -50,6 +58,57 @@ def _call(base_url: str, path_and_query: str, user: str, password: str) -> bool:
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("Zixi SRT input reset call failed (%s): %s", url, exc)
         return False
+
+
+def _stream_present(base_url: str, user: str, password: str, stream_id: str) -> bool | None:
+    """True/False if streams.json was readable, None if the check itself failed.
+
+    NOTE: combining pagesize+page+metadata on this endpoint makes Zixi return
+    an empty "streams" array (reproduced directly against the broadcaster
+    API), which silently broke every wait_for_stream_state confirmation.
+    metadata=0 alone still returns full stream entries, so use just that.
+    """
+    url = f"{base_url}/zixi/streams.json?metadata=0"
+    request = urllib.request.Request(url)
+    request.add_header("Authorization", _auth_header(user, password))
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read()
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    for stream in payload.get("streams", []):
+        if stream.get("id") == stream_id:
+            return True
+    return False
+
+
+def _wait_for_stream_state(
+    base_url: str,
+    user: str,
+    password: str,
+    stream_id: str,
+    *,
+    want_present: bool,
+) -> bool:
+    """Poll until the stream object's presence matches `want_present`.
+
+    Returns True once observed (or once the check API itself is unusable, so
+    callers still fall through to the push rather than blocking indefinitely).
+    """
+    deadline = time.monotonic() + _POLL_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        present = _stream_present(base_url, user, password, stream_id)
+        if present is None:
+            # Can't verify — don't spin on a broken API check.
+            return False
+        if present == want_present:
+            return True
+        time.sleep(_POLL_INTERVAL_SEC)
+    return False
 
 
 def reset_zixi_srt_input(
@@ -82,7 +141,13 @@ def reset_zixi_srt_input(
 
     logger.info("Resetting Zixi SRT input '%s' before push...", stream_id)
     _call(base_url, f"zixi/remove_stream.json?id={stream_enc}", user, password)
-    time.sleep(1)
+    if not _wait_for_stream_state(base_url, user, password, stream_id, want_present=False):
+        logger.warning(
+            "Zixi did not confirm '%s' removal within %.0fs; continuing anyway "
+            "(add_stream should still supersede it).",
+            stream_id,
+            _POLL_TIMEOUT_SEC,
+        )
 
     add_params = [
         ("id", stream_id),
@@ -139,4 +204,45 @@ def reset_zixi_srt_input(
         user,
         password,
     )
+
+    # Encoder must not start pushing before the new input object is bound —
+    # a push that lands during that gap gets treated as a reconnect on stale
+    # state, silently forfeiting the "first connection" grace the segmenter
+    # needs. This is the actual source of "sometimes HLS just never comes up."
+    if not _wait_for_stream_state(base_url, user, password, stream_id, want_present=True):
+        logger.warning(
+            "Zixi did not confirm '%s' was recreated within %.0fs; pushing anyway, "
+            "but HLS segmenting may not start cleanly for this job.",
+            stream_id,
+            _POLL_TIMEOUT_SEC,
+        )
+    return ok
+
+
+def remove_zixi_srt_input(
+    stream_id: str,
+    *,
+    base_url: str = "",
+    user: str = "",
+    password: str = "",
+) -> bool:
+    """Delete a Zixi SRT push input after a job finishes.
+
+    Per-job stream IDs (one input object per benchmark run) avoid the
+    first-connection segmenter race between overlapping jobs, but they also
+    mean Zixi's stream table accumulates one orphaned input per run unless
+    something deletes it afterwards. Best-effort — callers should not fail
+    the job over a cleanup error.
+    """
+    base_url = (base_url or os.environ.get("ZIXI_API_BASE", "")).rstrip("/")
+    user = user or os.environ.get("ZIXI_API_USER", "admin")
+    password = password or os.environ.get("ZIXI_API_PASSWORD", "")
+
+    if not base_url or not password:
+        return False
+
+    stream_enc = quote(stream_id, safe="")
+    logger.info("Removing per-job Zixi SRT input '%s' after push...", stream_id)
+    ok = _call(base_url, f"zixi/remove_stream.json?id={stream_enc}", user, password)
+    _wait_for_stream_state(base_url, user, password, stream_id, want_present=False)
     return ok

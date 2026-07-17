@@ -30,6 +30,7 @@ interface StreamPlayerProps {
   moqRelayUrl?: string;
   moqFingerprintUrl?: string;
   moqNamespace?: string;
+  zixiStreamId?: string;
   playbackGate?: PlaybackGate;
   jobId?: string;
   encodeStartedAtEpoch?: number | null;
@@ -43,6 +44,8 @@ interface StreamPlayerProps {
   controlsLocked?: boolean;
   onPlaybackModeChange?: (mode: PlaybackMode) => void;
   onWhepPlaybackUrlChange?: (url: string) => void;
+  /** When true, omit the card title (stream column already has a header). */
+  compactHeader?: boolean;
 }
 
 function PlayerFallback() {
@@ -60,6 +63,7 @@ export function StreamPlayer({
   moqRelayUrl = "",
   moqFingerprintUrl = "",
   moqNamespace = "",
+  zixiStreamId = "",
   playbackGate = "idle",
   jobId,
   encodeStartedAtEpoch,
@@ -73,6 +77,7 @@ export function StreamPlayer({
   controlsLocked = false,
   onPlaybackModeChange,
   onWhepPlaybackUrlChange,
+  compactHeader = false,
 }: StreamPlayerProps) {
   useEffect(() => {
     if (!onPlaybackModeChange) {
@@ -95,6 +100,7 @@ export function StreamPlayer({
         moqRelayUrl,
         moqFingerprintUrl,
         moqNamespace,
+        zixiStreamId,
       }),
     [
       protocol,
@@ -106,6 +112,7 @@ export function StreamPlayer({
       moqRelayUrl,
       moqFingerprintUrl,
       moqNamespace,
+      zixiStreamId,
     ],
   );
 
@@ -129,11 +136,55 @@ export function StreamPlayer({
       : playbackGate;
 
   return (
-    <div className="stream-player-card">
-      <div className="stream-player-header">
-        <h4>{title}</h4>
-        <span className="pill">{target.label}</span>
-      </div>
+    <div className={`stream-player-card${compactHeader ? " stream-player-card-embedded" : ""}`}>
+      {!compactHeader && (
+        <div className="stream-player-header">
+          <h4>{title}</h4>
+          <span className="pill">{target.label}</span>
+        </div>
+      )}
+      {compactHeader && (
+        <div className="stream-player-engine">
+          <span className="pill">{target.label}</span>
+        </div>
+      )}
+
+      {onPlaybackModeChange && (
+        <div className="player-playback-controls">
+          <label>
+            Video player
+            <select
+              value={playbackMode}
+              onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
+              disabled={controlsLocked}
+            >
+              {PLAYBACK_MODE_OPTIONS.map((item) => {
+                const compatible = isPlaybackModeCompatible(item.id, protocol);
+                return (
+                  <option key={item.id} value={item.id} disabled={!compatible}>
+                    {item.label}
+                    {!compatible ? " — incompatible with ingest" : ""}
+                  </option>
+                );
+              })}
+            </select>
+            {modeHint ? <span className="hint">{modeHint}</span> : null}
+          </label>
+          {showWhepField && onWhepPlaybackUrlChange && (
+            <label>
+              WHEP channel URL
+              <input
+                type="url"
+                value={whepPlaybackUrl}
+                onChange={(e) => onWhepPlaybackUrlChange(e.target.value)}
+                placeholder={whepPlaceholder}
+                disabled={controlsLocked}
+              />
+            </label>
+          )}
+        </div>
+      )}
+
       {target.url && target.engine !== "webrtc-embed" && (
         <p className="hint player-url">
           <code>{target.url}</code>
@@ -144,6 +195,7 @@ export function StreamPlayer({
           <code>{target.embedUrl}</code>
         </p>
       )}
+
       <PlayerErrorBoundary engine={target.engine}>
         <Suspense fallback={<PlayerFallback />}>
           {target.engine === "hls" && (
@@ -199,42 +251,6 @@ export function StreamPlayer({
           {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
         </Suspense>
       </PlayerErrorBoundary>
-
-      {onPlaybackModeChange && (
-        <div className="player-playback-controls">
-          <label>
-            Playback player
-            <select
-              value={playbackMode}
-              onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
-              disabled={controlsLocked}
-            >
-              {PLAYBACK_MODE_OPTIONS.map((item) => {
-                const compatible = isPlaybackModeCompatible(item.id, protocol);
-                return (
-                  <option key={item.id} value={item.id} disabled={!compatible}>
-                    {item.label}
-                    {!compatible ? " — incompatible with ingest" : ""}
-                  </option>
-                );
-              })}
-            </select>
-            <span className="hint">{modeHint}</span>
-          </label>
-          {showWhepField && onWhepPlaybackUrlChange && (
-            <label>
-              WHEP channel URL
-              <input
-                type="url"
-                value={whepPlaybackUrl}
-                onChange={(e) => onWhepPlaybackUrlChange(e.target.value)}
-                placeholder={whepPlaceholder}
-                disabled={controlsLocked}
-              />
-            </label>
-          )}
-        </div>
-      )}
     </div>
   );
 }

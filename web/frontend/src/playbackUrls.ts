@@ -11,12 +11,12 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "auto",
     label: "Auto (recommended)",
-    hint: "SRT/RTMP→Zixi HLS (browsers cannot open srt:// or rtmp://); MOQ→Chrome + WebTransport.",
+    hint: "",
   },
   {
     id: "hls",
     label: "HLS Playback (Live)",
-    hint: "HTTP Live Streaming via hls.js (Zixi live playlist). Not native SRT/RTMP.",
+    hint: "HTTP Live Streaming via hls.js (Zixi live playlist).",
   },
   {
     id: "dash",
@@ -26,22 +26,22 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "whep",
     label: "WHEP (WebRTC)",
-    hint: "Best low-latency SRT/RTMP alternative in-browser: WebRTC via a WHEP gateway.",
+    hint: "WebRTC via a WHEP gateway.",
   },
   {
     id: "moq",
     label: "MoQ Playback (Playa)",
-    hint: "Media over QUIC via the Playa MoQ player (@playa/player; Chrome/Edge + MoQ relay).",
+    hint: "Media over QUIC via Playa (Chrome/Edge + MoQ relay).",
   },
   {
     id: "webrtc",
     label: "WebRTC (Zixi)",
-    hint: "Zixi built-in WebRTC monitor player (iframe).",
+    hint: "Zixi built-in WebRTC monitor player.",
   },
   {
     id: "mpegts",
     label: "MPEG-TS over HTTP",
-    hint: "Lower-latency Zixi HTTP TS (mpegts.js) — still not raw SRT/RTMP in the browser.",
+    hint: "Lower-latency Zixi HTTP TS via mpegts.js.",
   },
   {
     id: "zixi-embed",
@@ -105,7 +105,13 @@ function parseStreamId(
   endpointUrl: string,
   protocol: string,
   ingestEndpointId?: string,
+  zixiStreamId?: string,
 ): string {
+  // Prefer the job's Zixi stream id (e.g. "SRT Test") over any streamid baked
+  // into the preset URL so HLS tracks the same input the encoder publishes to.
+  if (protocol === "srt" && zixiStreamId?.trim()) {
+    return zixiStreamId.trim();
+  }
   if (!endpointUrl.trim()) {
     return DEFAULT_STREAM_ID;
   }
@@ -260,6 +266,7 @@ export function resolvePlaybackTarget(options: {
   moqRelayUrl?: string;
   moqFingerprintUrl?: string;
   moqNamespace?: string;
+  zixiStreamId?: string;
 }): PlaybackTarget {
   const mode = options.playbackMode ?? "auto";
   const dvr = options.playbackDvr ?? false;
@@ -268,6 +275,7 @@ export function resolvePlaybackTarget(options: {
     options.endpointUrl,
     options.protocol,
     options.ingestEndpointId,
+    options.zixiStreamId,
   );
   const zixiManaged = isZixiManagedHost(host, options.ingestEndpointId);
   const resolvedHost = host ?? "35.222.33.58";

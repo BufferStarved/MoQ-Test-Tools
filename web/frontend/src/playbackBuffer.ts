@@ -24,6 +24,49 @@ export function bufferedAheadSec(media: HTMLMediaElement | null | undefined): nu
   return 0;
 }
 
+/**
+ * Tracks cumulative rebuffer time from `waiting` → `playing` brackets on a
+ * native `<video>` element. Ignores stalls before first playback (ttff==0)
+ * so initial join/pre-roll buffering isn't counted as a rebuffer.
+ */
+export class RebufferTracker {
+  private waitingSinceMs = 0;
+  private totalMs = 0;
+
+  /** Call from the element's `waiting` handler. */
+  beginWait(hasPlayedOnce: boolean): void {
+    if (!hasPlayedOnce || this.waitingSinceMs > 0) {
+      return;
+    }
+    this.waitingSinceMs = Date.now();
+  }
+
+  /** Call from the element's `playing` (or `canplay`) handler. */
+  endWait(): void {
+    if (this.waitingSinceMs <= 0) {
+      return;
+    }
+    this.totalMs += Date.now() - this.waitingSinceMs;
+    this.waitingSinceMs = 0;
+  }
+
+  /** Directly add a known stall duration (e.g. from a player's own stall event). */
+  addSec(durationSec: number): void {
+    if (Number.isFinite(durationSec) && durationSec > 0) {
+      this.totalMs += durationSec * 1000;
+    }
+  }
+
+  reset(): void {
+    this.waitingSinceMs = 0;
+    this.totalMs = 0;
+  }
+
+  get totalSec(): number {
+    return Math.round((this.totalMs / 1000) * 1000) / 1000;
+  }
+}
+
 /** End of the latest buffered range, or null. */
 export function bufferedEndSec(media: HTMLMediaElement | null | undefined): number | null {
   if (!media?.buffered || media.buffered.length === 0) {

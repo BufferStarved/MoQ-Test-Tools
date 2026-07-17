@@ -63,9 +63,9 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
       "Best-effort packet loss percentage. SRT → libsrt/Zixi; MoQ → moqx_quicPacketLoss_total job-window rate.",
   },
   net_retrans_pct: {
-    label: "Network retransmit %",
+    label: "Retransmit %",
     description:
-      "Best-effort retransmit percentage. SRT → ARQ; MoQ → moqx_quicPacketRetransmissions_total job-window rate.",
+      "Merged, cross-protocol retransmit percentage — SRT's ARQ retransmit rate and MoQ's moqx_quicPacketRetransmissions_total job-window rate reported on one normalized series so the Ingest tab needs only a single retransmit chart.",
   },
   encode_lag_ms: {
     label: "Encode lag",
@@ -96,7 +96,8 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   pkt_retrans: {
     label: "Retransmits",
-    description: "Cumulative SRT retransmitted packets. Retransmits recover loss but add latency and bandwidth overhead.",
+    description:
+      "Cumulative SRT retransmitted packets. Retransmits recover loss but add latency and bandwidth overhead. Superseded on the Ingest tab by the merged, cross-protocol net_retrans_pct series.",
   },
   pkt_fec_extra: {
     label: "FEC recovery packets",
@@ -144,17 +145,44 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   vmaf_score: {
     label: "VMAF",
-    description: "Video Multimethod Assessment Fusion score computed post-ingest against the source media. Scores closer to 100 indicate higher perceived quality.",
+    description:
+      "Video Multimethod Assessment Fusion score against the source media, picking whichever stage (encoder capture or post-ingest recording) is available. Scores closer to 100 indicate higher perceived quality. The Encode/Publish and Ingest tabs chart the encoder- and ingest-side scores separately — see vmaf_score_encoder / vmaf_score_ingest.",
   },
   psnr_db: {
     label: "PSNR",
     description:
-      "Peak signal-to-noise ratio in decibels from libvmaf (feature=name=psnr). Populated when VMAF runs with PSNR/SSIM features enabled.",
+      "Peak signal-to-noise ratio in decibels from libvmaf (feature=name=psnr), picking whichever stage is available. Populated when VMAF runs with PSNR/SSIM features enabled.",
   },
   ssim: {
     label: "SSIM",
     description:
-      "Structural similarity index from libvmaf (feature=name=float_ssim). Populated when VMAF runs with PSNR/SSIM features enabled.",
+      "Structural similarity index from libvmaf (feature=name=float_ssim), picking whichever stage is available. Populated when VMAF runs with PSNR/SSIM features enabled.",
+  },
+  vmaf_score_encoder: {
+    label: "VMAF",
+    description:
+      "VMAF computed against the encoder's own output (pre-network capture). Isolates encode-time quality loss from anything the network/ingest path adds. Shown on the Encode/Publish tab.",
+  },
+  psnr_db_encoder: {
+    label: "PSNR",
+    description: "PSNR (dB) against the encoder's own output, from libvmaf. Shown on the Encode/Publish tab.",
+  },
+  ssim_encoder: {
+    label: "SSIM",
+    description: "SSIM against the encoder's own output, from libvmaf. Shown on the Encode/Publish tab.",
+  },
+  vmaf_score_ingest: {
+    label: "VMAF (ingest)",
+    description:
+      "VMAF computed against the recording captured at the ingest/relay side, after the network path. Differences from the encoder-side score point at network/transport quality loss. Shown on the Ingest tab.",
+  },
+  psnr_db_ingest: {
+    label: "PSNR (ingest)",
+    description: "PSNR (dB) against the post-ingest recording, from libvmaf. Shown on the Ingest tab.",
+  },
+  ssim_ingest: {
+    label: "SSIM (ingest)",
+    description: "SSIM against the post-ingest recording, from libvmaf. Shown on the Ingest tab.",
   },
   total_bytes_sent: {
     label: "Total bytes sent",
@@ -203,11 +231,6 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description:
       "Disk on the destination edge VM (ingest agent and/or GCP Monitoring). 0% often means not collected.",
   },
-  moqx_subscribe_success: {
-    label: "Relay subscribe OK (Δ)",
-    description:
-      "MoQ relay subscribe successes as a job-window delta (charts subtract the first sample). Absolute Prometheus counters are global since relay restart.",
-  },
   moqx_subscribe_error: {
     label: "Relay subscribe errors (Δ)",
     description: "MoQ relay subscription rejections as a job-window delta.",
@@ -215,10 +238,6 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   moqx_publish_namespace_success: {
     label: "Relay publish OK (Δ)",
     description: "Successful namespace publish announcements as a job-window delta.",
-  },
-  moqx_publish_received: {
-    label: "Relay objects received (Δ)",
-    description: "MoQT objects received by the relay as a job-window delta.",
   },
   moqx_publish_done: {
     label: "Relay publish sessions closed",
@@ -233,8 +252,9 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description: "Congestion window size in bytes from the moq5 publisher picoquic qlog.",
   },
   quic_packets_lost: {
-    label: "QUIC packets lost",
-    description: "Cumulative recovery/packet_lost events in the publisher picoquic qlog trace.",
+    label: "Receive loss",
+    description:
+      "MoQ-only, ingest-side. Cumulative QUIC packets the moqx relay logged as lost while receiving from the publisher (moqx quicPacketLoss_total job-window delta), or the publisher's own picoquic packet_lost count on the moq5 backend. This is MoQ's receive-side counterpart to SRT's Send loss (pkt_snd_loss) — same transport-loss concept, observed from the relay/receiver rather than the sender, since the default openmoq-publisher exposes no sender-side loss telemetry.",
   },
   playback_stats_events: {
     label: "Playa stats events",
@@ -262,9 +282,14 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
       "Milliseconds until the first rendered frame after the player goes live (MoQ: @playa/player; HLS: wall clock to video.currentTime > 0.25s).",
   },
   playback_buffer_sec: {
-    label: "Buffer duration",
+    label: "Buffer size",
     description:
       "Seconds of media buffered ahead of the playhead (HTMLMediaElement.buffered end − currentTime). Higher values mean more resilience to jitter; lower values track the live edge more tightly.",
+  },
+  playback_rebuffer_sec: {
+    label: "Rebuffer time",
+    description:
+      "Cumulative seconds the player spent rebuffering after playback started — measured from each HTMLMediaElement 'waiting' event to the following 'playing' event. A rising line means the viewer is seeing stalls/spinners; flat means smooth playback.",
   },
   playback_hls_errors: {
     label: "HLS errors",

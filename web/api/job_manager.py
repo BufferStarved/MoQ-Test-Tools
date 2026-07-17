@@ -49,6 +49,7 @@ class UploadJobRecord:
     duration_sec: int
     preset_id: str = ""
     moq_namespace: Optional[str] = None
+    zixi_stream_id: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     csv_path: Optional[str] = None
     summary_path: Optional[str] = None
@@ -98,6 +99,16 @@ class JobManager:
                 namespace=moq_namespace,
             )
 
+        zixi_stream_id: Optional[str] = None
+        if job.destination.protocol == "srt":
+            from moq_publish import zixi_srt_stream_id_for_preset
+
+            # Use the shared preset stream ("SRT Test"), not per-job IDs.
+            # Fresh job-* inputs advertise HLS chunk=0 that Zixi keeps answering
+            # with HTTP 400 forever (segment_ready=no). Overlap is already handled
+            # by UploadService's exclusive SRT ingest lock + delete/recreate reset.
+            zixi_stream_id = zixi_srt_stream_id_for_preset(preset_id)
+
         from destinations import ingest_settings_for_preset
 
         if preset_id:
@@ -114,6 +125,7 @@ class JobManager:
             duration_sec=job.duration_sec,
             preset_id=preset_id,
             moq_namespace=moq_namespace,
+            zixi_stream_id=zixi_stream_id,
             compute_vmaf_on_ingest=job.compute_vmaf_on_ingest,
             compute_vmaf_encoder=job.compute_vmaf_encoder,
             encode_ladder=job.encode_ladder,
@@ -203,58 +215,79 @@ class JobManager:
         result = self._service.run(job, on_sample=on_sample)
         end_epoch = time.time()
 
-        if result.success:
-            self._persist_playback_metrics(job_id, result.summary_path)
-            self._update(
-                job_id,
-                status=JobStatus.COMPLETED,
-                csv_path=result.csv_path,
-                summary_path=result.summary_path,
-                encoder_vmaf_status=result.encoder_vmaf_status,
-                encoder_vmaf_score=result.encoder_vmaf_score,
-                encoder_psnr_db=result.encoder_psnr_db,
-                encoder_ssim=result.encoder_ssim,
-                encoder_vmaf_error=result.encoder_vmaf_error,
-                psnr_db=result.psnr_db,
-                ssim=result.ssim,
-            )
-            if job.compute_vmaf_on_ingest:
-                with self._lock:
-                    record = self._jobs.get(job_id)
-                    ingest_already_failed = (
-                        record is not None
-                        and record.vmaf_status == VmafStatus.FAILED.value
-                    )
-                    ingest_error = record.vmaf_error if record else None
-                if ingest_already_failed and result.summary_path:
-                    patch_summary_quality_leg(
-                        result.summary_path,
-                        "ingest",
-                        {
-                            "status": "failed",
-                            "computed_on": "ingest_agent",
-                            "error": ingest_error or "Ingest VMAF failed before upload completed",
-                        },
-                    )
-                elif not ingest_already_failed:
-                    thread = threading.Thread(
-                        target=self._compute_remote_vmaf,
-                        args=(job_id, job, result.summary_path, start_epoch, end_epoch),
-                        daemon=True,
-                    )
-                    thread.start()
-        else:
-            self._update(
-                job_id,
-                status=JobStatus.FAILED,
-                error=result.error or "Upload failed",
-                vmaf_status=VmafStatus.FAILED.value if job.compute_vmaf_on_ingest else VmafStatus.DISABLED.value,
-                vmaf_error=result.error if job.compute_vmaf_on_ingest else None,
-                encoder_vmaf_status=(
-                    VmafStatus.FAILED.value if job.compute_vmaf_encoder else VmafStatus.DISABLED.value
-                ),
-                encoder_vmaf_error=result.error if job.compute_vmaf_encoder else None,
-            )
+        try:
+            if result.success:
+                self._persist_playback_metrics(job_id, result.summary_path)
+                self._update(
+                    job_id,
+                    status=JobStatus.COMPLETED,
+                    csv_path=result.csv_path,
+                    summary_path=result.summary_path,
+                    encoder_vmaf_status=result.encoder_vmaf_status,
+                    encoder_vmaf_score=result.encoder_vmaf_score,
+                    encoder_psnr_db=result.encoder_psnr_db,
+                    encoder_ssim=result.encoder_ssim,
+                    encoder_vmaf_error=result.encoder_vmaf_error,
+                    psnr_db=result.psnr_db,
+                    ssim=result.ssim,
+                )
+                if job.compute_vmaf_on_ingest:
+                    with self._lock:
+                        record = self._jobs.get(job_id)
+                        ingest_already_failed = (
+                            record is not None
+                            and record.vmaf_status == VmafStatus.FAILED.value
+                        )
+                        ingest_error = record.vmaf_error if record else None
+                    if ingest_already_failed and result.summary_path:
+                        patch_summary_quality_leg(
+                            result.summary_path,
+                            "ingest",
+                            {
+                                "status": "failed",
+                                "computed_on": "ingest_agent",
+                                "error": ingest_error or "Ingest VMAF failed before upload completed",
+                            },
+                        )
+                    elif not ingest_already_failed:
+                        thread = threading.Thread(
+                            target=self._compute_remote_vmaf,
+                            args=(job_id, job, result.summary_path, start_epoch, end_epoch),
+                            daemon=True,
+                        )
+                        thread.start()
+            else:
+                self._update(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    error=result.error or "Upload failed",
+                    vmaf_status=VmafStatus.FAILED.value if job.compute_vmaf_on_ingest else VmafStatus.DISABLED.value,
+                    vmaf_error=result.error if job.compute_vmaf_on_ingest else None,
+                    encoder_vmaf_status=(
+                        VmafStatus.FAILED.value if job.compute_vmaf_encoder else VmafStatus.DISABLED.value
+                    ),
+                    encoder_vmaf_error=result.error if job.compute_vmaf_encoder else None,
+                )
+        finally:
+            # Status is already COMPLETED/FAILED so the UI flips playbackGate→ended
+            # and destroys HLS before we delete the Zixi input that backs the playlist.
+            self._schedule_zixi_cleanup(job)
+
+    def _schedule_zixi_cleanup(self, job: UploadJob) -> None:
+        """Delete ephemeral job-* Zixi SRT inputs after a short player teardown grace."""
+        stream_id = (getattr(job, "zixi_stream_id", None) or "").strip()
+        if not stream_id.startswith("job-"):
+            return
+
+        def _run() -> None:
+            time.sleep(2.0)
+            self._service.cleanup_zixi_srt_input_if_managed(job)
+
+        threading.Thread(
+            target=_run,
+            name=f"zixi-cleanup-{getattr(job, 'job_id', 'unknown')}",
+            daemon=True,
+        ).start()
 
     def _prepare_remote_vmaf(self, job_id: str, job: UploadJob) -> None:
         self._update(job_id, vmaf_status=VmafStatus.UPLOADING_REFERENCE.value, vmaf_error=None)
@@ -480,6 +513,7 @@ class JobManager:
                 duration_sec=record.duration_sec,
                 preset_id=record.preset_id,
                 moq_namespace=record.moq_namespace,
+                zixi_stream_id=record.zixi_stream_id,
                 created_at=record.created_at,
                 csv_path=record.csv_path,
                 summary_path=record.summary_path,
@@ -514,6 +548,7 @@ class JobManager:
                     duration_sec=record.duration_sec,
                     preset_id=record.preset_id,
                     moq_namespace=record.moq_namespace,
+                    zixi_stream_id=record.zixi_stream_id,
                     created_at=record.created_at,
                     csv_path=record.csv_path,
                     summary_path=record.summary_path,
@@ -667,6 +702,10 @@ def read_result_summary(csv_path: str) -> dict:
         legacy = _LEGACY_CSV_COLUMNS.get(key)
         if key in rows[-1] or (legacy and legacy in rows[-1]):
             averages[key] = int(_row_value(rows[-1], key))
+
+    # Cumulative seconds (not a plain count) — keep sub-second precision.
+    if "playback_rebuffer_sec" in rows[-1]:
+        averages["playback_rebuffer_sec"] = round(_row_value(rows[-1], "playback_rebuffer_sec"), 3)
 
     e2e_values = [
         float(r["e2e_latency_ms"])

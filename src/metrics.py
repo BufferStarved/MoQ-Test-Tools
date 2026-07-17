@@ -75,6 +75,7 @@ CSV_COLUMNS = [
     "playback_hls_frag_loads",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
 ]
@@ -194,6 +195,7 @@ class MetricsCollector:
         playback_hls_frag_loads: int = 0,
         playback_video_time_sec: float = 0.0,
         playback_buffer_sec: float = 0.0,
+        playback_rebuffer_sec: float = 0.0,
         playback_error_count: int = 0,
         e2e_latency_ms: float = 0.0,
         encode_lag_ms: float = 0.0,
@@ -320,6 +322,7 @@ class MetricsCollector:
                 "playback_hls_frag_loads": str(playback_hls_frag_loads),
                 "playback_video_time_sec": f"{playback_video_time_sec:.3f}",
                 "playback_buffer_sec": f"{playback_buffer_sec:.3f}",
+                "playback_rebuffer_sec": f"{playback_rebuffer_sec:.3f}",
                 "playback_error_count": str(resolved_playback_errors),
                 "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
             }
@@ -452,6 +455,10 @@ class MetricsCollector:
                 "playback_error_count",
             ):
                 averages[counter_key] = int(float(self._rows[-1].get(counter_key, 0) or 0))
+            # Cumulative seconds (not a plain count) — keep sub-second precision.
+            averages["playback_rebuffer_sec"] = round(
+                float(self._rows[-1].get("playback_rebuffer_sec", 0) or 0), 3
+            )
 
         return averages
 

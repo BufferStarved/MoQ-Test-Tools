@@ -216,7 +216,7 @@ def is_live_media_source(media_path: str) -> bool:
     return value.startswith(("udp://", "tcp://", "rtsp://", "srt://"))
 
 
-def build_ffmpeg_input_args(media_path: str) -> List[str]:
+def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = None) -> List[str]:
     if is_live_media_source(media_path):
         # Webcam bridge → UDP is often VFR / discontinuous; regenerate PTS so
         # the second encode + MoQ fMP4 tfdt stay monotonic.
@@ -234,7 +234,12 @@ def build_ffmpeg_input_args(media_path: str) -> List[str]:
             "-i",
             media_path,
         ]
-    return ["-re", "-i", media_path]
+    args = ["-re", "-i", media_path]
+    # Hard-cap file encodes to the job duration so ffmpeg cannot outrun the
+    # media (or hang past EOF waiting on a network muxer).
+    if duration_sec is not None and duration_sec > 0:
+        args.extend(["-t", str(int(duration_sec))])
+    return args
 
 
 def build_ffmpeg_moq_cmd(
@@ -243,11 +248,12 @@ def build_ffmpeg_moq_cmd(
     progress_path: str,
     encode_ladder: str = DEFAULT_ENCODE_LADDER_ID,
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
+    duration_sec: Optional[int] = None,
 ) -> List[str]:
     video_args = build_video_encode_args(encode_ladder, target_latency_ms)
     return [
         find_ffmpeg(),
-        *build_ffmpeg_input_args(media_path),
+        *build_ffmpeg_input_args(media_path, duration_sec=duration_sec),
         "-map",
         "0:v:0",
         "-map",

@@ -39,7 +39,7 @@ from moq_publish import (
 from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
-from zixi_input_reset import reset_zixi_srt_input
+from zixi_input_reset import remove_zixi_srt_input, reset_zixi_srt_input
 from network_metrics import (
     FfmpegProgressFileReader,
     FfmpegProgressReader,
@@ -75,6 +75,7 @@ class UploadJob:
     compute_vmaf_encoder: bool = False
     encode_ladder: str = DEFAULT_ENCODE_LADDER_ID
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS
+    zixi_stream_id: str = ""
     ingest_recording_dir: str = ""
     ingest_agent_url: str = ""
     ingest_agent_token: str = ""
@@ -121,7 +122,7 @@ class UploadJob:
             output_args = self._browser_compat_output_args()
         return [
             find_ffmpeg(),
-            *build_ffmpeg_input_args(self.media_path),
+            *build_ffmpeg_input_args(self.media_path, duration_sec=self.duration_sec),
             *self._video_args(),
             *BROWSER_COMPAT_AUDIO_ARGS,
             "-progress",
@@ -141,9 +142,17 @@ class UploadJob:
             ]
         return self.destination.ffmpeg_output_args()
 
+    def managed_zixi_stream_id(self) -> Optional[str]:
+        """Zixi SRT input stream ID for publish + HLS.
+
+        Prefer an explicit job.zixi_stream_id when set (legacy per-job ids);
+        otherwise the preset shared default ("SRT Test" for GCP Zixi).
+        """
+        return self.zixi_stream_id or zixi_srt_stream_id_for_preset(self.destination.preset_id)
+
     def _resolved_srt_destination_url(self) -> str:
         url = self.destination.url
-        stream_id = zixi_srt_stream_id_for_preset(self.destination.preset_id)
+        stream_id = self.managed_zixi_stream_id()
         if stream_id:
             url = with_srt_stream_id(url, stream_id)
         return with_srt_latency(url, self.target_latency_ms)
@@ -223,12 +232,41 @@ def _pick_udp_port() -> int:
 
 
 class UploadService:
+    # Zixi's SRT push input is a single shared listener (one port per input
+    # object; see zixi_input_reset.py). Per-job stream IDs stop two runs from
+    # reusing the same input object, but they still can't both bind that port
+    # at once, so overlapping SRT jobs are serialized here instead of racing
+    # add_stream/remove_stream calls against each other.
+    _zixi_srt_ingest_lock = threading.Lock()
+
     def run(
         self,
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
         if job.destination.protocol == "srt":
+            if job.managed_zixi_stream_id():
+                logger.info(
+                    "Waiting for exclusive access to shared Zixi SRT ingest (job %s)...",
+                    job.job_id,
+                )
+                while True:
+                    if job.is_cancelled():
+                        return UploadResult(
+                            success=False,
+                            error="Cancelled while waiting for exclusive SRT ingest access",
+                        )
+                    acquired = self._zixi_srt_ingest_lock.acquire(timeout=1.0)
+                    if acquired:
+                        break
+                logger.info("Acquired Zixi SRT ingest for job %s.", job.job_id)
+                try:
+                    return self._run_srt_pipeline(job, on_sample=on_sample)
+                finally:
+                    self._zixi_srt_ingest_lock.release()
+                    # Defer Zixi input deletion until after JobManager marks the job
+                    # completed/failed so the browser can flip playbackGate→ended and
+                    # destroy HLS before the playlist 404s. See cleanup_zixi_srt_input_if_managed.
             return self._run_srt_pipeline(job, on_sample=on_sample)
         if job.destination.protocol == "moq":
             return self._run_moq_pipeline(job, on_sample=on_sample)
@@ -394,7 +432,7 @@ class UploadService:
         restart does not clear that per-stream state, only recreating the
         stream object does. See src/zixi_input_reset.py for the full story.
         """
-        stream_id = zixi_srt_stream_id_for_preset(job.destination.preset_id)
+        stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return
         try:
@@ -412,6 +450,29 @@ class UploadService:
             )
         except Exception:
             logger.warning("Zixi SRT input reset failed; continuing with push anyway.", exc_info=True)
+
+    def cleanup_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
+        """Public wrapper so JobManager can delete the stream after gate=ended."""
+        self._cleanup_zixi_srt_input_if_managed(job)
+
+    def _cleanup_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
+        """Delete ephemeral per-job Zixi SRT inputs after push.
+
+        Shared preset streams like "SRT Test" are left in place (reset before
+        the next push). Only legacy job-* ids are removed so the stream table
+        does not accumulate orphans.
+        """
+        stream_id = (job.zixi_stream_id or "").strip()
+        if not stream_id.startswith("job-"):
+            return
+        try:
+            remove_zixi_srt_input(stream_id)
+        except Exception:
+            logger.warning(
+                "Zixi SRT input cleanup failed for '%s'; it may linger until the next reset.",
+                stream_id,
+                exc_info=True,
+            )
 
     def _run_srt_pipeline(
         self,
@@ -516,7 +577,8 @@ class UploadService:
             endpoint_url=resolved_srt_url,
             run_id=job.job_id,
         )
-        # Must use resolved URL (with streamid) so Zixi API looks up "SRT Test", not "".
+        # Must use resolved URL (with streamid) so the Zixi API looks up the
+        # job's actual input id, not "".
         zixi_poller = ZixiStatsPoller(resolved_srt_url)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
@@ -700,6 +762,7 @@ class UploadService:
             progress_path=progress_path,
             encode_ladder=job.encode_ladder,
             target_latency_ms=job.target_latency_ms,
+            duration_sec=job.duration_sec,
         )
         publisher_cmd = build_moq_publisher_cmd(
             publisher_bin,

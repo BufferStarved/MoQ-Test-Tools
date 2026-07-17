@@ -13,6 +13,7 @@ export const EMPTY_PLAYBACK_METRICS: PlaybackMetricsSnapshot = {
   playback_hls_frag_loads: 0,
   playback_video_time_sec: 0,
   playback_buffer_sec: 0,
+  playback_rebuffer_sec: 0,
   playback_error_count: 0,
   e2e_latency_ms: 0,
 };

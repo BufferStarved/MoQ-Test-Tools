@@ -139,6 +139,7 @@ class PlaybackSampleRequest(BaseModel):
     playback_hls_frag_loads: int = 0
     playback_video_time_sec: float = 0.0
     playback_buffer_sec: float = 0.0
+    playback_rebuffer_sec: float = 0.0
     playback_error_count: int = 0
     e2e_latency_ms: float = 0.0
 
@@ -155,6 +156,7 @@ def job_to_dict(job) -> dict:
         "encode_ladder": getattr(job, "encode_ladder", None),
         "target_latency_ms": getattr(job, "target_latency_ms", None),
         "moq_namespace": job.moq_namespace,
+        "zixi_stream_id": job.zixi_stream_id,
         "created_at": job.created_at,
         "csv_path": job.csv_path,
         "summary_path": job.summary_path,
@@ -650,6 +652,21 @@ def _sanitize_fetch_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
 
 
+def _unwrap_nested_playback_fetch_url(url: str) -> str:
+    """Undo accidental double-proxy URLs (http://zixi/api/playback/fetch?url=http://zixi/playback.ts)."""
+    current = url
+    for _ in range(3):
+        parsed = urlparse(current)
+        if "/api/playback/fetch" not in (parsed.path or ""):
+            return current
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        inner = (params.get("url") or "").strip()
+        if not inner.startswith("http"):
+            return current
+        current = inner
+    return current
+
+
 def _proxied_playback_path(remote_url: str) -> str:
     return f"/api/playback/fetch?url={quote(_sanitize_fetch_url(remote_url), safe='')}"
 
@@ -683,6 +700,7 @@ def _rewrite_m3u8_manifest(manifest_url: str, content: bytes) -> bytes:
 
 @app.get("/api/playback/fetch")
 def playback_fetch(url: str):
+    url = _unwrap_nested_playback_fetch_url(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise HTTPException(status_code=400, detail="Only http(s) playback URLs are allowed")
@@ -692,27 +710,24 @@ def playback_fetch(url: str):
     safe_url = _sanitize_fetch_url(url)
     path_lower = (parsed.path or "").lower()
     likely_manifest = path_lower.endswith(".m3u8") or "m3u8" in path_lower
-    # Zixi long-polls live playlists until the next segment (~chunk duration).
-    # Timeout must exceed that wait; on timeout return a real error so hls.js
-    # retries and keeps its previous playlist. Do NOT return an empty #EXTM3U
-    # on timeout — that replaces a valid live playlist and kills playback.
-    timeout = 8 if likely_manifest else 20
+    # Zixi long-polls live playlists until the next segment (~chunk duration,
+    # min 2s). Keep this tight and well under hls.js's own manifestLoadingTimeOut
+    # (10s) so a slow poll surfaces as a fast retry, not a client-side fatal
+    # timeout race. On timeout return a real error so hls.js retries and keeps
+    # its previous playlist — do NOT return an empty #EXTM3U here, that
+    # replaces a valid live playlist and kills playback.
+    timeout = 5 if likely_manifest else 20
     request = urllib.request.Request(safe_url, method="GET")
     no_store = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
     }
-    # Only for true 404 (stream not created yet) — startup preflight can keep polling.
-    empty_live_playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n"
+    # Propagate upstream 404 so waitForManifest / hls.js can keep polling without
+    # replacing a live playlist with an empty #EXTM3U stub (that causes fatal
+    # levelParsingError with http=200 once the Zixi input is torn down).
     try:
         upstream = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
-        if likely_manifest and exc.code == 404:
-            return Response(
-                content=empty_live_playlist,
-                media_type="application/vnd.apple.mpegurl",
-                headers=no_store,
-            )
         raise HTTPException(status_code=exc.code, detail=f"Playback upstream error: {exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc.reason}") from exc
@@ -725,6 +740,12 @@ def playback_fetch(url: str):
             content = upstream.read()
         finally:
             upstream.close()
+        stripped = content.lstrip()
+        if not stripped.startswith(b"#EXTM3U"):
+            raise HTTPException(
+                status_code=502,
+                detail="Upstream returned a non-playlist body for an m3u8 URL",
+            )
         if _is_m3u8_manifest(url, media_type, content):
             content = _rewrite_m3u8_manifest(url, content)
             media_type = "application/vnd.apple.mpegurl"
