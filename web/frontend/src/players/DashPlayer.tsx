@@ -1,12 +1,41 @@
 import { useEffect, useRef, useState } from "react";
 import { proxiedPlaybackUrl } from "../playbackUrls";
+import { resolvePlaybackXhrUrl } from "../playbackFetch";
+import type { PlaybackGate } from "../playbackGate";
+import { playbackGateLabel } from "../playbackGate";
 
 interface DashPlayerProps {
   url: string;
   label: string;
+  playbackGate?: PlaybackGate;
 }
 
-export default function DashPlayer({ url, label }: DashPlayerProps) {
+/**
+ * dash.js resolves relative SegmentTemplate URLs against the MPD request URL.
+ * When the MPD is loaded via /api/playback/fetch?url=..., that becomes
+ * /api/playback/playback.m4s (404). Rewrite those back onto the Zixi origin
+ * and proxy once.
+ */
+function resolveDashRequestUrl(requestUrl: string, manifestRemoteUrl: string): string {
+  try {
+    const parsed = new URL(requestUrl, window.location.origin);
+    const path = parsed.pathname;
+    if (path.endsWith("/playback.m4s") || path.endsWith("playback.m4s")) {
+      const origin = new URL(manifestRemoteUrl).origin;
+      return proxiedPlaybackUrl(`${origin}/playback.m4s${parsed.search}`);
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const absolute = new URL(requestUrl, manifestRemoteUrl).href;
+    return resolvePlaybackXhrUrl(absolute);
+  } catch {
+    return resolvePlaybackXhrUrl(requestUrl);
+  }
+}
+
+export default function DashPlayer({ url, label, playbackGate = "live" }: DashPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading DASH player...");
@@ -14,6 +43,14 @@ export default function DashPlayer({ url, label }: DashPlayerProps) {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) {
+      return;
+    }
+
+    if (playbackGate !== "live") {
+      setError(null);
+      setStatus(
+        playbackGate === "waiting" ? "Waiting for live DASH..." : "Waiting for encode...",
+      );
       return;
     }
 
@@ -33,16 +70,20 @@ export default function DashPlayer({ url, label }: DashPlayerProps) {
       instance.updateSettings({
         streaming: {
           requestModifier: {
-            modifyRequestURL: (requestUrl: string) => proxiedPlaybackUrl(requestUrl),
+            modifyRequestURL: (requestUrl: string) => resolveDashRequestUrl(requestUrl, url),
           },
         },
       });
       instance.initialize(video, proxiedPlaybackUrl(url), true);
       instance.on(dashjs.MediaPlayer.events.ERROR, () => {
-        setError("DASH playback failed. Is the stream live and DASH enabled on Zixi?");
+        if (!destroyed) {
+          setError("DASH playback failed. Is the stream live and DASH enabled on Zixi?");
+        }
       });
       instance.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
-        setStatus("Playing");
+        if (!destroyed) {
+          setStatus("Playing");
+        }
       });
     }
 
@@ -54,7 +95,10 @@ export default function DashPlayer({ url, label }: DashPlayerProps) {
       video.removeAttribute("src");
       video.load();
     };
-  }, [url]);
+  }, [url, playbackGate]);
+
+  const gateMessage =
+    playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;
 
   return (
     <div className="player-surface">
@@ -63,6 +107,7 @@ export default function DashPlayer({ url, label }: DashPlayerProps) {
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
+      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
     </div>
   );

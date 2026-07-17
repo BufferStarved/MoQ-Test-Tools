@@ -214,7 +214,12 @@ export function StreamPlayer({
             />
           )}
           {target.engine === "dash" && (
-            <DashPlayer key={target.url} url={target.url} label={target.label} />
+            <DashPlayer
+              key={target.url}
+              url={target.url}
+              label={target.label}
+              playbackGate={playbackGate}
+            />
           )}
           {target.engine === "mpegts" && (
             <MpegTsPlayer key={target.url} url={target.url} label={target.label} />

@@ -699,6 +699,63 @@ def _rewrite_m3u8_manifest(manifest_url: str, content: bytes) -> bytes:
     return body.encode("utf-8")
 
 
+_MPD_URL_ATTR_RE = re.compile(
+    r'\b(media|initialization|mediaRange|sourceURL)="([^"]+)"',
+    re.IGNORECASE,
+)
+_MPD_BASEURL_RE = re.compile(
+    r"(<BaseURL[^>]*>)(.*?)(</BaseURL>)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_mpd_manifest(url: str, media_type: str, content: bytes) -> bool:
+    path = urlparse(url).path.lower()
+    if path.endswith(".mpd") or ".mpd" in path:
+        return True
+    if "dash+xml" in media_type.lower() or "mpd" in media_type.lower():
+        return True
+    stripped = content.lstrip()[:200].lower()
+    return stripped.startswith(b"<?xml") and b"<mpd" in stripped
+
+
+def _absolutize_mpd_url(manifest_url: str, value: str) -> str:
+    """Turn relative DASH template/segment URLs into absolute Zixi URLs.
+
+    Keep ``$RepresentationID$`` / ``$Number$`` placeholders intact so dash.js
+    can still substitute them. Do **not** wrap in /api/playback/fetch here —
+    DashPlayer's request modifier proxies the final substituted URL.
+    """
+    value = value.strip()
+    if not value or value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.startswith("/api/playback/fetch"):
+        return value
+    return urljoin(manifest_url, value)
+
+
+def _rewrite_mpd_manifest(manifest_url: str, content: bytes) -> bytes:
+    """Prevent dash.js from resolving relative .m4s URLs under /api/playback/.
+
+    Without this, SegmentTemplate media=\"playback.m4s?...\" becomes
+    GET /api/playback/playback.m4s (404) instead of the Zixi origin.
+    """
+    text = content.decode("utf-8", errors="replace")
+
+    def replace_attr(match: re.Match[str]) -> str:
+        attr, value = match.group(1), match.group(2)
+        return f'{attr}="{_absolutize_mpd_url(manifest_url, value)}"'
+
+    text = _MPD_URL_ATTR_RE.sub(replace_attr, text)
+
+    def replace_baseurl(match: re.Match[str]) -> str:
+        open_tag, value, close_tag = match.group(1), match.group(2), match.group(3)
+        return f"{open_tag}{_absolutize_mpd_url(manifest_url, value)}{close_tag}"
+
+    text = _MPD_BASEURL_RE.sub(replace_baseurl, text)
+    return text.encode("utf-8")
+
+
 @app.get("/api/playback/fetch")
 def playback_fetch(url: str):
     url = _unwrap_nested_playback_fetch_url(url)
@@ -710,7 +767,9 @@ def playback_fetch(url: str):
 
     safe_url = _sanitize_fetch_url(url)
     path_lower = (parsed.path or "").lower()
-    likely_manifest = path_lower.endswith(".m3u8") or "m3u8" in path_lower
+    likely_m3u8 = path_lower.endswith(".m3u8") or "m3u8" in path_lower
+    likely_mpd = path_lower.endswith(".mpd") or ".mpd" in path_lower
+    likely_manifest = likely_m3u8 or likely_mpd
     # Zixi long-polls live playlists until the next segment (~chunk duration,
     # min 2s). Keep this tight and well under hls.js's own manifestLoadingTimeOut
     # (10s) so a slow poll surfaces as a fast retry, not a client-side fatal
@@ -736,21 +795,31 @@ def playback_fetch(url: str):
         raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
 
     media_type = upstream.headers.get("Content-Type", "application/octet-stream")
-    if likely_manifest or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower():
+    if likely_manifest or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower() or "dash+xml" in media_type.lower():
         try:
             content = upstream.read()
         finally:
             upstream.close()
-        stripped = content.lstrip()
-        if not stripped.startswith(b"#EXTM3U"):
-            raise HTTPException(
-                status_code=502,
-                detail="Upstream returned a non-playlist body for an m3u8 URL",
-            )
-        if _is_m3u8_manifest(url, media_type, content):
-            content = _rewrite_m3u8_manifest(url, content)
-            media_type = "application/vnd.apple.mpegurl"
-        return Response(content=content, media_type=media_type, headers=no_store)
+        if likely_m3u8 or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower():
+            stripped = content.lstrip()
+            if not stripped.startswith(b"#EXTM3U"):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Upstream returned a non-playlist body for an m3u8 URL",
+                )
+            if _is_m3u8_manifest(url, media_type, content):
+                content = _rewrite_m3u8_manifest(url, content)
+                media_type = "application/vnd.apple.mpegurl"
+            return Response(content=content, media_type=media_type, headers=no_store)
+        if likely_mpd or _is_mpd_manifest(url, media_type, content):
+            if not _is_mpd_manifest(url, media_type, content):
+                raise HTTPException(
+                    status_code=502,
+                    detail="Upstream returned a non-MPD body for an mpd URL",
+                )
+            content = _rewrite_mpd_manifest(url, content)
+            media_type = "application/dash+xml"
+            return Response(content=content, media_type=media_type, headers=no_store)
 
     def iter_chunks():
         try:
