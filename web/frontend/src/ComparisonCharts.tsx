@@ -3,6 +3,7 @@ import {
   LEG_COLORS,
   chartGroupById,
   comparisonHasMetric,
+  comparisonHasMetricPresent,
   comparisonSeries,
   comparisonVisibleGroups,
   buildComparisonPoints,
@@ -55,12 +56,14 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
   const encodeGroup = chartGroupById("encode");
   const transportGroup = chartGroupById("transport");
   const clientGroup = chartGroupById("client");
-  const serverGroup = chartGroupById("server");
-  const relayGroup = chartGroupById("edge_relay");
-  const zixiGroup = chartGroupById("edge_zixi");
+  const ingestGroup = chartGroupById("ingest");
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
   const qualityGroup = chartGroupById("video_quality");
+  const hasMoqLeg = activeLegs.some((leg) => leg.protocol === "moq");
+  const hasSrtOrRtmpLeg = activeLegs.some(
+    (leg) => leg.protocol === "srt" || leg.protocol === "rtmp",
+  );
 
   if (activeLegs.length < 2) {
     return (
@@ -196,85 +199,108 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
           </>
         )}
 
-        {currentGroup.id === "server" && serverGroup && (
+        {currentGroup.id === "ingest" && ingestGroup && (
           <>
+            <p className="hint chart-availability-note">
+              Normalized across MOQ / SRT / RTMP: ingest-host CPU &amp; memory, plus path loss% and
+              retransmit%. Protocol panels below are native counters (MoQ relay Δ, SRT/Zixi recovery).
+            </p>
             <MetricChart
-              title="Server CPU"
+              title="Ingest host CPU (normalized)"
               metricKey="server_cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_cpu_percent", "%")}
               height={260}
             />
             <MetricChart
-              title="Server memory"
+              title="Ingest host memory (normalized)"
               metricKey="server_memory_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_memory_percent", "%")}
               height={260}
             />
-          </>
-        )}
-
-        {currentGroup.id === "edge_relay" && relayGroup && (
-          <>
-            <ProtocolAvailabilityNote metricKey="moqx_subscribe_success" legs={activeLegs} />
-            <p className="hint chart-availability-note">
-              MoQ relay counters are job-window deltas (not absolute since relay restart).
-            </p>
             <MetricChart
-              title="Subscribe OK (Δ)"
-              metricKey="moqx_subscribe_success"
+              title="Path loss % (normalized)"
+              metricKey="net_loss_pct"
               data={points}
-              series={comparisonSeries(activeLegs, "moqx_subscribe_success", "count")}
-              height={260}
+              series={comparisonSeries(activeLegs, "net_loss_pct", "%")}
+              height={220}
+              keepZeroSeries
             />
             <MetricChart
-              title="Objects received (Δ)"
-              metricKey="moqx_publish_received"
+              title="Path retransmit % (normalized)"
+              metricKey="net_retrans_pct"
               data={points}
-              series={comparisonSeries(activeLegs, "moqx_publish_received", "count")}
-              height={260}
+              series={comparisonSeries(activeLegs, "net_retrans_pct", "%")}
+              height={220}
+              keepZeroSeries
             />
-            {comparisonHasMetric(points, "quic_cwnd_bytes", activeLegs.length) && (
-              <MetricChart
-                title="QUIC congestion window"
-                metricKey="quic_cwnd_bytes"
-                data={points}
-                series={comparisonSeries(activeLegs, "quic_cwnd_bytes", "bytes")}
-                height={220}
-              />
+            {hasMoqLeg && (
+              <>
+                <ProtocolAvailabilityNote metricKey="moqx_subscribe_success" legs={activeLegs} />
+                <p className="hint chart-availability-note">
+                  MoQ relay counters are job-window deltas (not absolute since relay restart).
+                </p>
+                <MetricChart
+                  title="MoQ subscribe OK (Δ)"
+                  metricKey="moqx_subscribe_success"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "moqx_subscribe_success", "count")}
+                  height={260}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="MoQ objects received (Δ)"
+                  metricKey="moqx_publish_received"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "moqx_publish_received", "count")}
+                  height={260}
+                  keepZeroSeries
+                />
+                {comparisonHasMetric(points, "quic_cwnd_bytes", activeLegs.length) && (
+                  <MetricChart
+                    title="QUIC congestion window"
+                    metricKey="quic_cwnd_bytes"
+                    data={points}
+                    series={comparisonSeries(activeLegs, "quic_cwnd_bytes", "bytes")}
+                    height={220}
+                  />
+                )}
+              </>
             )}
-          </>
-        )}
-
-        {currentGroup.id === "edge_zixi" && zixiGroup && (
-          <>
-            <ProtocolAvailabilityNote metricKey="pkt_retrans" legs={activeLegs} />
-            <p className="hint chart-availability-note">
-              Libsrt recovery counters from the SRT sender. A flat zero line means a clean path
-              (no retransmits / FEC extras observed).
-            </p>
-            <MetricChart
-              title="SRT retransmits"
-              metricKey="pkt_retrans"
-              data={points}
-              series={comparisonSeries(activeLegs, "pkt_retrans", "pkts")}
-              height={220}
-            />
-            <MetricChart
-              title="Send loss"
-              metricKey="pkt_snd_loss"
-              data={points}
-              series={comparisonSeries(activeLegs, "pkt_snd_loss", "pkts")}
-              height={220}
-            />
-            <MetricChart
-              title="FEC extra"
-              metricKey="pkt_fec_extra"
-              data={points}
-              series={comparisonSeries(activeLegs, "pkt_fec_extra", "pkts")}
-              height={220}
-            />
+            {hasSrtOrRtmpLeg && (
+              <>
+                <ProtocolAvailabilityNote metricKey="pkt_retrans" legs={activeLegs} />
+                <p className="hint chart-availability-note">
+                  Libsrt recovery counters from the SRT sender. A flat zero line means a clean path
+                  (no retransmits / FEC extras observed).
+                </p>
+                <MetricChart
+                  title="SRT retransmits"
+                  metricKey="pkt_retrans"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "pkt_retrans", "pkts")}
+                  height={220}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="Send loss"
+                  metricKey="pkt_snd_loss"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "pkt_snd_loss", "pkts")}
+                  height={220}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="FEC extra"
+                  metricKey="pkt_fec_extra"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "pkt_fec_extra", "pkts")}
+                  height={220}
+                  keepZeroSeries
+                />
+              </>
+            )}
           </>
         )}
 
@@ -354,13 +380,25 @@ export function ComparisonCharts({ legs }: ComparisonChartsProps) {
                 height={220}
               />
             )}
-            {comparisonHasMetric(points, "playback_stall_count", activeLegs.length) && (
+            {(comparisonHasMetricPresent(points, "playback_stall_count", activeLegs.length) ||
+              comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) ||
+              comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length)) && (
               <MetricChart
                 title="Playback stalls"
                 metricKey="playback_stall_count"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_stall_count", "count")}
                 height={260}
+                keepZeroSeries
+              />
+            )}
+            {comparisonHasMetric(points, "playback_buffer_sec", activeLegs.length) && (
+              <MetricChart
+                title="Buffer duration"
+                metricKey="playback_buffer_sec"
+                data={points}
+                series={comparisonSeries(activeLegs, "playback_buffer_sec", "s")}
+                height={220}
               />
             )}
             {comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length) && (

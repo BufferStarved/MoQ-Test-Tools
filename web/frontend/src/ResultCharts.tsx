@@ -57,12 +57,12 @@ export function ResultCharts({
   const encodeGroup = chartGroupById("encode");
   const transportGroup = chartGroupById("transport");
   const clientGroup = chartGroupById("client");
-  const serverGroup = chartGroupById("server");
-  const relayGroup = chartGroupById("edge_relay");
-  const zixiGroup = chartGroupById("edge_zixi");
+  const ingestGroup = chartGroupById("ingest");
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
   const qualityGroup = chartGroupById("video_quality");
+  const isMoq = resolvedProtocol === "moq";
+  const isSrtOrRtmp = resolvedProtocol === "srt" || resolvedProtocol === "rtmp";
 
   if (points.length === 0) {
     return (
@@ -159,67 +159,97 @@ export function ResultCharts({
           <MetricChart title="Client (publisher host)" metricKey="cpu_percent" data={points} series={clientGroup.series} height={260} />
         )}
 
-        {currentGroup.id === "server" && serverGroup && (
-          <MetricChart
-            title="Server (ingest / relay host)"
-            metricKey="server_cpu_percent"
-            data={points}
-            series={serverGroup.series}
-            height={260}
-          />
-        )}
-
-        {currentGroup.id === "edge_relay" && relayGroup && (
+        {currentGroup.id === "ingest" && ingestGroup && (
           <>
-            <AvailabilityNote metricKey="moqx_subscribe_success" protocol={resolvedProtocol} />
             <p className="hint chart-availability-note">
-              MoQ relay counters are job-window deltas (not absolute since relay restart).
+              Normalized ingest: host CPU/memory/disk and path loss/retransmit %. Protocol detail
+              below depends on the publish path (MoQ relay or SRT/Zixi).
             </p>
             <MetricChart
-              title="Relay subscribe outcomes (Δ)"
-              metricKey="moqx_subscribe_success"
+              title="Ingest host (normalized)"
+              metricKey="server_cpu_percent"
               data={points}
-              series={relayGroup.series.filter(
+              series={ingestGroup.series.filter(
                 (series) =>
-                  series.key === "moqx_subscribe_success" || series.key === "moqx_subscribe_error",
+                  series.key === "server_cpu_percent" ||
+                  series.key === "server_memory_percent" ||
+                  series.key === "server_disk_percent",
               )}
               height={260}
             />
-            <MetricChart
-              title="Relay publish activity (Δ)"
-              metricKey="moqx_publish_received"
-              data={points}
-              series={relayGroup.series.filter(
-                (series) =>
-                  series.key === "moqx_publish_namespace_success" ||
-                  series.key === "moqx_publish_received",
-              )}
-              height={260}
-            />
-            {hasData(points, "quic_cwnd_bytes") && (
+            {(hasData(points, "net_loss_pct") || hasData(points, "net_retrans_pct")) && (
               <MetricChart
-                title="QUIC congestion window"
-                metricKey="quic_cwnd_bytes"
+                title="Path recovery (normalized)"
+                metricKey="net_loss_pct"
                 data={points}
-                series={relayGroup.series.filter((series) => series.key === "quic_cwnd_bytes")}
+                series={ingestGroup.series.filter(
+                  (series) => series.key === "net_loss_pct" || series.key === "net_retrans_pct",
+                )}
                 height={220}
+                keepZeroSeries
               />
             )}
-          </>
-        )}
-
-        {currentGroup.id === "edge_zixi" && zixiGroup && (
-          <>
-            <p className="hint chart-availability-note">
-              Libsrt recovery counters from the SRT sender. Flat zeros mean a clean path.
-            </p>
-            <MetricChart
-              title="SRT recovery"
-              metricKey="pkt_retrans"
-              data={points}
-              series={zixiGroup.series}
-              height={260}
-            />
+            {isMoq && (
+              <>
+                <AvailabilityNote metricKey="moqx_subscribe_success" protocol={resolvedProtocol} />
+                <p className="hint chart-availability-note">
+                  MoQ relay counters are job-window deltas (not absolute since relay restart).
+                </p>
+                <MetricChart
+                  title="MoQ relay subscribe (Δ)"
+                  metricKey="moqx_subscribe_success"
+                  data={points}
+                  series={ingestGroup.series.filter(
+                    (series) =>
+                      series.key === "moqx_subscribe_success" ||
+                      series.key === "moqx_subscribe_error",
+                  )}
+                  height={260}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="MoQ relay publish (Δ)"
+                  metricKey="moqx_publish_received"
+                  data={points}
+                  series={ingestGroup.series.filter(
+                    (series) =>
+                      series.key === "moqx_publish_namespace_success" ||
+                      series.key === "moqx_publish_received",
+                  )}
+                  height={260}
+                  keepZeroSeries
+                />
+                {hasData(points, "quic_cwnd_bytes") && (
+                  <MetricChart
+                    title="QUIC congestion window"
+                    metricKey="quic_cwnd_bytes"
+                    data={points}
+                    series={ingestGroup.series.filter((series) => series.key === "quic_cwnd_bytes")}
+                    height={220}
+                  />
+                )}
+              </>
+            )}
+            {isSrtOrRtmp && (
+              <>
+                <p className="hint chart-availability-note">
+                  Libsrt recovery counters from the SRT sender. Flat zeros mean a clean path.
+                </p>
+                <MetricChart
+                  title="SRT / Zixi recovery"
+                  metricKey="pkt_retrans"
+                  data={points}
+                  series={ingestGroup.series.filter(
+                    (series) =>
+                      series.key === "pkt_retrans" ||
+                      series.key === "pkt_fec_extra" ||
+                      series.key === "pkt_snd_loss",
+                  )}
+                  height={260}
+                  keepZeroSeries
+                />
+              </>
+            )}
           </>
         )}
 
@@ -263,7 +293,17 @@ export function ResultCharts({
                   series.key === "playback_frames_rendered",
               )}
               height={260}
+              keepZeroSeries
             />
+            {hasData(points, "playback_buffer_sec") && (
+              <MetricChart
+                title="Buffer duration"
+                metricKey="playback_buffer_sec"
+                data={points}
+                series={playbackGroup.series.filter((series) => series.key === "playback_buffer_sec")}
+                height={220}
+              />
+            )}
             {hasData(points, "playback_video_time_sec") && (
               <MetricChart
                 title="Video playback time"

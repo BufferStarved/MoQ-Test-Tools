@@ -9,7 +9,7 @@ Live demo: [https://moq.sean-mccarthy.net](https://moq.sean-mccarthy.net) · Sou
 ## Features
 
 - **Protocols:** MoQ (openmoq → moqx relay), SRT, RTMP, HTTP PUT, WHIP
-- **Side-by-side comparisons** with live charts and a post-run Metrics scorecard
+- **Side-by-side comparisons** with live charts and a post-run Session details scorecard
 - **Encode telemetry:** bitrate, FPS, FPS stability, encode lag, CPU, memory
 - **Normalized transport metrics:** RTT, jitter, send rate, loss/retrans
 - **Browser playback:** MoQ player (moq-playa) and HLS.js against Zixi egress
@@ -73,7 +73,7 @@ npm install --prefix web/frontend
 - API: http://127.0.0.1:8000
 - Frontend: http://127.0.0.1:5173
 
-Use the **Benchmark** tab to configure streams and start a comparison. Live charts update during the run; when it finishes, open **Metrics** for the session scorecard and CSV/JSON downloads. **About** covers architecture and contact info.
+Use the **Benchmark** tab to configure streams and start a comparison. Live charts update during the run; when it finishes, open **Session Details** for the scorecard and CSV/JSON downloads. **About** covers architecture and contact info.
 
 ### CLI
 

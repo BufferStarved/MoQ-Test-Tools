@@ -80,7 +80,7 @@ e2e_latency_ms ≈ (wall_clock_now − encode_started_at) − playback_video_tim
 
 Assumptions: encode starts near wall clock T0; player `currentTime` tracks media timeline from that encode; browser and publisher clocks are roughly NTP-aligned. Values outside 0–120s are dropped as invalid.
 
-**How to compare protocols:** run legs in parallel (or back-to-back with the same media), keep playback open during the encode, and compare the **`e2e_latency_ms`** series (and summary average) under **Browser playback**. Pair with TTFF and stall count for a fuller viewer story.
+**How to compare protocols:** run legs in parallel (or back-to-back with the same media), keep playback open during the encode, and compare the **`e2e_latency_ms`** series (and summary average) under **Browser playback**. Pair with TTFF, stall count, and **`playback_buffer_sec`** (seconds buffered ahead of the playhead) for a fuller viewer story.
 
 A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-to-glass without clock skew.
 

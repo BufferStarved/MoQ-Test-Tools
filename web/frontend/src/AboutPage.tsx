@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { METRIC_DEFINITIONS } from "./metricDefinitions";
 
 const GH_REPO = "https://github.com/BufferStarved/MoQ-Test-Tools";
@@ -26,6 +27,7 @@ const ABOUT_METRIC_KEYS = [
   "e2e_latency_ms",
   "playback_ttff_ms",
   "playback_stall_count",
+  "playback_buffer_sec",
   "playback_frames_dropped",
   "vmaf_score",
   "psnr_db",
@@ -47,12 +49,34 @@ function FlowNode({
 }: {
   title: string;
   detail?: string;
-  tone?: "default" | "client" | "transport" | "server";
+  tone?: "default" | "client" | "transport" | "server" | "quality";
 }) {
   return (
     <div className={`about-flow-node tone-${tone}`}>
       <strong>{title}</strong>
       {detail ? <span>{detail}</span> : null}
+    </div>
+  );
+}
+
+function ArchStage({
+  step,
+  label,
+  tone,
+  children,
+}: {
+  step: string;
+  label: string;
+  tone: "client" | "server" | "transport" | "quality";
+  children: ReactNode;
+}) {
+  return (
+    <div className={`about-arch-stage tone-${tone}`}>
+      <div className="about-arch-stage-label">
+        <span className="about-arch-step">{step}</span>
+        {label}
+      </div>
+      <div className="about-arch-stage-body">{children}</div>
     </div>
   );
 }
@@ -117,38 +141,102 @@ export function AboutPage() {
       <section className="about-section">
         <h3>End-to-end architecture</h3>
         <p className="hint">
-          Three GCP roles in us-central1 typically host the live demo: web UI/API, Zixi ingest, and
-          the MoQ relay.
+          Media path runs left → right: source and encode, then parallel ingest, then browser
+          playback. Quality scoring runs on the ingest side.
         </p>
-        <div className="about-flow about-flow-wrap">
-          <FlowNode tone="client" title="Browser" detail="React · players · webcam" />
+        <div className="about-arch">
+          <ArchStage step="1" label="Source" tone="client">
+            <FlowNode tone="client" title="Browser / camera" detail="file or webcam MediaRecorder" />
+          </ArchStage>
           <FlowArrow />
-          <FlowNode tone="server" title="moq-web API" detail="FastAPI · ffmpeg · jobs" />
+          <ArchStage step="2" label="Encode (moq-web)" tone="server">
+            <FlowNode
+              tone="server"
+              title="ffmpeg on moq-web VM"
+              detail="H.264/AAC · GCP today · multi-cloud ready"
+            />
+            <FlowNode
+              tone="server"
+              title="Publish sidecars"
+              detail="srt-live-transmit · openmoq-publisher"
+            />
+          </ArchStage>
           <FlowArrow />
-          <div className="about-flow-branch">
-            <FlowNode tone="transport" title="Zixi Broadcaster" detail="SRT / RTMP · HLS :7777" />
-            <FlowNode tone="transport" title="moqx relay" detail="WebTransport · QUIC" />
-          </div>
+          <ArchStage step="3" label="Ingest" tone="transport">
+            <FlowNode
+              tone="transport"
+              title="Zixi Broadcaster"
+              detail="SRT/RTMP in · HLS :7777 · GCP (AWS/Linode presets planned)"
+            />
+            <FlowNode
+              tone="transport"
+              title="moqx relay"
+              detail="WebTransport :4433 · MOQT draft-16"
+            />
+            <FlowNode
+              tone="quality"
+              title="Ingest agent (server-side)"
+              detail="VMAF / PSNR / SSIM · CMAF · host metrics :8090"
+            />
+          </ArchStage>
           <FlowArrow />
-          <FlowNode tone="server" title="Ingest agent" detail="VMAF · CMAF · host metrics" />
+          <ArchStage step="4" label="Playback" tone="client">
+            <FlowNode tone="client" title="HLS Playback (Live)" detail="hls.js ← Zixi egress" />
+            <FlowNode tone="client" title="MoQ Playback (Playa)" detail="WebTransport ← moqx" />
+          </ArchStage>
         </div>
+        <ul className="about-list">
+          <li>
+            <strong>Where ffmpeg runs:</strong> on the moq-web host (not in the browser). Webcam
+            bytes arrive over WebSocket; VOD uses a local file on that VM.
+          </li>
+          <li>
+            <strong>VMAF:</strong> scored server-side by the ingest agent on the Zixi/relay worker —
+            encoder capture and/or post-ingest recording.
+          </li>
+          <li>
+            <strong>Multi-cloud:</strong> demo is GCP us-central1 today; presets/runbooks also cover
+            AWS and Linode Zixi targets as they come online.
+          </li>
+        </ul>
+      </section>
+
+      <section className="about-section">
+        <h3>Encode profile &amp; target latency</h3>
+        <p className="hint">
+          Upload configuration sets a shared bitrate ladder (360p–1080p) and a glass-to-glass
+          latency budget (100–10 000 ms). That budget scales encoder GOP/VBV, SRT/Zixi latency,
+          MoQ player catch-up, and HLS live buffer (2×2s segments = 4s default, down to 1s) for
+          every comparison leg.
+        </p>
+        <p className="hint">
+          <strong>SRT / RTMP in the browser:</strong> Chrome and other browsers cannot open{" "}
+          <code>srt://</code> or <code>rtmp://</code> sockets. Preview uses a browser-safe path —
+          Zixi HLS (default), MPEG-TS over HTTP, WHEP/WebRTC, or MoQ/WebTransport. True native
+          SRT/RTMP players exist only as native apps or via a gateway that re-packages to one of
+          those web transports.
+        </p>
       </section>
 
       <section className="about-section">
         <h3>Client path</h3>
-        <div className="about-flow about-flow-wrap">
-          <FlowNode tone="client" title="Benchmark UI" detail="presets · Start / Stop" />
+        <div className="about-arch about-arch-compact">
+          <ArchStage step="1" label="Capture" tone="client">
+            <FlowNode tone="client" title="Media source" detail="dummy.mp4 or MediaRecorder" />
+          </ArchStage>
           <FlowArrow />
-          <FlowNode tone="client" title="Media source" detail="dummy.mp4 or MediaRecorder" />
+          <ArchStage step="2" label="Jobs" tone="server">
+            <FlowNode tone="server" title="Upload jobs" detail="SSE samples · Stop / cancel" />
+          </ArchStage>
           <FlowArrow />
-          <FlowNode tone="server" title="Upload jobs" detail="SSE samples · cancel" />
+          <ArchStage step="3" label="Preview" tone="client">
+            <FlowNode tone="client" title="MoQ Playback (Playa)" detail="WebTransport" />
+            <FlowNode tone="client" title="HLS Playback (Live)" detail="hls.js · Zixi" />
+          </ArchStage>
           <FlowArrow />
-          <div className="about-flow-branch">
-            <FlowNode tone="client" title="MoQ player" detail="moq-playa · WebTransport" />
-            <FlowNode tone="client" title="HLS player" detail="hls.js · Zixi egress" />
-          </div>
-          <FlowArrow />
-          <FlowNode tone="client" title="Playback metrics" detail="TTFF · stalls · E2E" />
+          <ArchStage step="4" label="Report" tone="client">
+            <FlowNode tone="client" title="Session Details" detail="TTFF · stalls · E2E · downloads" />
+          </ArchStage>
         </div>
         <ul className="about-list">
           <li>
@@ -161,7 +249,8 @@ export function AboutPage() {
           </li>
           <li>
             Estimated E2E latency is wall-clock since encode start minus player{" "}
-            <code>currentTime</code>, including intentional HLS live buffer (~2 segments).
+            <code>currentTime</code>, including intentional HLS live buffer (default ~4s / 2×2s
+            segments; may tighten to 1s).
           </li>
         </ul>
       </section>

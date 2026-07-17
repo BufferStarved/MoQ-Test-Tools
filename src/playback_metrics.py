@@ -18,6 +18,7 @@ PLAYBACK_FIELD_NAMES = [
     "playback_hls_buffer_stalls",
     "playback_hls_frag_loads",
     "playback_video_time_sec",
+    "playback_buffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
 ]
@@ -28,6 +29,7 @@ PLAYBACK_GAUGE_KEYS = (
     "playback_bitrate_bps",
     "playback_ttff_ms",
     "playback_video_time_sec",
+    "playback_buffer_sec",
     "e2e_latency_ms",
 )
 

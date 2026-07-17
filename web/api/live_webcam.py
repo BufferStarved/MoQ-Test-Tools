@@ -47,8 +47,10 @@ class LiveWebcamSession:
     _ready_notified: bool = False
 
     def start_bridge(self) -> None:
-        if self._proc is not None:
+        if self._proc is not None and self._proc.poll() is None:
             return
+        # Prior process may have exited on a truncated WebM cluster — clear and restart.
+        self._proc = None
         ffmpeg = find_ffmpeg()
         tee_targets = "|".join(
             f"[f=mpegts:onfail=ignore]udp://127.0.0.1:{port}?pkt_size=1316"
@@ -60,7 +62,9 @@ class LiveWebcamSession:
             "-loglevel",
             "warning",
             "-fflags",
-            "+genpts+discardcorrupt",
+            "+genpts+discardcorrupt+igndts",
+            "-err_detect",
+            "ignore_err",
             "-f",
             "webm",
             "-i",
@@ -69,6 +73,12 @@ class LiveWebcamSession:
             "0:v:0",
             "-map",
             "0:a:0?",
+            "-vf",
+            "fps=30",
+            "-fps_mode",
+            "cfr",
+            "-r",
+            "30",
             "-c:v",
             "libx264",
             "-preset",
@@ -81,6 +91,8 @@ class LiveWebcamSession:
             "30",
             "-keyint_min",
             "30",
+            "-bf",
+            "0",
             "-c:a",
             "aac",
             "-ar",
@@ -100,13 +112,20 @@ class LiveWebcamSession:
         )
 
         def _watch_stderr() -> None:
-            assert self._proc is not None and self._proc.stderr is not None
-            for line in iter(self._proc.stderr.readline, b""):
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    logger.warning("live-bridge[%s]: %s", self.id, text)
-            code = self._proc.poll()
-            if code not in (None, 0) and not self._closed:
+            proc = self._proc
+            if proc is None or proc.stderr is None:
+                return
+            try:
+                for line in iter(proc.stderr.readline, b""):
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        logger.warning("live-bridge[%s]: %s", self.id, text)
+            except (ValueError, OSError):
+                # stderr closed while session teardown races this watcher.
+                return
+            code = proc.poll()
+            # Ignore exit if a newer bridge replaced this process (restart on truncated WebM).
+            if code not in (None, 0) and not self._closed and self._proc is proc:
                 self.failed = f"live bridge ffmpeg exited with code {code}"
                 self.ready.set()
 
@@ -115,18 +134,35 @@ class LiveWebcamSession:
     def write(self, chunk: bytes) -> None:
         if self._closed or not chunk:
             return
-        if self._proc is None:
-            self.start_bridge()
-        assert self._proc is not None and self._proc.stdin is not None
         with self._stdin_lock:
             if self._closed:
                 return
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                # MediaRecorder WebM often ends a cluster abruptly; restart ffmpeg
+                # instead of failing the whole live session.
+                if proc is not None:
+                    logger.warning(
+                        "live-bridge[%s]: ffmpeg exited (code=%s); restarting",
+                        self.id,
+                        proc.poll(),
+                    )
+                    self._proc = None
+                    self.failed = None
+                self.start_bridge()
+                proc = self._proc
+            if proc is None or proc.stdin is None:
+                return
             try:
-                self._proc.stdin.write(chunk)
-                self._proc.stdin.flush()
-            except BrokenPipeError as exc:
-                self.failed = f"live bridge pipe broken: {exc}"
-                self.ready.set()
+                proc.stdin.write(chunk)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                logger.warning("live-bridge[%s]: broken pipe; will restart on next chunk", self.id)
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                self._proc = None
                 return
         self._bytes_in += len(chunk)
         # After a small amount of media, fans-out are producing — jobs can start.
@@ -146,10 +182,18 @@ class LiveWebcamSession:
                         proc.stdin.close()
                     except OSError:
                         pass
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
         except Exception:
-            proc.kill()
-        self._proc = None
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        # Keep _proc until stderr watcher finishes reading; nulling early caused
+        # AttributeError: 'NoneType'.poll in the watcher thread.
 
 
 class LiveWebcamManager:

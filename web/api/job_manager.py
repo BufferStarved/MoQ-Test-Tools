@@ -56,6 +56,8 @@ class UploadJobRecord:
     samples: List[dict] = field(default_factory=list)
     compute_vmaf_on_ingest: bool = False
     compute_vmaf_encoder: bool = False
+    encode_ladder: str = ""
+    target_latency_ms: Optional[int] = None
     vmaf_status: str = VmafStatus.DISABLED.value
     vmaf_score: Optional[float] = None
     psnr_db: Optional[float] = None
@@ -114,6 +116,8 @@ class JobManager:
             moq_namespace=moq_namespace,
             compute_vmaf_on_ingest=job.compute_vmaf_on_ingest,
             compute_vmaf_encoder=job.compute_vmaf_encoder,
+            encode_ladder=job.encode_ladder,
+            target_latency_ms=job.target_latency_ms,
             vmaf_status=(
                 VmafStatus.WAITING_FOR_UPLOAD.value
                 if job.compute_vmaf_on_ingest
@@ -621,6 +625,7 @@ def read_result_summary(csv_path: str) -> dict:
         "playback_bitrate_bps",
         "playback_ttff_ms",
         "playback_video_time_sec",
+        "playback_buffer_sec",
         "e2e_latency_ms",
         "psnr_db",
         "ssim",

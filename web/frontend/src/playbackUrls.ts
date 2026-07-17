@@ -11,12 +11,12 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "auto",
     label: "Auto (recommended)",
-    hint: "SRT→Zixi HLS (or WHEP / WebRTC if configured); MOQ→Chrome + WebTransport.",
+    hint: "SRT/RTMP→Zixi HLS (browsers cannot open srt:// or rtmp://); MOQ→Chrome + WebTransport.",
   },
   {
     id: "hls",
     label: "HLS Playback (Live)",
-    hint: "HTTP Live Streaming via hls.js (Zixi live playlist).",
+    hint: "HTTP Live Streaming via hls.js (Zixi live playlist). Not native SRT/RTMP.",
   },
   {
     id: "dash",
@@ -26,7 +26,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "whep",
     label: "WHEP (WebRTC)",
-    hint: "Low-latency WebRTC preview via WHEP gateway (e.g. srt-whep).",
+    hint: "Best low-latency SRT/RTMP alternative in-browser: WebRTC via a WHEP gateway.",
   },
   {
     id: "moq",
@@ -41,7 +41,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "mpegts",
     label: "MPEG-TS over HTTP",
-    hint: "Low-latency TS preview from Zixi HTTP origin.",
+    hint: "Lower-latency Zixi HTTP TS (mpegts.js) — still not raw SRT/RTMP in the browser.",
   },
   {
     id: "zixi-embed",

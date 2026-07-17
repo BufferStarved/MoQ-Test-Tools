@@ -4,6 +4,15 @@ import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
 import { OPENMOQ_BENCHMARK_CATALOG } from "../moqOpenmoqCatalog";
+import { moqCatchUpConfig } from "../encodeProfiles";
+import {
+  markMoqCatalogReady,
+  markMoqFirstFrame,
+  moqPlaybackSucceeded,
+  resetMoqPlaybackOutcome,
+  getMoqPlaybackOutcome,
+} from "../moqPlaybackOutcome";
+import { bufferedAheadSec, seekNearLiveEdge } from "../playbackBuffer";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -20,16 +29,21 @@ interface MoqPlayerProps {
   jobStatus?: string;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  /** Glass-to-glass budget from upload config (ms). */
+  targetLatencyMs?: number;
 }
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const PUBLISHER_WARMUP_MS = 6_000;
+// Was 6s — that alone pinned wall−vt E2E near ~7s after join. Publisher is
+// usually ready within ~1–2s of job start with injected catalog.
+const PUBLISHER_WARMUP_MS = 1_500;
 const SUBSCRIBE_RETRY_MS = 5_000;
 const MAX_CONNECT_ATTEMPTS = 2;
 const MOQ_ALL_TRACKS_REFUSED = 4867;
+const LIVE_EDGE_TRIM_MS = 2_000;
 
 export default function MoqPlayer({
   relayUrl,
@@ -44,6 +58,7 @@ export default function MoqPlayer({
   jobStatus,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  targetLatencyMs = 400,
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -67,6 +82,7 @@ export default function MoqPlayer({
     bitrateBps: 0,
     ttffMs: 0,
     videoTimeSec: 0,
+    playerLatencyMs: 0,
   });
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
@@ -75,6 +91,18 @@ export default function MoqPlayer({
   // which would create two Player/MediaSource instances against the same
   // <video> element and could explain spurious "SourceBuffer removed" errors.
   const mountCountRef = useRef(0);
+  const lastJobIdRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!jobId || jobId === lastJobIdRef.current) {
+      return;
+    }
+    lastJobIdRef.current = jobId;
+    // Never clobber a successful outcome on remount (Strict Mode / prop churn).
+    if (!getMoqPlaybackOutcome(jobId)) {
+      resetMoqPlaybackOutcome(jobId);
+    }
+  }, [jobId]);
 
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => ({
@@ -89,6 +117,9 @@ export default function MoqPlayer({
       playback_hls_buffer_stalls: 0,
       playback_hls_frag_loads: 0,
       playback_video_time_sec: sessionRef.current.videoTimeSec,
+      playback_buffer_sec: bufferedAheadSec(videoRef.current),
+      // Prefer CaptureTimestamp latency from the player when present.
+      e2e_latency_ms: sessionRef.current.playerLatencyMs || undefined,
     }),
     [],
   );
@@ -98,6 +129,7 @@ export default function MoqPlayer({
     engine: "moq",
     enabled: playbackGate === "live",
     startedAtEpoch: encodeStartedAtEpoch,
+    targetLatencyMs,
     getSnapshot: getPlaybackSnapshot,
     onSample: onPlaybackSample,
   });
@@ -111,13 +143,21 @@ export default function MoqPlayer({
 
     if (playbackGate !== "live") {
       if (playbackGate === "ended") {
-        if (sessionRef.current.firstFrame) {
+        const outcome = getMoqPlaybackOutcome(jobId);
+        const playedOk =
+          moqPlaybackSucceeded(jobId) ||
+          sessionRef.current.firstFrame ||
+          sessionRef.current.videoTimeSec > 0.25 ||
+          sessionRef.current.ttffMs > 0;
+        const catalogReady = Boolean(outcome?.catalogReady || sessionRef.current.catalogReady);
+        if (playedOk) {
           setError(null);
+          lastErrorRef.current = null;
           setStatus("Playback OK");
         } else if (lastErrorRef.current) {
           setError(lastErrorRef.current);
           setStatus("Failed (see diagnostics)");
-        } else if (sessionRef.current.catalogReady) {
+        } else if (catalogReady) {
           const message = "MoQ catalog loaded but no video frames rendered during the encode.";
           lastErrorRef.current = message;
           setError(message);
@@ -149,6 +189,7 @@ export default function MoqPlayer({
 
     let destroyed = false;
     let connectTimeout: ReturnType<typeof window.setTimeout> | undefined;
+    let liveEdgeTimer: ReturnType<typeof window.setInterval> | undefined;
     sessionRef.current = {
       catalogReady: false,
       firstFrame: false,
@@ -159,6 +200,7 @@ export default function MoqPlayer({
       bitrateBps: 0,
       ttffMs: 0,
       videoTimeSec: 0,
+      playerLatencyMs: 0,
     };
 
     function pushDiag(line: string, pin = false) {
@@ -228,25 +270,51 @@ export default function MoqPlayer({
       }
     }
 
-    function onTimeUpdate() {
-      if (destroyed || sessionRef.current.firstFrame) {
+    function noteFirstFrame(source: string) {
+      if (destroyed || video.currentTime <= 0.25) {
         return;
       }
-      if (video.currentTime > 0.25) {
-        sessionRef.current.firstFrame = true;
-        sessionRef.current.videoTimeSec = Math.max(
-          sessionRef.current.videoTimeSec,
-          video.currentTime,
-        );
-        if (connectTimeout) {
-          window.clearTimeout(connectTimeout);
-        }
-        pushDiag(
-          `first_frame=ok video_time=${video.currentTime.toFixed(2)} size=${video.videoWidth}x${video.videoHeight}`,
-        );
-        setIsPlaying(true);
-        setStatus("Playing");
+      const wasFirst = !sessionRef.current.firstFrame;
+      sessionRef.current.firstFrame = true;
+      sessionRef.current.videoTimeSec = Math.max(
+        sessionRef.current.videoTimeSec,
+        video.currentTime,
+      );
+      markMoqFirstFrame(jobId, {
+        ttffMs: sessionRef.current.ttffMs,
+        videoTimeSec: sessionRef.current.videoTimeSec,
+      });
+      if (!wasFirst) {
+        return;
       }
+      lastErrorRef.current = null;
+      if (connectTimeout) {
+        window.clearTimeout(connectTimeout);
+      }
+      pushDiag(
+        `first_frame=ok via=${source} video_time=${video.currentTime.toFixed(2)} size=${video.videoWidth}x${video.videoHeight}`,
+      );
+      setError(null);
+      setIsPlaying(true);
+      setStatus("Playing");
+      // Defend against player/engine leaving a non-1.0 rate after false catch-up.
+      if (Math.abs(video.playbackRate - 1) > 0.01) {
+        pushDiag(`playback_rate_reset from=${video.playbackRate}`);
+        video.playbackRate = 1;
+      }
+    }
+
+    function onTimeUpdate() {
+      if (destroyed) {
+        return;
+      }
+      if (Math.abs(video.playbackRate - 1) > 0.01) {
+        video.playbackRate = 1;
+      }
+      if (sessionRef.current.firstFrame) {
+        return;
+      }
+      noteFirstFrame("video.timeupdate");
     }
 
     async function start() {
@@ -287,6 +355,12 @@ export default function MoqPlayer({
           pushDiag(`subscribe_retry=attempt${attempt}`, true);
         }
 
+        const catchUp = moqCatchUpConfig(targetLatencyMs || 400);
+        pushDiag(
+          `catch_up target=${catchUp.targetLatencyMs}ms maxRate=${catchUp.maxCatchUpRate} ` +
+            `threshold=${catchUp.catchUpThresholdMs}ms warmup=${PUBLISHER_WARMUP_MS}ms`,
+          true,
+        );
         const player = new Player(null, {
           url: relayUrl,
           namespace,
@@ -296,15 +370,17 @@ export default function MoqPlayer({
           video,
           muted: true,
           autoplay: true,
-          // Keep near the live edge. Default maxCatchUpRate is 1.0 (disabled),
-          // which lets webcam/live MoQ fall far behind while still looking "low
-          // latency" on wall−currentTime until catch-up is enabled.
-          targetLatencyMs: 400,
-          maxCatchUpRate: 1.15,
-          catchUpThresholdMs: 250,
-          catchUpRecoveryMs: 50,
+          targetLatencyMs: catchUp.targetLatencyMs,
+          // Catch-up + subscribe filter must go through moqtPlayerConfig —
+          // @playa/player only forwards a subset of top-level options.
           moqtPlayerConfig: {
             catalog: OPENMOQ_BENCHMARK_CATALOG,
+            // Catch-up disabled: openmoq CMAF has no LOC CaptureTimestamps.
+            maxCatchUpRate: catchUp.maxCatchUpRate,
+            catchUpThresholdMs: catchUp.catchUpThresholdMs,
+            catchUpRecoveryMs: catchUp.catchUpRecoveryMs,
+            // Next keyframe boundary — safer than LargestObject for fMP4 GOPs.
+            subscriptionFilter: { type: "NextGroupStart" },
           },
         });
         playerRef.current = player;
@@ -331,6 +407,7 @@ export default function MoqPlayer({
             return;
           }
           sessionRef.current.catalogReady = true;
+          markMoqCatalogReady(jobId);
           const levelNames = event.levels.map((level) => level.trackName ?? String(level.index)).join(",");
           pushDiag(
             `ready levels=${event.levels.length} tracks=${levelNames || "?"} audio=${event.audioTracks.length}`,
@@ -346,16 +423,8 @@ export default function MoqPlayer({
           if (destroyed) {
             return;
           }
-          if (video.currentTime > 0.25 && video.videoWidth > 0) {
-            sessionRef.current.firstFrame = true;
-            if (connectTimeout) {
-              window.clearTimeout(connectTimeout);
-            }
-            pushDiag(
-              `first_frame=ok video_time=${video.currentTime.toFixed(2)} size=${video.videoWidth}x${video.videoHeight}`,
-            );
-            setIsPlaying(true);
-            setStatus("Playing");
+          if (video.videoWidth > 0) {
+            noteFirstFrame("player.playing");
           }
         });
 
@@ -370,9 +439,7 @@ export default function MoqPlayer({
             return;
           }
           if (video.currentTime > 0.25 && video.videoWidth > 0) {
-            sessionRef.current.firstFrame = true;
-            setIsPlaying(true);
-            setStatus("Playing");
+            noteFirstFrame("player.timeupdate");
           } else if (currentTime > 0 && !sessionRef.current.catalogReady) {
             const bucket = Math.floor(currentTime / 5000);
             if (bucket !== lastTimelineDiagRef.current) {
@@ -394,14 +461,31 @@ export default function MoqPlayer({
             sessionRef.current.videoTimeSec,
             video.currentTime,
           );
+          if (typeof stats.latencyMs === "number" && stats.latencyMs > 0) {
+            sessionRef.current.playerLatencyMs = stats.latencyMs;
+          }
           if (stats.framesRendered > 0) {
             sessionRef.current.statsEvents += 1;
-            sessionRef.current.firstFrame = true;
+            if (video.currentTime > 0.25) {
+              noteFirstFrame("player.stats");
+            } else if (!sessionRef.current.firstFrame) {
+              // MSE can report rendered frames slightly before currentTime moves.
+              sessionRef.current.firstFrame = true;
+              markMoqFirstFrame(jobId, {
+                ttffMs: sessionRef.current.ttffMs,
+                videoTimeSec: sessionRef.current.videoTimeSec,
+              });
+              lastErrorRef.current = null;
+              if (connectTimeout) {
+                window.clearTimeout(connectTimeout);
+              }
+              setError(null);
+              setIsPlaying(true);
+              setStatus("Playing");
+            }
             pushDiag(
               `stats bitrate=${stats.bitrate} latency=${stats.latencyMs} ttf=${stats.timeToFirstFrameMs ?? 0} rendered=${stats.framesRendered}`,
             );
-            setIsPlaying(true);
-            setStatus("Playing");
           } else if (stats.bitrate > 0 && !statsZeroLogged) {
             statsZeroLogged = true;
             pushDiag(`stats bitrate=${stats.bitrate} latency=${stats.latencyMs} rendered=0`);
@@ -443,6 +527,7 @@ export default function MoqPlayer({
                 bitrateBps: 0,
                 ttffMs: 0,
                 videoTimeSec: 0,
+                playerLatencyMs: 0,
               };
               setIsReady(false);
               await sleep(SUBSCRIBE_RETRY_MS);
@@ -509,6 +594,21 @@ export default function MoqPlayer({
           return;
         }
         video.addEventListener("timeupdate", onTimeUpdate);
+        // Keep playhead near live only when the buffer clearly balloons.
+        // Aggressive seeks on a healthy ~0.5s buffer felt like stutter/slow-mo.
+        const holdBehindSec = Math.max(0.4, (targetLatencyMs || 800) / 1000);
+        liveEdgeTimer = window.setInterval(() => {
+          if (destroyed || !sessionRef.current.firstFrame) {
+            return;
+          }
+          const ahead = bufferedAheadSec(video);
+          if (ahead < holdBehindSec * 4) {
+            return;
+          }
+          if (seekNearLiveEdge(video, holdBehindSec)) {
+            pushDiag(`live_edge_seek ahead=${ahead.toFixed(2)}s hold=${holdBehindSec.toFixed(2)}s`);
+          }
+        }, LIVE_EDGE_TRIM_MS);
       } catch (err) {
         playerRef.current?.destroy();
         playerRef.current = null;
@@ -533,12 +633,17 @@ export default function MoqPlayer({
       if (connectTimeout) {
         window.clearTimeout(connectTimeout);
       }
+      if (liveEdgeTimer) {
+        window.clearInterval(liveEdgeTimer);
+      }
       setIsReady(false);
       const active = playerRef.current;
       playerRef.current = null;
       active?.destroy();
     };
-  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, encodeDurationSec]);
+    // encodeDurationSec is read once at start for catalog timeout — keep it out of
+    // deps so a late duration update does not tear down a healthy Player/MediaSource.
+  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs]);
 
   async function togglePlayPause() {
     const player = playerRef.current;

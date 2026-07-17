@@ -18,6 +18,8 @@ interface MetricChartProps {
   series: ChartSeries[];
   height?: number;
   yDomain?: [number, number];
+  /** Keep all-zero series (e.g. MoQ stalls=0 next to HLS stalls>0). */
+  keepZeroSeries?: boolean;
 }
 
 function formatValue(value: number, unit?: string): string {
@@ -87,11 +89,21 @@ export function MetricChart({
   series,
   height = 220,
   yDomain,
+  keepZeroSeries = false,
 }: MetricChartProps) {
   // Prefer series with non-zero samples, but keep all-zero series visible when
-  // the chart has data (e.g. clean SRT paths with zero retransmits).
+  // the chart has data (e.g. clean SRT paths with zero retransmits) or when
+  // keepZeroSeries is set (cross-protocol stalls / recovery counters).
   const nonzeroSeries = series.filter((item) => data.some((point) => (point[item.key] ?? 0) > 0));
-  const activeSeries = nonzeroSeries.length > 0 ? nonzeroSeries : data.length > 0 ? series : [];
+  const activeSeries = keepZeroSeries
+    ? data.length > 0
+      ? series
+      : []
+    : nonzeroSeries.length > 0
+      ? nonzeroSeries
+      : data.length > 0
+        ? series
+        : [];
   const resolvedMetricKey = metricKey ?? (series.length === 1 ? series[0]?.key : undefined);
 
   if (activeSeries.length === 0) {

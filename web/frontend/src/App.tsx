@@ -38,6 +38,18 @@ import {
   startLiveWebcamBroadcast,
   webcamCaptureSeconds,
 } from "./webcamCapture";
+import {
+  DEFAULT_ENCODE_LADDER_ID,
+  DEFAULT_TARGET_LATENCY_MS,
+  ENCODE_LADDER_OPTIONS,
+  MAX_TARGET_LATENCY_MS,
+  MIN_TARGET_LATENCY_MS,
+  clampTargetLatencyMs,
+  hlsLiveSyncCount,
+  hlsLiveSyncDurationSec,
+  moqPlayerTargetLatencyMs,
+} from "./encodeProfiles";
+import { isSafariBrowser } from "./browserDetect";
 
 type MediaSourceId = "dummy" | "bbb" | "webcam";
 
@@ -139,6 +151,8 @@ function App() {
   const [mediaLabel, setMediaLabel] = useState("Default Color Bar Asset (dummy.mp4)");
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
+  const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
+  const [targetLatencyMs, setTargetLatencyMs] = useState(DEFAULT_TARGET_LATENCY_MS);
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
   const [encoderVmafUnavailableReason, setEncoderVmafUnavailableReason] = useState<string | null>(null);
   const [vmafUnavailableReason, setVmafUnavailableReason] = useState<string | null>(null);
@@ -156,6 +170,8 @@ function App() {
   const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
   const anyIngestVmafAvailable = endpoints.some((endpoint) => endpoint.vmafAvailable);
+  /** Enable checkbox when we can score at least one leg (encoder and/or ingest). */
+  const vmafSelectable = encoderVmafAvailable || anyIngestVmafAvailable;
   const vmafBothAvailable = encoderVmafAvailable && anyIngestVmafAvailable;
   const endpointSignature = endpoints
     .map(
@@ -329,24 +345,39 @@ function App() {
   }, [apiOnline]);
 
   useEffect(() => {
-    if (!vmafBothAvailable) {
+    if (!vmafSelectable) {
+      // Only clear the checkbox when nothing can score — do not clear during
+      // brief capability-refresh flicker if the user already opted in.
       setComputeVmaf(false);
-      if (!encoderVmafAvailable && !anyIngestVmafAvailable) {
-        setVmafUnavailableReason(
-          encoderVmafUnavailableReason ??
-            "VMAF needs ffmpeg/libvmaf on this host and an ingest server with recording support.",
-        );
-      } else if (!encoderVmafAvailable) {
-        setVmafUnavailableReason(
-          encoderVmafUnavailableReason ?? "Encoder VMAF requires ffmpeg with libvmaf on this host.",
-        );
-      } else {
-        setVmafUnavailableReason("Ingest VMAF is not available for the selected ingest endpoints.");
-      }
+      setVmafUnavailableReason(
+        encoderVmafUnavailableReason ??
+          "VMAF needs ffmpeg/libvmaf on this host and/or an ingest server with recording support.",
+      );
+      return;
+    }
+    if (mediaSource === "webcam") {
+      setVmafUnavailableReason(
+        "VMAF / PSNR / SSIM need a file reference — disabled for live webcam. Use the color-bar asset to score quality.",
+      );
+      return;
+    }
+    if (!vmafBothAvailable) {
+      setVmafUnavailableReason(
+        encoderVmafAvailable
+          ? "Ingest VMAF is unavailable for some endpoints — encoder scores will still run where possible."
+          : "Encoder libvmaf is unavailable — ingest scores will still run where possible.",
+      );
       return;
     }
     setVmafUnavailableReason(null);
-  }, [vmafBothAvailable, encoderVmafAvailable, anyIngestVmafAvailable, encoderVmafUnavailableReason]);
+  }, [
+    vmafSelectable,
+    vmafBothAvailable,
+    encoderVmafAvailable,
+    anyIngestVmafAvailable,
+    encoderVmafUnavailableReason,
+    mediaSource,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -441,6 +472,8 @@ function App() {
     duration_sec?: number;
     compute_vmaf_on_ingest: boolean;
     compute_vmaf_encoder: boolean;
+    encode_ladder: string;
+    target_latency_ms: number;
     comparison_id: string;
     stream_index: number;
     stream_label: string;
@@ -456,6 +489,8 @@ function App() {
       // Live webcam has no file reference for VMAF.
       compute_vmaf_on_ingest: computeVmaf && endpoint.vmafAvailable && !isLive,
       compute_vmaf_encoder: computeVmaf && encoderVmafAvailable && !isLive,
+      encode_ladder: encodeLadder,
+      target_latency_ms: clampTargetLatencyMs(targetLatencyMs),
       comparison_id: comparisonId,
       stream_index: streamIndex,
       stream_label: endpointLabel(endpoint, streamIndex),
@@ -714,8 +749,16 @@ function App() {
     );
   }
 
+  const safariUnsupported = isSafariBrowser();
+
   return (
     <div className="app">
+      {safariUnsupported && (
+        <div className="info-banner safari-banner" role="status">
+          <strong>Safari playback is not currently supported.</strong> Upload benchmarking
+          will still function. For MoQ and live preview players, use Chrome or Edge.
+        </div>
+      )}
       <header className="hero">
         <div>
           <p className="eyebrow">Streaming benchmark platform</p>
@@ -729,7 +772,7 @@ function App() {
             Benchmark
           </button>
           <button className={tab === "metrics" ? "active" : ""} onClick={() => setTab("metrics")}>
-            Metrics{sessionMetrics.length > 0 ? ` (${sessionMetrics.length})` : ""}
+            Session Details{sessionMetrics.length > 0 ? ` (${sessionMetrics.length})` : ""}
           </button>
           <button className={tab === "about" ? "active" : ""} onClick={() => setTab("about")}>
             About
@@ -778,6 +821,46 @@ function App() {
                   Add another stream ({endpoints.length}/{MAX_ENDPOINTS})
                 </button>
               )}
+
+              <div className="source-media-section">
+                <h3>Encode profile</h3>
+                <div className="encode-profile-grid">
+                  <label>
+                    Target bitrate / resolution
+                    <select
+                      value={encodeLadder}
+                      onChange={(e) => setEncodeLadder(e.target.value)}
+                      disabled={bootstrapping || !apiOnline || loading}
+                    >
+                      {ENCODE_LADDER_OPTIONS.map((ladder) => (
+                        <option key={ladder.id} value={ladder.id}>
+                          {ladder.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Target latency (ms)
+                    <input
+                      type="number"
+                      min={MIN_TARGET_LATENCY_MS}
+                      max={MAX_TARGET_LATENCY_MS}
+                      step={50}
+                      value={targetLatencyMs}
+                      disabled={bootstrapping || !apiOnline || loading}
+                      onChange={(e) =>
+                        setTargetLatencyMs(clampTargetLatencyMs(Number(e.target.value)))
+                      }
+                    />
+                  </label>
+                </div>
+                <p className="hint">
+                  Latency ({MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS} ms) scales encoder GOP /
+                  VBV, SRT/Zixi latency, MoQ player catch-up, and HLS live buffer (default 2×2s
+                  segments = 4s, down to 1s). Bitrate sets
+                  H.264 scale + target/maxrate for every comparison leg.
+                </p>
+              </div>
 
               <div className="source-media-section">
                 <h3>Media</h3>
@@ -835,8 +918,8 @@ function App() {
                 <label className="checkbox-row">
                   <input
                     type="checkbox"
-                    checked={computeVmaf}
-                    disabled={!vmafBothAvailable}
+                    checked={computeVmaf && mediaSource !== "webcam"}
+                    disabled={!vmafSelectable || mediaSource === "webcam"}
                     onChange={(e) => setComputeVmaf(e.target.checked)}
                   />
                   <span>Compute VMAF — encoder + ingest (VMAF, PSNR, SSIM)</span>
@@ -845,6 +928,7 @@ function App() {
                   Encoder: scores the ffmpeg output before it leaves this host.
                   <br />
                   Ingest: scores the recording after upload. Runs on the ingest server.
+                  Requires the color-bar (or uploaded) file — not live webcam.
                 </p>
                 {vmafUnavailableReason && <p className="hint">{vmafUnavailableReason}</p>}
               </div>
@@ -891,7 +975,8 @@ function App() {
                     moqRelayUrl={endpoint.moqRelayUrl}
                     moqFingerprintUrl={endpoint.moqFingerprintUrl}
                     moqNamespace={
-                      comparisonLegs[index]?.job.moq_namespace ?? endpoint.moqNamespace
+                      comparisonLegs[index]?.job.moq_namespace ??
+                      (comparisonLegs[index] ? undefined : endpoint.moqNamespace)
                     }
                     playbackGate={playbackGateForJob(comparisonLegs[index]?.job, loading)}
                     jobId={comparisonLegs[index]?.job.id}
@@ -915,6 +1000,15 @@ function App() {
                     jobStatus={comparisonLegs[index]?.job.status}
                     benchmarkLoading={loading}
                     encodeDurationSec={comparisonLegs[index]?.job.duration_sec ?? 60}
+                    targetLatencyMs={moqPlayerTargetLatencyMs(
+                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
+                    )}
+                    hlsLiveSyncCount={hlsLiveSyncCount(
+                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
+                    )}
+                    hlsLiveSyncDurationSec={hlsLiveSyncDurationSec(
+                      comparisonLegs[index]?.job.target_latency_ms ?? targetLatencyMs,
+                    )}
                     controlsLocked={bootstrapping || !apiOnline}
                     onPlaybackModeChange={(mode) =>
                       updateEndpoint(endpoint.id, { playbackMode: mode })
@@ -1030,7 +1124,9 @@ function App() {
                 comparisonLegs.length > 0 &&
                 comparisonLegs.every((leg) => isLegFinished(leg.job, leg.ingestVmafRequested)) && (
                   <div className="session-download-strip">
-                    <p className="hint">Download this session’s raw metrics, or open the Metrics tab for the scorecard.</p>
+                    <p className="hint">
+                      Download this session’s raw metrics, or open Session Details for the scorecard.
+                    </p>
                     <div className="download-actions">
                       {comparisonLegs.map((leg) => {
                         const filename = resultFilenameFromPath(leg.job.csv_path);
@@ -1050,7 +1146,7 @@ function App() {
                         );
                       })}
                       <button type="button" className="secondary-button" onClick={() => setTab("metrics")}>
-                        Open Metrics
+                        Open Session Details
                       </button>
                     </div>
                   </div>
@@ -1078,7 +1174,7 @@ function App() {
 
         {tab === "metrics" && (
           <section className="panel results-panel">
-            <h2>Session metrics</h2>
+            <h2>Session Details</h2>
             <SessionMetrics streams={sessionMetrics} labels={sessionMetricLabels} />
           </section>
         )}

@@ -101,6 +101,8 @@ export function createUpload(payload: {
   endpoint_url?: string;
   compute_vmaf_on_ingest?: boolean;
   compute_vmaf_encoder?: boolean;
+  encode_ladder?: string;
+  target_latency_ms?: number;
   comparison_id?: string;
   stream_index?: number;
   stream_label?: string;
@@ -140,6 +142,8 @@ export interface PlaybackMetricsSnapshot {
   playback_hls_buffer_stalls: number;
   playback_hls_frag_loads: number;
   playback_video_time_sec: number;
+  /** Seconds of media buffered ahead of the playhead. */
+  playback_buffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
 }

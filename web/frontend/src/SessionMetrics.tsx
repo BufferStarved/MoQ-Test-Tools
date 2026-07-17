@@ -146,6 +146,15 @@ export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
                   value={String(avg.playback_stall_count ?? "—")}
                   tone={healthTone(avg.playback_stall_count)}
                 />
+                <ScoreCell
+                  metricKey="playback_buffer_sec"
+                  label="Buffer avg"
+                  value={
+                    avg.playback_buffer_sec != null
+                      ? `${avg.playback_buffer_sec.toFixed(2)} s`
+                      : "—"
+                  }
+                />
               </div>
             );
           })}
@@ -240,6 +249,22 @@ export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
                   label="SSIM (ingest)"
                   value={formatNum(ingest?.ssim ?? avg.ssim ?? null, 3)}
                 />
+                {(encoder?.status === "failed" || encoder?.error) && (
+                  <p className="hint scorecard-quality-error">
+                    Encoder quality: {encoder.error ?? encoder.status}
+                  </p>
+                )}
+                {(ingest?.status === "failed" || ingest?.error) && (
+                  <p className="hint scorecard-quality-error">
+                    Ingest quality: {ingest.error ?? ingest.status}
+                  </p>
+                )}
+                {!encoder && !ingest && (
+                  <p className="hint">
+                    No VMAF/PSNR/SSIM in this session — enable the checkbox with the color-bar
+                    asset (not webcam) before Start.
+                  </p>
+                )}
               </div>
             );
           })}

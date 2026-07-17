@@ -19,7 +19,7 @@
 #   ZIXI_PASSWORD          Admin password (required)
 #   ZIXI_STREAM_ID         Stream ID (default: benchmark)
 #   ZIXI_HTTP_PORT         HTTP server port (default: 7777)
-#   ZIXI_HLS_SEGMENT_SEC   HLS/CMAF segment duration in seconds (default: 6)
+#   ZIXI_HLS_SEGMENT_SEC   HLS/CMAF segment duration in seconds (default/min: 2)
 #   ZIXI_HLS_SEGMENTS      Segments kept in playlist (default: 6)
 #   ZIXI_SKIP_RESTART      Set to 1 to skip service restart (not recommended)
 set -euo pipefail
@@ -30,7 +30,13 @@ ZIXI_USER="${ZIXI_USER:-admin}"
 ZIXI_PASSWORD="${ZIXI_PASSWORD:-}"
 ZIXI_STREAM_ID="${ZIXI_STREAM_ID:-benchmark}"
 ZIXI_HTTP_PORT="${ZIXI_HTTP_PORT:-7777}"
-ZIXI_HLS_SEGMENT_SEC="${ZIXI_HLS_SEGMENT_SEC:-6}"
+# 2s minimum — 1s packs stutter between segments. Raise (3–6) when the
+# latency budget allows a longer chunk (player buffer defaults to 2× segment).
+ZIXI_HLS_SEGMENT_SEC="${ZIXI_HLS_SEGMENT_SEC:-2}"
+if [[ "$ZIXI_HLS_SEGMENT_SEC" -lt 2 ]]; then
+  echo "ZIXI_HLS_SEGMENT_SEC=${ZIXI_HLS_SEGMENT_SEC} is below the 2s minimum; clamping to 2." >&2
+  ZIXI_HLS_SEGMENT_SEC=2
+fi
 ZIXI_HLS_SEGMENTS="${ZIXI_HLS_SEGMENTS:-6}"
 ZIXI_SKIP_RESTART="${ZIXI_SKIP_RESTART:-0}"
 
@@ -111,6 +117,8 @@ enable_http_hls_dash_origin() {
 &hls_media_http_cache_header_seconds=0&dash_media_http_cache_header_seconds=0\
 &auto_hls_playback=1&auto_hls_playback_sub_gop_latency=0\
 &ws_enabled=0&ws_port=8100&quic_enabled=0&quic_port=8080" >/dev/null
+  # NOTE: auto_hls_playback=0 makes /playback.m3u8?stream=… return 404 even while
+  # SRT ingest is live on this Broadcaster build — keep it on.
 }
 
 restart_zixi_if_needed() {
@@ -138,6 +146,15 @@ echo ""
 
 enable_http_hls_dash_origin
 restart_zixi_if_needed
+
+# Live Protocols restart drops non-permanent SRT push inputs — recreate the
+# managed "SRT Test" listener so the next web encode does not 404 forever.
+if [[ -x "$REPO_ROOT/infra/zixi/scripts/reset-zixi-srt-input.sh" ]]; then
+  echo "Recreating managed SRT push input after Zixi restart..."
+  ZIXI_HOST="$ZIXI_HOST" ZIXI_PORT="$ZIXI_PORT" ZIXI_USER="$ZIXI_USER" \
+    ZIXI_PASSWORD="$ZIXI_PASSWORD" ZIXI_SRT_STREAM="SRT Test" \
+    "$REPO_ROOT/infra/zixi/scripts/reset-zixi-srt-input.sh" || true
+fi
 
 if stream_exists "$ZIXI_STREAM_ID"; then
   echo "Input '${ZIXI_STREAM_ID}' already exists — refreshing recording settings."

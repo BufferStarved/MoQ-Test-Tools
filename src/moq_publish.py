@@ -18,36 +18,18 @@ DEFAULT_MOQ_FORWARD = 1
 OPENMOQ_PUBLISHER_VERSION = "v0.3.2"
 DEFAULT_MOQ_PUBLISHER_BACKEND = "auto"  # auto | moq5 | openmoq
 
-# H.264 Main + yuv420p (4:2:0) — required for browser <video>, MSE/HLS, and WebCodecs.
-# repeat-headers + fixed GOP keeps SPS/PPS at each IDR so Zixi HLS chunks are MSE-decodable.
-BROWSER_COMPAT_VIDEO_ARGS = [
-    "-c:v",
-    "libx264",
-    "-pix_fmt",
-    "yuv420p",
-    "-profile:v",
-    "main",
-    "-level:v",
-    "4.0",
-    "-preset",
-    "veryfast",
-    "-g",
-    "60",
-    "-keyint_min",
-    "60",
-    "-sc_threshold",
-    "0",
-    "-bf",
-    "0",
-    "-b:v",
-    "2500k",
-    "-maxrate",
-    "2800k",
-    "-bufsize",
-    "5600k",
-    "-x264-params",
-    "repeat-headers=1",
-]
+# Default H.264 Main + yuv420p ladder (720p). Prefer build_video_encode_args()
+# from encode_profile when the UI supplies ladder + target latency.
+from encode_profile import (  # noqa: E402
+    DEFAULT_ENCODE_LADDER_ID,
+    DEFAULT_TARGET_LATENCY_MS,
+    build_video_encode_args,
+)
+
+BROWSER_COMPAT_VIDEO_ARGS = build_video_encode_args(
+    DEFAULT_ENCODE_LADDER_ID,
+    DEFAULT_TARGET_LATENCY_MS,
+)
 # +bitexact is required, not cosmetic: ffmpeg's native AAC encoder embeds its
 # version string ("Lavc62.28.102\0") as literal bytes inside the FIRST access
 # unit of every encoded AAC frame (a libavcodec "fill_element" comment, not
@@ -236,11 +218,15 @@ def is_live_media_source(media_path: str) -> bool:
 
 def build_ffmpeg_input_args(media_path: str) -> List[str]:
     if is_live_media_source(media_path):
+        # Webcam bridge → UDP is often VFR / discontinuous; regenerate PTS so
+        # the second encode + MoQ fMP4 tfdt stay monotonic.
         return [
             "-fflags",
-            "nobuffer",
+            "+nobuffer+genpts+discardcorrupt+igndts",
             "-flags",
             "low_delay",
+            "-use_wallclock_as_timestamps",
+            "1",
             "-probesize",
             "32k",
             "-analyzeduration",
@@ -251,7 +237,14 @@ def build_ffmpeg_input_args(media_path: str) -> List[str]:
     return ["-re", "-i", media_path]
 
 
-def build_ffmpeg_moq_cmd(media_path: str, *, progress_path: str) -> List[str]:
+def build_ffmpeg_moq_cmd(
+    media_path: str,
+    *,
+    progress_path: str,
+    encode_ladder: str = DEFAULT_ENCODE_LADDER_ID,
+    target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
+) -> List[str]:
+    video_args = build_video_encode_args(encode_ladder, target_latency_ms)
     return [
         find_ffmpeg(),
         *build_ffmpeg_input_args(media_path),
@@ -263,11 +256,16 @@ def build_ffmpeg_moq_cmd(media_path: str, *, progress_path: str) -> List[str]:
         "-1",
         "-sn",
         "-dn",
-        *BROWSER_COMPAT_VIDEO_ARGS,
+        *video_args,
         *BROWSER_COMPAT_AUDIO_ARGS,
         "-progress",
         progress_path,
         "-nostats",
+        # Keep fMP4 decode times near zero-based; fragment on keyframes for MoQ CMAF.
+        "-muxdelay",
+        "0",
+        "-muxpreload",
+        "0",
         "-movflags",
         "+frag_keyframe+empty_moov+default_base_moof+separate_moof",
         "-f",

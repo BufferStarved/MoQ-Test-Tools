@@ -16,6 +16,8 @@ Configure with the same environment variables used by ZixiStatsPoller:
   ZIXI_API_PASSWORD
 """
 
+from __future__ import annotations
+
 import base64
 import logging
 import os
@@ -57,6 +59,8 @@ def reset_zixi_srt_input(
     base_url: str = "",
     user: str = "",
     password: str = "",
+    srt_latency_ms: int | None = None,
+    max_bitrate_kbps: int | None = None,
 ) -> bool:
     """Delete and recreate a Zixi SRT push input so its HLS segmenter starts fresh.
 
@@ -105,10 +109,24 @@ def reset_zixi_srt_input(
         ("rec_path", ""),
         ("type", "SRT"),
         ("port", str(port)),
-        ("max_bitrate", str(_DEFAULT_SRT_MAX_BITRATE_BPS)),
+        (
+            "max_bitrate",
+            str(
+                int(max_bitrate_kbps) * 1000
+                if max_bitrate_kbps is not None and int(max_bitrate_kbps) > 0
+                else _DEFAULT_SRT_MAX_BITRATE_BPS
+            ),
+        ),
         ("pass", ""),
         ("nic", ""),
-        ("srt_latency", str(_DEFAULT_SRT_LATENCY_MS)),
+        (
+            "srt_latency",
+            str(
+                int(srt_latency_ms)
+                if srt_latency_ms is not None and int(srt_latency_ms) > 0
+                else _DEFAULT_SRT_LATENCY_MS
+            ),
+        ),
         ("verify_streamid", "0"),
         ("srt_version", "1.5.5"),
     ]

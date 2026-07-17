@@ -39,6 +39,16 @@ from destinations import (  # noqa: E402
 from endpoint_probe import probe_endpoint  # noqa: E402
 from ingest_agent_client import IngestAgentClient, resolve_ingest_agent, vmaf_available_for_endpoint  # noqa: E402
 from vmaf_score import libvmaf_available  # noqa: E402
+from encode_profile import (  # noqa: E402
+    DEFAULT_ENCODE_LADDER_ID,
+    DEFAULT_TARGET_LATENCY_MS,
+    MAX_TARGET_LATENCY_MS,
+    MIN_TARGET_LATENCY_MS,
+    clamp_target_latency_ms,
+    encode_profile_summary,
+    ensure_known_ladder,
+    list_encode_ladders,
+)
 from upload_service import UploadJob  # noqa: E402
 from job_manager import (  # noqa: E402
     JobManager,
@@ -72,6 +82,12 @@ class CreateUploadRequest(BaseModel):
     endpoint_url: Optional[str] = None
     compute_vmaf_on_ingest: bool = False
     compute_vmaf_encoder: bool = False
+    encode_ladder: str = DEFAULT_ENCODE_LADDER_ID
+    target_latency_ms: int = Field(
+        default=DEFAULT_TARGET_LATENCY_MS,
+        ge=MIN_TARGET_LATENCY_MS,
+        le=MAX_TARGET_LATENCY_MS,
+    )
     comparison_id: Optional[str] = None
     stream_index: int = Field(default=0, ge=0, le=9)
     stream_label: str = ""
@@ -122,6 +138,7 @@ class PlaybackSampleRequest(BaseModel):
     playback_hls_buffer_stalls: int = 0
     playback_hls_frag_loads: int = 0
     playback_video_time_sec: float = 0.0
+    playback_buffer_sec: float = 0.0
     playback_error_count: int = 0
     e2e_latency_ms: float = 0.0
 
@@ -135,6 +152,8 @@ def job_to_dict(job) -> dict:
         "media_path": job.media_path,
         "duration_sec": job.duration_sec,
         "preset_id": job.preset_id,
+        "encode_ladder": getattr(job, "encode_ladder", None),
+        "target_latency_ms": getattr(job, "target_latency_ms", None),
         "moq_namespace": job.moq_namespace,
         "created_at": job.created_at,
         "csv_path": job.csv_path,
@@ -160,6 +179,29 @@ def job_to_dict(job) -> dict:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/encode-profiles")
+def encode_profiles():
+    """Bitrate ladder presets + latency bounds for the upload configuration UI."""
+    return {
+        "ladders": list_encode_ladders(),
+        "default_ladder": DEFAULT_ENCODE_LADDER_ID,
+        "default_target_latency_ms": DEFAULT_TARGET_LATENCY_MS,
+        "min_target_latency_ms": MIN_TARGET_LATENCY_MS,
+        "max_target_latency_ms": MAX_TARGET_LATENCY_MS,
+        "example": encode_profile_summary(DEFAULT_ENCODE_LADDER_ID, DEFAULT_TARGET_LATENCY_MS),
+        "notes": {
+            "latency": (
+                "Target latency is a glass-to-glass budget: encoder GOP/bufsize, "
+                "SRT/Zixi latency, MoQ player targetLatencyMs, and HLS liveSync depth."
+            ),
+            "srt_rtmp_playback": (
+                "Browsers cannot open srt:// or rtmp:// natively. Use Zixi HLS/MPEG-TS, "
+                "WHEP (WebRTC), or MoQ/WebTransport for in-page preview."
+            ),
+        },
+    }
 
 
 @app.post("/api/media/upload")
@@ -475,12 +517,20 @@ def create_upload(request: CreateUploadRequest):
     if is_live:
         duration_sec = max(5, min(MAX_LIVE_DURATION_SEC, int(duration_sec)))
 
+    try:
+        encode_ladder = ensure_known_ladder(request.encode_ladder)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    target_latency_ms = clamp_target_latency_ms(request.target_latency_ms)
+
     job = UploadJob(
         media_path=media_path,
         destination=destination,
         duration_sec=duration_sec,
         compute_vmaf_on_ingest=compute_vmaf_on_ingest,
         compute_vmaf_encoder=compute_vmaf_encoder,
+        encode_ladder=encode_ladder,
+        target_latency_ms=target_latency_ms,
         comparison_id=request.comparison_id or "",
         stream_index=request.stream_index,
         stream_label=request.stream_label,
@@ -640,30 +690,58 @@ def playback_fetch(url: str):
         raise HTTPException(status_code=400, detail="Invalid playback URL")
 
     safe_url = _sanitize_fetch_url(url)
+    path_lower = (parsed.path or "").lower()
+    likely_manifest = path_lower.endswith(".m3u8") or "m3u8" in path_lower
+    # Zixi long-polls live playlists until the next segment (~chunk duration).
+    # Timeout must exceed that wait; on timeout return a real error so hls.js
+    # retries and keeps its previous playlist. Do NOT return an empty #EXTM3U
+    # on timeout — that replaces a valid live playlist and kills playback.
+    timeout = 8 if likely_manifest else 20
     request = urllib.request.Request(safe_url, method="GET")
+    no_store = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    # Only for true 404 (stream not created yet) — startup preflight can keep polling.
+    empty_live_playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n"
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            content = response.read()
-            media_type = response.headers.get("Content-Type", "application/octet-stream")
+        upstream = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
+        if likely_manifest and exc.code == 404:
+            return Response(
+                content=empty_live_playlist,
+                media_type="application/vnd.apple.mpegurl",
+                headers=no_store,
+            )
         raise HTTPException(status_code=exc.code, detail=f"Playback upstream error: {exc.reason}") from exc
     except urllib.error.URLError as exc:
         raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
 
-    if _is_m3u8_manifest(url, media_type, content):
-        content = _rewrite_m3u8_manifest(url, content)
-        media_type = "application/vnd.apple.mpegurl"
+    media_type = upstream.headers.get("Content-Type", "application/octet-stream")
+    if likely_manifest or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower():
+        try:
+            content = upstream.read()
+        finally:
+            upstream.close()
+        if _is_m3u8_manifest(url, media_type, content):
+            content = _rewrite_m3u8_manifest(url, content)
+            media_type = "application/vnd.apple.mpegurl"
+        return Response(content=content, media_type=media_type, headers=no_store)
 
-    # Zixi playlists/segments must never be cached — a stale m3u8 or TS chunk
-    # is exactly the "last 2 seconds looping" failure mode.
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-        },
-    )
+    def iter_chunks():
+        try:
+            while True:
+                chunk = upstream.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            upstream.close()
+
+    # Stream TS/DASH segments — buffering the full body added multi-hundred-ms TTFF.
+    return StreamingResponse(iter_chunks(), media_type=media_type, headers=no_store)
 
 
 @app.get("/api/playback/probe")

@@ -81,6 +81,7 @@ export interface UploadSample {
   playback_hls_buffer_stalls?: number;
   playback_hls_frag_loads?: number;
   playback_video_time_sec?: number;
+  playback_buffer_sec?: number;
 }
 
 export interface EndpointConfig {
@@ -106,6 +107,8 @@ export interface UploadJob {
   media_path: string;
   duration_sec: number;
   preset_id?: string;
+  encode_ladder?: string | null;
+  target_latency_ms?: number | null;
   moq_namespace?: string | null;
   created_at: string;
   started_at_epoch?: number | null;
@@ -201,6 +204,7 @@ export interface ResultSummary {
     playback_hls_buffer_stalls?: number;
     playback_hls_frag_loads?: number;
     playback_video_time_sec?: number;
+    playback_buffer_sec?: number;
     e2e_latency_ms?: number;
     e2e_latency_max_ms?: number;
     playback_error_count?: number;

@@ -75,7 +75,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   e2e_latency_ms: {
     label: "E2E latency (estimated)",
     description:
-      "Estimated glass-to-glass latency: (wall clock since encode start) − (player video currentTime). Includes intentional player buffers — for HLS that is ~2 live segments (liveSyncDurationCount). MoQ targets a low catch-up latency instead. Distinct from TTFF (join delay).",
+      "Estimated glass-to-glass latency. HLS: (wall clock since encode start) − (player video currentTime), including ~2 live segments of intentional buffer. MoQ: prefers player CaptureTimestamp latency; otherwise buffer lead when the MSE timeline is relative to join (wall−vt alone is join delay). Distinct from TTFF.",
   },
   playback_error_count: {
     label: "Player errors",
@@ -258,7 +258,13 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   playback_ttff_ms: {
     label: "Time to first frame",
-    description: "Milliseconds until the first rendered frame, from @playa/player stats.",
+    description:
+      "Milliseconds until the first rendered frame after the player goes live (MoQ: @playa/player; HLS: wall clock to video.currentTime > 0.25s).",
+  },
+  playback_buffer_sec: {
+    label: "Buffer duration",
+    description:
+      "Seconds of media buffered ahead of the playhead (HTMLMediaElement.buffered end − currentTime). Higher values mean more resilience to jitter; lower values track the live edge more tightly.",
   },
   playback_hls_errors: {
     label: "HLS errors",

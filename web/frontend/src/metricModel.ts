@@ -12,9 +12,7 @@ export type MetricStageId =
   | "encode"
   | "video_quality"
   | "transport"
-  | "server"
-  | "edge_relay"
-  | "edge_zixi"
+  | "ingest"
   | "media_health"
   | "playback";
 
@@ -53,19 +51,10 @@ export const METRIC_STAGES: MetricStage[] = [
     description: "Normalized net_* fields filled from SRT, QUIC, or best-effort proxies.",
   },
   {
-    id: "server",
-    title: "Server",
-    description: "Ingest or relay VM health (agent and/or GCP Monitoring).",
-  },
-  {
-    id: "edge_relay",
-    title: "Relay health (MoQ)",
-    description: "moqx Prometheus counters as job-window deltas — not absolute since restart.",
-  },
-  {
-    id: "edge_zixi",
-    title: "Edge (Zixi)",
-    description: "Zixi/SRT recovery counters (retransmits, FEC) — transport recovery, not Media Health.",
+    id: "ingest",
+    title: "Ingest",
+    description:
+      "Normalized ingest host health + path recovery (CPU/mem/disk, loss%, retrans%), plus protocol detail (MoQ relay counters, SRT/Zixi recovery).",
   },
   {
     id: "media_health",
@@ -145,6 +134,7 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   // Playback (normalized)
   playback_ttff_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_stall_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  playback_buffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_bitrate_bps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_frames_rendered: ["moq", "srt", "hls"],
   playback_frames_dropped: ["moq", "srt", "hls"],
@@ -200,6 +190,10 @@ export function metricUnavailableMessage(metricKey: string, protocol: ProtocolId
  * segments). Do not subtract them — the metric is meant to reflect what the
  * viewer experiences, not theoretical transport-only delay.
  * Requires roughly NTP-aligned clocks on browser and publisher host.
+ *
+ * Caveat: MoQ MSE often remaps the live edge to currentTime≈0 after join, so
+ * wall−vt collapses to join delay and stays flat. Prefer
+ * {@link estimateMoqE2eLatencyMs} for MoQ.
  */
 export function estimateE2eLatencyMs(
   encodeStartedAtEpoch: number | null | undefined,
@@ -218,4 +212,34 @@ export function estimateE2eLatencyMs(
     return null;
   }
   return Math.round(latency);
+}
+
+/**
+ * MoQ glass-to-glass estimate.
+ *
+ * Prefer player-reported CaptureTimestamp latency when present. Otherwise, when
+ * wall−vt looks like a stuck join-delay artifact (≫ buffer + target), report
+ * buffer lead + a small encode fudge — the MSE timeline is relative to join.
+ */
+export function estimateMoqE2eLatencyMs(options: {
+  encodeStartedAtEpoch?: number | null;
+  videoTimeSec: number;
+  bufferSec: number;
+  playerLatencyMs?: number;
+  targetLatencyMs?: number;
+}): number | null {
+  const playerLatency = options.playerLatencyMs ?? 0;
+  if (Number.isFinite(playerLatency) && playerLatency > 0 && playerLatency <= 120_000) {
+    return Math.round(playerLatency);
+  }
+
+  const wallVt = estimateE2eLatencyMs(options.encodeStartedAtEpoch, options.videoTimeSec);
+  const bufferMs = Math.max(0, options.bufferSec) * 1000;
+  const target = Math.max(100, options.targetLatencyMs ?? 800);
+
+  if (wallVt != null && bufferMs > 80 && wallVt > bufferMs + target + 500) {
+    // Relative MSE live edge: viewer latency ≈ buffered lead + encode pipeline.
+    return Math.round(bufferMs + 250);
+  }
+  return wallVt;
 }

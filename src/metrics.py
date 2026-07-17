@@ -74,6 +74,7 @@ CSV_COLUMNS = [
     "playback_hls_buffer_stalls",
     "playback_hls_frag_loads",
     "playback_video_time_sec",
+    "playback_buffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
 ]
@@ -192,6 +193,7 @@ class MetricsCollector:
         playback_hls_buffer_stalls: int = 0,
         playback_hls_frag_loads: int = 0,
         playback_video_time_sec: float = 0.0,
+        playback_buffer_sec: float = 0.0,
         playback_error_count: int = 0,
         e2e_latency_ms: float = 0.0,
         encode_lag_ms: float = 0.0,
@@ -317,6 +319,7 @@ class MetricsCollector:
                 "playback_hls_buffer_stalls": str(playback_hls_buffer_stalls),
                 "playback_hls_frag_loads": str(playback_hls_frag_loads),
                 "playback_video_time_sec": f"{playback_video_time_sec:.3f}",
+                "playback_buffer_sec": f"{playback_buffer_sec:.3f}",
                 "playback_error_count": str(resolved_playback_errors),
                 "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
             }
@@ -405,6 +408,7 @@ class MetricsCollector:
             "playback_bitrate_bps",
             "playback_ttff_ms",
             "playback_video_time_sec",
+            "playback_buffer_sec",
             "e2e_latency_ms",
             "cmaf_tfdt_gap_ms",
             "psnr_db",

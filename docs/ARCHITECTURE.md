@@ -14,28 +14,16 @@ Live demo: [https://moq.sean-mccarthy.net](https://moq.sean-mccarthy.net)
 ## System overview
 
 ```
-┌──────────────────────┐
-│  Browser (React)     │  Benchmark UI · webcam · players · playback metrics
-└──────────┬───────────┘
-           │ HTTPS / WSS
-           ▼
-┌──────────────────────┐
-│  moq-web (FastAPI)   │  Jobs · SSE · live webcam bridge · result files
-│  + UploadService     │  ffmpeg · srt-live-transmit · openmoq-publisher
-└──────────┬───────────┘
-           │
-     ┌─────┴──────────────────────────┐
-     ▼                                ▼
-┌─────────────────┐          ┌─────────────────┐
-│ Zixi Broadcaster│          │ moqx relay      │
-│ SRT/RTMP ingest │          │ WebTransport    │
-│ HLS :7777 egress│          │ QUIC /admin     │
-└────────┬────────┘          └────────┬────────┘
-         │                            │
-         └────────────┬───────────────┘
-                      ▼
-              Ingest agent (:8090)
-              host metrics · recording · CMAF health · VMAF
+1 Source          2 Encode (moq-web)       3 Ingest                         4 Playback
+─────────         ──────────────────       ───────                          ─────────
+file / webcam  →  ffmpeg on moq-web VM  →  Zixi (SRT/RTMP → HLS :7777)  →  hls.js
+                  srt-live-transmit        moqx (WebTransport :4433)    →  Playa
+                  openmoq-publisher            │
+                                               ▼
+                                      Ingest agent :8090
+                                      (server-side VMAF / CMAF)
+
+Demo hosts are GCP us-central1 today; AWS/Linode Zixi presets are planned.
 ```
 
 Typical GCP layout (us-central1):

@@ -53,29 +53,22 @@ export const CHART_GROUPS: ChartGroup[] = [
     ],
   },
   {
-    id: "server",
-    title: "Server",
+    id: "ingest",
+    title: "Ingest",
     series: [
-      { key: "server_cpu_percent", label: "Server CPU", color: "#60a5fa", unit: "%" },
-      { key: "server_memory_percent", label: "Server memory", color: "#34d399", unit: "%" },
-      { key: "server_disk_percent", label: "Server disk", color: "#fbbf24", unit: "%" },
-    ],
-  },
-  {
-    id: "edge_relay",
-    title: "Relay health (MoQ)",
-    series: [
-      { key: "moqx_subscribe_success", label: "Subscribe OK (Δ)", color: "#60a5fa", unit: "count" },
-      { key: "moqx_subscribe_error", label: "Subscribe errors (Δ)", color: "#f87171", unit: "count" },
-      { key: "moqx_publish_received", label: "Objects received (Δ)", color: "#a3e635", unit: "count" },
-      { key: "moqx_publish_namespace_success", label: "Publish OK (Δ)", color: "#4ade80", unit: "count" },
+      // Normalized (all protocols): host health + path recovery
+      { key: "server_cpu_percent", label: "Ingest host CPU", color: "#60a5fa", unit: "%" },
+      { key: "server_memory_percent", label: "Ingest host memory", color: "#34d399", unit: "%" },
+      { key: "server_disk_percent", label: "Ingest host disk", color: "#fbbf24", unit: "%" },
+      { key: "net_loss_pct", label: "Path loss %", color: "#f87171", unit: "%" },
+      { key: "net_retrans_pct", label: "Path retransmit %", color: "#ef4444", unit: "%" },
+      // Protocol detail — MoQ relay
+      { key: "moqx_subscribe_success", label: "MoQ subscribe OK (Δ)", color: "#60a5fa", unit: "count" },
+      { key: "moqx_subscribe_error", label: "MoQ subscribe errors (Δ)", color: "#f87171", unit: "count" },
+      { key: "moqx_publish_received", label: "MoQ objects received (Δ)", color: "#a3e635", unit: "count" },
+      { key: "moqx_publish_namespace_success", label: "MoQ publish OK (Δ)", color: "#4ade80", unit: "count" },
       { key: "quic_cwnd_bytes", label: "QUIC cwnd", color: "#818cf8", unit: "bytes" },
-    ],
-  },
-  {
-    id: "edge_zixi",
-    title: "Edge (Zixi)",
-    series: [
+      // Protocol detail — SRT / Zixi edge
       { key: "pkt_retrans", label: "SRT retransmits", color: "#f87171", unit: "pkts" },
       { key: "pkt_fec_extra", label: "FEC extra", color: "#c084fc", unit: "pkts" },
       { key: "pkt_snd_loss", label: "Send loss", color: "#ef4444", unit: "pkts" },
@@ -114,6 +107,7 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "e2e_latency_ms", label: "E2E latency (est.)", color: "#f472b6", unit: "ms" },
       { key: "playback_ttff_ms", label: "Time to first frame", color: "#22d3ee", unit: "ms" },
       { key: "playback_stall_count", label: "Stalls", color: "#f87171", unit: "count" },
+      { key: "playback_buffer_sec", label: "Buffer duration", color: "#a78bfa", unit: "s" },
       { key: "playback_bitrate_bps", label: "Playback bitrate", color: "#38bdf8", unit: "bps" },
       { key: "playback_frames_rendered", label: "Frames rendered", color: "#4ade80", unit: "frames" },
       { key: "playback_frames_dropped", label: "Frames dropped", color: "#fb923c", unit: "frames" },
@@ -123,13 +117,16 @@ export const CHART_GROUPS: ChartGroup[] = [
   },
 ];
 
-/** @deprecated Use id transport / client / edge_* / video_quality */
+/** @deprecated Use id transport / client / ingest / video_quality */
 export const LEGACY_CHART_GROUP_ALIASES: Record<string, string> = {
   network: "transport",
   bandwidth: "transport",
   system: "client",
-  quic: "edge_relay",
-  moqx: "edge_relay",
+  server: "ingest",
+  quic: "ingest",
+  moqx: "ingest",
+  edge_relay: "ingest",
+  edge_zixi: "ingest",
   quality: "video_quality",
 };
 
@@ -225,6 +222,7 @@ export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] 
       playback_hls_buffer_stalls: rowMetric(row, "playback_hls_buffer_stalls"),
       playback_hls_frag_loads: rowMetric(row, "playback_hls_frag_loads"),
       playback_video_time_sec: rowMetric(row, "playback_video_time_sec"),
+      playback_buffer_sec: rowMetric(row, "playback_buffer_sec"),
       playback_error_count: rowMetric(row, "playback_error_count") || hlsErrors + hlsFatal,
       e2e_latency_ms: rowMetric(row, "e2e_latency_ms"),
     };
@@ -389,6 +387,7 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
     playback_ttff_ms: sample.playback_ttff_ms ?? 0,
     playback_error_count: sample.playback_error_count ?? hlsErrors + hlsFatal,
     playback_video_time_sec: sample.playback_video_time_sec ?? 0,
+    playback_buffer_sec: sample.playback_buffer_sec ?? 0,
     e2e_latency_ms: sample.e2e_latency_ms ?? 0,
   };
 }
@@ -408,11 +407,22 @@ export function hasSeriesData(points: ChartPoint[], key: string): boolean {
 export function visibleGroups(points: ChartPoint[], protocol: string): ChartGroup[] {
   const proto = (protocol || "").toLowerCase();
   return CHART_GROUPS.filter((group) => {
-    if (group.id === "edge_zixi" && proto !== "srt" && proto !== "rtmp") {
-      return false;
-    }
-    if (group.id === "edge_relay" && proto !== "moq") {
-      return false;
+    if (group.id === "ingest") {
+      // Host health + path recovery are normalized; protocol panels may be all-zero
+      // (clean SRT) so still surface the tab when we have samples for that path.
+      return (
+        points.length > 0 &&
+        (hasSeriesData(points, "server_cpu_percent") ||
+          hasSeriesData(points, "server_memory_percent") ||
+          hasSeriesData(points, "net_loss_pct") ||
+          hasSeriesData(points, "net_retrans_pct") ||
+          hasSeriesData(points, "moqx_subscribe_success") ||
+          hasSeriesData(points, "moqx_publish_received") ||
+          hasSeriesData(points, "quic_cwnd_bytes") ||
+          proto === "moq" ||
+          proto === "srt" ||
+          proto === "rtmp")
+      );
     }
     if (group.id === "media_health") {
       return (
@@ -423,7 +433,7 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
         hasSeriesData(points, "cmaf_parse_errors")
       );
     }
-    if (group.id === "playback" || group.id === "video_quality" || group.id === "server") {
+    if (group.id === "playback" || group.id === "video_quality") {
       return group.series.some((series) => hasSeriesData(points, series.key));
     }
     return group.series.some((series) => hasSeriesData(points, series.key));
@@ -578,6 +588,7 @@ const COMPARISON_METRIC_KEYS = [
   "playback_ttff_ms",
   "playback_error_count",
   "playback_video_time_sec",
+  "playback_buffer_sec",
   "e2e_latency_ms",
   "vmaf_score",
   "psnr_db",
@@ -659,6 +670,21 @@ export function comparisonHasMetric(points: ChartPoint[], metric: string, legCou
   return false;
 }
 
+/** True when any leg has the key present (including flat zeros). */
+export function comparisonHasMetricPresent(
+  points: ChartPoint[],
+  metric: string,
+  legCount: number,
+): boolean {
+  for (let index = 0; index < legCount; index += 1) {
+    const key = `${metric}_${index}`;
+    if (points.some((point) => Object.prototype.hasOwnProperty.call(point, key))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function comparisonVisibleGroups(
   points: ChartPoint[],
   legs: ComparisonLegData[],
@@ -676,14 +702,12 @@ export function comparisonVisibleGroups(
   if (comparisonHasMetric(points, "cpu_percent", legs.length)) {
     groups.push({ id: "client", title: "Client" });
   }
-  if (comparisonHasMetric(points, "server_cpu_percent", legs.length)) {
-    groups.push({ id: "server", title: "Server" });
-  }
-  if (hasMoq) {
-    groups.push({ id: "edge_relay", title: "Relay health (MoQ)" });
-  }
-  if (hasSrtOrRtmp) {
-    groups.push({ id: "edge_zixi", title: "Edge (Zixi)" });
+  if (
+    comparisonHasMetric(points, "server_cpu_percent", legs.length) ||
+    hasMoq ||
+    hasSrtOrRtmp
+  ) {
+    groups.push({ id: "ingest", title: "Ingest" });
   }
   if (
     comparisonHasMetric(points, "ts_continuity_counter_errors", legs.length) ||
@@ -703,7 +727,7 @@ export function comparisonVisibleGroups(
   }
   if (
     comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_stall_count", legs.length) ||
+    comparisonHasMetricPresent(points, "playback_stall_count", legs.length) ||
     comparisonHasMetric(points, "playback_ttff_ms", legs.length) ||
     comparisonHasMetric(points, "playback_video_time_sec", legs.length)
   ) {

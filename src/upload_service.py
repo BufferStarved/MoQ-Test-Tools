@@ -13,12 +13,19 @@ from urllib.parse import urlparse
 import psutil
 
 from destinations import DestinationProfile
+from encode_profile import (
+    DEFAULT_ENCODE_LADDER_ID,
+    DEFAULT_TARGET_LATENCY_MS,
+    build_video_encode_args,
+    clamp_target_latency_ms,
+    encode_profile_summary,
+    with_srt_latency,
+)
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
 from metrics import MetricsCollector, compute_encode_lag_ms
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
-    BROWSER_COMPAT_VIDEO_ARGS,
     MPEGTS_VIDEO_BSF,
     build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
@@ -66,6 +73,8 @@ class UploadJob:
     stream_label: str = ""
     compute_vmaf_on_ingest: bool = False
     compute_vmaf_encoder: bool = False
+    encode_ladder: str = DEFAULT_ENCODE_LADDER_ID
+    target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS
     ingest_recording_dir: str = ""
     ingest_agent_url: str = ""
     ingest_agent_token: str = ""
@@ -79,8 +88,13 @@ class UploadJob:
         return bool(self.cancel_event and self.cancel_event.is_set())
 
     def __post_init__(self):
+        self.target_latency_ms = clamp_target_latency_ms(self.target_latency_ms)
+        self.encode_ladder = (self.encode_ladder or DEFAULT_ENCODE_LADDER_ID).strip().lower()
         if not self.ffmpeg_cmd:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
+
+    def _video_args(self) -> List[str]:
+        return build_video_encode_args(self.encode_ladder, self.target_latency_ms)
 
     def _build_ffmpeg_cmd(
         self,
@@ -108,7 +122,7 @@ class UploadJob:
         return [
             find_ffmpeg(),
             *build_ffmpeg_input_args(self.media_path),
-            *BROWSER_COMPAT_VIDEO_ARGS,
+            *self._video_args(),
             *BROWSER_COMPAT_AUDIO_ARGS,
             "-progress",
             progress_path,
@@ -128,10 +142,11 @@ class UploadJob:
         return self.destination.ffmpeg_output_args()
 
     def _resolved_srt_destination_url(self) -> str:
+        url = self.destination.url
         stream_id = zixi_srt_stream_id_for_preset(self.destination.preset_id)
         if stream_id:
-            return with_srt_stream_id(self.destination.url, stream_id)
-        return self.destination.url
+            url = with_srt_stream_id(url, stream_id)
+        return with_srt_latency(url, self.target_latency_ms)
 
 
 @dataclass
@@ -387,7 +402,14 @@ class UploadService:
         except ValueError:
             port = 10080
         try:
-            reset_zixi_srt_input(stream_id, port=port)
+            reset_zixi_srt_input(
+                stream_id,
+                port=port,
+                srt_latency_ms=job.target_latency_ms,
+                max_bitrate_kbps=encode_profile_summary(
+                    job.encode_ladder, job.target_latency_ms
+                )["maxrate_kbps"],
+            )
         except Exception:
             logger.warning("Zixi SRT input reset failed; continuing with push anyway.", exc_info=True)
 
@@ -673,7 +695,12 @@ class UploadService:
             qlog_dir = os.path.join(temp_dir, "qlog")
             os.makedirs(qlog_dir, exist_ok=True)
 
-        ffmpeg_cmd = build_ffmpeg_moq_cmd(job.media_path, progress_path=progress_path)
+        ffmpeg_cmd = build_ffmpeg_moq_cmd(
+            job.media_path,
+            progress_path=progress_path,
+            encode_ladder=job.encode_ladder,
+            target_latency_ms=job.target_latency_ms,
+        )
         publisher_cmd = build_moq_publisher_cmd(
             publisher_bin,
             publisher_backend,
@@ -1026,6 +1053,7 @@ class UploadService:
                 "comparison_id": job.comparison_id,
                 "stream_index": job.stream_index,
                 "stream_label": job.stream_label,
+                **encode_profile_summary(job.encode_ladder, job.target_latency_ms),
                 "vmaf_available": vmaf_score is not None,
                 "vmaf_computed_on": "local" if vmaf_score is not None else "",
                 "vmaf_pending_on_ingest": job.compute_vmaf_on_ingest,

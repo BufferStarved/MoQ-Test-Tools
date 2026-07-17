@@ -37,6 +37,9 @@ interface StreamPlayerProps {
   jobStatus?: string;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  targetLatencyMs?: number;
+  hlsLiveSyncCount?: number;
+  hlsLiveSyncDurationSec?: number;
   controlsLocked?: boolean;
   onPlaybackModeChange?: (mode: PlaybackMode) => void;
   onWhepPlaybackUrlChange?: (url: string) => void;
@@ -64,6 +67,9 @@ export function StreamPlayer({
   jobStatus,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  targetLatencyMs = 800,
+  hlsLiveSyncCount = 2,
+  hlsLiveSyncDurationSec = 4,
   controlsLocked = false,
   onPlaybackModeChange,
   onWhepPlaybackUrlChange,
@@ -114,6 +120,13 @@ export function StreamPlayer({
       ? selectedOption.hint
       : `Not available with ${protocol.toUpperCase()} ingest.`
     : "";
+  // Wait for the per-job MoQ namespace before going live — using the preset
+  // default ("benchmark") then flipping causes a Player/MediaSource remount.
+  const moqReadyNamespace = (target.moqNamespace || moqNamespace || "").trim();
+  const moqPlaybackGate: PlaybackGate =
+    target.engine === "moq" && playbackGate === "live" && !moqReadyNamespace
+      ? "waiting"
+      : playbackGate;
 
   return (
     <div className="stream-player-card">
@@ -135,7 +148,7 @@ export function StreamPlayer({
         <Suspense fallback={<PlayerFallback />}>
           {target.engine === "hls" && (
             <HlsPlayer
-              key={target.url}
+              key={`${target.url}:sync${hlsLiveSyncDurationSec}`}
               url={target.url}
               label={target.label}
               playbackGate={playbackGate}
@@ -144,6 +157,8 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}
+              liveSyncDurationCount={hlsLiveSyncCount}
+              liveSyncDurationSec={hlsLiveSyncDurationSec}
             />
           )}
           {target.engine === "dash" && (
@@ -155,14 +170,14 @@ export function StreamPlayer({
           {target.engine === "whep" && (
             <WhepPlayer key={target.url} url={target.url} label={target.label} />
           )}
-          {target.engine === "moq" && (
+          {target.engine === "moq" && moqReadyNamespace && (
             <MoqPlayer
-              key={`${target.url}:${target.moqNamespace}`}
+              key={`${target.url}:${moqReadyNamespace}`}
               relayUrl={target.url}
-              namespace={target.moqNamespace ?? "benchmark"}
+              namespace={moqReadyNamespace}
               fingerprintUrl={target.moqFingerprintUrl}
               label={target.label}
-              playbackGate={playbackGate}
+              playbackGate={moqPlaybackGate}
               pinTlsCert
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
@@ -170,7 +185,13 @@ export function StreamPlayer({
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
+              targetLatencyMs={targetLatencyMs}
             />
+          )}
+          {target.engine === "moq" && !moqReadyNamespace && (
+            <div className="player-surface player-loading">
+              <p className="hint">Waiting for MoQ publish namespace…</p>
+            </div>
           )}
           {target.engine === "webrtc-embed" && target.embedUrl && (
             <ZixiWebRtcEmbed embedUrl={target.embedUrl} label={target.label} />

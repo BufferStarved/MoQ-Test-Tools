@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "./api";
-import { estimateE2eLatencyMs } from "./metricModel";
+import { estimateE2eLatencyMs, estimateMoqE2eLatencyMs } from "./metricModel";
 
 const REPORT_INTERVAL_MS = 1000;
 
@@ -16,10 +16,12 @@ export function usePlaybackMetricsReporter(options: {
   engine: "moq" | "hls";
   enabled: boolean;
   startedAtEpoch?: number | null;
+  /** MoQ catch-up / live-edge target — used when wall−vt is a join-delay artifact. */
+  targetLatencyMs?: number;
   getSnapshot: () => PlaybackMetricsSnapshot;
   onSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
 }): void {
-  const { jobId, engine, enabled, startedAtEpoch, getSnapshot, onSample } = options;
+  const { jobId, engine, enabled, startedAtEpoch, targetLatencyMs, getSnapshot, onSample } = options;
   const getSnapshotRef = useRef(getSnapshot);
   const onSampleRef = useRef(onSample);
 
@@ -44,7 +46,16 @@ export function usePlaybackMetricsReporter(options: {
       }
       const snapshot = getSnapshotRef.current();
       const elapsed_sec = elapsedSecFromStart(startedAtEpoch);
-      const e2e = estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
+      const e2e =
+        engine === "moq"
+          ? estimateMoqE2eLatencyMs({
+              encodeStartedAtEpoch: startedAtEpoch,
+              videoTimeSec: snapshot.playback_video_time_sec,
+              bufferSec: snapshot.playback_buffer_sec,
+              playerLatencyMs: snapshot.e2e_latency_ms,
+              targetLatencyMs,
+            })
+          : estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
       const playback_error_count =
         snapshot.playback_error_count ??
         (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);
@@ -67,5 +78,5 @@ export function usePlaybackMetricsReporter(options: {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [enabled, jobId, engine, startedAtEpoch]);
+  }, [enabled, jobId, engine, startedAtEpoch, targetLatencyMs]);
 }
