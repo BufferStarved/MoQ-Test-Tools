@@ -38,8 +38,15 @@ _DEFAULT_SRT_MAX_BITRATE_BPS = 10_000_000
 # still "removing" or not yet bound), which made the encoder connect to a
 # half-recreated input — the segmenter then never gets the fresh-object grace
 # it needs, and HLS silently stays 1-deep / stale for the whole job.
-_POLL_TIMEOUT_SEC = 6.0
+_POLL_TIMEOUT_SEC = 10.0
 _POLL_INTERVAL_SEC = 0.3
+# Require repeated observations so a single flaky streams.json read does not
+# green-light a push into a half-bound input object.
+_CONFIRM_HITS = 2
+# After recreate, wait until no clients are attached so an external probe or
+# leftover session cannot burn the first-connection HLS segmenter grace.
+_IDLE_TIMEOUT_SEC = 3.0
+_SETTLE_AFTER_READY_SEC = 0.4
 
 
 def _auth_header(user: str, password: str) -> str:
@@ -60,8 +67,8 @@ def _call(base_url: str, path_and_query: str, user: str, password: str) -> bool:
         return False
 
 
-def _stream_present(base_url: str, user: str, password: str, stream_id: str) -> bool | None:
-    """True/False if streams.json was readable, None if the check itself failed.
+def _stream_entry(base_url: str, user: str, password: str, stream_id: str) -> dict | None | bool:
+    """Return the stream dict, False if absent, None if the listing failed.
 
     NOTE: combining pagesize+page+metadata on this endpoint makes Zixi return
     an empty "streams" array (reproduced directly against the broadcaster
@@ -82,8 +89,16 @@ def _stream_present(base_url: str, user: str, password: str, stream_id: str) -> 
         return None
     for stream in payload.get("streams", []):
         if stream.get("id") == stream_id:
-            return True
+            return stream if isinstance(stream, dict) else {}
     return False
+
+
+def _stream_present(base_url: str, user: str, password: str, stream_id: str) -> bool | None:
+    """True/False if streams.json was readable, None if the check itself failed."""
+    entry = _stream_entry(base_url, user, password, stream_id)
+    if entry is None:
+        return None
+    return entry is not False
 
 
 def _wait_for_stream_state(
@@ -93,21 +108,61 @@ def _wait_for_stream_state(
     stream_id: str,
     *,
     want_present: bool,
+    timeout_sec: float = _POLL_TIMEOUT_SEC,
+    consecutive: int = _CONFIRM_HITS,
 ) -> bool:
-    """Poll until the stream object's presence matches `want_present`.
-
-    Returns True once observed (or once the check API itself is unusable, so
-    callers still fall through to the push rather than blocking indefinitely).
-    """
-    deadline = time.monotonic() + _POLL_TIMEOUT_SEC
+    """Poll until stream presence matches `want_present` for `consecutive` hits."""
+    deadline = time.monotonic() + timeout_sec
+    hits = 0
     while time.monotonic() < deadline:
         present = _stream_present(base_url, user, password, stream_id)
         if present is None:
-            # Can't verify — don't spin on a broken API check.
-            return False
-        if present == want_present:
-            return True
+            hits = 0
+        elif present == want_present:
+            hits += 1
+            if hits >= consecutive:
+                return True
+        else:
+            hits = 0
         time.sleep(_POLL_INTERVAL_SEC)
+    return False
+
+
+def _wait_for_idle_input(
+    base_url: str,
+    user: str,
+    password: str,
+    stream_id: str,
+    *,
+    timeout_sec: float = _IDLE_TIMEOUT_SEC,
+) -> bool:
+    """Wait until the recreated input reports zero clients (exclusive first connect)."""
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        entry = _stream_entry(base_url, user, password, stream_id)
+        if entry is None:
+            time.sleep(_POLL_INTERVAL_SEC)
+            continue
+        if entry is False:
+            return False
+        try:
+            clients = int(entry.get("clients") or 0)
+        except (TypeError, ValueError):
+            clients = 0
+        if clients <= 0:
+            return True
+        logger.info(
+            "Zixi SRT input '%s' still has %s client(s); waiting for exclusive first connect...",
+            stream_id,
+            clients,
+        )
+        time.sleep(_POLL_INTERVAL_SEC)
+    logger.warning(
+        "Zixi SRT input '%s' still had attached clients after %.1fs; "
+        "first-connection HLS grace may already be burned.",
+        stream_id,
+        timeout_sec,
+    )
     return False
 
 
@@ -123,8 +178,8 @@ def reset_zixi_srt_input(
 ) -> bool:
     """Delete and recreate a Zixi SRT push input so its HLS segmenter starts fresh.
 
-    Returns True if the reset API calls completed (best-effort — callers should
-    treat a False return as non-fatal and still attempt the push).
+    Returns True only when the new stream object is confirmed present and idle.
+    Callers that need reliable HLS must treat False as fatal (retry, then fail).
     """
     base_url = (base_url or os.environ.get("ZIXI_API_BASE", "")).rstrip("/")
     user = user or os.environ.get("ZIXI_API_USER", "admin")
@@ -143,11 +198,12 @@ def reset_zixi_srt_input(
     _call(base_url, f"zixi/remove_stream.json?id={stream_enc}", user, password)
     if not _wait_for_stream_state(base_url, user, password, stream_id, want_present=False):
         logger.warning(
-            "Zixi did not confirm '%s' removal within %.0fs; continuing anyway "
-            "(add_stream should still supersede it).",
+            "Zixi did not confirm '%s' removal within %.0fs.",
             stream_id,
             _POLL_TIMEOUT_SEC,
         )
+        # Still attempt add_stream — Zixi may accept a replace — but do not
+        # claim success unless presence is confirmed below.
 
     add_params = [
         ("id", stream_id),
@@ -197,6 +253,8 @@ def reset_zixi_srt_input(
     ]
     add_qs = urlencode(add_params, quote_via=quote)
     ok = _call(base_url, f"zixi/add_stream.json?func=load_live_inputs&{add_qs}", user, password)
+    if not ok:
+        return False
 
     _call(
         base_url,
@@ -210,13 +268,61 @@ def reset_zixi_srt_input(
     # state, silently forfeiting the "first connection" grace the segmenter
     # needs. This is the actual source of "sometimes HLS just never comes up."
     if not _wait_for_stream_state(base_url, user, password, stream_id, want_present=True):
-        logger.warning(
-            "Zixi did not confirm '%s' was recreated within %.0fs; pushing anyway, "
-            "but HLS segmenting may not start cleanly for this job.",
+        logger.error(
+            "Zixi did not confirm '%s' was recreated within %.0fs — refusing to push.",
             stream_id,
             _POLL_TIMEOUT_SEC,
         )
-    return ok
+        return False
+
+    if not _wait_for_idle_input(base_url, user, password, stream_id):
+        # Still present; proceed only if we at least own the exclusive window soon.
+        # Fail closed when something else is already attached — that burns grace.
+        entry = _stream_entry(base_url, user, password, stream_id)
+        if isinstance(entry, dict):
+            try:
+                clients = int(entry.get("clients") or 0)
+            except (TypeError, ValueError):
+                clients = 0
+            if clients > 0:
+                logger.error(
+                    "Zixi SRT input '%s' has %s client(s) before our push — "
+                    "HLS first-connection grace is already consumed.",
+                    stream_id,
+                    clients,
+                )
+                return False
+
+    time.sleep(_SETTLE_AFTER_READY_SEC)
+    logger.info("Zixi SRT input '%s' reset verified (present + idle).", stream_id)
+    return True
+
+
+def reset_zixi_srt_input_with_retry(
+    stream_id: str,
+    *,
+    port: int,
+    attempts: int = 2,
+    srt_latency_ms: int | None = None,
+    max_bitrate_kbps: int | None = None,
+) -> bool:
+    """Run delete+recreate up to `attempts` times; return True on first verified success."""
+    for attempt in range(1, max(1, attempts) + 1):
+        logger.info(
+            "Zixi SRT input reset attempt %s/%s for '%s'...",
+            attempt,
+            attempts,
+            stream_id,
+        )
+        if reset_zixi_srt_input(
+            stream_id,
+            port=port,
+            srt_latency_ms=srt_latency_ms,
+            max_bitrate_kbps=max_bitrate_kbps,
+        ):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def remove_zixi_srt_input(

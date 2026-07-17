@@ -50,6 +50,7 @@ class UploadJobRecord:
     preset_id: str = ""
     moq_namespace: Optional[str] = None
     zixi_stream_id: Optional[str] = None
+    preview_ready: bool = True
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     csv_path: Optional[str] = None
     summary_path: Optional[str] = None
@@ -116,6 +117,9 @@ class JobManager:
             job.ingest_agent_url = agent_url
             job.ingest_recording_dir = recording_dir
 
+        # SRT HLS preview stays gated until UploadService confirms a readable segment.
+        preview_ready = not bool(zixi_stream_id)
+
         record = UploadJobRecord(
             id=job_id,
             status=JobStatus.PENDING,
@@ -126,6 +130,7 @@ class JobManager:
             preset_id=preset_id,
             moq_namespace=moq_namespace,
             zixi_stream_id=zixi_stream_id,
+            preview_ready=preview_ready,
             compute_vmaf_on_ingest=job.compute_vmaf_on_ingest,
             compute_vmaf_encoder=job.compute_vmaf_encoder,
             encode_ladder=job.encode_ladder,
@@ -138,6 +143,10 @@ class JobManager:
             encoder_vmaf_status=VmafStatus.DISABLED.value,
         )
         job.cancel_event = record.cancel_event
+        job.zixi_stream_id = zixi_stream_id or ""
+        job.on_preview_ready = lambda ready, _job_id=job_id: self._update(
+            _job_id, preview_ready=bool(ready)
+        )
         with self._lock:
             self._jobs[job_id] = record
 
@@ -514,6 +523,7 @@ class JobManager:
                 preset_id=record.preset_id,
                 moq_namespace=record.moq_namespace,
                 zixi_stream_id=record.zixi_stream_id,
+                preview_ready=record.preview_ready,
                 created_at=record.created_at,
                 csv_path=record.csv_path,
                 summary_path=record.summary_path,
@@ -549,6 +559,7 @@ class JobManager:
                     preset_id=record.preset_id,
                     moq_namespace=record.moq_namespace,
                     zixi_stream_id=record.zixi_stream_id,
+                    preview_ready=record.preview_ready,
                     created_at=record.created_at,
                     csv_path=record.csv_path,
                     summary_path=record.summary_path,

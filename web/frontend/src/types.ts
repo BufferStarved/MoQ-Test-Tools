@@ -112,6 +112,8 @@ export interface UploadJob {
   target_latency_ms?: number | null;
   moq_namespace?: string | null;
   zixi_stream_id?: string | null;
+  /** False for SRT until Zixi HLS serves a readable MPEG-TS segment. */
+  preview_ready?: boolean;
   created_at: string;
   started_at_epoch?: number | null;
   csv_path?: string | null;

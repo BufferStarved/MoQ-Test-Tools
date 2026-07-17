@@ -296,7 +296,9 @@ export default function HlsPlayer({
         }
       } else {
         setStatus(
-          playbackGate === "waiting" ? "Waiting for live HLS..." : "Waiting for encode...",
+          playbackGate === "waiting"
+            ? "Waiting for readable HLS segments..."
+            : "Waiting for encode...",
         );
       }
       return;

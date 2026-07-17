@@ -39,7 +39,8 @@ from moq_publish import (
 from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
-from zixi_input_reset import remove_zixi_srt_input, reset_zixi_srt_input
+from zixi_hls_health import probe_hls_segment_ready, zixi_hls_playback_url
+from zixi_input_reset import remove_zixi_srt_input, reset_zixi_srt_input_with_retry
 from network_metrics import (
     FfmpegProgressFileReader,
     FfmpegProgressReader,
@@ -60,6 +61,12 @@ from vmaf_score import compute_vmaf
 from zixi_stats import ZixiStatsPoller
 
 logger = logging.getLogger("MoQ-SRT-Bench")
+
+# After ingest starts, allow this long for Zixi HLS before treating it as wedged.
+_HLS_WARMUP_SEC = 5
+_HLS_STUCK_SEC = 18
+_HLS_STALE_ROLLING_SEC = 24
+_HLS_HEAL_ATTEMPTS = 1
 
 
 @dataclass
@@ -83,6 +90,8 @@ class UploadJob:
     encoder_capture_path: str = ""
     compute_vmaf: bool = False
     cancel_event: Optional[threading.Event] = None
+    # JobManager sets this so SRT preview stays gated until HLS segments are readable.
+    on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
     ffmpeg_cmd: List[str] = field(default_factory=list, init=False)
 
     def is_cancelled(self) -> bool:
@@ -424,32 +433,53 @@ class UploadService:
             server_metrics_enabled=ingest_poller.enabled,
         )
 
-    def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
-        """Best-effort delete+recreate of the Zixi SRT push input before pushing.
+    def _notify_preview_ready(self, job: UploadJob, ready: bool) -> None:
+        callback = job.on_preview_ready
+        if not callback:
+            return
+        try:
+            callback(ready)
+        except Exception:
+            logger.warning("on_preview_ready callback failed", exc_info=True)
 
-        Zixi's SRT push input HLS segmenter only cuts segments for the first
-        source connection in the input object's lifetime — a plain service
-        restart does not clear that per-stream state, only recreating the
-        stream object does. See src/zixi_input_reset.py for the full story.
+    def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
+        stream_id = job.managed_zixi_stream_id()
+        if not stream_id:
+            return None
+        return zixi_hls_playback_url(stream_id, endpoint_url=job.destination.url)
+
+    def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> bool:
+        """Delete+recreate the Zixi SRT push input before pushing.
+
+        Returns True only when the reset is verified. Fail closed — pushing into
+        a half-bound input burns Zixi's first-connection HLS segmenter grace.
         """
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
-            return
+            return True
         try:
             port = urlparse(job.destination.url).port or 10080
         except ValueError:
             port = 10080
         try:
-            reset_zixi_srt_input(
+            ok = reset_zixi_srt_input_with_retry(
                 stream_id,
                 port=port,
+                attempts=2,
                 srt_latency_ms=job.target_latency_ms,
                 max_bitrate_kbps=encode_profile_summary(
                     job.encode_ladder, job.target_latency_ms
                 )["maxrate_kbps"],
             )
         except Exception:
-            logger.warning("Zixi SRT input reset failed; continuing with push anyway.", exc_info=True)
+            logger.exception("Zixi SRT input reset raised for '%s'", stream_id)
+            return False
+        if not ok:
+            logger.error(
+                "Zixi SRT input reset failed for '%s' after retries — not pushing.",
+                stream_id,
+            )
+        return ok
 
     def cleanup_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
         """Public wrapper so JobManager can delete the stream after gate=ended."""
@@ -474,6 +504,53 @@ class UploadService:
                 exc_info=True,
             )
 
+    def _watch_hls_preview_until_ready(
+        self,
+        job: UploadJob,
+        stop_event: threading.Event,
+    ) -> None:
+        """Mark preview_ready once Zixi HLS serves a readable MPEG-TS segment."""
+        manifest_url = self._managed_hls_manifest_url(job)
+        if not manifest_url:
+            self._notify_preview_ready(job, True)
+            return
+        while not stop_event.is_set():
+            if probe_hls_segment_ready(manifest_url).ok:
+                self._notify_preview_ready(job, True)
+                return
+            stop_event.wait(1.0)
+
+    def _heal_srt_live_transmit(
+        self,
+        job: UploadJob,
+        *,
+        srt_proc: Optional[subprocess.Popen],
+        srt_cmd: List[str],
+    ) -> tuple[Optional[subprocess.Popen], Optional[str]]:
+        """Stop SRT push, reset Zixi input, reconnect once. Keeps ffmpeg/UDP running."""
+        logger.warning(
+            "HLS preview wedged for job %s — attempting one SRT reconnect heal...",
+            job.job_id,
+        )
+        self._notify_preview_ready(job, False)
+        self._terminate_process(srt_proc)
+        # Brief pause so Zixi drops the previous source before recreate.
+        time.sleep(0.5)
+        if not self._reset_zixi_srt_input_if_managed(job):
+            return None, (
+                "Zixi SRT input reset failed during HLS heal; "
+                "preview cannot recover for this job"
+            )
+        try:
+            new_proc = subprocess.Popen(
+                srt_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            return None, f"Failed to restart srt-live-transmit during HLS heal: {exc}"
+        return new_proc, None
+
     def _run_srt_pipeline(
         self,
         job: UploadJob,
@@ -485,7 +562,17 @@ class UploadService:
         Set SRT_USE_LIVE_TRANSMIT=0 to force native ffmpeg→SRT.
         Set SRT_USE_LIVE_TRANSMIT=1 to require live-transmit (error if missing).
         """
-        self._reset_zixi_srt_input_if_managed(job)
+        if job.managed_zixi_stream_id():
+            if not self._reset_zixi_srt_input_if_managed(job):
+                return UploadResult(
+                    success=False,
+                    error=(
+                        "Zixi SRT input could not be verified after delete+recreate. "
+                        "Refusing to publish into a half-bound input (HLS would stay stale). "
+                        "Check ZIXI_API_* credentials and that nothing else is connected to "
+                        f"'{job.managed_zixi_stream_id()}'."
+                    ),
+                )
 
         live_transmit_flag = os.environ.get("SRT_USE_LIVE_TRANSMIT", "").strip().lower()
         srt_bin = find_srt_live_transmit()
@@ -522,7 +609,17 @@ class UploadService:
             except (OSError, subprocess.TimeoutExpired):
                 pass
             logger.info("SRT destination (direct ffmpeg): %s", resolved)
-            return self._run_direct_ffmpeg(job, on_sample=on_sample)
+            stop_preview = threading.Event()
+            threading.Thread(
+                target=self._watch_hls_preview_until_ready,
+                args=(job, stop_preview),
+                daemon=True,
+                name=f"hls-preview-{job.job_id[:8]}",
+            ).start()
+            try:
+                return self._run_direct_ffmpeg(job, on_sample=on_sample)
+            finally:
+                stop_preview.set()
 
         udp_port = _pick_udp_port()
         udp_url = f"udp://127.0.0.1:{udp_port}?pkt_size=1316"
@@ -586,6 +683,12 @@ class UploadService:
             ingest_provider=job.destination.ingest_provider,
         )
         start_time = time.time()
+        manifest_url = self._managed_hls_manifest_url(job)
+        preview_ready = False
+        bad_since: Optional[float] = None
+        rolling_sig: Optional[tuple] = None
+        rolling_since: Optional[float] = None
+        heals_used = 0
 
         try:
             while time.time() - start_time < job.duration_sec:
@@ -601,7 +704,7 @@ class UploadService:
                         success=False,
                         error=self._ffmpeg_failure_message(ffmpeg_proc),
                     )
-                if srt_proc.poll() is not None and srt_proc.returncode not in (0, None):
+                if srt_proc is not None and srt_proc.poll() is not None and srt_proc.returncode not in (0, None):
                     stderr = ""
                     if srt_proc.stderr:
                         stderr = srt_proc.stderr.read().decode("utf-8", errors="replace").strip()
@@ -611,12 +714,62 @@ class UploadService:
                         error=f"srt-live-transmit exited with code {srt_proc.returncode}: {detail}",
                     )
 
+                elapsed = int(time.time() - start_time)
+
+                # Gate browser HLS on real segment readiness; auto-heal once if wedged.
+                if manifest_url and elapsed >= _HLS_WARMUP_SEC:
+                    health = probe_hls_segment_ready(manifest_url)
+                    now = time.time()
+                    if health.ok:
+                        bad_since = None
+                        sig = (health.media_sequence, health.segment_uri)
+                        if sig != rolling_sig:
+                            rolling_sig = sig
+                            rolling_since = now
+                        if not preview_ready:
+                            logger.info(
+                                "HLS preview ready for job %s (%s)",
+                                job.job_id,
+                                health.detail,
+                            )
+                            self._notify_preview_ready(job, True)
+                            preview_ready = True
+                        stale_rolling = (
+                            rolling_since is not None
+                            and (now - rolling_since) >= _HLS_STALE_ROLLING_SEC
+                            and health.depth <= 1
+                        )
+                        if stale_rolling and heals_used < _HLS_HEAL_ATTEMPTS:
+                            srt_proc, heal_error = self._heal_srt_live_transmit(
+                                job, srt_proc=srt_proc, srt_cmd=srt_cmd
+                            )
+                            heals_used += 1
+                            preview_ready = False
+                            bad_since = None
+                            rolling_sig = None
+                            rolling_since = None
+                            if heal_error:
+                                return UploadResult(success=False, error=heal_error)
+                    else:
+                        if bad_since is None:
+                            bad_since = now
+                        elif (now - bad_since) >= _HLS_STUCK_SEC and heals_used < _HLS_HEAL_ATTEMPTS:
+                            srt_proc, heal_error = self._heal_srt_live_transmit(
+                                job, srt_proc=srt_proc, srt_cmd=srt_cmd
+                            )
+                            heals_used += 1
+                            preview_ready = False
+                            bad_since = None
+                            rolling_sig = None
+                            rolling_since = None
+                            if heal_error:
+                                return UploadResult(success=False, error=heal_error)
+
                 status = progress_reader.get_status()
                 srt_stats = srt_reader.poll()
                 zixi_stats = zixi_poller.poll()
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
-                elapsed = int(time.time() - start_time)
                 pids = [pid for pid in (ffmpeg_proc.pid, srt_proc.pid if srt_proc else None) if pid]
                 cpu, mem = self._process_usage(pids)
 

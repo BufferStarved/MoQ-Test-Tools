@@ -157,6 +157,7 @@ def job_to_dict(job) -> dict:
         "target_latency_ms": getattr(job, "target_latency_ms", None),
         "moq_namespace": job.moq_namespace,
         "zixi_stream_id": job.zixi_stream_id,
+        "preview_ready": getattr(job, "preview_ready", True),
         "created_at": job.created_at,
         "csv_path": job.csv_path,
         "summary_path": job.summary_path,
