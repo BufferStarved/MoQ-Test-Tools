@@ -73,8 +73,25 @@ def _playlist_depth(body: str) -> int:
     return sum(1 for line in body.splitlines() if line.strip() and not line.strip().startswith("#"))
 
 
+def _sanitize_http_url(url: str) -> str:
+    """Re-quote path/query so Zixi playlist lines with raw spaces are fetchable.
+
+    Zixi emits segment URIs like ``playback.ts?stream=SRT Test&chunk=0``. Python's
+    http.client rejects those with InvalidURL; browsers and our playback proxy
+    percent-encode them. Mirror that here so preview gating cannot crash the job.
+    """
+    parts = urllib.parse.urlsplit(url.strip())
+    query = urllib.parse.urlencode(
+        urllib.parse.parse_qsl(parts.query, keep_blank_values=True),
+        quote_via=urllib.parse.quote,
+    )
+    path = urllib.parse.quote(urllib.parse.unquote(parts.path), safe="/:@")
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
+
+
 def _fetch(url: str, *, timeout: float = 5.0) -> tuple[Optional[int], bytes]:
-    request = urllib.request.Request(url, headers={"Cache-Control": "no-store"})
+    safe_url = _sanitize_http_url(url)
+    request = urllib.request.Request(safe_url, headers={"Cache-Control": "no-store"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read()
@@ -84,13 +101,17 @@ def _fetch(url: str, *, timeout: float = 5.0) -> tuple[Optional[int], bytes]:
         except Exception:
             body = b""
         return exc.code, body
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None, b""
 
 
 def probe_hls_segment_ready(manifest_url: str, *, timeout: float = 5.0) -> HlsHealth:
     """Return ok=True only when a playlist segment fetches as real MPEG-TS."""
-    status, raw = _fetch(manifest_url, timeout=timeout)
+    try:
+        status, raw = _fetch(manifest_url, timeout=timeout)
+    except Exception as exc:
+        logger.warning("HLS manifest probe failed for %s: %s", manifest_url, exc)
+        return HlsHealth(ok=False, detail=f"manifest_probe_error={exc}")
     if status != 200:
         return HlsHealth(
             ok=False,
@@ -116,8 +137,18 @@ def probe_hls_segment_ready(manifest_url: str, *, timeout: float = 5.0) -> HlsHe
             detail="no_segment",
         )
 
-    segment_url = urllib.parse.urljoin(manifest_url, segment)
-    seg_status, seg_bytes = _fetch(segment_url, timeout=timeout)
+    segment_url = _sanitize_http_url(urllib.parse.urljoin(manifest_url, segment))
+    try:
+        seg_status, seg_bytes = _fetch(segment_url, timeout=timeout)
+    except Exception as exc:
+        logger.warning("HLS segment probe failed for %s: %s", segment_url, exc)
+        return HlsHealth(
+            ok=False,
+            media_sequence=sequence,
+            segment_uri=segment,
+            depth=depth,
+            detail=f"segment_probe_error={exc}",
+        )
     ready = (
         seg_status == 200
         and len(seg_bytes) >= _MIN_TS_BYTES

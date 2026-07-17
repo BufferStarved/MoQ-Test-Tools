@@ -718,9 +718,17 @@ class UploadService:
 
                 # Gate browser HLS on real segment readiness; auto-heal once if wedged.
                 if manifest_url and elapsed >= _HLS_WARMUP_SEC:
-                    health = probe_hls_segment_ready(manifest_url)
+                    try:
+                        health = probe_hls_segment_ready(manifest_url)
+                    except Exception:
+                        logger.warning(
+                            "HLS health probe raised unexpectedly for job %s",
+                            job.job_id,
+                            exc_info=True,
+                        )
+                        health = None
                     now = time.time()
-                    if health.ok:
+                    if health is not None and health.ok:
                         bad_since = None
                         sig = (health.media_sequence, health.segment_uri)
                         if sig != rolling_sig:

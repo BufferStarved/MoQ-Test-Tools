@@ -221,7 +221,10 @@ test -f web/frontend/dist/index.html
 echo "Frontend build OK."
 
 mkdir -p "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads"
+# Service runs as ubuntu; rsync often lands files owned by the deploy SSH user.
 chown -R ubuntu:ubuntu "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads" || true
+# Keep app tree readable/executable by the service account after sean/rsync deploys.
+chown -R ubuntu:ubuntu "\$INSTALL_ROOT/src" "\$INSTALL_ROOT/web" "\$INSTALL_ROOT/.venv" 2>/dev/null || true
 
 PUB_BIN="\$INSTALL_ROOT/tools/openmoq-publisher/bin"
 cat > "\$ENV_FILE" <<ENVEOF
