@@ -276,18 +276,42 @@ def reset_zixi_srt_input(
         return False
 
     if not _wait_for_idle_input(base_url, user, password, stream_id):
-        # Still present; proceed only if we at least own the exclusive window soon.
-        # Fail closed when something else is already attached — that burns grace.
-        entry = _stream_entry(base_url, user, password, stream_id)
-        if isinstance(entry, dict):
-            try:
-                clients = int(entry.get("clients") or 0)
-            except (TypeError, ValueError):
-                clients = 0
+        # A leftover publisher (zombie srt-live-transmit from a crashed job) can
+        # reattach the moment the listener returns. Force one more remove+add so
+        # we own the first-connection window instead of permanently refusing to publish.
+        logger.warning(
+            "Zixi SRT input '%s' was not idle after recreate — forcing a second remove/add.",
+            stream_id,
+        )
+        _call(base_url, f"zixi/remove_stream.json?id={stream_enc}", user, password)
+        _wait_for_stream_state(base_url, user, password, stream_id, want_present=False)
+        ok = _call(base_url, f"zixi/add_stream.json?func=load_live_inputs&{add_qs}", user, password)
+        if not ok:
+            return False
+        _call(
+            base_url,
+            f"set_live_recording.json?func=hard_reload_inputs_table&id={stream_enc}&on=1",
+            user,
+            password,
+        )
+        if not _wait_for_stream_state(base_url, user, password, stream_id, want_present=True):
+            logger.error(
+                "Zixi did not confirm '%s' after forced recreate — refusing to push.",
+                stream_id,
+            )
+            return False
+        if not _wait_for_idle_input(base_url, user, password, stream_id):
+            entry = _stream_entry(base_url, user, password, stream_id)
+            clients = 0
+            if isinstance(entry, dict):
+                try:
+                    clients = int(entry.get("clients") or 0)
+                except (TypeError, ValueError):
+                    clients = 0
             if clients > 0:
                 logger.error(
-                    "Zixi SRT input '%s' has %s client(s) before our push — "
-                    "HLS first-connection grace is already consumed.",
+                    "Zixi SRT input '%s' still has %s client(s) after forced recreate — "
+                    "another process is holding the listener; refuse push.",
                     stream_id,
                     clients,
                 )
