@@ -49,9 +49,20 @@ find_distorted() {
 }
 
 DISTORTED="$(find_distorted)"
+# Prefer on-disk recordings; if missing, pull raw HTTP-TS (http_ts_auto_out) when configured.
 if [[ -z "$DISTORTED" || ! -f "$DISTORTED" ]]; then
-  echo "{\"error\":\"no recording found in ${RECORDING_DIR} for benchmark window\"}" >&2
-  exit 1
+  if [[ -n "${ZIXI_HTTP_TS_URL:-}" ]]; then
+    PULL_SECS="$(python3 -c "print(max(5, int(float('${END_EPOCH}') - float('${START_EPOCH}'))))" 2>/dev/null || echo 15)"
+    DISTORTED="${WORK_DIR}/http-ts-capture.ts"
+    echo "No disk recording; pulling HTTP-TS for ${PULL_SECS}s from ${ZIXI_HTTP_TS_URL}..." >&2
+    if ! "$FFMPEG" -hide_banner -loglevel error -y -i "$ZIXI_HTTP_TS_URL" -t "$PULL_SECS" -c copy "$DISTORTED"; then
+      echo "{\"error\":\"no recording in ${RECORDING_DIR} and HTTP-TS pull failed\"}" >&2
+      exit 1
+    fi
+  else
+    echo "{\"error\":\"no recording found in ${RECORDING_DIR} for benchmark window\"}" >&2
+    exit 1
+  fi
 fi
 
 LOG_PATH="${WORK_DIR}/vmaf-$(basename "$DISTORTED").json"

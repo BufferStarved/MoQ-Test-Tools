@@ -120,8 +120,22 @@ Or manually in the Zixi UI (**Settings → Live Protocols**):
 2. Enable **HLS** and **CMAF (DASH + fMP4 HLS)**
 3. Set **Segment duration** to `6` seconds
 4. Enable **Allow Automatic HTTP Push input**
-5. Add **HTTP TS Push** input with Stream ID `benchmark` (or rely on automatic)
-6. Enable **Record to disk** for VMAF
+5. Enable **Automatic HTTP TS output** (`http_ts_auto_out`) — serves `http://<host>:7777/<stream-id>.ts`
+6. Add **HTTP TS Push** input with Stream ID `benchmark` (or rely on automatic)
+7. Enable **Record to disk** for VMAF
+
+`http_ts_auto_out` needs a Broadcaster restart after `apply_settings` (the configure script restarts unless `ZIXI_SKIP_RESTART=1`).
+
+### Fast HLS packager + file republish (important)
+
+Zixi Fast HLS reuses its packager across SRT reconnects. Playing a file from the start each
+job rewinds the media timeline; the packager waits until PTS passes the previous high-water
+mark, so the playlist can stall for the whole publish. This bench applies ffmpeg
+`-output_ts_offset` automatically for managed Zixi SRT jobs (`src/zixi_ts_offset.py`).
+Delete+recreate is heal/fallback only (`ZIXI_SRT_RESET_BEFORE_PUBLISH=1` restores the old
+preflight). Prefer raw HTTP-TS for VMAF/stats and ultra-low-latency browser monitor
+(mpegts.js). Optional Broadcaster-side fix: error-concealed derived input with
+`continuous_timeline=1` (~+100 ms on Fast HLS).
 
 Verify end-to-end:
 
@@ -207,6 +221,9 @@ MoQ relay recordings land in `/var/lib/moq-relay-recordings/<job_id>.mp4` on thi
 | SSH timeout | Your IP may have changed — update `allowed_ssh_cidr` in `terraform/gcp/terraform.tfvars` and `terraform apply` |
 | License activation fails | Check VM outbound internet; confirm ports 80/443 open egress |
 | SRT push rejected | Input must be **ONLINE**; use port `10080` not `2088`; open UDP/TCP in GCP firewall + VM `ufw` |
+| Fast HLS stuck after republish | Confirm `-output_ts_offset` is in the publish recipe (`/api/debug/zixi-srt`); or reset input / use HTTP-TS |
+| `*.ts` HTTP playback **403 Forbidden** | `http_ts_auto_out` is off (or pending restart). Run `configure-zixi-hls-dash-output.sh` and **restart** `zixibc` (gcloud SSH to `moq-zixi-gcp`). Idle pulls may hang waiting for a publisher; while publishing expect `Content-Type: video/mp2t` and MPEG-TS sync `0x47`. |
+| ffmpeg `Protocol not found` for `srt://` | PATH `ffmpeg` (Homebrew) often lacks SRT output. Use `ffmpeg-full` (`find_ffmpeg()` prefers it) or `srt-live-transmit`. |
 | RTMP push I/O error | Enable RTMP server; add push input with Stream ID `benchmark`; run `configure-zixi-rtmp-input.sh` |
 | HLS/DASH 404 on :7777 | Run `configure-zixi-hls-dash-output.sh` (restarts Zixi). Use `playback.m3u8?stream=benchmark`, not `benchmark.m3u8` |
 | HTTP TS push broken pipe | Enable automatic HTTP push or add HTTP_PUSH input with Stream ID `benchmark` |

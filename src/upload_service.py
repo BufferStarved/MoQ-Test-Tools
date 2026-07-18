@@ -26,6 +26,7 @@ from ingest_host_metrics import IngestHostMetricsPoller
 from metrics import MetricsCollector, compute_encode_lag_ms
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
+    WHIP_COMPAT_AUDIO_ARGS,
     MPEGTS_VIDEO_BSF,
     build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
@@ -33,18 +34,27 @@ from moq_publish import (
     find_ffmpeg,
     find_moq_publisher,
     is_live_media_source,
+    mediamtx_loopback_publish_url,
     with_srt_stream_id,
+    zixi_http_push_stream_id_for_preset,
     zixi_srt_stream_id_for_preset,
 )
 from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
 from zixi_hls_health import (
-    mediamtx_hls_playback_url,
+    mediamtx_hls_probe_url,
     probe_hls_segment_ready,
+    probe_http_ts_ready,
     zixi_hls_playback_url,
 )
 from zixi_input_reset import remove_zixi_srt_input, reset_zixi_srt_input_with_retry
+from zixi_ts_offset import (
+    allocate_output_ts_offset,
+    ffmpeg_output_ts_offset_args,
+    reset_output_ts_offset,
+    ts_offset_enabled,
+)
 from network_metrics import (
     FfmpegProgressFileReader,
     FfmpegProgressReader,
@@ -98,6 +108,8 @@ class UploadJob:
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
     ffmpeg_cmd: List[str] = field(default_factory=list, init=False)
+    # Allocated once per job for managed Zixi MPEG-TS (Fast HLS timeline fix).
+    _zixi_output_ts_offset_sec: Optional[float] = field(default=None, init=False, repr=False)
 
     def is_cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())
@@ -110,6 +122,23 @@ class UploadJob:
 
     def _video_args(self) -> List[str]:
         return build_video_encode_args(self.encode_ladder, self.target_latency_ms)
+
+    def _uses_zixi_mpegts_output(self) -> bool:
+        """True when this encode muxes MPEG-TS toward a managed Zixi SRT input."""
+        return self.destination.protocol == "srt" and bool(self.managed_zixi_stream_id())
+
+    def _ensure_zixi_output_ts_offset(self) -> float:
+        if self._zixi_output_ts_offset_sec is not None:
+            return float(self._zixi_output_ts_offset_sec)
+        if not ts_offset_enabled() or not self._uses_zixi_mpegts_output():
+            self._zixi_output_ts_offset_sec = 0.0
+            return 0.0
+        stream_id = self.managed_zixi_stream_id() or ""
+        self._zixi_output_ts_offset_sec = allocate_output_ts_offset(
+            stream_id,
+            duration_sec=self.duration_sec,
+        )
+        return float(self._zixi_output_ts_offset_sec)
 
     def _build_ffmpeg_cmd(
         self,
@@ -125,6 +154,8 @@ class UploadJob:
                 network_url = self._resolved_srt_destination_url()
             else:
                 network_url = self.destination.url
+                if self._is_mediamtx_destination():
+                    network_url = mediamtx_loopback_publish_url(network_url)
             output_args = build_tee_output_args(
                 self.destination.protocol,
                 network_url,
@@ -134,16 +165,28 @@ class UploadJob:
             output_args = ["-bsf:v", MPEGTS_VIDEO_BSF, "-f", "mpegts", udp_url]
         else:
             output_args = self._browser_compat_output_args()
+        offset_args: List[str] = []
+        if self._uses_zixi_mpegts_output():
+            offset_args = ffmpeg_output_ts_offset_args(self._ensure_zixi_output_ts_offset())
+        audio_args = (
+            WHIP_COMPAT_AUDIO_ARGS
+            if self.destination.protocol == "webrtc"
+            else BROWSER_COMPAT_AUDIO_ARGS
+        )
         return [
             find_ffmpeg(),
             *build_ffmpeg_input_args(self.media_path, duration_sec=self.duration_sec),
             *self._video_args(),
-            *BROWSER_COMPAT_AUDIO_ARGS,
+            *audio_args,
             "-progress",
             progress_path,
             "-nostats",
+            *offset_args,
             *output_args,
         ]
+
+    def _is_mediamtx_destination(self) -> bool:
+        return (self.destination.ingest_provider or "").strip().lower() == "gcp_mediamtx"
 
     def _browser_compat_output_args(self) -> List[str]:
         if self.destination.protocol == "srt":
@@ -154,7 +197,11 @@ class UploadJob:
                 "mpegts",
                 self._resolved_srt_destination_url(),
             ]
-        return self.destination.ffmpeg_output_args()
+        args = list(self.destination.ffmpeg_output_args())
+        if self._is_mediamtx_destination() and args:
+            # Last arg is the publish URL for RTMP / WHIP muxers.
+            args[-1] = mediamtx_loopback_publish_url(str(args[-1]))
+        return args
 
     def managed_zixi_stream_id(self) -> Optional[str]:
         """Zixi SRT input stream ID for publish + HLS.
@@ -169,7 +216,10 @@ class UploadJob:
         stream_id = self.managed_zixi_stream_id()
         if stream_id:
             url = with_srt_stream_id(url, stream_id)
-        return with_srt_latency(url, self.target_latency_ms)
+        url = with_srt_latency(url, self.target_latency_ms)
+        if self._is_mediamtx_destination():
+            url = mediamtx_loopback_publish_url(url)
+        return url
 
 
 @dataclass
@@ -536,17 +586,26 @@ class UploadService:
 
     def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
         if self._is_mediamtx_destination(job):
-            return mediamtx_hls_playback_url("benchmark", endpoint_url=job.destination.url)
+            # Probe via loopback; public playback URLs stay in the SPA/proxy.
+            return mediamtx_hls_probe_url("benchmark")
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return None
         return zixi_hls_playback_url(stream_id, endpoint_url=job.destination.url)
 
-    def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> bool:
-        """Delete+recreate the Zixi SRT push input before pushing.
+    def _managed_http_ts_stream_id(self, job: UploadJob) -> Optional[str]:
+        if (job.destination.ingest_provider or "").strip().lower() != "gcp_zixi":
+            return None
+        if job.destination.protocol not in {"hls", "dash"}:
+            return None
+        return zixi_http_push_stream_id_for_preset(job.destination.preset_id) or "benchmark"
 
-        Returns True only when the reset is verified. Fail closed — pushing into
-        a half-bound input burns Zixi's first-connection HLS segmenter grace.
+    def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> bool:
+        """Delete+recreate the Zixi SRT push input (fresh Fast HLS packager).
+
+        Returns True only when the reset is verified. Used as heal/fallback and
+        when ZIXI_SRT_RESET_BEFORE_PUBLISH=1; normal publishes rely on
+        ``-output_ts_offset`` instead.
         """
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
@@ -570,10 +629,14 @@ class UploadService:
             return False
         if not ok:
             logger.error(
-                "Zixi SRT input reset failed for '%s' after retries — not pushing.",
+                "Zixi SRT input reset failed for '%s' after retries.",
                 stream_id,
             )
-        return ok
+            return False
+        # New packager starts at timeline zero — restart the publisher offset counter.
+        reset_output_ts_offset(stream_id)
+        job._zixi_output_ts_offset_sec = None
+        return True
 
     def cleanup_zixi_srt_input_if_managed(self, job: UploadJob) -> None:
         """Public wrapper so JobManager can delete the stream after gate=ended."""
@@ -603,9 +666,22 @@ class UploadService:
         job: UploadJob,
         stop_event: threading.Event,
     ) -> None:
-        """Mark preview_ready once Zixi HLS serves a readable MPEG-TS segment."""
+        """Mark preview_ready once delivery media is readable.
+
+        SRT/MediaMTX → HLS segment probe. TS-PUT (hls/dash presets) → HTTP-TS,
+        because Fast HLS for HTTP push often stays 404 on this Broadcaster.
+        """
+        http_ts_id = self._managed_http_ts_stream_id(job)
+        if http_ts_id:
+            while not stop_event.is_set():
+                if probe_http_ts_ready(http_ts_id, endpoint_url=job.destination.url).ok:
+                    self._notify_preview_ready(job, True)
+                    return
+                stop_event.wait(1.0)
+            return
         manifest_url = self._managed_hls_manifest_url(job)
         if not manifest_url:
+            # No gated delivery path — allow UI immediately (e.g. custom endpoints).
             self._notify_preview_ready(job, True)
             return
         while not stop_event.is_set():
@@ -655,14 +731,19 @@ class UploadService:
         Prefer srt-live-transmit when available (libsrt pkt_* / send-rate CSV stats).
         Set SRT_USE_LIVE_TRANSMIT=0 to force native ffmpeg→SRT.
         Set SRT_USE_LIVE_TRANSMIT=1 to require live-transmit (error if missing).
+
+        Managed Zixi SRT publishes use monotonic ``-output_ts_offset`` so Fast HLS
+        does not stall on file republish. Delete+recreate is heal/fallback only
+        (set ZIXI_SRT_RESET_BEFORE_PUBLISH=1 to force the old preflight).
         """
-        if job.managed_zixi_stream_id():
+        reset_flag = os.environ.get("ZIXI_SRT_RESET_BEFORE_PUBLISH", "").strip().lower()
+        if job.managed_zixi_stream_id() and reset_flag in {"1", "true", "yes"}:
             if not self._reset_zixi_srt_input_if_managed(job):
                 return UploadResult(
                     success=False,
                     error=(
-                        "Zixi SRT input could not be verified after delete+recreate. "
-                        "Refusing to publish into a half-bound input (HLS would stay stale). "
+                        "Zixi SRT input could not be verified after delete+recreate "
+                        "(ZIXI_SRT_RESET_BEFORE_PUBLISH=1). "
                         "Check ZIXI_API_* credentials and that nothing else is connected to "
                         f"'{job.managed_zixi_stream_id()}'."
                     ),

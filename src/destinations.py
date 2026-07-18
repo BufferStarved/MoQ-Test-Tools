@@ -111,6 +111,8 @@ SERVICE_PRESETS: List[ServicePreset] = [
             "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
             "upload adds streamid=#!::r=SRT Test,m=publish automatically. "
             "HLS playback uses playback.m3u8?stream=SRT%20Test. "
+            "Publishes apply monotonic -output_ts_offset so Fast HLS survives file republish. "
+            "HTTP-TS: http://35.222.33.58:7777/SRT%20Test.ts (http_ts_auto_out). "
             "Upload transcodes to H.264 Main yuv420p for browser playback."
         ),
         supports_vmaf=True,
@@ -136,7 +138,9 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url="http://35.222.33.58:7777/benchmark",
         notes=(
             "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
-            "Live HLS playback: http://35.222.33.58:7777/playback.m3u8?stream=benchmark. "
+            "Encode/upload metrics only on current Broadcaster settings — Fast HLS "
+            "and HTTP-TS playback for this PUT input stay unavailable (use SRT/RTMP "
+            "presets for Chrome playback). "
             "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
         ),
         supports_vmaf=True,
@@ -151,7 +155,8 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url="http://35.222.33.58:7777/benchmark",
         notes=(
             "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
-            "Live DASH playback: http://35.222.33.58:7777/playback.mpd?stream=benchmark. "
+            "Same playback limitation as the HLS PUT preset — no per-input MPD/"
+            "HTTP-TS on current settings; use SRT/RTMP for browser validation. "
             "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
         ),
         supports_vmaf=True,
@@ -211,8 +216,9 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="webrtc",
         url="http://34.9.217.178:8889/benchmark/whip",
         notes=(
-            "ffmpeg WHIP publish into MediaMTX; play with WHEP or LL-HLS. "
-            "Install: infra/mediamtx/scripts/install-mediamtx.sh"
+            "ffmpeg WHIP publish into MediaMTX (Opus audio required by the WHIP muxer); "
+            "play with WHEP or LL-HLS. Co-located publish uses 127.0.0.1 to avoid GCP "
+            "hairpin. Install: infra/mediamtx/scripts/install-mediamtx.sh"
         ),
         supports_vmaf=False,
         ingest_provider="gcp_mediamtx",

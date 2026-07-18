@@ -57,7 +57,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "mpegts",
     label: "MPEG-TS over HTTP",
-    hint: "Lower-latency Zixi HTTP TS via mpegts.js.",
+    hint: "Raw Zixi HTTP-TS (http_ts_auto_out) via mpegts.js — bypasses Fast HLS packager; auto-reconnects on republish.",
   },
   {
     id: "zixi-embed",
@@ -313,8 +313,8 @@ function engineForMode(
   if (mediamtx) return "hls";
   if (protocol === "srt" && hasWhepUrl) return "whep";
   if (protocol === "srt") return "hls";
-  if (protocol === "hls") return "hls";
-  if (protocol === "dash") return "dash";
+  // HTTP-TS push ingest: Fast HLS/DASH manifests are often absent — Auto uses MPEG-TS.
+  if (protocol === "hls" || protocol === "dash") return "mpegts";
   if (protocol === "webrtc") return mediamtx ? "whep" : "webrtc-embed";
   return "hls";
 }

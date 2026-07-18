@@ -51,6 +51,87 @@ def zixi_hls_playback_url(stream_id: str, *, endpoint_url: str = "", port: int =
     return f"http://{host}:{port}/playback.m3u8?stream={urllib.parse.quote(stream_id, safe='')}"
 
 
+def zixi_http_ts_playback_url(
+    stream_id: str,
+    *,
+    endpoint_url: str = "",
+    port: int = _DEFAULT_HLS_PORT,
+) -> str:
+    """Raw MPEG-TS over HTTP (``http_ts_auto_out``) — bypasses the Fast HLS packager."""
+    host = zixi_hls_host_from_endpoint(endpoint_url) if endpoint_url else zixi_hls_host_from_endpoint("")
+    clean = (stream_id or "benchmark").strip() or "benchmark"
+    return f"http://{host}:{port}/{urllib.parse.quote(clean, safe='')}.ts"
+
+
+def probe_http_ts_ready(
+    stream_id: str,
+    *,
+    endpoint_url: str = "",
+    timeout: float = 4.0,
+) -> HlsHealth:
+    """True when ``/<stream>.ts`` returns MPEG-TS sync bytes (TS-PUT / http_ts_auto_out)."""
+    url = zixi_http_ts_playback_url(stream_id, endpoint_url=endpoint_url)
+    try:
+        status, raw = _fetch(url, timeout=timeout)
+    except Exception as exc:
+        return HlsHealth(ok=False, detail=f"http_ts_probe_error={exc}")
+    ready = status == 200 and _looks_like_media_bytes(raw)
+    return HlsHealth(
+        ok=ready,
+        segment_uri=url,
+        segment_ready=ready,
+        http_status=status,
+        detail="http_ts_ready" if ready else f"http_ts_http={status if status is not None else 'error'} bytes={len(raw)}",
+    )
+
+
+def capture_zixi_http_ts(
+    stream_id: str,
+    dest_path: str,
+    *,
+    endpoint_url: str = "",
+    duration_sec: float = 8.0,
+    ffmpeg_bin: str = "ffmpeg",
+) -> Optional[str]:
+    """Pull a short HTTP-TS sample for VMAF/stats. Returns dest_path on success."""
+    import subprocess
+
+    url = zixi_http_ts_playback_url(stream_id, endpoint_url=endpoint_url)
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_bin,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                url,
+                "-t",
+                str(max(1.0, float(duration_sec))),
+                "-c",
+                "copy",
+                dest_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(30, int(duration_sec) + 20),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("HTTP-TS capture failed for %s: %s", url, exc)
+        return None
+    if proc.returncode != 0 or not os.path.isfile(dest_path) or os.path.getsize(dest_path) < _MIN_TS_BYTES:
+        logger.warning(
+            "HTTP-TS capture empty/failed for %s (code=%s): %s",
+            url,
+            proc.returncode,
+            (proc.stderr or "").strip()[-400:],
+        )
+        return None
+    return dest_path
+
+
 _DEFAULT_MEDIAMTX_HLS_PORT = 8888
 
 
@@ -62,6 +143,22 @@ def mediamtx_hls_playback_url(
 ) -> str:
     """LL-HLS playlist for a MediaMTX path (e.g. /benchmark/index.m3u8)."""
     host = zixi_hls_host_from_endpoint(endpoint_url) if endpoint_url else zixi_hls_host_from_endpoint("")
+    clean = (path or "benchmark").strip().strip("/") or "benchmark"
+    return f"http://{host}:{port}/{urllib.parse.quote(clean, safe='')}/index.m3u8"
+
+
+def mediamtx_hls_probe_url(
+    path: str = "benchmark",
+    *,
+    port: int = _DEFAULT_MEDIAMTX_HLS_PORT,
+) -> str:
+    """Server-side LL-HLS probe URL (loopback).
+
+    Co-located moq-web must not hairpin to the VM public IP — those GETs hang
+    and stall the sample loop / preview gate. Browsers still use the public host
+    via ``mediamtx_hls_playback_url`` / the SPA.
+    """
+    host = (os.environ.get("MEDIAMTX_PROBE_HOST", "127.0.0.1").strip() or "127.0.0.1")
     clean = (path or "benchmark").strip().strip("/") or "benchmark"
     return f"http://{host}:{port}/{urllib.parse.quote(clean, safe='')}/index.m3u8"
 

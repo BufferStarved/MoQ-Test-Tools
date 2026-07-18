@@ -111,7 +111,7 @@ enable_http_hls_dash_origin() {
 &hls_chunk_time=${ZIXI_HLS_SEGMENT_SEC}&hls_chunks=${ZIXI_HLS_SEGMENTS}\
 &http_auth_cahce_timeout=0&http_on=1&https_on=0&https_out_port=443\
 &hls_dvr_duration_s=86400&hls_no_mem_chunks=0&hls_no_dvr=0&hls_vod_abs_path_on=0\
-&http_ts_auto_in=1&http_ts_auto_out=0&http_ts_buffer_size=0&http_ts_smoothing_latency=0\
+&http_ts_auto_in=1&http_ts_auto_out=1&http_ts_buffer_size=0&http_ts_smoothing_latency=0\
 &tcp_congestion_algo=0\
 &hls_playlist_http_cache_header_seconds=0&dash_playlist_http_cache_header_seconds=0\
 &hls_media_http_cache_header_seconds=0&dash_media_http_cache_header_seconds=0\
@@ -132,7 +132,17 @@ restart_zixi_if_needed() {
     sleep 5
     return 0
   fi
-  echo "Restarting remote Zixi service on ${ZIXI_HOST}..."
+  # Public :22 to the Zixi VM is often filtered; prefer gcloud IAP SSH when available.
+  if command -v gcloud >/dev/null 2>&1; then
+    local instance="${ZIXI_GCE_INSTANCE:-moq-zixi-gcp}"
+    local zone="${ZIXI_GCE_ZONE:-us-central1-a}"
+    echo "Restarting Zixi via gcloud compute ssh ${instance} (${zone})..."
+    gcloud compute ssh "$instance" --zone="$zone" --command='
+      sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service
+    '
+    return 0
+  fi
+  echo "Restarting remote Zixi service on ${ZIXI_HOST} over SSH..."
   ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "ubuntu@${ZIXI_HOST}" \
     'sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service'
 }
@@ -140,8 +150,11 @@ restart_zixi_if_needed() {
 echo "Configuring Zixi HLS/DASH origin at ${BASE_URL}"
 echo "Stream ID: ${ZIXI_STREAM_ID}"
 echo "HTTP TS push ingest: http://${ZIXI_HOST}:${ZIXI_HTTP_PORT}/${ZIXI_STREAM_ID}"
+echo "HTTP TS playback:    http://${ZIXI_HOST}:${ZIXI_HTTP_PORT}/${ZIXI_STREAM_ID}.ts  (http_ts_auto_out=1)"
 echo "HLS playback (live): http://${ZIXI_HOST}:${ZIXI_HTTP_PORT}/playback.m3u8?stream=${ZIXI_STREAM_ID}"
 echo "DASH playback:       http://${ZIXI_HOST}:${ZIXI_HTTP_PORT}/${ZIXI_STREAM_ID}.mpd (may need adaptive group)"
+echo ""
+echo "Note: http_ts_auto_out requires a Broadcaster restart (performed below unless ZIXI_SKIP_RESTART=1)."
 echo ""
 
 enable_http_hls_dash_origin

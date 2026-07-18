@@ -136,50 +136,43 @@ export function AboutPage() {
       </section>
 
       <section className="about-section">
-        <h3>Zixi Fast HLS debugging</h3>
+        <h3>Zixi Fast HLS (packager timeline)</h3>
         <p>
-          For reproducing the SRT → Fast HLS stall (
-          <code>playback.m3u8?stream=SRT%20Test</code>, stuck{" "}
-          <code>media_sequence=0</code> / <code>chunk=0</code>):
+          Fast HLS builds a lightweight packager on the first playlist request and{" "}
+          <strong>reuses it across SRT reconnects</strong>. File publishes that rewind PTS behind
+          that packager&apos;s high-water mark stall the playlist (
+          <code>media_sequence</code> frozen / <code>chunk=0</code> 404) even while ingest looks
+          healthy. RTMP looks more stable because Zixi starts a <em>fresh</em> packager per RTMP
+          publish.
         </p>
-        <ol className="about-list">
-          <li>
-            Open the <strong>Test</strong> tab, keep an SRT destination (GCP Zixi preset), start a
-            benchmark encode.
-          </li>
-          <li>
-            On the SRT player card, expand <strong>Playback diagnostics</strong>.
-          </li>
-          <li>
-            While preview is stuck or waiting, click <strong>Capture stuck playlist</strong> — that
-            copies the raw playlist body plus the failing segment HTTP status/headers (ready to
-            paste into email).
-          </li>
-          <li>
-            Click <strong>Copy publish recipe</strong> for the exact ffmpeg /{" "}
-            <code>srt-live-transmit</code> flags, stream id, GOP, and reconnect notes.
-          </li>
-        </ol>
+        <p>
+          This site applies a monotonic ffmpeg <code>-output_ts_offset</code> on managed Zixi SRT
+          publishes so each session starts above the previous timeline (no delete+recreate
+          required). Mid-job heal may still reset the SRT input if the playlist wedges. For
+          ultra-low-latency monitor / VMAF pulls, use playback mode{" "}
+          <strong>MPEG-TS over HTTP</strong> (
+          <code>http://&lt;zixi&gt;:7777/&lt;stream&gt;.ts</code>, requires{" "}
+          <code>http_ts_auto_out=1</code>) — it bypasses the HLS packager entirely.
+        </p>
+        <p>
+          The <strong>HLS / DASH</strong> Zixi presets push MPEG-TS over HTTP PUT to{" "}
+          <code>/benchmark</code>. On the current Broadcaster settings that path collects encode
+          metrics but does <em>not</em> expose Fast HLS or HTTP-TS for Chrome — use the SRT or RTMP
+          presets when you need browser playback.
+        </p>
         <p className="hint">
-          Machine-readable recipe (no auth):{" "}
+          Optional Broadcaster-side alternative (not auto-created here): error-concealed derived
+          input with <code>continuous_timeline=1</code> in front of Fast HLS (~+100&nbsp;ms). Recipe:{" "}
           <a href="/api/debug/zixi-srt" target="_blank" rel="noreferrer">
             /api/debug/zixi-srt
           </a>
-          . Config scripts:{" "}
+          . Config:{" "}
           <a
             href={`${GH_BLOB}/infra/zixi/scripts/configure-zixi-hls-dash-output.sh`}
             target="_blank"
             rel="noreferrer"
           >
             configure-zixi-hls-dash-output.sh
-          </a>
-          ,{" "}
-          <a
-            href={`${GH_BLOB}/infra/zixi/scripts/reset-zixi-srt-input.sh`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            reset-zixi-srt-input.sh
           </a>
           .
         </p>

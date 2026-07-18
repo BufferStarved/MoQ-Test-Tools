@@ -247,6 +247,7 @@ def debug_zixi_srt(
     srt_url = with_srt_latency(with_srt_stream_id(srt_base, stream), latency_ms)
     playlist_url = f"http://{host}:7777/playback.m3u8?stream={quote(stream)}"
     segment_url = f"http://{host}:7777/playback.ts?stream={quote(stream)}&chunk=0"
+    http_ts_url = f"http://{host}:7777/{quote(stream)}.ts"
     ffmpeg_example = shlex.join(
         [
             "ffmpeg",
@@ -255,6 +256,8 @@ def debug_zixi_srt(
             "SOURCE.mp4",
             *video_args,
             *BROWSER_COMPAT_AUDIO_ARGS,
+            "-output_ts_offset",
+            "OFFSET_SEC",
             "-bsf:v",
             MPEGTS_VIDEO_BSF,
             "-f",
@@ -298,8 +301,15 @@ def debug_zixi_srt(
         "srt_url": srt_url,
         "playlist_url": playlist_url,
         "segment_url_chunk0": segment_url,
+        "http_ts_url": http_ts_url,
         "curl_playlist": f'curl -v "{playlist_url}"',
         "curl_segment_chunk0": f'curl -v -o /tmp/chunk0.ts "{segment_url}"',
+        "curl_http_ts": f'curl -v -o /tmp/live.ts "{http_ts_url}"',
+        "root_cause": (
+            "Fast HLS builds a single-segment packager on first playlist hit and reuses it "
+            "across SRT reconnects. File publishes that rewind PTS behind the packager "
+            "high-water mark stall the playlist until the timeline catches up (Zixi eng)."
+        ),
         "player_attach": (
             "Browser confidence monitor mounts after the SRT publish job is running, "
             "and only goes live once a Fast HLS segment returns a non-empty MPEG-TS body "
@@ -308,10 +318,12 @@ def debug_zixi_srt(
         ),
         "reconnect": (
             f"Same SRT stream id every run (`{stream}`). Jobs are serialized. "
-            "Before each managed SRT publish we delete+recreate the Zixi SRT input "
-            "(verified) because Fast HLS otherwise often stays on media_sequence=0 / "
-            "chunk=0 with HTTP 400 for the whole job — longer than one GOP. Gap between "
-            "runs is whatever the operator waits in the UI (seconds to minutes)."
+            "Managed publishes apply a monotonic ffmpeg -output_ts_offset so each file "
+            "session starts above the previous Fast HLS high-water mark (no delete+recreate "
+            "required). Mid-job heal may still reset the input if the playlist wedges. "
+            "Force the old preflight with ZIXI_SRT_RESET_BEFORE_PUBLISH=1. "
+            "For VMAF/ULL monitor prefer raw HTTP-TS "
+            f"({http_ts_url}) when http_ts_auto_out=1."
         ),
         "config_scripts": [
             "https://github.com/BufferStarved/MoQ-Test-Tools/blob/main/infra/zixi/scripts/configure-zixi-hls-dash-output.sh",

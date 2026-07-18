@@ -1,5 +1,6 @@
 import unittest
 
+from zixi_hls_health import zixi_http_ts_playback_url
 from zixi_stats import (
     ZixiStatsPoller,
     parse_zixi_jsonp,
@@ -48,6 +49,14 @@ class ZixiStatsTests(unittest.TestCase):
         poller = ZixiStatsPoller(url)
         self.assertEqual(poller._input_id, "SRT Test")
 
+    def test_http_ts_playback_url(self):
+        url = zixi_http_ts_playback_url(
+            "SRT Test",
+            endpoint_url="srt://35.222.33.58:10080?mode=caller",
+        )
+        self.assertEqual(url, "http://35.222.33.58:7777/SRT%20Test.ts")
+
 
 if __name__ == "__main__":
     unittest.main()
+

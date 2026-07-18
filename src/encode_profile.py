@@ -162,8 +162,10 @@ def with_srt_latency(url: str, target_latency_ms: int) -> str:
         return url
     query = parse_qs(parsed.query, keep_blank_values=True)
     query["latency"] = [str(srt_latency_us(target_latency_ms))]
+    # Keep streamid punctuation (: # ! = ,) intact — MediaMTX expects
+    # ``publish:benchmark``, not ``publish%3Abenchmark``.
     flat_query = "&".join(
-        f"{key}={quote(values[-1], safe='')}" for key, values in query.items() if values
+        f"{key}={quote(values[-1], safe=':#!/@=,')}" for key, values in query.items() if values
     )
     return urlunparse(
         (parsed.scheme, parsed.netloc, parsed.path, parsed.params, flat_query, parsed.fragment)

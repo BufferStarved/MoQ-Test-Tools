@@ -123,7 +123,8 @@ class JobManager:
             or ""
         ).strip().lower()
         # Gate browser HLS until UploadService confirms a readable segment
-        # (Zixi Fast HLS or MediaMTX LL-HLS).
+        # (Zixi Fast HLS or MediaMTX LL-HLS). HTTP-TS PUT presets are encode-only
+        # on current Broadcaster settings — do not gate them on missing playback.
         needs_hls_preview = bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx"
         preview_ready = not needs_hls_preview
 

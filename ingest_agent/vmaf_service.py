@@ -200,9 +200,54 @@ def compute_vmaf(
             break
         time.sleep(5)
     if not distorted:
-        state.status = "failed"
-        state.error = f"No recording found under {recording_dir or RECORDING_DIR}"
-        return state
+        # Prefer disk recordings; fall back to Zixi raw HTTP-TS (http_ts_auto_out).
+        http_ts = (os.environ.get("ZIXI_HTTP_TS_URL") or "").strip()
+        if not http_ts:
+            stream = (os.environ.get("ZIXI_HTTP_TS_STREAM") or "SRT Test").strip()
+            host = (os.environ.get("ZIXI_HTTP_TS_HOST") or "127.0.0.1").strip()
+            port = (os.environ.get("ZIXI_HTTP_TS_PORT") or "7777").strip()
+            from urllib.parse import quote
+
+            http_ts = f"http://{host}:{port}/{quote(stream, safe='')}.ts"
+        pull_secs = max(5, int(max(0.0, end_epoch - start_epoch)) or 15)
+        pulled = job_dir(job_id) / "http-ts-capture.ts"
+        pull_cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            http_ts,
+            "-t",
+            str(pull_secs),
+            "-c",
+            "copy",
+            str(pulled),
+        ]
+        try:
+            pull = subprocess.run(
+                pull_cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(60, pull_secs + 30),
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            state.status = "failed"
+            state.error = (
+                f"No recording under {recording_dir or RECORDING_DIR} "
+                f"and HTTP-TS pull failed: {exc}"
+            )
+            return state
+        if pull.returncode != 0 or not pulled.is_file() or pulled.stat().st_size < 188:
+            state.status = "failed"
+            state.error = (
+                f"No recording under {recording_dir or RECORDING_DIR} "
+                f"and HTTP-TS pull from {http_ts} failed"
+            )
+            return state
+        distorted = str(pulled)
 
     state.distorted_path = distorted
     log_path = job_dir(job_id) / f"vmaf-{Path(distorted).name}.json"

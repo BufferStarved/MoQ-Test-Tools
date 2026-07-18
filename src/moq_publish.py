@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import parse_qs, quote, urlparse, urlunparse
@@ -44,23 +45,58 @@ BROWSER_COMPAT_AUDIO_ARGS = [
     "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-flags:a", "+bitexact",
 ]
 
+# ffmpeg WHIP muxer accepts Opus only (AAC → exit 234 "Conversion failed!").
+WHIP_COMPAT_AUDIO_ARGS = [
+    "-c:a", "libopus", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+]
+
 # MP4 → MPEG-TS for SRT/Zixi. repeat-headers=1 (above) injects SPS/PPS at IDR; annex-B converts AVCC.
 # Chained bsf syntax (dump_extra+…) is not supported on Homebrew ffmpeg-full.
 MPEGTS_VIDEO_BSF = "h264_mp4toannexb"
 
 
+def _ffmpeg_has_srt_output(ffmpeg_bin: str) -> bool:
+    """True when this ffmpeg binary can mux/publish ``srt://`` outputs."""
+    try:
+        probe = subprocess.run(
+            [ffmpeg_bin, "-protocols"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    text = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+    # Protocol lists are split into Input:/Output: sections; require Output srt.
+    out_section = ""
+    if "Output:" in text:
+        out_section = text.split("Output:", 1)[1]
+        if "\nInput:" in out_section:
+            out_section = out_section.split("\nInput:", 1)[0]
+    else:
+        out_section = text
+    return any(tok == "srt" for tok in out_section.replace("\n", " ").split())
+
+
 def find_ffmpeg() -> str:
-    """Prefer ffmpeg-full (libsrt) over system ffmpeg."""
+    """Prefer an ffmpeg that can speak SRT (Homebrew ffmpeg-full), not PATH ffmpeg."""
     override = os.environ.get("FFMPEG", "").strip()
     if override and os.path.isfile(override) and os.access(override, os.X_OK):
         return override
-    for candidate in (
+    candidates = [
         "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
         "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
         shutil.which("ffmpeg"),
-    ):
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+    ]
+    existing = [
+        c for c in candidates if c and os.path.isfile(c) and os.access(c, os.X_OK)
+    ]
+    for candidate in existing:
+        if _ffmpeg_has_srt_output(candidate):
             return candidate
+    if existing:
+        return existing[0]
     return "ffmpeg"
 
 
@@ -80,6 +116,47 @@ def zixi_srt_stream_id_for_preset(preset_id: str) -> Optional[str]:
     return None
 
 
+def zixi_http_push_stream_id_for_preset(preset_id: str) -> Optional[str]:
+    """Stream ID for Zixi TS-over-HTTP push presets (HLS/DASH ingest buttons)."""
+    if preset_id in {"moq_zixi_gcp_hls", "moq_zixi_gcp_dash"}:
+        return "benchmark"
+    return None
+
+
+def mediamtx_loopback_publish_url(url: str) -> str:
+    """Rewrite co-located MediaMTX public host → 127.0.0.1 for ffmpeg publish.
+
+    GCP VMs typically cannot hairpin to their own external IP, so publishing
+    SRT/RTMP/WHIP from moq-web to ``34.x.x.x`` often dies after a few seconds.
+    Browser playback URLs keep the public host; only the publish endpoint is
+    localized. Override with ``MEDIAMTX_PUBLIC_HOST`` (comma-separated hosts).
+    """
+    text = (url or "").strip()
+    if not text:
+        return url
+    hosts = [
+        h.strip()
+        for h in os.environ.get("MEDIAMTX_PUBLIC_HOST", "34.9.217.178").split(",")
+        if h.strip()
+    ]
+    parsed = urlparse(text)
+    hostname = parsed.hostname or ""
+    if hostname not in hosts:
+        return url
+    # Preserve userinfo / port / path / query; swap host only.
+    userinfo = ""
+    if parsed.username is not None:
+        userinfo = parsed.username
+        if parsed.password is not None:
+            userinfo += f":{parsed.password}"
+        userinfo += "@"
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{userinfo}127.0.0.1{port}"
+    return urlunparse(
+        (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment)
+    )
+
+
 def zixi_srt_streamid_value(stream_id: str) -> str:
     """Build the SRT streamid payload Zixi expects on caller/push connections."""
     mode = os.environ.get("ZIXI_SRT_STREAMID_MODE", "access").strip().lower()
@@ -97,8 +174,9 @@ def with_srt_stream_id(url: str, stream_id: str) -> str:
     if (query.get("streamid") or [""])[0].strip():
         return url
     query["streamid"] = [zixi_srt_streamid_value(stream_id)]
+    # Preserve Zixi ``#!::r=…`` and MediaMTX ``publish:path`` streamid forms.
     flat_query = "&".join(
-        f"{key}={quote(values[-1], safe='')}" for key, values in query.items() if values
+        f"{key}={quote(values[-1], safe=':#!/@=,')}" for key, values in query.items() if values
     )
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, flat_query, parsed.fragment))
 
