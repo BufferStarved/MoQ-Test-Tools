@@ -8,13 +8,14 @@ interface DashPlayerProps {
   url: string;
   label: string;
   playbackGate?: PlaybackGate;
+  /** Enable dash.js low-latency live mode (CMAF LL-DASH). */
+  lowLatencyMode?: boolean;
 }
 
 /**
  * dash.js resolves relative SegmentTemplate URLs against the MPD request URL.
- * When the MPD is loaded via /api/playback/fetch?url=..., that becomes
- * /api/playback/playback.m4s (404). Rewrite those back onto the Zixi origin
- * and proxy once.
+ * When the MPD is loaded via /api/playback/fetch?url=..., relative segments must
+ * be rewritten back onto the upstream origin and re-proxied.
  */
 function resolveDashRequestUrl(requestUrl: string, manifestRemoteUrl: string): string {
   try {
@@ -35,7 +36,12 @@ function resolveDashRequestUrl(requestUrl: string, manifestRemoteUrl: string): s
   }
 }
 
-export default function DashPlayer({ url, label, playbackGate = "live" }: DashPlayerProps) {
+export default function DashPlayer({
+  url,
+  label,
+  playbackGate = "live",
+  lowLatencyMode = false,
+}: DashPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading DASH player...");
@@ -59,7 +65,7 @@ export default function DashPlayer({ url, label, playbackGate = "live" }: DashPl
 
     async function start() {
       setError(null);
-      setStatus("Connecting...");
+      setStatus(lowLatencyMode ? "Connecting (LL-DASH)..." : "Connecting...");
       const dashjs = await import("dashjs");
       if (destroyed || !video) {
         return;
@@ -69,6 +75,24 @@ export default function DashPlayer({ url, label, playbackGate = "live" }: DashPl
       player = instance;
       instance.updateSettings({
         streaming: {
+          delay: lowLatencyMode
+            ? {
+                liveDelay: 2,
+                liveCatchup: {
+                  enabled: true,
+                  maxDrift: 0.5,
+                  playbackRate: { min: -0.5, max: 0.5 },
+                },
+              }
+            : undefined,
+          lowLatencyEnabled: lowLatencyMode,
+          liveCatchup: lowLatencyMode
+            ? {
+                enabled: true,
+                maxDrift: 0.5,
+                playbackRate: { min: -0.5, max: 0.5 },
+              }
+            : undefined,
           requestModifier: {
             modifyRequestURL: (requestUrl: string) => resolveDashRequestUrl(requestUrl, url),
           },
@@ -77,7 +101,11 @@ export default function DashPlayer({ url, label, playbackGate = "live" }: DashPl
       instance.initialize(video, proxiedPlaybackUrl(url), true);
       instance.on(dashjs.MediaPlayer.events.ERROR, () => {
         if (!destroyed) {
-          setError("DASH playback failed. Is the stream live and DASH enabled on Zixi?");
+          setError(
+            lowLatencyMode
+              ? "LL-DASH playback failed. Is MediaMTX live and the LL-DASH packager running?"
+              : "DASH playback failed. Is the stream live and DASH enabled on Zixi?",
+          );
         }
       });
       instance.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
@@ -95,7 +123,7 @@ export default function DashPlayer({ url, label, playbackGate = "live" }: DashPl
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate]);
+  }, [url, playbackGate, lowLatencyMode]);
 
   const gateMessage =
     playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;

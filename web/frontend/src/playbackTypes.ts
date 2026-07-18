@@ -1,7 +1,9 @@
 export type PlaybackMode =
   | "auto"
   | "hls"
+  | "ll-hls"
   | "dash"
+  | "ll-dash"
   | "webrtc"
   | "whep"
   | "moq"

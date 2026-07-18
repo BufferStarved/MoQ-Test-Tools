@@ -1,0 +1,22 @@
+# MediaMTX delivery origin (LL-HLS + WHEP + SRT/RTMP ingest)
+# + nginx static origin for ffmpeg CMAF LL-DASH (port 8891).
+#
+# Usage:
+#   PUBLIC_IP=x.x.x.x ./infra/mediamtx/scripts/install-mediamtx.sh
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1.15.3
+    container_name: moq-mediamtx
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  lldash-origin:
+    image: nginx:1.27-alpine
+    container_name: moq-mediamtx-lldash-origin
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./dash:/usr/share/nginx/html:ro
+      - ./nginx-lldash.conf:/etc/nginx/conf.d/default.conf:ro

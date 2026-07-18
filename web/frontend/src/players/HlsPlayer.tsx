@@ -21,6 +21,11 @@ interface HlsPlayerProps {
   liveSyncDurationCount?: number;
   /** Intentional live buffer in seconds (preferred over count). Default ~4s. */
   liveSyncDurationSec?: number;
+  encodeLadder?: string;
+  targetLatencyMs?: number;
+  zixiStreamId?: string;
+  /** Enable hls.js lowLatencyMode (MediaMTX Apple LL-HLS). */
+  lowLatencyMode?: boolean;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -194,6 +199,10 @@ export default function HlsPlayer({
   benchmarkLoading = false,
   liveSyncDurationCount = 2,
   liveSyncDurationSec,
+  encodeLadder,
+  targetLatencyMs,
+  zixiStreamId,
+  lowLatencyMode = false,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -421,8 +430,8 @@ export default function HlsPlayer({
       const syncCount = Math.max(1, Math.round(syncSec / Math.max(1, targetDuration)));
       const hls = new Hls({
         enableWorker: true,
-        // Zixi HLS is not LL-HLS; lowLatencyMode + tight sync caused buffer stalls.
-        lowLatencyMode: false,
+        // MediaMTX Apple LL-HLS needs lowLatencyMode; Zixi Fast HLS does not.
+        lowLatencyMode,
         // Use segment counts (more reliable than liveSyncDuration on 1-deep Zixi).
         liveSyncDurationCount: syncCount,
         liveMaxLatencyDurationCount: shallow
@@ -655,6 +664,9 @@ export default function HlsPlayer({
         error={error ?? lastErrorRef.current}
         lines={diagLines}
         manifestUrl={url}
+        encodeLadder={encodeLadder}
+        targetLatencyMs={targetLatencyMs}
+        zixiStreamId={zixiStreamId}
       />
     </div>
   );

@@ -1,5 +1,6 @@
 export const INGEST_ENDPOINTS = [
   { id: "gcp_zixi", label: "Zixi Broadcaster gcp-us-central1", available: true },
+  { id: "gcp_mediamtx", label: "MediaMTX gcp-us-central1 (LL-HLS / LL-DASH / WHEP)", available: true },
   { id: "gcp_moq_relay", label: "OpenMOQ MOQ-X gcp-us-central1", available: true },
   { id: "aws_zixi", label: "AWS Zixi", available: false },
   { id: "linode_zixi", label: "Linode Zixi", available: false },
@@ -14,6 +15,11 @@ export const INGEST_PRESET_BY_PROTOCOL: Record<IngestEndpointId, Partial<Record<
     rtmp: "moq_zixi_gcp_rtmp",
     hls: "moq_zixi_gcp_hls",
     dash: "moq_zixi_gcp_dash",
+  },
+  gcp_mediamtx: {
+    srt: "moq_mediamtx_gcp_srt",
+    rtmp: "moq_mediamtx_gcp_rtmp",
+    webrtc: "moq_mediamtx_gcp_whip",
   },
   gcp_moq_relay: {
     moq: "moq_gcp_relay",

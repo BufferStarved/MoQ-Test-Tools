@@ -110,15 +110,22 @@ class JobManager:
             # by UploadService's exclusive SRT ingest lock + delete/recreate reset.
             zixi_stream_id = zixi_srt_stream_id_for_preset(preset_id)
 
-        from destinations import ingest_settings_for_preset
+        from destinations import PRESET_BY_ID, ingest_settings_for_preset
 
         if preset_id:
             agent_url, recording_dir = ingest_settings_for_preset(preset_id)
             job.ingest_agent_url = agent_url
             job.ingest_recording_dir = recording_dir
 
-        # SRT HLS preview stays gated until UploadService confirms a readable segment.
-        preview_ready = not bool(zixi_stream_id)
+        ingest_provider = (
+            (PRESET_BY_ID.get(preset_id).ingest_provider if preset_id and PRESET_BY_ID.get(preset_id) else "")
+            or job.destination.ingest_provider
+            or ""
+        ).strip().lower()
+        # Gate browser HLS until UploadService confirms a readable segment
+        # (Zixi Fast HLS or MediaMTX LL-HLS).
+        needs_hls_preview = bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx"
+        preview_ready = not needs_hls_preview
 
         record = UploadJobRecord(
             id=job_id,

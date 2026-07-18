@@ -195,15 +195,80 @@ export function fetchPlaybackProbe(manifestUrl: string): Promise<{
   manifest_url: string;
   manifest_ok: boolean;
   manifest_bytes: number;
+  manifest_status?: number | null;
+  manifest_headers?: Record<string, string>;
+  manifest_body?: string | null;
+  media_sequence?: number | null;
+  target_duration?: number | null;
+  playlist_depth?: number | null;
   segment_url: string | null;
   segment_ok: boolean;
   segment_bytes: number;
+  segment_status?: number | null;
+  segment_headers?: Record<string, string>;
   segment_decodable?: boolean | null;
   segment_video?: string | null;
+  curl_playlist?: string | null;
+  curl_segment?: string | null;
   checks: string[];
 }> {
   const query = new URLSearchParams({ url: manifestUrl });
   return request(`/playback/probe?${query.toString()}`);
+}
+
+export function fetchZixiSrtDebug(params?: {
+  encode_ladder?: string;
+  target_latency_ms?: number;
+  stream_id?: string;
+}): Promise<{
+  broadcaster: {
+    host: string;
+    ui: string;
+    srt_listen_port: number;
+    hls_origin_port: number;
+    build_hint: string;
+    srt_input: string;
+    fast_hls: string;
+  };
+  stream_id: string;
+  streamid_payload: string;
+  pipeline: string;
+  encode: Record<string, unknown>;
+  video_notes: {
+    codec: string;
+    gop_frames: number;
+    keyframe_interval_sec: number;
+    x264_params: string;
+    bsf: string;
+    global_header: boolean;
+    b_frames: number;
+    sc_threshold: number;
+  };
+  audio: string;
+  ffmpeg_example: string;
+  srt_transmit_example: string;
+  srt_url: string;
+  playlist_url: string;
+  segment_url_chunk0: string;
+  curl_playlist: string;
+  curl_segment_chunk0: string;
+  player_attach: string;
+  reconnect: string;
+  config_scripts: string[];
+  site_capture: string;
+}> {
+  const query = new URLSearchParams();
+  if (params?.encode_ladder) {
+    query.set("encode_ladder", params.encode_ladder);
+  }
+  if (params?.target_latency_ms != null) {
+    query.set("target_latency_ms", String(params.target_latency_ms));
+  }
+  if (params?.stream_id) {
+    query.set("stream_id", params.stream_id);
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request(`/debug/zixi-srt${suffix}`);
 }
 
 export function fetchMoqProbe(relayAdmin = "http://34.28.164.90:8000"): Promise<{

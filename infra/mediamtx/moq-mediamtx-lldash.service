@@ -1,0 +1,17 @@
+[Unit]
+Description=MediaMTX CMAF LL-DASH packager (ffmpeg sidecar)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MTX_API=http://127.0.0.1:9997
+Environment=DASH_ROOT=/opt/moq-mediamtx/dash
+Environment=PATHS=benchmark
+Environment=FFMPEG=/usr/bin/ffmpeg
+ExecStart=/opt/moq-mediamtx/scripts/lldash-packager.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,73 @@
+# MediaMTX — LL-HLS / WHEP delivery origin for MoQ Test Tools.
+# Publish with ffmpeg (SRT / RTMP / WHIP); play HLS or WHEP in the browser.
+#
+# Defaults match bluenviron/mediamtx; keep auth open for the public bench.
+# Override the public IP via install script sed of webrtcAdditionalHosts.
+
+logLevel: info
+logDestinations: [stdout]
+
+# Open bench: anonymous publish + read (lock down for non-demo deployments).
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+      - action: pprof
+
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+rtsp: yes
+rtspAddress: :8554
+
+rtmp: yes
+rtmpAddress: :1935
+
+# LL-HLS (Apple-style parts). Served over HTTP here; browsers reach it via
+# the moq-web /api/playback/fetch HTTPS proxy (MediaMTX TLS not required).
+hls: yes
+hlsAddress: :8888
+hlsEncryption: no
+hlsAllowOrigin: "*"
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsMuxerCloseAfter: 60s
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcAllowOrigin: "*"
+webrtcLocalUDPAddress: :8189
+# Public IP / hostname for ICE — install script rewrites this.
+webrtcAdditionalHosts: ["34.9.217.178"]
+webrtcIPsFromInterfaces: yes
+
+srt: yes
+srtAddress: :8890
+
+# Allow any path; publishers choose stream name (default: benchmark).
+pathDefaults:
+  source: publisher
+
+paths:
+  benchmark:
+    source: publisher
+  all_others:
+    source: publisher

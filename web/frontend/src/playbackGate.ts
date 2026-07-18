@@ -13,9 +13,9 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
     return "waiting";
   }
   if (job.status === "running") {
-    // Keep HLS players gated until the backend confirms a readable Zixi segment.
-    // Mounting hls.js earlier just storms fragLoadError on chunk=0 HTTP 400.
-    if (job.protocol === "srt" && job.preview_ready === false) {
+    // Keep HLS players gated until the backend confirms a readable segment
+    // (Zixi Fast HLS or MediaMTX LL-HLS). Mounting hls.js earlier storms errors.
+    if (job.preview_ready === false) {
       return "waiting";
     }
     return "live";

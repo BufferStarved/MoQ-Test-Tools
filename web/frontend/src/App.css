@@ -1316,6 +1316,21 @@ code {
   margin: 8px 0 0;
 }
 
+.player-diagnostics-capture {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #1e293b;
+  background: #020617;
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .player-link {
   color: #67e8f9;
   text-decoration: none;

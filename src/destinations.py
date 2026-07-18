@@ -179,6 +179,45 @@ SERVICE_PRESETS: List[ServicePreset] = [
         ingest_provider="gcp_moq_relay",
     ),
     ServicePreset(
+        id="moq_mediamtx_gcp_srt",
+        name="MediaMTX gcp-us-central1 (LL delivery)",
+        protocol="srt",
+        # streamid already set — do not overlay Zixi #!::r=… payload.
+        url="srt://34.9.217.178:8890?mode=caller&latency=200000&streamid=publish:benchmark",
+        notes=(
+            "MediaMTX SRT publish → LL-HLS / WHEP playback. "
+            "HLS: http://34.9.217.178:8888/benchmark/index.m3u8 · "
+            "WHEP: http://34.9.217.178:8889/benchmark/whep. "
+            "Install: infra/mediamtx/scripts/install-mediamtx.sh"
+        ),
+        supports_vmaf=False,
+        ingest_provider="gcp_mediamtx",
+    ),
+    ServicePreset(
+        id="moq_mediamtx_gcp_rtmp",
+        name="MediaMTX gcp-us-central1 (LL delivery)",
+        protocol="rtmp",
+        url="rtmp://34.9.217.178:1935/benchmark",
+        notes=(
+            "MediaMTX RTMP publish → LL-HLS / WHEP playback. "
+            "Install: infra/mediamtx/scripts/install-mediamtx.sh"
+        ),
+        supports_vmaf=False,
+        ingest_provider="gcp_mediamtx",
+    ),
+    ServicePreset(
+        id="moq_mediamtx_gcp_whip",
+        name="MediaMTX gcp-us-central1 (LL delivery)",
+        protocol="webrtc",
+        url="http://34.9.217.178:8889/benchmark/whip",
+        notes=(
+            "ffmpeg WHIP publish into MediaMTX; play with WHEP or LL-HLS. "
+            "Install: infra/mediamtx/scripts/install-mediamtx.sh"
+        ),
+        supports_vmaf=False,
+        ingest_provider="gcp_mediamtx",
+    ),
+    ServicePreset(
         id="zixi_aws_srt",
         name="AWS Zixi",
         protocol="srt",

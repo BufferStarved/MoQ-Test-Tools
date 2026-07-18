@@ -65,6 +65,10 @@ def resolve_gcp_instance(ingest_provider: str = "", endpoint_url: str = "") -> T
         name = os.environ.get("GCP_INSTANCE_ZIXI", "moq-zixi-gcp").strip()
         return name, zone
 
+    if provider.startswith("gcp_mediamtx") or provider == "gcp_mediamtx":
+        name = os.environ.get("GCP_INSTANCE_MEDIAMTX", "moq-web-gcp").strip()
+        return name, zone
+
     name = (
         os.environ.get("GCP_INSTANCE_ZIXI", "").strip()
         or os.environ.get("GCP_INSTANCE_MOQX", "").strip()

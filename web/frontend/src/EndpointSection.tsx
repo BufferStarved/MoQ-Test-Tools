@@ -103,18 +103,29 @@ export function EndpointSection({
             if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol)) {
               return;
             }
+            let nextIngest = endpoint.ingestEndpointId;
+            if (protocol === "moq") {
+              nextIngest = "gcp_moq_relay";
+            } else if (endpoint.ingestEndpointId === "gcp_moq_relay") {
+              nextIngest = "gcp_zixi";
+            } else if (
+              endpoint.ingestEndpointId === "gcp_mediamtx" &&
+              protocol !== "srt" &&
+              protocol !== "rtmp" &&
+              protocol !== "webrtc"
+            ) {
+              nextIngest = "gcp_zixi";
+            }
             const patch: Partial<EndpointConfig> = {
               protocol,
-              playbackMode: defaultPlaybackModeForProtocol(protocol),
+              ingestEndpointId: nextIngest,
+              playbackMode: defaultPlaybackModeForProtocol(protocol, nextIngest),
             };
             if (protocol === "moq") {
-              patch.ingestEndpointId = "gcp_moq_relay";
               Object.assign(
                 patch,
                 moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: "gcp_moq_relay" }, presets),
               );
-            } else if (endpoint.ingestEndpointId === "gcp_moq_relay") {
-              patch.ingestEndpointId = "gcp_zixi";
             }
             onChange(endpoint.id, patch);
           }}
@@ -141,7 +152,10 @@ export function EndpointSection({
           value={endpoint.ingestEndpointId}
           onChange={(e) => {
             const ingestEndpointId = e.target.value;
-            const patch: Partial<EndpointConfig> = { ingestEndpointId };
+            const patch: Partial<EndpointConfig> = {
+              ingestEndpointId,
+              playbackMode: defaultPlaybackModeForProtocol(endpoint.protocol, ingestEndpointId),
+            };
             if (endpoint.protocol === "moq" && isManagedMoqRelay(ingestEndpointId)) {
               Object.assign(patch, moqPatchFromPreset({ ...endpoint, ingestEndpointId }, presets));
             }

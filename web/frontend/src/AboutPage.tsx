@@ -118,6 +118,74 @@ export function AboutPage() {
       </div>
 
       <section className="about-section">
+        <h3>MediaMTX LL-HLS / LL-DASH / WHEP delivery</h3>
+        <p>
+          For standards low-latency delivery (separate from Zixi Fast HLS), pick ingest endpoint{" "}
+          <strong>MediaMTX gcp-us-central1 (LL-HLS / WHEP)</strong> and publish SRT, RTMP, or WHIP.
+          Playback: <strong>LL-HLS</strong> (MediaMTX native), <strong>LL-DASH</strong> (ffmpeg CMAF
+          sidecar → nginx :8891), or <strong>WHEP</strong>. See{" "}
+          <a
+            href={`${GH_BLOB}/infra/mediamtx/GCP-MEDIAMTX-RUNBOOK.md`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            GCP-MEDIAMTX-RUNBOOK.md
+          </a>
+          .
+        </p>
+      </section>
+
+      <section className="about-section">
+        <h3>Zixi Fast HLS debugging</h3>
+        <p>
+          For reproducing the SRT → Fast HLS stall (
+          <code>playback.m3u8?stream=SRT%20Test</code>, stuck{" "}
+          <code>media_sequence=0</code> / <code>chunk=0</code>):
+        </p>
+        <ol className="about-list">
+          <li>
+            Open the <strong>Test</strong> tab, keep an SRT destination (GCP Zixi preset), start a
+            benchmark encode.
+          </li>
+          <li>
+            On the SRT player card, expand <strong>Playback diagnostics</strong>.
+          </li>
+          <li>
+            While preview is stuck or waiting, click <strong>Capture stuck playlist</strong> — that
+            copies the raw playlist body plus the failing segment HTTP status/headers (ready to
+            paste into email).
+          </li>
+          <li>
+            Click <strong>Copy publish recipe</strong> for the exact ffmpeg /{" "}
+            <code>srt-live-transmit</code> flags, stream id, GOP, and reconnect notes.
+          </li>
+        </ol>
+        <p className="hint">
+          Machine-readable recipe (no auth):{" "}
+          <a href="/api/debug/zixi-srt" target="_blank" rel="noreferrer">
+            /api/debug/zixi-srt
+          </a>
+          . Config scripts:{" "}
+          <a
+            href={`${GH_BLOB}/infra/zixi/scripts/configure-zixi-hls-dash-output.sh`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            configure-zixi-hls-dash-output.sh
+          </a>
+          ,{" "}
+          <a
+            href={`${GH_BLOB}/infra/zixi/scripts/reset-zixi-srt-input.sh`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            reset-zixi-srt-input.sh
+          </a>
+          .
+        </p>
+      </section>
+
+      <section className="about-section">
         <h3>Project goals</h3>
         <ul className="about-list">
           <li>

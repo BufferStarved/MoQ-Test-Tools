@@ -51,6 +51,21 @@ def zixi_hls_playback_url(stream_id: str, *, endpoint_url: str = "", port: int =
     return f"http://{host}:{port}/playback.m3u8?stream={urllib.parse.quote(stream_id, safe='')}"
 
 
+_DEFAULT_MEDIAMTX_HLS_PORT = 8888
+
+
+def mediamtx_hls_playback_url(
+    path: str = "benchmark",
+    *,
+    endpoint_url: str = "",
+    port: int = _DEFAULT_MEDIAMTX_HLS_PORT,
+) -> str:
+    """LL-HLS playlist for a MediaMTX path (e.g. /benchmark/index.m3u8)."""
+    host = zixi_hls_host_from_endpoint(endpoint_url) if endpoint_url else zixi_hls_host_from_endpoint("")
+    clean = (path or "benchmark").strip().strip("/") or "benchmark"
+    return f"http://{host}:{port}/{urllib.parse.quote(clean, safe='')}/index.m3u8"
+
+
 def _media_sequence(body: str) -> Optional[int]:
     match = re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", body)
     if not match:
@@ -105,8 +120,25 @@ def _fetch(url: str, *, timeout: float = 5.0) -> tuple[Optional[int], bytes]:
         return None, b""
 
 
-def probe_hls_segment_ready(manifest_url: str, *, timeout: float = 5.0) -> HlsHealth:
-    """Return ok=True only when a playlist segment fetches as real MPEG-TS."""
+def _looks_like_media_bytes(data: bytes) -> bool:
+    """True for MPEG-TS (Zixi) or fMP4 init/media (MediaMTX LL-HLS)."""
+    if len(data) >= _MIN_TS_BYTES and data[0] == _TS_SYNC:
+        return True
+    if len(data) >= 8 and data[4:8] in (b"ftyp", b"moof", b"mdat"):
+        return True
+    if len(data) >= 32 and (b"ftyp" in data[:32] or b"moof" in data[:32]):
+        return True
+    # LL-HLS partials can be small CMAF chunks.
+    return len(data) >= 64 and (b"moof" in data[:64] or b"mdat" in data[:64])
+
+
+def probe_hls_segment_ready(
+    manifest_url: str,
+    *,
+    timeout: float = 5.0,
+    _depth: int = 0,
+) -> HlsHealth:
+    """Return ok=True when a playlist media URI fetches as MPEG-TS or fMP4."""
     try:
         status, raw = _fetch(manifest_url, timeout=timeout)
     except Exception as exc:
@@ -125,8 +157,20 @@ def probe_hls_segment_ready(manifest_url: str, *, timeout: float = 5.0) -> HlsHe
     if "#EXTM3U" not in body:
         return HlsHealth(ok=False, http_status=status, detail="not_m3u8")
 
-    sequence = _media_sequence(body)
+    # Follow one master→media hop (MediaMTX index.m3u8 is often a multivariant).
     segment = _segment_uri(body)
+    if segment and segment.endswith(".m3u8") and _depth < 2:
+        nested_url = _sanitize_http_url(urllib.parse.urljoin(manifest_url, segment))
+        return probe_hls_segment_ready(nested_url, timeout=timeout, _depth=_depth + 1)
+
+    # LL-HLS: prefer first EXT-X-PART URI when present.
+    part_match = re.search(r'#EXT-X-PART:[^\n]*URI="([^"]+)"', body)
+    if part_match:
+        segment = part_match.group(1)
+
+    sequence = _media_sequence(body)
+    if not segment:
+        segment = _segment_uri(body)
     depth = _playlist_depth(body)
     if not segment:
         return HlsHealth(
@@ -149,11 +193,7 @@ def probe_hls_segment_ready(manifest_url: str, *, timeout: float = 5.0) -> HlsHe
             depth=depth,
             detail=f"segment_probe_error={exc}",
         )
-    ready = (
-        seg_status == 200
-        and len(seg_bytes) >= _MIN_TS_BYTES
-        and seg_bytes[0] == _TS_SYNC
-    )
+    ready = seg_status == 200 and _looks_like_media_bytes(seg_bytes)
     return HlsHealth(
         ok=ready,
         media_sequence=sequence,

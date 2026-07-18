@@ -2,10 +2,16 @@ import type { PlaybackEngine, PlaybackMode, PlaybackTarget } from "./playbackTyp
 
 const ZIXI_HTTP_PORT = 7777;
 const ZIXI_UI_PORT = 4444;
+const MEDIAMTX_HLS_PORT = 8888;
+const MEDIAMTX_WEBRTC_PORT = 8889;
+/** ffmpeg CMAF LL-DASH sidecar (nginx) beside MediaMTX. */
+const MEDIAMTX_LLDASH_PORT = 8891;
 const DEFAULT_STREAM_ID = "benchmark";
 const DEFAULT_MOQ_NAMESPACE = "benchmark";
 /** GCP Zixi SRT push input stream ID (see infra/zixi/GCP-ZIXI-RUNBOOK.md). */
 const GCP_ZIXI_SRT_STREAM_ID = "SRT Test";
+/** Default MediaMTX path name for publish/play. */
+const MEDIAMTX_PATH = "benchmark";
 
 export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: string }[] = [
   {
@@ -16,17 +22,27 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "hls",
     label: "HLS Playback (Live)",
-    hint: "HTTP Live Streaming via hls.js (Zixi live playlist).",
+    hint: "HTTP Live Streaming via hls.js (Zixi Fast HLS or classic).",
+  },
+  {
+    id: "ll-hls",
+    label: "LL-HLS (MediaMTX)",
+    hint: "Apple-style Low-Latency HLS via MediaMTX (hls.js lowLatencyMode).",
   },
   {
     id: "dash",
     label: "DASH",
-    hint: "MPEG-DASH via dash.js.",
+    hint: "MPEG-DASH via dash.js (Zixi CMAF when available).",
+  },
+  {
+    id: "ll-dash",
+    label: "LL-DASH (MediaMTX)",
+    hint: "CMAF low-latency DASH packaged beside MediaMTX (dash.js lowLatencyEnabled).",
   },
   {
     id: "whep",
     label: "WHEP (WebRTC)",
-    hint: "WebRTC via a WHEP gateway.",
+    hint: "WebRTC via MediaMTX WHEP (or another WHEP gateway).",
   },
   {
     id: "moq",
@@ -54,6 +70,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
 export function isPlaybackModeCompatible(
   mode: PlaybackMode,
   protocol: string,
+  ingestEndpointId?: string,
 ): boolean {
   if (mode === "auto") {
     return true;
@@ -61,18 +78,36 @@ export function isPlaybackModeCompatible(
   if (protocol === "moq") {
     return mode === "moq";
   }
+  const mediamtx = isMediaMtxManaged(ingestEndpointId ?? "");
+  if (mediamtx) {
+    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep";
+  }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
-    return mode === "hls" || mode === "dash" || mode === "whep" || mode === "webrtc"
-      || mode === "mpegts" || mode === "zixi-embed";
+    return mode === "hls" || mode === "ll-hls" || mode === "dash" || mode === "ll-dash"
+      || mode === "whep" || mode === "webrtc" || mode === "mpegts" || mode === "zixi-embed";
   }
   if (protocol === "webrtc") {
-    return mode === "whep" || mode === "webrtc" || mode === "zixi-embed";
+    return mode === "whep" || mode === "ll-hls" || mode === "ll-dash" || mode === "webrtc"
+      || mode === "zixi-embed";
   }
   return true;
 }
 
-export function defaultPlaybackModeForProtocol(protocol: string): PlaybackMode {
-  return protocol === "moq" ? "moq" : "auto";
+export function defaultPlaybackModeForProtocol(
+  protocol: string,
+  ingestEndpointId?: string,
+): PlaybackMode {
+  if (protocol === "moq") {
+    return "moq";
+  }
+  if (isMediaMtxManaged(ingestEndpointId ?? "")) {
+    return "ll-hls";
+  }
+  return "auto";
+}
+
+export function isMediaMtxManaged(ingestEndpointId: string): boolean {
+  return ingestEndpointId === "gcp_mediamtx" || ingestEndpointId.startsWith("gcp_mediamtx");
 }
 
 export function managedEndpointUrlLabel(protocol: string): string {
@@ -130,14 +165,24 @@ function parseStreamId(
       const match = endpointUrl.match(/streamid=([^&]+)/i);
       if (match?.[1]) {
         try {
-          return decodeURIComponent(match[1].split("/").pop() || DEFAULT_STREAM_ID);
+          const decoded = decodeURIComponent(match[1]);
+          if (decoded.startsWith("publish:")) {
+            return decoded.slice("publish:".length) || MEDIAMTX_PATH;
+          }
+          return decoded.split("/").pop() || DEFAULT_STREAM_ID;
         } catch {
           return match[1].split("/").pop() || DEFAULT_STREAM_ID;
         }
       }
+      if (ingestEndpointId && isMediaMtxManaged(ingestEndpointId)) {
+        return MEDIAMTX_PATH;
+      }
       if (ingestEndpointId?.startsWith("gcp_zixi")) {
         return GCP_ZIXI_SRT_STREAM_ID;
       }
+    }
+    if (protocol === "webrtc" && ingestEndpointId && isMediaMtxManaged(ingestEndpointId)) {
+      return MEDIAMTX_PATH;
     }
     if (protocol === "moq") {
       try {
@@ -231,8 +276,24 @@ function zixiWebRtcEmbedUrl(host: string, streamId: string): string {
   return `http://${host}:${ZIXI_UI_PORT}/webrtc.html?stream=${encodeURIComponent(streamId)}`;
 }
 
+function mediaMtxHlsUrl(host: string, path: string): string {
+  const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
+  return `http://${host}:${MEDIAMTX_HLS_PORT}/${encodeURIComponent(clean)}/index.m3u8`;
+}
+
+function mediaMtxWhepUrl(host: string, path: string): string {
+  const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
+  return `http://${host}:${MEDIAMTX_WEBRTC_PORT}/${encodeURIComponent(clean)}/whep`;
+}
+
+function mediaMtxLlDashUrl(host: string, path: string): string {
+  const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
+  return `http://${host}:${MEDIAMTX_LLDASH_PORT}/${encodeURIComponent(clean)}/manifest.mpd`;
+}
+
 export function defaultWhepPlaybackUrl(host: string, streamId: string): string {
-  return `http://${host}:8080/whep/${encodeURIComponent(streamId)}`;
+  // Prefer MediaMTX WHEP shape; custom gateways can still override in the UI.
+  return mediaMtxWhepUrl(host, streamId);
 }
 
 function engineForMode(
@@ -240,19 +301,21 @@ function engineForMode(
   protocol: string,
   hasWhepUrl: boolean,
   hasMoqRelay: boolean,
+  mediamtx: boolean,
 ): PlaybackEngine {
-  if (mode === "hls") return "hls";
-  if (mode === "dash") return "dash";
-  if (mode === "whep") return hasWhepUrl ? "whep" : "unsupported";
+  if (mode === "ll-hls" || mode === "hls") return "hls";
+  if (mode === "ll-dash" || mode === "dash") return "dash";
+  if (mode === "whep") return hasWhepUrl || mediamtx ? "whep" : "unsupported";
   if (mode === "moq") return hasMoqRelay ? "moq" : "unsupported";
   if (mode === "webrtc" || mode === "zixi-embed") return "webrtc-embed";
   if (mode === "mpegts") return "mpegts";
   if (protocol === "moq") return hasMoqRelay ? "moq" : "unsupported";
+  if (mediamtx) return "hls";
   if (protocol === "srt" && hasWhepUrl) return "whep";
   if (protocol === "srt") return "hls";
   if (protocol === "hls") return "hls";
   if (protocol === "dash") return "dash";
-  if (protocol === "webrtc") return "webrtc-embed";
+  if (protocol === "webrtc") return mediamtx ? "whep" : "webrtc-embed";
   return "hls";
 }
 
@@ -278,10 +341,14 @@ export function resolvePlaybackTarget(options: {
     options.zixiStreamId,
   );
   const zixiManaged = isZixiManagedHost(host, options.ingestEndpointId);
-  const resolvedHost = host ?? "35.222.33.58";
+  const mediamtx = isMediaMtxManaged(options.ingestEndpointId);
+  const resolvedHost = host ?? (mediamtx ? "34.9.217.178" : "35.222.33.58");
   const moqNamespace = options.moqNamespace?.trim() || streamId || DEFAULT_MOQ_NAMESPACE;
+  const pathId = streamId || MEDIAMTX_PATH;
 
-  const whepUrl = options.whepPlaybackUrl?.trim() || "";
+  const whepUrl =
+    options.whepPlaybackUrl?.trim() ||
+    (mediamtx || mode === "whep" ? mediaMtxWhepUrl(resolvedHost, pathId) : "");
   const moqRelayFromField = options.moqRelayUrl?.trim() || "";
   const moqRelayFromEndpoint =
     options.protocol === "moq" && options.endpointUrl.trim()
@@ -291,14 +358,14 @@ export function resolvePlaybackTarget(options: {
   const hasWhepUrl = Boolean(whepUrl);
   const hasMoqRelay = Boolean(moqRelayUrl && (options.protocol === "moq" || mode === "moq"));
 
-  const engine = engineForMode(mode, options.protocol, hasWhepUrl, hasMoqRelay);
+  const engine = engineForMode(mode, options.protocol, hasWhepUrl, hasMoqRelay, mediamtx);
 
   if (engine === "whep") {
     return {
       engine: "whep",
       url: whepUrl,
       label: "WHEP (WebRTC)",
-      streamId,
+      streamId: pathId,
       host: resolvedHost,
     };
   }
@@ -323,7 +390,7 @@ export function resolvePlaybackTarget(options: {
       engine: "unsupported",
       url: "",
       label: "WHEP",
-      note: "Set a WHEP channel URL (e.g. http://host:8080/whep/benchmark) in playback settings.",
+      note: "Set a WHEP channel URL (e.g. http://host:8889/benchmark/whep) in playback settings.",
     };
   }
 
@@ -336,7 +403,7 @@ export function resolvePlaybackTarget(options: {
     };
   }
 
-  if (!host && !zixiManaged && engine !== "unsupported") {
+  if (!host && !zixiManaged && !mediamtx && engine !== "unsupported") {
     return {
       engine: "unsupported",
       url: "",
@@ -368,22 +435,39 @@ export function resolvePlaybackTarget(options: {
   }
 
   if (engine === "dash") {
+    const useLlDash = mediamtx || (mode === "ll-dash" && !zixiManaged);
     return {
       engine: "dash",
-      url: zixiDashUrl(resolvedHost, streamId, dvr),
-      label: dvr ? "DASH Playback (DVR)" : "DASH Playback (Live)",
-      streamId,
+      url: useLlDash
+        ? mediaMtxLlDashUrl(resolvedHost, pathId)
+        : zixiDashUrl(resolvedHost, streamId, dvr),
+      label: useLlDash
+        ? "LL-DASH (MediaMTX)"
+        : dvr
+          ? "DASH Playback (DVR)"
+          : "DASH Playback (Live)",
+      streamId: useLlDash ? pathId : streamId,
       host: resolvedHost,
+      note: useLlDash ? "lowLatencyDash" : undefined,
     };
   }
 
   if (engine === "hls") {
+    // Apple-style LL-HLS only from MediaMTX. Zixi Fast HLS stays on the Zixi URLs.
+    const useMediaMtxHls = mediamtx || (mode === "ll-hls" && !zixiManaged);
     return {
       engine: "hls",
-      url: zixiHlsUrl(resolvedHost, streamId, dvr),
-      label: dvr ? "HLS Playback (DVR)" : "HLS Playback (Live)",
-      streamId,
+      url: useMediaMtxHls
+        ? mediaMtxHlsUrl(resolvedHost, pathId)
+        : zixiHlsUrl(resolvedHost, streamId, dvr),
+      label: useMediaMtxHls
+        ? "LL-HLS (MediaMTX)"
+        : dvr
+          ? "HLS Playback (DVR)"
+          : "HLS Playback (Live)",
+      streamId: useMediaMtxHls ? pathId : streamId,
       host: resolvedHost,
+      note: useMediaMtxHls ? "lowLatencyMode" : undefined,
     };
   }
 

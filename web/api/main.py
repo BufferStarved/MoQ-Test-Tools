@@ -44,10 +44,18 @@ from encode_profile import (  # noqa: E402
     DEFAULT_TARGET_LATENCY_MS,
     MAX_TARGET_LATENCY_MS,
     MIN_TARGET_LATENCY_MS,
+    build_video_encode_args,
     clamp_target_latency_ms,
     encode_profile_summary,
     ensure_known_ladder,
     list_encode_ladders,
+    with_srt_latency,
+)
+from moq_publish import (  # noqa: E402
+    BROWSER_COMPAT_AUDIO_ARGS,
+    MPEGTS_VIDEO_BSF,
+    with_srt_stream_id,
+    zixi_srt_streamid_value,
 )
 from upload_service import UploadJob  # noqa: E402
 from job_manager import (  # noqa: E402
@@ -204,6 +212,117 @@ def encode_profiles():
                 "WHEP (WebRTC), or MoQ/WebTransport for in-page preview."
             ),
         },
+    }
+
+
+def _zixi_public_host() -> str:
+    preset = PRESET_BY_ID.get("moq_zixi_gcp")
+    if preset and preset.url.startswith("srt://"):
+        return urlparse(preset.url).hostname or "35.222.33.58"
+    return "35.222.33.58"
+
+
+@app.get("/api/debug/zixi-srt")
+def debug_zixi_srt(
+    encode_ladder: str = DEFAULT_ENCODE_LADDER_ID,
+    target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
+    stream_id: str = "SRT Test",
+):
+    """Vendor-facing publish recipe + curl templates for Fast HLS debugging.
+
+    No credentials. Safe to share with Zixi support while reproducing SRT→HLS stalls.
+    """
+    import shlex
+
+    try:
+        ladder = ensure_known_ladder(encode_ladder)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    latency_ms = clamp_target_latency_ms(target_latency_ms)
+    host = _zixi_public_host()
+    stream = (stream_id or "SRT Test").strip() or "SRT Test"
+    summary = encode_profile_summary(ladder, latency_ms)
+    video_args = build_video_encode_args(ladder, latency_ms)
+    srt_base = f"srt://{host}:10080"
+    srt_url = with_srt_latency(with_srt_stream_id(srt_base, stream), latency_ms)
+    playlist_url = f"http://{host}:7777/playback.m3u8?stream={quote(stream)}"
+    segment_url = f"http://{host}:7777/playback.ts?stream={quote(stream)}&chunk=0"
+    ffmpeg_example = shlex.join(
+        [
+            "ffmpeg",
+            "-re",
+            "-i",
+            "SOURCE.mp4",
+            *video_args,
+            *BROWSER_COMPAT_AUDIO_ARGS,
+            "-bsf:v",
+            MPEGTS_VIDEO_BSF,
+            "-f",
+            "mpegts",
+            "udp://127.0.0.1:PORT?pkt_size=1316",
+        ]
+    )
+    srt_transmit_example = (
+        f"srt-live-transmit udp://:@127.0.0.1:PORT {shlex.quote(srt_url)}"
+    )
+    return {
+        "broadcaster": {
+            "host": host,
+            "ui": f"http://{host}:4444",
+            "srt_listen_port": 10080,
+            "hls_origin_port": 7777,
+            "build_hint": "46908 (UI `version=46908`; v19.0 family)",
+            "srt_input": "listener (broadcaster listens; publisher calls in)",
+            "fast_hls": f"http://{host}:7777/playback.m3u8?stream=<stream-id>",
+        },
+        "stream_id": stream,
+        "streamid_payload": zixi_srt_streamid_value(stream),
+        "pipeline": (
+            "ffmpeg (H.264+AAC → MPEG-TS) → local UDP → srt-live-transmit → "
+            "Zixi SRT listener. Fallback: ffmpeg libsrt caller directly to the same URL."
+        ),
+        "encode": summary,
+        "video_notes": {
+            "codec": "libx264 main@L4.0 yuv420p",
+            "gop_frames": summary.get("gop_frames"),
+            "keyframe_interval_sec": round(float(summary.get("gop_frames") or 0) / 30.0, 3),
+            "x264_params": "repeat-headers=1",
+            "bsf": MPEGTS_VIDEO_BSF,
+            "global_header": False,
+            "b_frames": 0,
+            "sc_threshold": 0,
+        },
+        "audio": "aac 128k 48kHz stereo (-flags:a +bitexact)",
+        "ffmpeg_example": ffmpeg_example,
+        "srt_transmit_example": srt_transmit_example,
+        "srt_url": srt_url,
+        "playlist_url": playlist_url,
+        "segment_url_chunk0": segment_url,
+        "curl_playlist": f'curl -v "{playlist_url}"',
+        "curl_segment_chunk0": f'curl -v -o /tmp/chunk0.ts "{segment_url}"',
+        "player_attach": (
+            "Browser confidence monitor mounts after the SRT publish job is running, "
+            "and only goes live once a Fast HLS segment returns a non-empty MPEG-TS body "
+            "(preview_ready). Typical case: push starts first; player attaches mid-session "
+            "as soon as the playlist/segment become readable — not before publish."
+        ),
+        "reconnect": (
+            f"Same SRT stream id every run (`{stream}`). Jobs are serialized. "
+            "Before each managed SRT publish we delete+recreate the Zixi SRT input "
+            "(verified) because Fast HLS otherwise often stays on media_sequence=0 / "
+            "chunk=0 with HTTP 400 for the whole job — longer than one GOP. Gap between "
+            "runs is whatever the operator waits in the UI (seconds to minutes)."
+        ),
+        "config_scripts": [
+            "https://github.com/BufferStarved/MoQ-Test-Tools/blob/main/infra/zixi/scripts/configure-zixi-hls-dash-output.sh",
+            "https://github.com/BufferStarved/MoQ-Test-Tools/blob/main/infra/zixi/scripts/reset-zixi-srt-input.sh",
+            "https://github.com/BufferStarved/MoQ-Test-Tools/blob/main/src/zixi_input_reset.py",
+        ],
+        "site_capture": (
+            "On https://moq.sean-mccarthy.net run an SRT benchmark, open the SRT player "
+            "→ Playback diagnostics → Capture stuck playlist. That returns the raw "
+            "playback.m3u8 body plus the failing segment status/headers (item 4)."
+        ),
     }
 
 
@@ -835,9 +954,40 @@ def playback_fetch(url: str):
     return StreamingResponse(iter_chunks(), media_type=media_type, headers=no_store)
 
 
+def _m3u8_capture_fields(manifest_text: str) -> dict:
+    """Parse fields Zixi support asked for (media_sequence, depth, chunk URI)."""
+    media_sequence = None
+    target_duration = None
+    segment_uris: list[str] = []
+    for line in manifest_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                media_sequence = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                media_sequence = None
+        elif stripped.startswith("#EXT-X-TARGETDURATION:"):
+            try:
+                target_duration = float(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                target_duration = None
+        elif stripped and not stripped.startswith("#"):
+            segment_uris.append(stripped)
+    return {
+        "media_sequence": media_sequence,
+        "target_duration": target_duration,
+        "playlist_depth": len(segment_uris),
+        "segment_uris": segment_uris[:8],
+    }
+
+
 @app.get("/api/playback/probe")
 def playback_probe(url: str):
-    """Fetch manifest + first media segment and return structured playback diagnostics."""
+    """Fetch manifest + first media segment and return structured playback diagnostics.
+
+    Includes a vendor-friendly capture block (raw playlist + segment status/headers)
+    so stuck Fast HLS cases can be emailed without a separate curl session.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise HTTPException(status_code=400, detail="Only http(s) playback URLs are allowed")
@@ -849,16 +999,36 @@ def playback_probe(url: str):
         "manifest_url": safe_manifest_url,
         "manifest_ok": False,
         "manifest_bytes": 0,
+        "manifest_status": None,
+        "manifest_headers": {},
+        "manifest_body": None,
+        "media_sequence": None,
+        "target_duration": None,
+        "playlist_depth": None,
         "segment_url": None,
         "segment_ok": False,
         "segment_bytes": 0,
+        "segment_status": None,
+        "segment_headers": {},
+        "curl_playlist": f'curl -v "{safe_manifest_url}"',
+        "curl_segment": None,
         "checks": [],
     }
 
     try:
         with urllib.request.urlopen(urllib.request.Request(safe_manifest_url, method="GET"), timeout=15) as response:
             manifest = response.read()
+            result["manifest_status"] = int(getattr(response, "status", 200) or 200)
+            result["manifest_headers"] = {k: v for k, v in response.headers.items()}
     except urllib.error.HTTPError as exc:
+        result["manifest_status"] = int(exc.code)
+        result["manifest_headers"] = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
+        try:
+            body = exc.read()
+            result["manifest_body"] = body.decode("utf-8", errors="replace")[:4000]
+            result["manifest_bytes"] = len(body)
+        except Exception:
+            pass
         result["checks"].append(f"manifest_http_{exc.code}")
         return result
     except urllib.error.URLError as exc:
@@ -869,8 +1039,12 @@ def playback_probe(url: str):
         result["checks"].append("manifest_not_m3u8")
         return result
 
+    manifest_text = manifest.decode("utf-8", errors="replace")
     result["manifest_ok"] = True
     result["manifest_bytes"] = len(manifest)
+    result["manifest_body"] = manifest_text[:8000]
+    result.update(_m3u8_capture_fields(manifest_text))
+
     rewritten = _rewrite_m3u8_manifest(url, manifest).decode("utf-8", errors="replace")
     segment_line = ""
     for line in rewritten.splitlines():
@@ -886,7 +1060,7 @@ def playback_probe(url: str):
     if segment_line.startswith("/api/playback/fetch"):
         result["checks"].append("manifest_segments_proxied_ok")
         upstream_line = ""
-        for raw_line in manifest.decode("utf-8", errors="replace").splitlines():
+        for raw_line in manifest_text.splitlines():
             raw_stripped = raw_line.strip()
             if raw_stripped and not raw_stripped.startswith("#"):
                 upstream_line = urljoin(url, raw_stripped)
@@ -896,10 +1070,15 @@ def playback_probe(url: str):
         segment_url = _sanitize_fetch_url(urljoin(url, segment_line))
 
     result["segment_url"] = segment_url
+    result["curl_segment"] = f'curl -v -o /tmp/zixi-chunk.ts "{segment_url}"'
     try:
         with urllib.request.urlopen(urllib.request.Request(segment_url, method="GET"), timeout=15) as response:
             segment = response.read()
+            result["segment_status"] = int(getattr(response, "status", 200) or 200)
+            result["segment_headers"] = {k: v for k, v in response.headers.items()}
     except urllib.error.HTTPError as exc:
+        result["segment_status"] = int(exc.code)
+        result["segment_headers"] = {k: v for k, v in (exc.headers.items() if exc.headers else [])}
         result["checks"].append(f"segment_http_{exc.code}")
         return result
     except urllib.error.URLError as exc:

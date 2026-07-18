@@ -7,6 +7,19 @@ import {
   isPlaybackModeCompatible,
   resolvePlaybackTarget,
 } from "./playbackUrls";
+
+function parseHostSafe(endpointUrl: string): string | null {
+  try {
+    if (endpointUrl.startsWith("srt://") || endpointUrl.startsWith("rtmp://")) {
+      const withoutScheme = endpointUrl.split("://")[1] ?? "";
+      const hostPart = withoutScheme.split(/[/?]/)[0] ?? "";
+      return hostPart.split(":")[0] || null;
+    }
+    return new URL(endpointUrl).hostname || null;
+  } catch {
+    return null;
+  }
+}
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
@@ -39,6 +52,7 @@ interface StreamPlayerProps {
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
   targetLatencyMs?: number;
+  encodeLadder?: string;
   hlsLiveSyncCount?: number;
   hlsLiveSyncDurationSec?: number;
   controlsLocked?: boolean;
@@ -72,6 +86,7 @@ export function StreamPlayer({
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 800,
+  encodeLadder,
   hlsLiveSyncCount = 2,
   hlsLiveSyncDurationSec = 4,
   controlsLocked = false,
@@ -83,10 +98,10 @@ export function StreamPlayer({
     if (!onPlaybackModeChange) {
       return;
     }
-    if (!isPlaybackModeCompatible(playbackMode, protocol)) {
-      onPlaybackModeChange(defaultPlaybackModeForProtocol(protocol));
+    if (!isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)) {
+      onPlaybackModeChange(defaultPlaybackModeForProtocol(protocol, ingestEndpointId));
     }
-  }, [playbackMode, protocol, onPlaybackModeChange]);
+  }, [playbackMode, protocol, ingestEndpointId, onPlaybackModeChange]);
 
   const target = useMemo(
     () =>
@@ -117,16 +132,20 @@ export function StreamPlayer({
   );
 
   const showWhepField = playbackMode === "whep";
-  const whepPlaceholder =
-    protocol === "srt"
-      ? defaultWhepPlaybackUrl("35.222.33.58", "benchmark")
-      : "http://host:8080/whep/benchmark";
+  const whepPlaceholder = defaultWhepPlaybackUrl(
+    parseHostSafe(endpointUrl) ?? "34.9.217.178",
+    "benchmark",
+  );
   const selectedOption = PLAYBACK_MODE_OPTIONS.find((item) => item.id === playbackMode);
   const modeHint = selectedOption
-    ? isPlaybackModeCompatible(playbackMode, protocol)
+    ? isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
       ? selectedOption.hint
       : `Not available with ${protocol.toUpperCase()} ingest.`
     : "";
+  const hlsLowLatency =
+    target.note === "lowLatencyMode" || playbackMode === "ll-hls";
+  const dashLowLatency =
+    target.note === "lowLatencyDash" || playbackMode === "ll-dash";
   // Wait for the per-job MoQ namespace before going live — using the preset
   // default ("benchmark") then flipping causes a Player/MediaSource remount.
   const moqReadyNamespace = (target.moqNamespace || moqNamespace || "").trim();
@@ -159,7 +178,7 @@ export function StreamPlayer({
               disabled={controlsLocked}
             >
               {PLAYBACK_MODE_OPTIONS.map((item) => {
-                const compatible = isPlaybackModeCompatible(item.id, protocol);
+                const compatible = isPlaybackModeCompatible(item.id, protocol, ingestEndpointId);
                 return (
                   <option key={item.id} value={item.id} disabled={!compatible}>
                     {item.label}
@@ -211,14 +230,19 @@ export function StreamPlayer({
               benchmarkLoading={benchmarkLoading}
               liveSyncDurationCount={hlsLiveSyncCount}
               liveSyncDurationSec={hlsLiveSyncDurationSec}
+              encodeLadder={encodeLadder}
+              targetLatencyMs={targetLatencyMs}
+              zixiStreamId={zixiStreamId}
+              lowLatencyMode={hlsLowLatency}
             />
           )}
           {target.engine === "dash" && (
             <DashPlayer
-              key={target.url}
+              key={`${target.url}:ll${dashLowLatency ? 1 : 0}`}
               url={target.url}
               label={target.label}
               playbackGate={playbackGate}
+              lowLatencyMode={dashLowLatency}
             />
           )}
           {target.engine === "mpegts" && (

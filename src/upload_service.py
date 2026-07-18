@@ -39,7 +39,11 @@ from moq_publish import (
 from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
-from zixi_hls_health import probe_hls_segment_ready, zixi_hls_playback_url
+from zixi_hls_health import (
+    mediamtx_hls_playback_url,
+    probe_hls_segment_ready,
+    zixi_hls_playback_url,
+)
 from zixi_input_reset import remove_zixi_srt_input, reset_zixi_srt_input_with_retry
 from network_metrics import (
     FfmpegProgressFileReader,
@@ -58,6 +62,7 @@ from quality_metrics import (
     quality_leg_from_vmaf_result,
 )
 from vmaf_score import compute_vmaf
+from mediamtx_stats import MediaMtxStatsPoller, MediaMtxStatsSnapshot
 from zixi_stats import ZixiStatsPoller
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -308,6 +313,16 @@ class UploadService:
             )
             ffmpeg_cmd = job._build_ffmpeg_cmd(capture_path=job.encoder_capture_path)
 
+        stop_preview = threading.Event()
+        if self._managed_hls_manifest_url(job):
+            self._notify_preview_ready(job, False)
+            threading.Thread(
+                target=self._watch_hls_preview_until_ready,
+                args=(job, stop_preview),
+                daemon=True,
+                name=f"hls-preview-{job.job_id[:8]}",
+            ).start()
+
         try:
             process = subprocess.Popen(
                 ffmpeg_cmd,
@@ -315,6 +330,7 @@ class UploadService:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
+            stop_preview.set()
             return UploadResult(success=False, error="ffmpeg not found in PATH")
 
         progress_reader = FfmpegProgressReader(process.stdout)
@@ -329,12 +345,13 @@ class UploadService:
             run_id=job.job_id,
         )
         zixi_poller = ZixiStatsPoller(zixi_stats_url)
+        mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
         )
-        # RTMP has no libsrt RTT; prefer Zixi receiver stats when available,
+        # RTMP has no libsrt RTT; prefer Zixi/MediaMTX receiver stats when available,
         # otherwise TCP-connect probe to the RTMP host:port as net_rtt / jitter.
         path_rtt_probe: Optional[PathRttProbe] = None
         if job.destination.protocol == "rtmp":
@@ -342,6 +359,13 @@ class UploadService:
             path_rtt_probe = PathRttProbe(
                 job.destination.url,
                 port=rtmp_parsed.port or 1935,
+            )
+        elif job.destination.protocol == "webrtc" and mtx_poller:
+            # WHIP HTTP control plane — TCP probe as RTT fallback when WebRTC has no RTT metric.
+            whip_parsed = urlparse(job.destination.url)
+            path_rtt_probe = PathRttProbe(
+                job.destination.url,
+                port=whip_parsed.port or 8889,
             )
         start_time = time.time()
 
@@ -361,6 +385,7 @@ class UploadService:
 
                 status = progress_reader.get_status()
                 zixi_stats = zixi_poller.poll()
+                mtx_stats = mtx_poller.poll() if mtx_poller else MediaMtxStatsSnapshot()
                 path_rtt = path_rtt_probe.poll() if path_rtt_probe and path_rtt_probe.enabled else None
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
@@ -369,8 +394,15 @@ class UploadService:
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
                 encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
-                net_rtt_ms = zixi_stats.rtt_ms or (path_rtt.rtt_ms if path_rtt else 0.0)
-                net_jitter_ms = zixi_stats.jitter_ms or (path_rtt.jitter_ms if path_rtt else 0.0)
+                merged = self._merge_mediamtx_transport(
+                    mtx=mtx_stats,
+                    net_rtt_ms=zixi_stats.rtt_ms or (path_rtt.rtt_ms if path_rtt else 0.0),
+                    net_jitter_ms=zixi_stats.jitter_ms or (path_rtt.jitter_ms if path_rtt else 0.0),
+                    net_send_mbps=send_mbps,
+                    net_recv_mbps=0.0,
+                    net_loss_pct=zixi_stats.packet_loss_pct,
+                    ts_continuity_counter_errors=zixi_stats.cc_errors,
+                )
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
@@ -382,14 +414,22 @@ class UploadService:
                     cpu_percent=cpu,
                     memory_mb=mem,
                     progress=status.progress,
-                    transport_rtt_ms=net_rtt_ms,
-                    transport_rtt_jitter_ms=net_jitter_ms,
-                    net_rtt_ms=net_rtt_ms,
-                    net_jitter_ms=net_jitter_ms,
-                    net_send_mbps=send_mbps,
+                    transport_rtt_ms=merged["net_rtt_ms"],
+                    transport_rtt_jitter_ms=merged["net_jitter_ms"],
+                    net_rtt_ms=merged["net_rtt_ms"],
+                    net_jitter_ms=merged["net_jitter_ms"],
+                    net_send_mbps=merged["net_send_mbps"],
+                    net_recv_mbps=merged["net_recv_mbps"],
+                    net_loss_pct=merged["net_loss_pct"],
+                    net_retrans_pct=merged["net_retrans_pct"],
                     encode_lag_ms=encode_lag_ms,
-                    ts_continuity_counter_errors=zixi_stats.cc_errors,
-                    encoder_send_rate_mbps=send_mbps,
+                    pkt_rcv_drop=merged["pkt_rcv_drop"],
+                    pkt_snd_drop=merged["pkt_snd_drop"],
+                    pkt_snd_loss=merged["pkt_snd_loss"],
+                    pkt_retrans=merged["pkt_retrans"],
+                    ts_continuity_counter_errors=merged["ts_continuity_counter_errors"],
+                    encoder_send_rate_mbps=merged["net_send_mbps"],
+                    transport_recv_rate_mbps=merged["net_recv_mbps"],
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
@@ -404,12 +444,20 @@ class UploadService:
                     out_time=status.out_time,
                     transport_rtt_ms=sample.transport_rtt_ms,
                     transport_rtt_jitter_ms=sample.transport_rtt_jitter_ms,
+                    pkt_rcv_drop=sample.pkt_rcv_drop,
+                    pkt_snd_drop=sample.pkt_snd_drop,
+                    pkt_snd_loss=sample.pkt_snd_loss,
+                    pkt_retrans=sample.pkt_retrans,
                     ts_continuity_counter_errors=sample.ts_continuity_counter_errors,
-                    encoder_send_rate_mbps=send_mbps,
+                    encoder_send_rate_mbps=sample.encoder_send_rate_mbps,
+                    transport_recv_rate_mbps=sample.transport_recv_rate_mbps,
                     encode_lag_ms=encode_lag_ms,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
-                    net_send_mbps=send_mbps,
+                    net_send_mbps=sample.net_send_mbps,
+                    net_recv_mbps=sample.net_recv_mbps,
+                    net_loss_pct=sample.net_loss_pct,
+                    net_retrans_pct=sample.net_retrans_pct,
                     client_memory_percent=sample.client_memory_percent,
                     client_disk_percent=sample.client_disk_percent,
                     server_cpu_percent=sample.server_cpu_percent,
@@ -424,6 +472,7 @@ class UploadService:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
         finally:
+            stop_preview.set()
             self._terminate_process(process)
 
         return self._finalize_result(
@@ -442,7 +491,52 @@ class UploadService:
         except Exception:
             logger.warning("on_preview_ready callback failed", exc_info=True)
 
+    def _is_mediamtx_destination(self, job: UploadJob) -> bool:
+        return (job.destination.ingest_provider or "").strip().lower() == "gcp_mediamtx"
+
+    def _mediamtx_poller_for_job(self, job: UploadJob) -> Optional[MediaMtxStatsPoller]:
+        if not self._is_mediamtx_destination(job):
+            return None
+        return MediaMtxStatsPoller(endpoint_url=job.destination.url)
+
+    @staticmethod
+    def _merge_mediamtx_transport(
+        *,
+        mtx: MediaMtxStatsSnapshot,
+        net_rtt_ms: float,
+        net_jitter_ms: float,
+        net_send_mbps: float,
+        net_recv_mbps: float,
+        net_loss_pct: float = 0.0,
+        net_retrans_pct: float = 0.0,
+        pkt_rcv_drop: int = 0,
+        pkt_snd_drop: int = 0,
+        pkt_snd_loss: int = 0,
+        pkt_retrans: int = 0,
+        ts_continuity_counter_errors: int = 0,
+    ) -> dict:
+        """Prefer publisher libsrt when present; fill gaps from MediaMTX receiver stats."""
+        return {
+            "net_rtt_ms": net_rtt_ms or mtx.net_rtt_ms,
+            "net_jitter_ms": net_jitter_ms or mtx.net_jitter_ms,
+            # Send = publisher→network (libsrt/ffmpeg). If missing, approximate with
+            # MediaMTX ingest receive rate. mtx.net_send_mbps is egress to readers.
+            "net_send_mbps": net_send_mbps or mtx.net_recv_mbps,
+            "net_recv_mbps": net_recv_mbps or mtx.net_recv_mbps,
+            "net_loss_pct": net_loss_pct or mtx.net_loss_pct,
+            "net_retrans_pct": net_retrans_pct or mtx.net_retrans_pct,
+            "pkt_rcv_drop": pkt_rcv_drop or mtx.pkt_rcv_drop,
+            "pkt_snd_drop": pkt_snd_drop or mtx.pkt_snd_drop,
+            "pkt_snd_loss": pkt_snd_loss or mtx.pkt_snd_loss,
+            "pkt_retrans": pkt_retrans or mtx.pkt_retrans,
+            "ts_continuity_counter_errors": (
+                ts_continuity_counter_errors or mtx.ts_continuity_counter_errors
+            ),
+        }
+
     def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
+        if self._is_mediamtx_destination(job):
+            return mediamtx_hls_playback_url("benchmark", endpoint_url=job.destination.url)
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return None
@@ -677,6 +771,7 @@ class UploadService:
         # Must use resolved URL (with streamid) so the Zixi API looks up the
         # job's actual input id, not "".
         zixi_poller = ZixiStatsPoller(resolved_srt_url)
+        mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
             agent_url=job.ingest_agent_url,
@@ -776,19 +871,32 @@ class UploadService:
                 status = progress_reader.get_status()
                 srt_stats = srt_reader.poll()
                 zixi_stats = zixi_poller.poll()
+                mtx_stats = mtx_poller.poll() if mtx_poller else MediaMtxStatsSnapshot()
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 pids = [pid for pid in (ffmpeg_proc.pid, srt_proc.pid if srt_proc else None) if pid]
                 cpu, mem = self._process_usage(pids)
 
-                transport_rtt_ms = srt_stats.rtt_ms or zixi_stats.rtt_ms
-                transport_rtt_jitter_ms = srt_stats.rtt_jitter_ms or zixi_stats.jitter_ms
-                ts_continuity_counter_errors = zixi_stats.cc_errors
                 send_mbps = srt_stats.mbps_send_rate or (status.bitrate_kbps / 1000.0)
                 # ffmpeg -progress often reports bitrate=N/A for mpegts/UDP tee; use libsrt send rate.
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                recv_mbps = srt_stats.mbps_recv_rate
                 encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                # Publisher libsrt first; MediaMTX fills receiver RTT/loss/recv rate (and Zixi if any).
+                merged = self._merge_mediamtx_transport(
+                    mtx=mtx_stats,
+                    net_rtt_ms=srt_stats.rtt_ms or zixi_stats.rtt_ms,
+                    net_jitter_ms=srt_stats.rtt_jitter_ms or zixi_stats.jitter_ms,
+                    net_send_mbps=send_mbps,
+                    net_recv_mbps=srt_stats.mbps_recv_rate,
+                    net_loss_pct=zixi_stats.packet_loss_pct,
+                    pkt_rcv_drop=srt_stats.pkt_rcv_drop,
+                    pkt_snd_drop=srt_stats.pkt_snd_drop,
+                    pkt_snd_loss=srt_stats.pkt_snd_loss,
+                    pkt_retrans=srt_stats.pkt_retrans,
+                    ts_continuity_counter_errors=zixi_stats.cc_errors,
+                )
+                transport_rtt_ms = merged["net_rtt_ms"]
+                transport_rtt_jitter_ms = merged["net_jitter_ms"]
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
@@ -802,19 +910,21 @@ class UploadService:
                     progress=status.progress,
                     transport_rtt_ms=transport_rtt_ms,
                     transport_rtt_jitter_ms=transport_rtt_jitter_ms,
-                    net_rtt_ms=transport_rtt_ms,
-                    net_jitter_ms=transport_rtt_jitter_ms,
-                    net_send_mbps=send_mbps,
-                    net_recv_mbps=recv_mbps,
+                    net_rtt_ms=merged["net_rtt_ms"],
+                    net_jitter_ms=merged["net_jitter_ms"],
+                    net_send_mbps=merged["net_send_mbps"],
+                    net_recv_mbps=merged["net_recv_mbps"],
+                    net_loss_pct=merged["net_loss_pct"],
+                    net_retrans_pct=merged["net_retrans_pct"],
                     encode_lag_ms=encode_lag_ms,
-                    pkt_rcv_drop=srt_stats.pkt_rcv_drop,
-                    pkt_snd_drop=srt_stats.pkt_snd_drop,
-                    pkt_snd_loss=srt_stats.pkt_snd_loss,
-                    pkt_retrans=srt_stats.pkt_retrans,
+                    pkt_rcv_drop=merged["pkt_rcv_drop"],
+                    pkt_snd_drop=merged["pkt_snd_drop"],
+                    pkt_snd_loss=merged["pkt_snd_loss"],
+                    pkt_retrans=merged["pkt_retrans"],
                     pkt_fec_extra=srt_stats.pkt_fec_extra,
-                    ts_continuity_counter_errors=ts_continuity_counter_errors,
-                    encoder_send_rate_mbps=send_mbps,
-                    transport_recv_rate_mbps=recv_mbps,
+                    ts_continuity_counter_errors=merged["ts_continuity_counter_errors"],
+                    encoder_send_rate_mbps=merged["net_send_mbps"],
+                    transport_recv_rate_mbps=merged["net_recv_mbps"],
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
@@ -835,14 +945,16 @@ class UploadService:
                     pkt_snd_loss=sample.pkt_snd_loss,
                     pkt_retrans=sample.pkt_retrans,
                     pkt_fec_extra=sample.pkt_fec_extra,
-                    ts_continuity_counter_errors=ts_continuity_counter_errors,
-                    encoder_send_rate_mbps=send_mbps,
-                    transport_recv_rate_mbps=recv_mbps,
+                    ts_continuity_counter_errors=sample.ts_continuity_counter_errors,
+                    encoder_send_rate_mbps=sample.encoder_send_rate_mbps,
+                    transport_recv_rate_mbps=sample.transport_recv_rate_mbps,
                     encode_lag_ms=encode_lag_ms,
-                    net_rtt_ms=transport_rtt_ms,
-                    net_jitter_ms=transport_rtt_jitter_ms,
-                    net_send_mbps=send_mbps,
-                    net_recv_mbps=recv_mbps,
+                    net_rtt_ms=sample.net_rtt_ms,
+                    net_jitter_ms=sample.net_jitter_ms,
+                    net_send_mbps=sample.net_send_mbps,
+                    net_recv_mbps=sample.net_recv_mbps,
+                    net_loss_pct=sample.net_loss_pct,
+                    net_retrans_pct=sample.net_retrans_pct,
                     client_memory_percent=sample.client_memory_percent,
                     client_disk_percent=sample.client_disk_percent,
                     server_cpu_percent=sample.server_cpu_percent,

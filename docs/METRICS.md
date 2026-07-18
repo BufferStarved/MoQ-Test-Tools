@@ -101,11 +101,11 @@ A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-
 
 | Column | Typical source |
 |--------|----------------|
-| `net_rtt_ms` | **SRT:** libsrt/Zixi. **RTMP:** Zixi receiver RTT when available, else TCP connect probe to RTMP host:port (default 1935). **MoQ:** picoquic qlog smoothed RTT (moq5), else TCP path probe to relay admin port (`MOQX_ADMIN_PORT`, default 8000) |
-| `net_jitter_ms` | Same estimator for both: mean absolute successive RTT deltas |
-| `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` |
-| `net_recv_mbps` | libsrt receive rate |
-| `net_loss_pct` / `net_retrans_pct` | **SRT:** libsrt. **MoQ:** moqx `quicPacketLoss` / `quicPacketRetransmissions` rates |
+| `net_rtt_ms` | **SRT:** libsrt, then Zixi or MediaMTX `srt_conns_ms_rtt`. **RTMP:** Zixi/MediaMTX when available, else TCP connect probe. **MoQ:** picoquic qlog / TCP path probe |
+| `net_jitter_ms` | libsrt jitter, Zixi jitter, or EMA of successive MediaMTX RTT deltas |
+| `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` (MediaMTX: falls back to path ingest rate) |
+| `net_recv_mbps` | libsrt receive rate, or MediaMTX `srt_conns_mbps_receive_rate` / path byte deltas |
+| `net_loss_pct` / `net_retrans_pct` | **SRT:** libsrt or MediaMTX SRT loss/retrans. **MoQ:** moqx QUIC counters |
 
 Legacy columns (`transport_rtt_ms`, `encoder_send_rate_mbps`, …) remain for compatibility.
 
@@ -162,6 +162,33 @@ export ZIXI_INPUT_ID=<input-id>    # optional
 | `tr101[].Continuity_count_error` | `ts_continuity_counter_errors` |
 
 Enable **Analyze / TR101** on the Zixi input for continuity errors.
+
+---
+
+## Optional: MediaMTX receiver metrics
+
+Used when `ingest_provider=gcp_mediamtx` (encode co-located on `moq-web`).
+
+```bash
+# Defaults (loopback on the MediaMTX host):
+export MEDIAMTX_METRICS_URL=http://127.0.0.1:9998/metrics
+export MEDIAMTX_API_URL=http://127.0.0.1:9997
+export MEDIAMTX_PATH=benchmark
+```
+
+| MediaMTX metric | CSV column |
+|-----------------|------------|
+| `srt_conns_ms_rtt` | `net_rtt_ms` / `transport_rtt_ms` |
+| successive RTT deltas (EMA) | `net_jitter_ms` |
+| `srt_conns_mbps_*` or `paths_*` / `srt_conns_bytes_*` Δ | `net_recv_mbps` (ingest) |
+| `srt_conns_packets_received_loss` / `*_loss_rate` | `net_loss_pct` |
+| `srt_conns_packets_retrans` (+ received_retrans) | `pkt_retrans` / `net_retrans_pct` |
+| `srt_conns_packets_received_drop` / `send_drop` | `pkt_rcv_drop` / `pkt_snd_drop` |
+| `srt_conns_packets_send_loss` | `pkt_snd_loss` |
+| `paths_inbound_frames_in_error` | `ts_continuity_counter_errors` (best-effort; not TR101) |
+| RTMP/WHIP: path or session byte Δ | `net_recv_mbps` (no SRT RTT) |
+
+Publisher-side libsrt (when using `srt-live-transmit`) still wins when both are present; MediaMTX fills gaps and supplies true **receiver** ingest rate.
 
 ---
 
