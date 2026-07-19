@@ -76,6 +76,45 @@ function playlistTargetDurationSec(body: string): number {
 }
 
 /**
+ * MediaMTX Apple LL-HLS serves a multivariant *master* playlist at
+ * index.m3u8 (EXT-X-STREAM-INF + an audio EXT-X-MEDIA group) — the real
+ * media playlist with segments/parts lives at a nested rendition URI. Zixi
+ * Fast HLS never nests, so this is always false there.
+ */
+function isMultivariantPlaylist(body: string): boolean {
+  return body.includes("#EXT-X-STREAM-INF");
+}
+
+/** First rendition playlist URI following an EXT-X-STREAM-INF tag (skips the
+ * audio group's URI= attribute, which is not a standalone playlist line). */
+function variantPlaylistUri(body: string): string | null {
+  const lines = body.split("\n").map((row) => row.trim());
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!lines[i].startsWith("#EXT-X-STREAM-INF")) {
+      continue;
+    }
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const candidate = lines[j];
+      if (!candidate || candidate.startsWith("#")) {
+        continue;
+      }
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Apple LL-HLS (fMP4/CMAF, e.g. MediaMTX) advertises its init segment via
+ * EXT-X-MAP as soon as the muxer has a keyframe — that's the readiness
+ * signal for this format. Classic Zixi Fast HLS (flat MPEG-TS) never emits
+ * EXT-X-MAP, so this only ever fires for LL-HLS sources.
+ */
+function llHlsMapReady(body: string): boolean {
+  return body.includes("#EXT-X-MAP");
+}
+
+/**
  * Zixi often advertises playback.ts?chunk=N in the playlist before that
  * chunk is actually readable (HTTP 400 Bad Request). Starting hls.js then
  * loops fragLoadError forever. Require a real MPEG-TS body before go-live.
@@ -118,6 +157,19 @@ function hlsSyncDurationForPlaylist(body: string, requestedSec: number): number 
   return Math.max(1, Math.min(requested, maxHold));
 }
 
+async function fetchManifestBody(fetchUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(fetchUrl, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    const body = await response.text();
+    return body.includes("#EXTM3U") ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 async function waitForManifest(
   url: string,
   shouldContinue: () => boolean,
@@ -133,52 +185,83 @@ async function waitForManifest(
       return null;
     }
     try {
-      const response = await fetch(manifestUrl, { cache: "no-store" });
-      if (response.ok) {
-        const body = await response.text();
-        if (body.includes("#EXTM3U")) {
-          const sequence = mediaSequence(body);
-          const segment = segmentUri(body);
-          const depth = playlistDepth(body);
-          const candidate =
-            depth >= 2 ||
-            (Boolean(sequence && previousSequence && sequence !== previousSequence)) ||
-            (Boolean(segment && previousSegment && segment !== previousSegment)) ||
-            (Boolean(segment && attempt >= MANIFEST_START_POLLS));
+      const topBody = await fetchManifestBody(manifestUrl);
+      if (topBody) {
+        let body = topBody;
+        let mediaPlaylistUrl = url;
 
-          let segmentReady = false;
-          if (candidate && segment) {
-            segmentReady = await segmentFetchable(url, segment);
+        // Follow a multivariant master playlist to its real media playlist
+        // before running any of the readiness checks below.
+        if (isMultivariantPlaylist(body)) {
+          const variantUri = variantPlaylistUri(body);
+          if (variantUri) {
+            const variantAbsolute = new URL(variantUri, url).href;
+            const variantBody = await fetchManifestBody(resolvePlaybackXhrUrl(variantAbsolute));
+            if (variantBody) {
+              body = variantBody;
+              mediaPlaylistUrl = variantAbsolute;
+            }
           }
+        }
 
+        const sequence = mediaSequence(body);
+        const depth = playlistDepth(body);
+
+        // Apple LL-HLS (fMP4/CMAF): ready once the init segment is known.
+        // hls.js's own LL-HLS handling deals with EXT-X-GAP filler and
+        // preload hints from here — the MPEG-TS byte probe below is
+        // meaningless for fMP4 and would never pass.
+        if (llHlsMapReady(body)) {
           onAttempt(
             attempt,
             [
               sequence ? `media_sequence=${sequence}` : "media_sequence=unknown",
               `depth=${depth}`,
-              segment ? `segment_ready=${segmentReady ? "yes" : "no"}` : "segment=none",
+              "ll_hls_map=ready",
             ].join(" "),
           );
-
-          if (candidate && segmentReady) {
-            return body;
-          }
-
-          if (
-            (sequence && previousSequence && sequence === previousSequence) ||
-            (segment && previousSegment && segment === previousSegment)
-          ) {
-            unchangedPolls += 1;
-            if (unchangedPolls >= MANIFEST_STUCK_POLLS) {
-              onStuck?.(sequence ?? "unknown");
-              return null;
-            }
-          } else {
-            unchangedPolls = 0;
-          }
-          previousSequence = sequence ?? previousSequence;
-          previousSegment = segment ?? previousSegment;
+          return body;
         }
+
+        const segment = segmentUri(body);
+        const candidate =
+          depth >= 2 ||
+          (Boolean(sequence && previousSequence && sequence !== previousSequence)) ||
+          (Boolean(segment && previousSegment && segment !== previousSegment)) ||
+          (Boolean(segment && attempt >= MANIFEST_START_POLLS));
+
+        let segmentReady = false;
+        if (candidate && segment) {
+          segmentReady = await segmentFetchable(mediaPlaylistUrl, segment);
+        }
+
+        onAttempt(
+          attempt,
+          [
+            sequence ? `media_sequence=${sequence}` : "media_sequence=unknown",
+            `depth=${depth}`,
+            segment ? `segment_ready=${segmentReady ? "yes" : "no"}` : "segment=none",
+          ].join(" "),
+        );
+
+        if (candidate && segmentReady) {
+          return body;
+        }
+
+        if (
+          (sequence && previousSequence && sequence === previousSequence) ||
+          (segment && previousSegment && segment === previousSegment)
+        ) {
+          unchangedPolls += 1;
+          if (unchangedPolls >= MANIFEST_STUCK_POLLS) {
+            onStuck?.(sequence ?? "unknown");
+            return null;
+          }
+        } else {
+          unchangedPolls = 0;
+        }
+        previousSequence = sequence ?? previousSequence;
+        previousSegment = segment ?? previousSegment;
       }
     } catch {
       // Retry while the encode spins up.
