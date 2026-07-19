@@ -1610,6 +1610,16 @@ class UploadService:
                 "the URL stream key (benchmark for rtmp://host:1935/live/benchmark). "
                 "Re-run infra/zixi/scripts/configure-zixi-rtmp-input.sh on the ingest host."
             )
+        if ("timed out" in stderr.lower() or "timeout" in stderr.lower()) and ":7777/" in stderr:
+            message += (
+                " Zixi's TS-over-HTTP push input stopped draining the PUT socket "
+                "after the initial burst (reproduced independently of this service — "
+                "raw ffmpeg PUT freezes identically after ~2s). This looks like a "
+                "Zixi-side limitation with continuous chunked TS push, not an "
+                "encoder/network issue here. Ask Zixi support to confirm HTTP TS "
+                "push input support for sustained live streams; use SRT/RTMP "
+                "ingest to Zixi for reliable DASH/HLS delivery in the meantime."
+            )
         return message
 
     def _process_usage(self, pids: List[int]) -> tuple[float, float]:

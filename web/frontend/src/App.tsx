@@ -547,6 +547,10 @@ function App() {
             const updatedJob: UploadJob = {
               ...leg.job,
               status: status.status as UploadJob["status"],
+              // The initial GET snapshots preview_ready=false for gated presets
+              // (MediaMTX / managed Zixi SRT) — without this, the SSE stream
+              // never tells the player it flipped true and playback never starts.
+              preview_ready: status.preview_ready ?? leg.job.preview_ready,
               csv_path: status.csv_path ?? leg.job.csv_path,
               summary_path: status.summary_path ?? leg.job.summary_path,
               error: status.error,

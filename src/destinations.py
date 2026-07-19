@@ -75,6 +75,15 @@ class DestinationProfile:
             ]
         if self.protocol in {"hls", "dash"}:
             return [
+                # Zixi's TS-over-HTTP push input has been observed to stop
+                # draining the PUT socket after the first ~2s of a continuous
+                # live feed (reproduced independently of this service — raw
+                # ffmpeg freezes identically). Without rw_timeout the write()
+                # blocks forever and the job silently "succeeds" with frozen
+                # progress instead of failing. -1 -> fail fast with a clear
+                # error rather than reporting fake healthy-looking metrics.
+                "-rw_timeout",
+                "8000000",
                 "-f",
                 "mpegts",
                 "-method",

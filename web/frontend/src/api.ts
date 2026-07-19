@@ -291,6 +291,7 @@ export function subscribeToUpload(
   onSample: (sample: UploadJob["samples"][number]) => void,
   onStatus: (status: {
     status: string;
+    preview_ready?: boolean;
     csv_path?: string | null;
     summary_path?: string | null;
     error?: string | null;

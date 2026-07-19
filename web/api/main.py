@@ -727,6 +727,7 @@ async def upload_events(job_id: str):
 
             payload = {
                 "status": current.status.value,
+                "preview_ready": getattr(current, "preview_ready", True),
                 "csv_path": current.csv_path,
                 "summary_path": current.summary_path,
                 "error": current.error,

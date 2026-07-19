@@ -322,8 +322,13 @@ function engineForMode(
   if (mediamtx) return "hls";
   if (protocol === "srt" && hasWhepUrl) return "whep";
   if (protocol === "srt") return "hls";
-  // HTTP-TS push ingest: Fast HLS/DASH manifests are often absent — Auto uses MPEG-TS.
-  if (protocol === "hls" || protocol === "dash") return "mpegts";
+  // Zixi TS-over-HTTP push has no Fast HLS/DASH manifest for this input — MPEG-TS
+  // is the only playable option.
+  if (protocol === "hls") return "mpegts";
+  // Zixi per-input DASH MPD needs an adaptive group we don't have — route through
+  // the "dash" engine so Auto gets the same Fast HLS fallback (with a clear label)
+  // that explicit DASH mode uses, instead of a raw, unlabeled MPEG-TS attempt.
+  if (protocol === "dash") return "dash";
   if (protocol === "webrtc") return mediamtx ? "whep" : "webrtc-embed";
   return "hls";
 }
