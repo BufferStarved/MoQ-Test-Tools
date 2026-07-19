@@ -155,8 +155,9 @@ SERVICE_PRESETS: List[ServicePreset] = [
         url="http://35.222.33.58:7777/benchmark",
         notes=(
             "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
-            "Same playback limitation as the HLS PUT preset — no per-input MPD/"
-            "HTTP-TS on current settings; use SRT/RTMP for browser validation. "
+            "Per-input DASH MPD is unavailable without an adaptive group — the UI "
+            "falls back to Fast HLS for browser playback. Prefer SRT/RTMP ingest "
+            "when comparing delivery quality. "
             "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
         ),
         supports_vmaf=True,
@@ -391,6 +392,9 @@ def ingest_agent_url_for_preset(preset_id: str) -> str:
     preset = PRESET_BY_ID.get(preset_id)
     if preset is not None and preset.ingest_agent_url:
         return preset.ingest_agent_url
+    # MediaMTX is co-located on moq-web — never inherit the Zixi agent URL.
+    if preset is not None and (preset.ingest_provider or "").strip().lower() == "gcp_mediamtx":
+        return ""
     return os.environ.get("INGEST_AGENT_BASE_URL", "").strip()
 
 

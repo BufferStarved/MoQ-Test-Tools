@@ -153,7 +153,8 @@ class IngestAgentClient:
             raise RuntimeError(f"Ingest agent health check failed: {exc.reason}") from exc
 
     def host_metrics(self) -> dict:
-        return self._request("GET", "/api/v1/host/metrics", timeout=10)
+        # Sample loops call this every ~1s; do not block on a dead agent.
+        return self._request("GET", "/api/v1/host/metrics", timeout=2)
 
     def upload_reference(self, job_id: str, media_path: str) -> None:
         boundary = f"----moqboundary{int(time.time() * 1000)}"

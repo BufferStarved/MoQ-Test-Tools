@@ -66,6 +66,27 @@ export default function DashPlayer({
     async function start() {
       setError(null);
       setStatus(lowLatencyMode ? "Connecting (LL-DASH)..." : "Connecting...");
+      const proxied = proxiedPlaybackUrl(url);
+      try {
+        const probe = await fetch(proxied, { cache: "no-store" });
+        if (!probe.ok) {
+          if (!destroyed) {
+            setStatus("DASH manifest missing");
+            setError(
+              lowLatencyMode
+                ? `LL-DASH manifest HTTP ${probe.status}. Is the MediaMTX LL-DASH packager running on :8891?`
+                : `DASH manifest HTTP ${probe.status}. Zixi per-input MPD needs an adaptive group — use HLS or MPEG-TS playback.`,
+            );
+          }
+          return;
+        }
+      } catch (err) {
+        if (!destroyed) {
+          setStatus("DASH manifest unreachable");
+          setError(err instanceof Error ? err.message : "Failed to fetch DASH manifest");
+        }
+        return;
+      }
       const dashjs = await import("dashjs");
       if (destroyed || !video) {
         return;
@@ -98,13 +119,14 @@ export default function DashPlayer({
           },
         },
       });
-      instance.initialize(video, proxiedPlaybackUrl(url), true);
-      instance.on(dashjs.MediaPlayer.events.ERROR, () => {
+      instance.initialize(video, proxied, true);
+      instance.on(dashjs.MediaPlayer.events.ERROR, (e: { error?: { message?: string } }) => {
         if (!destroyed) {
+          const detail = e?.error?.message ? ` (${e.error.message})` : "";
           setError(
             lowLatencyMode
-              ? "LL-DASH playback failed. Is MediaMTX live and the LL-DASH packager running?"
-              : "DASH playback failed. Is the stream live and DASH enabled on Zixi?",
+              ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
+              : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`,
           );
         }
       });

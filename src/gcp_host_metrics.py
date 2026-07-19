@@ -161,7 +161,9 @@ class GcpHostMetricsPoller:
             headers={"Authorization": f"Bearer {self._access_token()}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            # Keep this short — sample loops call poll() every ~1s and a slow
+            # Monitoring round-trip freezes CSV + preview gating.
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:300]

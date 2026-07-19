@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from gcp_host_metrics import GcpHostMetricsPoller
 from ingest_agent_client import IngestAgentClient, resolve_ingest_agent
+from system_metrics import read_client_host_metrics
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
@@ -21,6 +22,9 @@ class IngestHostMetricsPoller:
     - Zixi / shared ingest worker: prefer ingest-agent psutil, GCP as fallback.
     - MoQ relay: prefer GCP Cloud Monitoring for the relay instance (the ingest
       agent often lives on the Zixi worker, not the relay).
+    - MediaMTX (co-located on moq-web): local psutil only — never probe a remote
+      ingest-agent or GCP Monitoring in the sample loop (those hang ~10s and
+      starve preview_ready / CSV sampling).
     """
 
     def __init__(
@@ -31,6 +35,17 @@ class IngestHostMetricsPoller:
         ingest_provider: str = "",
     ):
         self._ingest_provider = (ingest_provider or "").strip().lower()
+        # MediaMTX runs on the same VM as the bench API — local metrics only.
+        self._use_local = self._ingest_provider == "gcp_mediamtx"
+        if self._use_local:
+            self._config = None
+            self._client = None
+            self._gcp = GcpHostMetricsPoller(ingest_provider="", endpoint_url="")
+            self._gcp.enabled = False
+            self.enabled = True
+            self._prefer_gcp = False
+            return
+
         self._config = resolve_ingest_agent(endpoint_url, agent_url=agent_url)
         self._client = IngestAgentClient(self._config) if self._config else None
         self._gcp = GcpHostMetricsPoller(
@@ -41,6 +56,15 @@ class IngestHostMetricsPoller:
         self._prefer_gcp = self._ingest_provider == "gcp_moq_relay" and self._gcp.enabled
 
     def poll(self) -> IngestHostMetricsSnapshot:
+        if self._use_local:
+            local = read_client_host_metrics()
+            return IngestHostMetricsSnapshot(
+                cpu_percent=local.cpu_percent,
+                memory_percent=local.memory_percent,
+                disk_percent=local.disk_percent,
+                source="local",
+            )
+
         if self._prefer_gcp:
             gcp = self._poll_gcp()
             if gcp.cpu_percent > 0 or gcp.memory_percent > 0 or gcp.disk_percent > 0:

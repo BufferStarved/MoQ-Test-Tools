@@ -139,7 +139,13 @@ class ZixiStatsPoller:
       ZIXI_INPUT_ID   optional input stream id/name
     """
 
-    def __init__(self, endpoint_url: str, input_id: Optional[str] = None):
+    def __init__(
+        self,
+        endpoint_url: str,
+        input_id: Optional[str] = None,
+        *,
+        enabled: Optional[bool] = None,
+    ):
         self._enabled = False
         self._base_url = os.environ.get("ZIXI_API_BASE", "").rstrip("/")
         self._user = os.environ.get("ZIXI_API_USER", "admin")
@@ -160,7 +166,9 @@ class ZixiStatsPoller:
             if host:
                 self._base_url = f"http://{host}:4444"
 
-        if self._password:
+        if enabled is False:
+            self._enabled = False
+        elif self._password:
             self._enabled = True
 
     @staticmethod

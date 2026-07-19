@@ -276,19 +276,28 @@ function zixiWebRtcEmbedUrl(host: string, streamId: string): string {
   return `http://${host}:${ZIXI_UI_PORT}/webrtc.html?stream=${encodeURIComponent(streamId)}`;
 }
 
+/** Browser-facing MediaMTX host — never 127.0.0.1 from co-located publish URLs. */
+function mediaMtxPublicHost(host: string | null | undefined): string {
+  const h = (host || "").trim();
+  if (!h || h === "127.0.0.1" || h === "localhost" || h === "::1") {
+    return "34.9.217.178";
+  }
+  return h;
+}
+
 function mediaMtxHlsUrl(host: string, path: string): string {
   const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
-  return `http://${host}:${MEDIAMTX_HLS_PORT}/${encodeURIComponent(clean)}/index.m3u8`;
+  return `http://${mediaMtxPublicHost(host)}:${MEDIAMTX_HLS_PORT}/${encodeURIComponent(clean)}/index.m3u8`;
 }
 
 function mediaMtxWhepUrl(host: string, path: string): string {
   const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
-  return `http://${host}:${MEDIAMTX_WEBRTC_PORT}/${encodeURIComponent(clean)}/whep`;
+  return `http://${mediaMtxPublicHost(host)}:${MEDIAMTX_WEBRTC_PORT}/${encodeURIComponent(clean)}/whep`;
 }
 
 function mediaMtxLlDashUrl(host: string, path: string): string {
   const clean = (path || MEDIAMTX_PATH).replace(/^\/+|\/+$/g, "") || MEDIAMTX_PATH;
-  return `http://${host}:${MEDIAMTX_LLDASH_PORT}/${encodeURIComponent(clean)}/manifest.mpd`;
+  return `http://${mediaMtxPublicHost(host)}:${MEDIAMTX_LLDASH_PORT}/${encodeURIComponent(clean)}/manifest.mpd`;
 }
 
 export function defaultWhepPlaybackUrl(host: string, streamId: string): string {
@@ -436,19 +445,25 @@ export function resolvePlaybackTarget(options: {
 
   if (engine === "dash") {
     const useLlDash = mediamtx || (mode === "ll-dash" && !zixiManaged);
+    if (useLlDash) {
+      return {
+        engine: "dash",
+        url: mediaMtxLlDashUrl(resolvedHost, pathId),
+        label: "LL-DASH (MediaMTX)",
+        streamId: pathId,
+        host: mediaMtxPublicHost(resolvedHost),
+        note: "lowLatencyDash",
+      };
+    }
+    // Zixi per-input MPD is not served without an adaptive group. Fall back to
+    // Fast HLS so "DASH Playback" still shows video instead of a silent blank player.
     return {
-      engine: "dash",
-      url: useLlDash
-        ? mediaMtxLlDashUrl(resolvedHost, pathId)
-        : zixiDashUrl(resolvedHost, streamId, dvr),
-      label: useLlDash
-        ? "LL-DASH (MediaMTX)"
-        : dvr
-          ? "DASH Playback (DVR)"
-          : "DASH Playback (Live)",
-      streamId: useLlDash ? pathId : streamId,
+      engine: "hls",
+      url: zixiHlsUrl(resolvedHost, streamId, dvr),
+      label: dvr ? "HLS (DASH unavailable · DVR)" : "HLS (DASH MPD unavailable)",
+      streamId,
       host: resolvedHost,
-      note: useLlDash ? "lowLatencyDash" : undefined,
+      note: "zixiDashFallbackHls",
     };
   }
 

@@ -156,9 +156,8 @@ export function AboutPage() {
         </p>
         <p>
           The <strong>HLS / DASH</strong> Zixi presets push MPEG-TS over HTTP PUT to{" "}
-          <code>/benchmark</code>. On the current Broadcaster settings that path collects encode
-          metrics but does <em>not</em> expose Fast HLS or HTTP-TS for Chrome — use the SRT or RTMP
-          presets when you need browser playback.
+          <code>/benchmark</code>. Per-input DASH MPD is not served without an adaptive group; the
+          player falls back to Fast HLS. Prefer SRT/RTMP ingest when comparing browser delivery.
         </p>
         <p className="hint">
           Optional Broadcaster-side alternative (not auto-created here): error-concealed derived

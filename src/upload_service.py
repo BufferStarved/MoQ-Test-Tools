@@ -216,7 +216,12 @@ class UploadJob:
         stream_id = self.managed_zixi_stream_id()
         if stream_id:
             url = with_srt_stream_id(url, stream_id)
-        url = with_srt_latency(url, self.target_latency_ms)
+        # Cap MediaMTX SRT latency for LL-HLS — multi-second caller latency
+        # delays the first playlist and fights low-latency delivery.
+        latency_ms = self.target_latency_ms
+        if self._is_mediamtx_destination():
+            latency_ms = min(int(latency_ms), 1000)
+        url = with_srt_latency(url, latency_ms)
         if self._is_mediamtx_destination():
             url = mediamtx_loopback_publish_url(url)
         return url
@@ -394,7 +399,10 @@ class UploadService:
             endpoint_url=zixi_stats_url,
             run_id=job.job_id,
         )
-        zixi_poller = ZixiStatsPoller(zixi_stats_url)
+        zixi_poller = ZixiStatsPoller(
+            zixi_stats_url,
+            enabled=False if self._is_mediamtx_destination(job) else None,
+        )
         mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
@@ -668,9 +676,26 @@ class UploadService:
     ) -> None:
         """Mark preview_ready once delivery media is readable.
 
-        SRT/MediaMTX → HLS segment probe. TS-PUT (hls/dash presets) → HTTP-TS,
-        because Fast HLS for HTTP push often stays 404 on this Broadcaster.
+        MediaMTX → API/metrics path-ready (avoid slow LL-HLS probes).
+        Zixi SRT → HLS segment probe. TS-PUT → HTTP-TS when configured.
         """
+        if self._is_mediamtx_destination(job):
+            poller = MediaMtxStatsPoller(endpoint_url=job.destination.url)
+            probe_url = mediamtx_hls_probe_url("benchmark")
+            while not stop_event.is_set():
+                snap = poller.poll()
+                if snap.ready or snap.net_recv_mbps > 0 or snap.bytes_received > 0:
+                    self._notify_preview_ready(job, True)
+                    return
+                # Short LL-HLS probe as a last resort (loopback, 2s timeout).
+                try:
+                    if probe_hls_segment_ready(probe_url, timeout=2.0).ok:
+                        self._notify_preview_ready(job, True)
+                        return
+                except Exception:
+                    logger.debug("MediaMTX HLS preview probe failed", exc_info=True)
+                stop_event.wait(0.5)
+            return
         http_ts_id = self._managed_http_ts_stream_id(job)
         if http_ts_id:
             while not stop_event.is_set():
@@ -754,6 +779,16 @@ class UploadService:
         use_live_transmit = live_transmit_flag in {"1", "true", "yes"} or (
             live_transmit_flag not in {"0", "false", "no"} and bool(srt_bin)
         )
+        # MediaMTX: ffmpeg→UDP→srt-live-transmit connects SRT but delivers no
+        # media (path stays empty, LL-HLS 404). Direct ffmpeg→SRT works; receiver
+        # stats still come from MediaMTX Prometheus.
+        if self._is_mediamtx_destination(job):
+            if use_live_transmit:
+                logger.info(
+                    "MediaMTX SRT job %s: using direct ffmpeg→SRT (skipping srt-live-transmit)",
+                    job.job_id,
+                )
+            use_live_transmit = False
 
         if not use_live_transmit or not srt_bin:
             if live_transmit_flag in {"1", "true", "yes"} and not srt_bin:
@@ -823,6 +858,17 @@ class UploadService:
 
         ffmpeg_proc: Optional[subprocess.Popen] = None
         srt_proc: Optional[subprocess.Popen] = None
+        # Live-transmit path previously skipped the preview watcher — the sample
+        # loop alone could not open the player when host-metric polls stalled.
+        stop_preview = threading.Event()
+        if self._managed_hls_manifest_url(job) or self._is_mediamtx_destination(job):
+            self._notify_preview_ready(job, False)
+            threading.Thread(
+                target=self._watch_hls_preview_until_ready,
+                args=(job, stop_preview),
+                daemon=True,
+                name=f"hls-preview-{job.job_id[:8]}",
+            ).start()
 
         try:
             ffmpeg_proc = subprocess.Popen(
@@ -837,6 +883,7 @@ class UploadService:
                 stderr=subprocess.PIPE,
             )
         except FileNotFoundError:
+            stop_preview.set()
             self._terminate_process(ffmpeg_proc)
             return UploadResult(success=False, error="ffmpeg not found in PATH")
 
@@ -849,9 +896,12 @@ class UploadService:
             endpoint_url=resolved_srt_url,
             run_id=job.job_id,
         )
-        # Must use resolved URL (with streamid) so the Zixi API looks up the
-        # job's actual input id, not "".
-        zixi_poller = ZixiStatsPoller(resolved_srt_url)
+        # Zixi API lookups on MediaMTX streamids (publish:benchmark) hang and
+        # stall the sample loop — only poll Zixi for managed Zixi SRT.
+        zixi_poller = ZixiStatsPoller(
+            resolved_srt_url,
+            enabled=False if self._is_mediamtx_destination(job) else None,
+        )
         mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
@@ -891,9 +941,37 @@ class UploadService:
                     )
 
                 elapsed = int(time.time() - start_time)
+                is_mediamtx = self._is_mediamtx_destination(job)
 
-                # Gate browser HLS on real segment readiness; auto-heal once if wedged.
-                if manifest_url and elapsed >= _HLS_WARMUP_SEC:
+                status = progress_reader.get_status()
+                srt_stats = srt_reader.poll()
+                zixi_stats = zixi_poller.poll()
+                mtx_stats = mtx_poller.poll() if mtx_poller else MediaMtxStatsSnapshot()
+                # MediaMTX: open the player from path/encode signals only.
+                # Do not HLS-probe here — nested LL-HLS fetches were blocking the
+                # sample loop (~10s) and Zixi-style heal must never run on MTX.
+                if is_mediamtx and not preview_ready and elapsed >= 2:
+                    if (
+                        mtx_stats.ready
+                        or mtx_stats.net_recv_mbps > 0
+                        or mtx_stats.bytes_received > 0
+                    ):
+                        logger.info(
+                            "MediaMTX preview ready for job %s (ready=%s recv_mbps=%.3f bytes=%s)",
+                            job.job_id,
+                            mtx_stats.ready,
+                            mtx_stats.net_recv_mbps,
+                            mtx_stats.bytes_received,
+                        )
+                        self._notify_preview_ready(job, True)
+                        preview_ready = True
+
+                # Zixi Fast HLS only: gate on segment readiness; auto-heal once if wedged.
+                if (
+                    manifest_url
+                    and elapsed >= _HLS_WARMUP_SEC
+                    and not is_mediamtx
+                ):
                     try:
                         health = probe_hls_segment_ready(manifest_url)
                     except Exception:
@@ -919,7 +997,8 @@ class UploadService:
                             self._notify_preview_ready(job, True)
                             preview_ready = True
                         stale_rolling = (
-                            rolling_since is not None
+                            not is_mediamtx
+                            and rolling_since is not None
                             and (now - rolling_since) >= _HLS_STALE_ROLLING_SEC
                             and health.depth <= 1
                         )
@@ -934,7 +1013,7 @@ class UploadService:
                             rolling_since = None
                             if heal_error:
                                 return UploadResult(success=False, error=heal_error)
-                    else:
+                    elif not is_mediamtx:
                         if bad_since is None:
                             bad_since = now
                         elif (now - bad_since) >= _HLS_STUCK_SEC and heals_used < _HLS_HEAL_ATTEMPTS:
@@ -948,11 +1027,6 @@ class UploadService:
                             rolling_since = None
                             if heal_error:
                                 return UploadResult(success=False, error=heal_error)
-
-                status = progress_reader.get_status()
-                srt_stats = srt_reader.poll()
-                zixi_stats = zixi_poller.poll()
-                mtx_stats = mtx_poller.poll() if mtx_poller else MediaMtxStatsSnapshot()
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 pids = [pid for pid in (ffmpeg_proc.pid, srt_proc.pid if srt_proc else None) if pid]
@@ -1050,6 +1124,7 @@ class UploadService:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
         finally:
+            stop_preview.set()
             self._terminate_process(srt_proc)
             self._terminate_process(ffmpeg_proc)
 
