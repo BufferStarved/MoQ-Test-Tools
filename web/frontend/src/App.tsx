@@ -981,6 +981,7 @@ function App() {
                           leg?.job.moq_namespace ?? (leg ? undefined : endpoint.moqNamespace)
                         }
                         zixiStreamId={leg?.job.zixi_stream_id ?? undefined}
+                        zixiPlaybackStreamId={leg?.job.zixi_playback_stream_id ?? undefined}
                         encodeLadder={leg?.job.encode_ladder ?? encodeLadder}
                         playbackGate={playbackGateForJob(leg?.job, loading)}
                         jobId={leg?.job.id}

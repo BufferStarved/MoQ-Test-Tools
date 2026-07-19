@@ -112,6 +112,9 @@ export interface UploadJob {
   target_latency_ms?: number | null;
   moq_namespace?: string | null;
   zixi_stream_id?: string | null;
+  /** Error-concealed derived stream for HLS playback, when Zixi concealment
+   * is configured — falls back to zixi_stream_id otherwise. */
+  zixi_playback_stream_id?: string | null;
   /** False for SRT until Zixi HLS serves a readable MPEG-TS segment. */
   preview_ready?: boolean;
   created_at: string;

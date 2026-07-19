@@ -50,6 +50,10 @@ class UploadJobRecord:
     preset_id: str = ""
     moq_namespace: Optional[str] = None
     zixi_stream_id: Optional[str] = None
+    # HLS playback target — the error-concealed derived stream when available,
+    # so the browser never sees the reused-packager stall Zixi diagnosed.
+    # Falls back to zixi_stream_id itself when concealment isn't set up.
+    zixi_playback_stream_id: Optional[str] = None
     preview_ready: bool = True
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     csv_path: Optional[str] = None
@@ -101,6 +105,7 @@ class JobManager:
             )
 
         zixi_stream_id: Optional[str] = None
+        zixi_playback_stream_id: Optional[str] = None
         if job.destination.protocol == "srt":
             from moq_publish import zixi_srt_stream_id_for_preset
 
@@ -109,6 +114,15 @@ class JobManager:
             # with HTTP 400 forever (segment_ready=no). Overlap is already handled
             # by UploadService's exclusive SRT ingest lock + delete/recreate reset.
             zixi_stream_id = zixi_srt_stream_id_for_preset(preset_id)
+            if zixi_stream_id:
+                from zixi_error_concealment import ensure_error_concealed_stream
+
+                # Best-effort: fall back to the raw stream (today's behavior,
+                # still correct via -output_ts_offset + heal) if Zixi's API is
+                # unreachable or concealment isn't configured.
+                zixi_playback_stream_id = (
+                    ensure_error_concealed_stream(zixi_stream_id) or zixi_stream_id
+                )
 
         from destinations import PRESET_BY_ID, ingest_settings_for_preset
 
@@ -138,6 +152,7 @@ class JobManager:
             preset_id=preset_id,
             moq_namespace=moq_namespace,
             zixi_stream_id=zixi_stream_id,
+            zixi_playback_stream_id=zixi_playback_stream_id,
             preview_ready=preview_ready,
             compute_vmaf_on_ingest=job.compute_vmaf_on_ingest,
             compute_vmaf_encoder=job.compute_vmaf_encoder,
@@ -152,6 +167,7 @@ class JobManager:
         )
         job.cancel_event = record.cancel_event
         job.zixi_stream_id = zixi_stream_id or ""
+        job.zixi_playback_stream_id = zixi_playback_stream_id or ""
         job.on_preview_ready = lambda ready, _job_id=job_id: self._update(
             _job_id, preview_ready=bool(ready)
         )
@@ -531,6 +547,7 @@ class JobManager:
                 preset_id=record.preset_id,
                 moq_namespace=record.moq_namespace,
                 zixi_stream_id=record.zixi_stream_id,
+                zixi_playback_stream_id=record.zixi_playback_stream_id,
                 preview_ready=record.preview_ready,
                 created_at=record.created_at,
                 csv_path=record.csv_path,
@@ -567,6 +584,7 @@ class JobManager:
                     preset_id=record.preset_id,
                     moq_namespace=record.moq_namespace,
                     zixi_stream_id=record.zixi_stream_id,
+                    zixi_playback_stream_id=record.zixi_playback_stream_id,
                     preview_ready=record.preview_ready,
                     created_at=record.created_at,
                     csv_path=record.csv_path,

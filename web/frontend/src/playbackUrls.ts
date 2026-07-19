@@ -141,9 +141,16 @@ function parseStreamId(
   protocol: string,
   ingestEndpointId?: string,
   zixiStreamId?: string,
+  zixiPlaybackStreamId?: string,
 ): string {
-  // Prefer the job's Zixi stream id (e.g. "SRT Test") over any streamid baked
-  // into the preset URL so HLS tracks the same input the encoder publishes to.
+  // For playback (not diagnostics/recipe), prefer the error-concealed
+  // derived stream when Zixi concealment is configured — it holds a
+  // continuous timeline across SRT reconnects so Fast HLS never stalls.
+  // Falls back to the raw job stream id (e.g. "SRT Test"), then the preset
+  // URL's own streamid.
+  if (protocol === "srt" && zixiPlaybackStreamId?.trim()) {
+    return zixiPlaybackStreamId.trim();
+  }
   if (protocol === "srt" && zixiStreamId?.trim()) {
     return zixiStreamId.trim();
   }
@@ -344,6 +351,7 @@ export function resolvePlaybackTarget(options: {
   moqFingerprintUrl?: string;
   moqNamespace?: string;
   zixiStreamId?: string;
+  zixiPlaybackStreamId?: string;
 }): PlaybackTarget {
   const mode = options.playbackMode ?? "auto";
   const dvr = options.playbackDvr ?? false;
@@ -353,6 +361,7 @@ export function resolvePlaybackTarget(options: {
     options.protocol,
     options.ingestEndpointId,
     options.zixiStreamId,
+    options.zixiPlaybackStreamId,
   );
   const zixiManaged = isZixiManagedHost(host, options.ingestEndpointId);
   const mediamtx = isMediaMtxManaged(options.ingestEndpointId);

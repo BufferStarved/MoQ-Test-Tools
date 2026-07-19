@@ -44,6 +44,7 @@ interface StreamPlayerProps {
   moqFingerprintUrl?: string;
   moqNamespace?: string;
   zixiStreamId?: string;
+  zixiPlaybackStreamId?: string;
   playbackGate?: PlaybackGate;
   jobId?: string;
   encodeStartedAtEpoch?: number | null;
@@ -78,6 +79,7 @@ export function StreamPlayer({
   moqFingerprintUrl = "",
   moqNamespace = "",
   zixiStreamId = "",
+  zixiPlaybackStreamId = "",
   playbackGate = "idle",
   jobId,
   encodeStartedAtEpoch,
@@ -116,6 +118,7 @@ export function StreamPlayer({
         moqFingerprintUrl,
         moqNamespace,
         zixiStreamId,
+        zixiPlaybackStreamId,
       }),
     [
       protocol,
@@ -128,6 +131,7 @@ export function StreamPlayer({
       moqFingerprintUrl,
       moqNamespace,
       zixiStreamId,
+      zixiPlaybackStreamId,
     ],
   );
 

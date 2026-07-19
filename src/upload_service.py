@@ -98,6 +98,10 @@ class UploadJob:
     encode_ladder: str = DEFAULT_ENCODE_LADDER_ID
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS
     zixi_stream_id: str = ""
+    # Error-concealed derived stream for HLS playback (falls back to
+    # zixi_stream_id when concealment isn't configured). See
+    # zixi_error_concealment.py.
+    zixi_playback_stream_id: str = ""
     ingest_recording_dir: str = ""
     ingest_agent_url: str = ""
     ingest_agent_token: str = ""
@@ -599,7 +603,11 @@ class UploadService:
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return None
-        return zixi_hls_playback_url(stream_id, endpoint_url=job.destination.url)
+        # Watch the same error-concealed stream the browser plays (when
+        # available) so our own preview-ready gating / heal detection can't
+        # disagree with what's actually on screen.
+        playback_stream_id = job.zixi_playback_stream_id or stream_id
+        return zixi_hls_playback_url(playback_stream_id, endpoint_url=job.destination.url)
 
     def _managed_http_ts_stream_id(self, job: UploadJob) -> Optional[str]:
         if (job.destination.ingest_provider or "").strip().lower() != "gcp_zixi":
