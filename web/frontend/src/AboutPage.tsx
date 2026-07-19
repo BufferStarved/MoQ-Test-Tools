@@ -160,6 +160,13 @@ export function AboutPage() {
           player falls back to Fast HLS. Prefer SRT/RTMP ingest when comparing browser delivery.
         </p>
         <p className="hint">
+          <strong>DASH ingest is retired for now.</strong> Zixi's TS-over-HTTP push input
+          reproducibly stops draining the socket a couple seconds into a continuous live push
+          (confirmed independent of this app with a bare ffmpeg PUT to the same endpoint), so the
+          encode silently froze while metrics kept ticking. We're waiting on Zixi support to confirm
+          whether that input supports sustained live streams before re-enabling it.
+        </p>
+        <p className="hint">
           Optional Broadcaster-side alternative (not auto-created here): error-concealed derived
           input with <code>continuous_timeline=1</code> in front of Fast HLS (~+100&nbsp;ms). Recipe:{" "}
           <a href="/api/debug/zixi-srt" target="_blank" rel="noreferrer">

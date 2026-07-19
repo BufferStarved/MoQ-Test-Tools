@@ -10,7 +10,24 @@ import {
 } from "./playbackUrls";
 
 /** Upload protocols not ready for benchmark comparisons yet. */
-const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "webrtc"]);
+const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "webrtc", "dash"]);
+
+/** Per-protocol reason shown under the disabled protocol select. */
+const UPLOAD_PROTOCOL_DISABLED_HINT: Partial<Record<string, string>> = {
+  dash: (
+    "Retired for now — Zixi's TS-over-HTTP push input reproducibly stops draining "
+    + "the socket a couple seconds into a continuous live stream (confirmed independent "
+    + "of this app), so DASH ingest silently produced frozen encodes. Use SRT or RTMP "
+    + "ingest instead; we'll re-enable this once Zixi confirms sustained live TS push support."
+  ),
+};
+const DEFAULT_PROTOCOL_DISABLED_HINT =
+  "This upload protocol is coming soon and is not available for comparisons yet.";
+/** Option suffix — "retired" for protocols we turned off deliberately, "coming soon" otherwise. */
+const UPLOAD_PROTOCOL_DISABLED_SUFFIX: Partial<Record<string, string>> = {
+  dash: " (retired)",
+};
+const DEFAULT_PROTOCOL_DISABLED_SUFFIX = " (coming soon)";
 
 interface EndpointSectionProps {
   index: number;
@@ -136,13 +153,17 @@ export function EndpointSection({
             return (
               <option key={item.id} value={item.id} disabled={comingSoon}>
                 {item.label}
-                {comingSoon ? " (coming soon)" : ""}
+                {comingSoon
+                  ? UPLOAD_PROTOCOL_DISABLED_SUFFIX[item.id] ?? DEFAULT_PROTOCOL_DISABLED_SUFFIX
+                  : ""}
               </option>
             );
           })}
         </select>
         {UPLOAD_PROTOCOLS_COMING_SOON.has(endpoint.protocol) && (
-          <span className="hint">This upload protocol is coming soon and is not available for comparisons yet.</span>
+          <span className="hint">
+            {UPLOAD_PROTOCOL_DISABLED_HINT[endpoint.protocol] ?? DEFAULT_PROTOCOL_DISABLED_HINT}
+          </span>
         )}
       </label>
 

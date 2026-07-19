@@ -163,11 +163,13 @@ SERVICE_PRESETS: List[ServicePreset] = [
         protocol="dash",
         url="http://35.222.33.58:7777/benchmark",
         notes=(
-            "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
-            "Per-input DASH MPD is unavailable without an adaptive group — the UI "
-            "falls back to Fast HLS for browser playback. Prefer SRT/RTMP ingest "
-            "when comparing delivery quality. "
-            "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
+            "RETIRED for now (hidden in the UI protocol picker, still reachable via API). "
+            "Zixi's TS-over-HTTP push input reproducibly stops draining the PUT socket a "
+            "couple seconds into a continuous live stream — reproduced independently of "
+            "this app with a bare ffmpeg PUT to the same endpoint. Encodes silently froze "
+            "while metrics kept ticking. Re-enable once Zixi support confirms sustained "
+            "live TS push support; use SRT/RTMP ingest to Zixi for DASH/HLS in the "
+            "meantime. Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
         ),
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
