@@ -41,7 +41,11 @@ async function sleep(ms: number): Promise<void> {
 // usually ready within ~1–2s of job start with injected catalog.
 const PUBLISHER_WARMUP_MS = 1_500;
 const SUBSCRIBE_RETRY_MS = 5_000;
-const MAX_CONNECT_ATTEMPTS = 2;
+// 2 attempts (~10s total patience) was too tight under real contention —
+// ffmpeg+openmoq-publisher startup can lag past that when other comparison
+// legs are also encoding on the same host. 4 attempts (~20s) stays well
+// inside a typical job's duration.
+const MAX_CONNECT_ATTEMPTS = 4;
 const MOQ_ALL_TRACKS_REFUSED = 4867;
 const LIVE_EDGE_TRIM_MS = 2_000;
 
@@ -555,6 +559,18 @@ export default function MoqPlayer({
               }
             })();
             return;
+          }
+          // Every other path that reaches fail() first destroys the player
+          // (the retry branch above, the outer catch, the connect-timeout).
+          // This was the one gap: on a fatal error with no more retries left
+          // (or any other fatal), the underlying MoQ session was never torn
+          // down — @playa/player kept it alive and resubscribing internally
+          // on its own, well past our app-level retry cap. Confirmed live in
+          // the relay's logs: one session repeating SUBSCRIBE/timeout every
+          // ~2s indefinitely after we'd already given up and shown "Failed".
+          player.destroy();
+          if (playerRef.current === player) {
+            playerRef.current = null;
           }
           fail(detail);
         });
