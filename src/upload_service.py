@@ -84,6 +84,27 @@ _HLS_STALE_ROLLING_SEC = 24
 _HLS_HEAL_ATTEMPTS = 1
 
 
+def _hls_stuck_threshold_sec(target_latency_ms: int) -> float:
+    """Higher target latency legitimately means slower per-chunk cadence.
+
+    Confirmed live 2026-07-19: a job with target_latency_ms=5350 whose own
+    CSV showed perfectly steady fps/out_time for its whole ~58s duration
+    still tripped this heal (stale sig for 24s+) at ~32s in, tearing down a
+    working player. The fixed thresholds were tuned around the ~800-1000ms
+    jobs we test with most; a much higher target latency legitimately slows
+    Zixi's per-chunk cadence enough to need real headroom here, not just a
+    token bump — and Option 1 (error-concealed derived stream) is already
+    the seamless fix for the classic reconnect stall this heal exists for,
+    so erring toward patience over a disruptive false-positive reconnect is
+    the right tradeoff now.
+    """
+    return max(_HLS_STUCK_SEC, (target_latency_ms / 1000.0) * 6.0)
+
+
+def _hls_stale_rolling_threshold_sec(target_latency_ms: int) -> float:
+    return max(_HLS_STALE_ROLLING_SEC, (target_latency_ms / 1000.0) * 8.0)
+
+
 @dataclass
 class UploadJob:
     media_path: str
@@ -1007,7 +1028,8 @@ class UploadService:
                         stale_rolling = (
                             not is_mediamtx
                             and rolling_since is not None
-                            and (now - rolling_since) >= _HLS_STALE_ROLLING_SEC
+                            and (now - rolling_since)
+                            >= _hls_stale_rolling_threshold_sec(job.target_latency_ms)
                             and health.depth <= 1
                         )
                         if stale_rolling and heals_used < _HLS_HEAL_ATTEMPTS:
@@ -1024,7 +1046,11 @@ class UploadService:
                     elif not is_mediamtx:
                         if bad_since is None:
                             bad_since = now
-                        elif (now - bad_since) >= _HLS_STUCK_SEC and heals_used < _HLS_HEAL_ATTEMPTS:
+                        elif (
+                            now - bad_since
+                        ) >= _hls_stuck_threshold_sec(
+                            job.target_latency_ms
+                        ) and heals_used < _HLS_HEAL_ATTEMPTS:
                             srt_proc, heal_error = self._heal_srt_live_transmit(
                                 job, srt_proc=srt_proc, srt_cmd=srt_cmd
                             )
