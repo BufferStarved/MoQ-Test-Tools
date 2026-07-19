@@ -1,4 +1,5 @@
 import type { ResultSummary, UploadSample } from "./types";
+import { protocolColor } from "./protocolTheme";
 
 export interface ChartPoint {
   second: number;
@@ -771,7 +772,7 @@ export function comparisonSeries(
   return legs.map((leg, index) => ({
     key: `${metric}_${index}`,
     label: leg.label,
-    color: LEG_COLORS[index % LEG_COLORS.length],
+    color: protocolColor(leg.protocol, index),
     unit,
   }));
 }

@@ -1,10 +1,25 @@
 export const INGEST_ENDPOINTS = [
-  { id: "gcp_zixi", label: "Zixi Broadcaster gcp-us-central1", available: true },
-  { id: "gcp_mediamtx", label: "MediaMTX gcp-us-central1 (LL-HLS / LL-DASH / WHEP)", available: true },
-  { id: "gcp_moq_relay", label: "OpenMOQ MOQ-X gcp-us-central1", available: true },
-  { id: "aws_zixi", label: "AWS Zixi", available: false },
-  { id: "linode_zixi", label: "Linode Zixi", available: false },
-  { id: "custom", label: "Custom URL", available: true },
+  {
+    id: "gcp_zixi",
+    label: "Zixi · GCP us-central1",
+    detail: "Broadcaster Fast HLS / MPEG-TS",
+    available: true,
+  },
+  {
+    id: "gcp_mediamtx",
+    label: "MediaMTX · GCP us-central1",
+    detail: "LL-HLS / LL-DASH / WHEP",
+    available: true,
+  },
+  {
+    id: "gcp_moq_relay",
+    label: "OpenMOQ · GCP us-central1",
+    detail: "MoQ relay (WebTransport)",
+    available: true,
+  },
+  { id: "aws_zixi", label: "Zixi · AWS", detail: "Coming soon", available: false },
+  { id: "linode_zixi", label: "Zixi · Linode", detail: "Coming soon", available: false },
+  { id: "custom", label: "Custom URL", detail: "Your origin / gateway", available: true },
 ] as const;
 
 export type IngestEndpointId = (typeof INGEST_ENDPOINTS)[number]["id"];
@@ -71,4 +86,29 @@ export function ingestEndpointLabel(ingestEndpointId: string): string {
 
 export function isCustomIngestEndpoint(ingestEndpointId: string): boolean {
   return ingestEndpointId === "custom";
+}
+
+/** Default host for a freshly chosen upload protocol. */
+export function defaultIngestForProtocol(protocol: string): IngestEndpointId {
+  if (protocol === "moq") {
+    return "gcp_moq_relay";
+  }
+  // SRT races MediaMTX LL-HLS by default; Zixi remains selectable manually.
+  if (protocol === "srt") {
+    return "gcp_mediamtx";
+  }
+  if (protocol === "webrtc") {
+    return "gcp_mediamtx";
+  }
+  return "gcp_zixi";
+}
+
+/** Host options that make sense for the selected upload protocol. */
+export function ingestEndpointsForProtocol(protocol: string) {
+  if (protocol === "moq") {
+    return INGEST_ENDPOINTS.filter(
+      (item) => item.id === "gcp_moq_relay" || item.id === "custom",
+    );
+  }
+  return INGEST_ENDPOINTS.filter((item) => item.id !== "gcp_moq_relay");
 }

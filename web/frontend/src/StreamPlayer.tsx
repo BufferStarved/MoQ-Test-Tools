@@ -1,10 +1,11 @@
 import { Suspense, lazy, useEffect, useMemo } from "react";
 import type { PlaybackMetricsSnapshot } from "./api";
 import {
-  PLAYBACK_MODE_OPTIONS,
   defaultPlaybackModeForProtocol,
   defaultWhepPlaybackUrl,
   isPlaybackModeCompatible,
+  playbackModesForSelection,
+  playbackSelectionCopy,
   resolvePlaybackTarget,
 } from "./playbackUrls";
 
@@ -29,7 +30,6 @@ const DashPlayer = lazy(() => import("./players/DashPlayer"));
 const MpegTsPlayer = lazy(() => import("./players/MpegTsPlayer"));
 const WhepPlayer = lazy(() => import("./players/WhepPlayer"));
 const MoqPlayer = lazy(() => import("./players/MoqPlayer"));
-const ZixiWebRtcEmbed = lazy(() => import("./players/ZixiWebRtcEmbed"));
 const UnsupportedPlayback = lazy(() => import("./players/UnsupportedPlayback"));
 
 interface StreamPlayerProps {
@@ -140,12 +140,11 @@ export function StreamPlayer({
     parseHostSafe(endpointUrl) ?? "34.9.217.178",
     "benchmark",
   );
-  const selectedOption = PLAYBACK_MODE_OPTIONS.find((item) => item.id === playbackMode);
-  const modeHint = selectedOption
-    ? isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
-      ? selectedOption.hint
-      : `Not available with ${protocol.toUpperCase()} ingest.`
-    : "";
+  const playerModes = playbackModesForSelection(protocol, ingestEndpointId);
+  const selectMode = playerModes.some((item) => item.id === playbackMode)
+    ? playbackMode
+    : defaultPlaybackModeForProtocol(protocol, ingestEndpointId);
+  const selectionCopy = playbackSelectionCopy(selectMode, target, protocol);
   const hlsLowLatency =
     target.note === "lowLatencyMode" || playbackMode === "ll-hls";
   const dashLowLatency =
@@ -177,25 +176,26 @@ export function StreamPlayer({
           <label>
             Video player
             <select
-              value={playbackMode}
+              value={selectMode}
               onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
-              disabled={controlsLocked}
+              disabled={controlsLocked || playerModes.length <= 1}
             >
-              {PLAYBACK_MODE_OPTIONS.map((item) => {
-                const compatible = isPlaybackModeCompatible(item.id, protocol, ingestEndpointId);
-                return (
-                  <option key={item.id} value={item.id} disabled={!compatible}>
-                    {item.label}
-                    {!compatible ? " — incompatible with ingest" : ""}
-                  </option>
-                );
-              })}
+              {playerModes.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
             </select>
-            {modeHint ? <span className="hint">{modeHint}</span> : null}
+            <span className="player-mode-hint">
+              <strong className="player-mode-hint-label">{selectionCopy.label}</strong>
+              {selectionCopy.description ? (
+                <span className="hint">{selectionCopy.description}</span>
+              ) : null}
+            </span>
           </label>
           {showWhepField && onWhepPlaybackUrlChange && (
             <label>
-              WHEP channel URL
+              WHEP Playback URL
               <input
                 type="url"
                 value={whepPlaybackUrl}
@@ -208,14 +208,10 @@ export function StreamPlayer({
         </div>
       )}
 
-      {target.url && target.engine !== "webrtc-embed" && (
+      {target.url && target.engine !== "unsupported" && (
         <p className="hint player-url">
+          <span className="url-field-label">Playback URL</span>
           <code>{target.url}</code>
-        </p>
-      )}
-      {target.engine === "webrtc-embed" && target.embedUrl && (
-        <p className="hint player-url">
-          <code>{target.embedUrl}</code>
         </p>
       )}
 
@@ -277,9 +273,6 @@ export function StreamPlayer({
             <div className="player-surface player-loading">
               <p className="hint">Waiting for MoQ publish namespace…</p>
             </div>
-          )}
-          {target.engine === "webrtc-embed" && target.embedUrl && (
-            <ZixiWebRtcEmbed embedUrl={target.embedUrl} label={target.label} />
           )}
           {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
         </Suspense>

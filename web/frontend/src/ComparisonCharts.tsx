@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  LEG_COLORS,
   chartGroupById,
   comparisonHasMetric,
   comparisonHasMetricPresent,
@@ -12,6 +11,7 @@ import {
 import { MetricChart } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
 import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
+import { protocolColor } from "./protocolTheme";
 
 interface ComparisonChartsProps {
   legs: ComparisonLegData[];
@@ -102,7 +102,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
           <span key={leg.id} className="comparison-legend-item">
             <span
               className="comparison-swatch"
-              style={{ background: LEG_COLORS[index % LEG_COLORS.length] }}
+              style={{ background: protocolColor(leg.protocol, index) }}
             />
             {leg.label}
           </span>

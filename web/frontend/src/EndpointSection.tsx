@@ -1,13 +1,21 @@
-import { INGEST_ENDPOINTS, isCustomIngestEndpoint, presetIdForIngest } from "./ingestEndpoints";
+import {
+  defaultIngestForProtocol,
+  ingestEndpointLabel,
+  ingestEndpointsForProtocol,
+  isCustomIngestEndpoint,
+  presetIdForIngest,
+} from "./ingestEndpoints";
 import type { EndpointConfig, Preset, Protocol } from "./types";
 import {
   defaultPlaybackModeForProtocol,
   isManagedMoqRelay,
   managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
+  playbackModesForSelection,
   relayWebTransportUrl,
   showMoqUrlFields,
 } from "./playbackUrls";
+import { protocolLabel } from "./protocolTheme";
 
 /** Upload protocols not ready for benchmark comparisons yet. */
 const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "webrtc", "dash"]);
@@ -73,6 +81,16 @@ function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string 
   return publishUrl;
 }
 
+function playerShortLabel(endpoint: EndpointConfig): string {
+  const modes = playbackModesForSelection(endpoint.protocol, endpoint.ingestEndpointId);
+  const mode = endpoint.playbackMode ?? defaultPlaybackModeForProtocol(
+    endpoint.protocol,
+    endpoint.ingestEndpointId,
+  );
+  return modes.find((item) => item.id === mode)?.label
+    ?? (endpoint.protocol === "moq" ? "MoQ Playback (Playa)" : "Auto");
+}
+
 export function EndpointSection({
   index,
   endpoint,
@@ -85,7 +103,9 @@ export function EndpointSection({
   onRemove,
 }: EndpointSectionProps) {
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
-  const selectedIngest = INGEST_ENDPOINTS.find((item) => item.id === endpoint.ingestEndpointId);
+  const hostOptions = ingestEndpointsForProtocol(endpoint.protocol);
+  const selectedIngest = hostOptions.find((item) => item.id === endpoint.ingestEndpointId)
+    ?? hostOptions[0];
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
   const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
@@ -111,6 +131,18 @@ export function EndpointSection({
         )}
       </div>
 
+      <p className="stream-path-chips" aria-label="Publish path">
+        <span>{protocolLabel(endpoint.protocol)}</span>
+        <span className="stream-path-sep" aria-hidden="true">
+          →
+        </span>
+        <span>{ingestEndpointLabel(endpoint.ingestEndpointId)}</span>
+        <span className="stream-path-sep" aria-hidden="true">
+          →
+        </span>
+        <span>{playerShortLabel(endpoint)}</span>
+      </p>
+
       <label>
         Protocol
         <select
@@ -120,19 +152,7 @@ export function EndpointSection({
             if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol)) {
               return;
             }
-            let nextIngest = endpoint.ingestEndpointId;
-            if (protocol === "moq") {
-              nextIngest = "gcp_moq_relay";
-            } else if (endpoint.ingestEndpointId === "gcp_moq_relay") {
-              nextIngest = "gcp_zixi";
-            } else if (
-              endpoint.ingestEndpointId === "gcp_mediamtx" &&
-              protocol !== "srt" &&
-              protocol !== "rtmp" &&
-              protocol !== "webrtc"
-            ) {
-              nextIngest = "gcp_zixi";
-            }
+            const nextIngest = defaultIngestForProtocol(protocol);
             const patch: Partial<EndpointConfig> = {
               protocol,
               ingestEndpointId: nextIngest,
@@ -141,7 +161,7 @@ export function EndpointSection({
             if (protocol === "moq") {
               Object.assign(
                 patch,
-                moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: "gcp_moq_relay" }, presets),
+                moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: nextIngest }, presets),
               );
             }
             onChange(endpoint.id, patch);
@@ -168,9 +188,13 @@ export function EndpointSection({
       </label>
 
       <label>
-        Ingest Endpoint
+        Host / ingest
         <select
-          value={endpoint.ingestEndpointId}
+          value={
+            hostOptions.some((item) => item.id === endpoint.ingestEndpointId)
+              ? endpoint.ingestEndpointId
+              : (hostOptions[0]?.id ?? endpoint.ingestEndpointId)
+          }
           onChange={(e) => {
             const ingestEndpointId = e.target.value;
             const patch: Partial<EndpointConfig> = {
@@ -184,40 +208,44 @@ export function EndpointSection({
           }}
           disabled={controlsLocked}
         >
-          {INGEST_ENDPOINTS.map((item) => (
+          {hostOptions.map((item) => (
             <option key={item.id} value={item.id} disabled={!item.available}>
               {item.label}
               {!item.available ? " (coming soon)" : ""}
             </option>
           ))}
         </select>
+        {selectedIngest?.detail && selectedIngest.available && (
+          <span className="field-hint">{selectedIngest.detail}</span>
+        )}
         {selectedIngest && !selectedIngest.available && (
-          <span className="hint">This ingest endpoint is not configured yet.</span>
+          <span className="hint">This host is not configured yet.</span>
         )}
       </label>
 
       {isCustom && (
         <label>
-          Endpoint URL
+          Publish URL
           <input
             type="url"
             value={endpoint.endpointUrl}
             onChange={(e) => onChange(endpoint.id, { endpointUrl: e.target.value })}
-            placeholder={protocolMeta?.syntax ?? "Enter endpoint URL"}
+            placeholder={protocolMeta?.syntax ?? "Enter publish URL"}
           />
         </label>
       )}
 
       {managedUrl && (
         <p className="hint managed-endpoint-url">
-          {managedLabel} <code>{managedUrl}</code>
+          <span className="url-field-label">{managedLabel}</span>
+          <code>{managedUrl}</code>
         </p>
       )}
 
       {showMoq && (
         <>
           <label>
-            MoQ relay URL
+            MoQ Publish URL
             <input
               type="url"
               value={endpoint.moqRelayUrl ?? ""}

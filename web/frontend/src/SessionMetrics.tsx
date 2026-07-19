@@ -1,13 +1,17 @@
 import { useMemo } from "react";
 import { downloadCombinedCsv, downloadCombinedJsonFromSummaries } from "./combinedDownload";
+import { buildComparisonVerdict } from "./comparisonVerdict";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
+import { protocolColor } from "./protocolTheme";
 import type { ResultSummary } from "./types";
 
 interface SessionMetricsProps {
   streams: ResultSummary[];
   labels?: string[];
+  /** When true, this is a session loaded from history (not the just-finished run). */
+  fromHistory?: boolean;
 }
 
 function formatBytes(value?: number): string {
@@ -76,7 +80,7 @@ function ScoreCell({
   );
 }
 
-export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
+export function SessionMetrics({ streams, labels, fromHistory = false }: SessionMetricsProps) {
   const chartLegs = useMemo(() => {
     const saved = streams.map((result, index) => {
       const stream = resultToSavedStream(result, index);
@@ -88,23 +92,55 @@ export function SessionMetrics({ streams, labels }: SessionMetricsProps) {
     return savedStreamsToLegs(saved);
   }, [streams, labels]);
 
+  const verdict = useMemo(() => buildComparisonVerdict(streams, labels), [streams, labels]);
+
   if (streams.length === 0) {
     return (
-      <p className="muted">
-        Run a comparison on the Benchmark tab. When it finishes, this tab shows a scorecard for that
-        session and download links for JSON/CSV.
-      </p>
+      <div className="results-empty">
+        <p className="muted">
+          Run a comparison on the Benchmark tab to answer which protocol and host path fit your
+          latency, quality, and delivery goals.
+        </p>
+        <p className="hint">
+          When a run finishes — or you pick a past session — this tab shows a verdict, scorecard,
+          charts, and downloadable CSV/JSON.
+        </p>
+      </div>
     );
   }
 
+  const title = fromHistory
+    ? `Selected session · ${streams.length} streams`
+    : `Latest comparison · ${streams.length} streams`;
+
   return (
     <div className="session-metrics">
+      {verdict && (
+        <div className="results-verdict">
+          <span className="decision-board-kicker">Verdict</span>
+          <p className="results-verdict-headline">{verdict.headline}</p>
+          <div className="decision-board-highlights">
+            {verdict.highlights.map((item) => (
+              <div
+                key={item.label}
+                className="decision-highlight"
+                style={{ "--chip-color": protocolColor(item.protocol) } as never}
+              >
+                <span className="decision-highlight-label">{item.label}</span>
+                <strong>{item.winner}</strong>
+                <span className="decision-highlight-value">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="session-metrics-header">
         <div>
-          <h3>Last comparison · {streams.length} streams</h3>
+          <h3>{title}</h3>
           <p className="hint">
-            Post-run scorecard for the session that just finished. Download raw samples (CSV) or
-            the summary (JSON) for all streams combined into one file.
+            Scorecard for latency, throughput, quality, and host health. Download raw samples (CSV)
+            or the summary (JSON) for all streams in one file.
           </p>
         </div>
         <div className="download-actions">

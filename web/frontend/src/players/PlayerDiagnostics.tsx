@@ -190,9 +190,15 @@ export function PlayerDiagnostics({
     await copyText("diag", text);
   }
 
+  const healthTone = error ? "bad" : playbackGate === "live" ? "ok" : "idle";
+
   return (
     <details className="player-diagnostics">
-      <summary>Playback diagnostics ({engine.toUpperCase()})</summary>
+      <summary>
+        <span className={`diagnostics-health-dot tone-${healthTone}`} aria-hidden="true" />
+        Playback diagnostics ({engine.toUpperCase()})
+        <span className="diagnostics-summary-status">{error ? "issue detected" : status}</span>
+      </summary>
       <ul>
         {entries.map((line, index) => (
           <li key={`${index}-${line}`}>

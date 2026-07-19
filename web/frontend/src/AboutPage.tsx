@@ -89,16 +89,47 @@ export function AboutPage() {
         <div>
           <h2>About MOQ Ingest Testing</h2>
           <p className="about-lede">
-            An open benchmark platform for comparing live video ingest — especially{" "}
-            <strong>MoQ over WebTransport</strong> against traditional paths such as{" "}
-            <strong>SRT / RTMP into Zixi</strong> — with shared encodes, normalized metrics, and
-            browser playback.
+            A decision toolkit for streaming architects. Run the same encode against competing
+            upload protocols and host locations, watch browser playback side by side, and leave with
+            data for protocol choice, ingest placement, player selection, and config recipes.
           </p>
         </div>
         <a className="csv-download" href={GH_REPO} target="_blank" rel="noreferrer">
           GitHub repository
         </a>
       </header>
+
+      <section className="about-section about-decisions">
+        <h3>Questions this site helps answer</h3>
+        <div className="about-decision-grid">
+          <div>
+            <h4>Primary</h4>
+            <ul className="about-list">
+              <li>
+                <strong>Which upload protocol?</strong> Compare SRT, RTMP, MoQ (and more as they
+                land) under one wall-clock window.
+              </li>
+              <li>
+                <strong>Where should I host ingest?</strong> Race Zixi, MediaMTX, OpenMOQ relay, or
+                a custom origin in the same recipe.
+              </li>
+            </ul>
+          </div>
+          <div>
+            <h4>Secondary</h4>
+            <ul className="about-list">
+              <li>
+                <strong>Which player?</strong> Switch HLS, MoQ/Playa, WHEP, and MPEG-TS modes per
+                stream and compare join time / stalls.
+              </li>
+              <li>
+                <strong>What configs?</strong> Shared encode ladder + latency budget, plus per-stream
+                publish / host / playback settings — exportable as CSV/JSON.
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
 
       <div className="about-contact">
         <h3>Contribute & contact</h3>
@@ -185,23 +216,23 @@ export function AboutPage() {
       </section>
 
       <section className="about-section">
-        <h3>Project goals</h3>
+        <h3>How comparisons stay fair</h3>
         <ul className="about-list">
           <li>
             Encode the <em>same</em> source (file or webcam) for every comparison leg under one
             wall-clock window.
           </li>
           <li>
-            Publish over different ingest protocols (MoQ, SRT, RTMP, …) and observe transport,
-            edge/relay, media integrity, playback, and optional VMAF side by side.
+            Publish over different ingest protocols and hosts, then observe transport, edge/relay,
+            media integrity, playback, and optional VMAF side by side.
           </li>
           <li>
             Keep metrics comparable with a normalized model (`net_*`, media health, playback E2E)
             rather than protocol-specific charts only.
           </li>
           <li>
-            Export raw CSV sample logs and summary JSON after each run — no historical archive in
-            the UI.
+            Export CSV/JSON after each run, and reopen past sessions from the Results tab picker
+            when you want to revisit a protocol or host trade-off.
           </li>
         </ul>
       </section>
@@ -303,7 +334,7 @@ export function AboutPage() {
           </ArchStage>
           <FlowArrow />
           <ArchStage step="4" label="Report" tone="client">
-            <FlowNode tone="client" title="Session Details" detail="TTFF · stalls · E2E · downloads" />
+            <FlowNode tone="client" title="Results" detail="Verdict · TTFF · stalls · E2E · downloads" />
           </ArchStage>
         </div>
         <ul className="about-list">

@@ -144,6 +144,8 @@ export interface ResultFile {
   size_bytes: number;
   comparison_id?: string;
   stream_index?: number;
+  protocol?: string;
+  stream_label?: string;
 }
 
 export interface QualityLeg {

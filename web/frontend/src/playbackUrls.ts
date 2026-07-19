@@ -50,47 +50,64 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
     hint: "Media over QUIC via Playa (Chrome/Edge + MoQ relay).",
   },
   {
-    id: "webrtc",
-    label: "WebRTC (Zixi)",
-    hint: "Zixi built-in WebRTC monitor player.",
-  },
-  {
     id: "mpegts",
     label: "MPEG-TS over HTTP",
     hint: "Raw Zixi HTTP-TS (http_ts_auto_out) via mpegts.js — bypasses Fast HLS packager; auto-reconnects on republish.",
   },
-  {
-    id: "zixi-embed",
-    label: "Zixi player page",
-    hint: "Full Zixi WebRTC player UI in an iframe.",
-  },
 ];
 
-/** Playback modes that can work for a given ingest protocol selection. */
+function isZixiManagedIngest(ingestEndpointId: string): boolean {
+  return (
+    ingestEndpointId === "gcp_zixi" ||
+    ingestEndpointId.startsWith("gcp_zixi") ||
+    ingestEndpointId.startsWith("aws_zixi") ||
+    ingestEndpointId.startsWith("linode_zixi")
+  );
+}
+
+/** Playback modes that can work for a given ingest protocol + host/packager. */
 export function isPlaybackModeCompatible(
   mode: PlaybackMode,
   protocol: string,
   ingestEndpointId?: string,
 ): boolean {
-  if (mode === "auto") {
-    return true;
-  }
+  // MoQ ingest only plays through Playa — no Auto / HLS / WHEP fallbacks.
   if (protocol === "moq") {
     return mode === "moq";
   }
-  const mediamtx = isMediaMtxManaged(ingestEndpointId ?? "");
+  if (mode === "auto") {
+    return true;
+  }
+  if (mode === "moq") {
+    return false;
+  }
+
+  const ingest = ingestEndpointId ?? "";
+  const mediamtx = isMediaMtxManaged(ingest);
+  const zixi = isZixiManagedIngest(ingest);
+
+  // MediaMTX origin: native LL-HLS, LL-DASH sidecar, HLS, and WHEP.
   if (mediamtx) {
     return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep";
   }
+
+  // Zixi Broadcaster: Fast HLS + MPEG-TS only for in-app playback.
+  // - DASH per-input MPD is not served (player would silently fall back to HLS).
+  // - WHEP is a MediaMTX endpoint shape, not available on Zixi :7777/:4444.
+  // - Zixi WebRTC UI cannot be iframed (frame-ancestors 'self').
+  if (zixi) {
+    return mode === "hls" || mode === "mpegts";
+  }
+
+  // Custom / unknown host: browser-safe modes only (no packager-specific LL presets).
+  // WHEP requires the user to paste a real WHEP URL.
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
-    return mode === "hls" || mode === "ll-hls" || mode === "dash" || mode === "ll-dash"
-      || mode === "whep" || mode === "webrtc" || mode === "mpegts" || mode === "zixi-embed";
+    return mode === "hls" || mode === "mpegts" || mode === "whep";
   }
   if (protocol === "webrtc") {
-    return mode === "whep" || mode === "ll-hls" || mode === "ll-dash" || mode === "webrtc"
-      || mode === "zixi-embed";
+    return mode === "whep";
   }
-  return true;
+  return false;
 }
 
 export function defaultPlaybackModeForProtocol(
@@ -106,18 +123,86 @@ export function defaultPlaybackModeForProtocol(
   return "auto";
 }
 
+/** Compatible player options only — keeps MoQ (and other locked paths) uncluttered. */
+export function playbackModesForSelection(
+  protocol: string,
+  ingestEndpointId?: string,
+): typeof PLAYBACK_MODE_OPTIONS {
+  return PLAYBACK_MODE_OPTIONS.filter((item) =>
+    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId),
+  );
+}
+
+/** Map a resolved playback target back to a concrete mode option (for Auto copy). */
+export function resolvedPlaybackModeOption(target: {
+  engine: string;
+  label: string;
+  note?: string;
+}): (typeof PLAYBACK_MODE_OPTIONS)[number] | undefined {
+  if (target.note === "lowLatencyMode" || target.label.includes("LL-HLS")) {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "ll-hls");
+  }
+  if (target.note === "lowLatencyDash" || target.label.includes("LL-DASH")) {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "ll-dash");
+  }
+  if (target.engine === "hls") {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "hls");
+  }
+  if (target.engine === "dash") {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "dash");
+  }
+  if (target.engine === "whep") {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "whep");
+  }
+  if (target.engine === "moq") {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "moq");
+  }
+  if (target.engine === "mpegts") {
+    return PLAYBACK_MODE_OPTIONS.find((item) => item.id === "mpegts");
+  }
+  return PLAYBACK_MODE_OPTIONS.find((item) => item.label === target.label);
+}
+
+/** Label + description shown under the Video player select (including Auto). */
+export function playbackSelectionCopy(
+  mode: PlaybackMode,
+  target: { engine: string; label: string; note?: string },
+  protocol: string,
+): { label: string; description: string } {
+  if (protocol === "moq" || mode === "moq") {
+    return {
+      label: "MoQ Playback (Playa)",
+      description: "MoQ ingest plays only through MoQ Playback (Playa).",
+    };
+  }
+  if (mode === "auto") {
+    const resolved = resolvedPlaybackModeOption(target);
+    return {
+      label: `Auto → ${target.label}`,
+      description:
+        resolved?.hint ||
+        `Automatically selects ${target.label} for this protocol and host.`,
+    };
+  }
+  const option = PLAYBACK_MODE_OPTIONS.find((item) => item.id === mode);
+  return {
+    label: option?.label ?? target.label,
+    description: option?.hint || target.note || "",
+  };
+}
+
 export function isMediaMtxManaged(ingestEndpointId: string): boolean {
   return ingestEndpointId === "gcp_mediamtx" || ingestEndpointId.startsWith("gcp_mediamtx");
 }
 
 export function managedEndpointUrlLabel(protocol: string): string {
-  if (protocol === "moq") return "WebTransport URL";
-  if (protocol === "srt") return "SRT URL";
-  if (protocol === "rtmp") return "RTMP URL";
-  if (protocol === "hls") return "HLS URL";
-  if (protocol === "dash") return "DASH URL";
-  if (protocol === "webrtc") return "WebRTC URL";
-  return "Endpoint URL";
+  if (protocol === "moq") return "MoQ Publish URL";
+  if (protocol === "srt") return "SRT Publish URL";
+  if (protocol === "rtmp") return "RTMP Publish URL";
+  if (protocol === "hls") return "HLS Publish URL";
+  if (protocol === "dash") return "DASH Publish URL";
+  if (protocol === "webrtc") return "WebRTC Publish URL";
+  return "Publish URL";
 }
 
 function parseHost(endpointUrl: string): string | null {
@@ -323,7 +408,9 @@ function engineForMode(
   if (mode === "ll-dash" || mode === "dash") return "dash";
   if (mode === "whep") return hasWhepUrl || mediamtx ? "whep" : "unsupported";
   if (mode === "moq") return hasMoqRelay ? "moq" : "unsupported";
-  if (mode === "webrtc" || mode === "zixi-embed") return "webrtc-embed";
+  // Legacy Zixi iframe modes — Broadcaster sends frame-ancestors 'self', so they
+  // cannot play inside this app. Prefer HLS / MPEG-TS / WHEP instead.
+  if (mode === "webrtc" || mode === "zixi-embed") return "unsupported";
   if (mode === "mpegts") return "mpegts";
   if (protocol === "moq") return hasMoqRelay ? "moq" : "unsupported";
   if (mediamtx) return "hls";
@@ -336,7 +423,7 @@ function engineForMode(
   // the "dash" engine so Auto gets the same Fast HLS fallback (with a clear label)
   // that explicit DASH mode uses, instead of a raw, unlabeled MPEG-TS attempt.
   if (protocol === "dash") return "dash";
-  if (protocol === "webrtc") return mediamtx ? "whep" : "webrtc-embed";
+  if (protocol === "webrtc") return mediamtx ? "whep" : "unsupported";
   return "hls";
 }
 
@@ -369,9 +456,11 @@ export function resolvePlaybackTarget(options: {
   const moqNamespace = options.moqNamespace?.trim() || streamId || DEFAULT_MOQ_NAMESPACE;
   const pathId = streamId || MEDIAMTX_PATH;
 
+  // Only invent a WHEP URL for MediaMTX. On Zixi/custom, require an explicit URL
+  // so we never point :8889 WHEP at a Broadcaster host.
   const whepUrl =
     options.whepPlaybackUrl?.trim() ||
-    (mediamtx || mode === "whep" ? mediaMtxWhepUrl(resolvedHost, pathId) : "");
+    (mediamtx ? mediaMtxWhepUrl(resolvedHost, pathId) : "");
   const moqRelayFromField = options.moqRelayUrl?.trim() || "";
   const moqRelayFromEndpoint =
     options.protocol === "moq" && options.endpointUrl.trim()
@@ -435,13 +524,14 @@ export function resolvePlaybackTarget(options: {
     };
   }
 
-  if (engine === "webrtc-embed") {
-    const embedUrl = zixiWebRtcEmbedUrl(resolvedHost, streamId);
+  if (mode === "webrtc" || mode === "zixi-embed") {
     return {
-      engine: "webrtc-embed",
-      url: embedUrl,
-      embedUrl,
+      engine: "unsupported",
+      url: zixiWebRtcEmbedUrl(resolvedHost, streamId),
       label: "Zixi WebRTC",
+      note:
+        "Zixi's WebRTC player UI cannot be embedded here (X-Frame-Options / CSP frame-ancestors). "
+        + "Open it from the Zixi Broadcaster UI in a new tab, or use HLS / MPEG-TS for in-app playback.",
       streamId,
       host: resolvedHost,
     };

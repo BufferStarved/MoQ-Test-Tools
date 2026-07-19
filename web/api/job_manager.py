@@ -632,6 +632,8 @@ def list_result_files(results_dir: str = "results") -> List[dict]:
         path = os.path.join(results_dir, name)
         comparison_id = ""
         stream_index = 0
+        protocol = ""
+        stream_label = ""
         base, _ = os.path.splitext(path)
         summary_path = f"{base}.summary.json"
         if os.path.exists(summary_path):
@@ -641,6 +643,8 @@ def list_result_files(results_dir: str = "results") -> List[dict]:
                 extra = summary_payload.get("extra", {})
                 comparison_id = extra.get("comparison_id", "") or ""
                 stream_index = int(extra.get("stream_index", 0) or 0)
+                protocol = summary_payload.get("protocol", "") or ""
+                stream_label = extra.get("stream_label", "") or ""
             except (json.JSONDecodeError, OSError, TypeError, ValueError):
                 pass
         files.append({
@@ -651,6 +655,8 @@ def list_result_files(results_dir: str = "results") -> List[dict]:
             ).isoformat(),
             "size_bytes": os.path.getsize(path),
             "comparison_id": comparison_id,
+            "protocol": protocol,
+            "stream_label": stream_label,
             "stream_index": stream_index,
         })
     files.sort(key=lambda item: item["modified_at"], reverse=True)
