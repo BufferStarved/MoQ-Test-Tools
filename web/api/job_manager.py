@@ -34,6 +34,12 @@ class VmafStatus(str, Enum):
     DISABLED = "disabled"
     UPLOADING_REFERENCE = "uploading_reference"
     WAITING_FOR_UPLOAD = "waiting_for_upload"
+    # Encoder-side VMAF/PSNR/SSIM only runs after the job's own encode capture
+    # finishes (it compares against that capture, not an uploaded reference) —
+    # distinct from WAITING_FOR_UPLOAD so the UI never says "disabled" for a
+    # metric the user did request, and never says "computing" before there's
+    # anything to compute yet.
+    WAITING_FOR_ENCODE = "waiting_for_encode"
     COMPUTING = "computing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -163,13 +169,20 @@ class JobManager:
                 if job.compute_vmaf_on_ingest
                 else VmafStatus.DISABLED.value
             ),
-            encoder_vmaf_status=VmafStatus.DISABLED.value,
+            encoder_vmaf_status=(
+                VmafStatus.WAITING_FOR_ENCODE.value
+                if job.compute_vmaf_encoder
+                else VmafStatus.DISABLED.value
+            ),
         )
         job.cancel_event = record.cancel_event
         job.zixi_stream_id = zixi_stream_id or ""
         job.zixi_playback_stream_id = zixi_playback_stream_id or ""
         job.on_preview_ready = lambda ready, _job_id=job_id: self._update(
             _job_id, preview_ready=bool(ready)
+        )
+        job.on_encoder_vmaf_status = lambda status, _job_id=job_id: self._update(
+            _job_id, encoder_vmaf_status=str(status)
         )
         with self._lock:
             self._jobs[job_id] = record

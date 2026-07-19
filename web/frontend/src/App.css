@@ -360,7 +360,8 @@ input:disabled {
 .pill.pending,
 .pill.computing,
 .pill.uploading_reference,
-.pill.waiting_for_upload {
+.pill.waiting_for_upload,
+.pill.waiting_for_encode {
   color: #67e8f9;
 }
 
@@ -370,6 +371,32 @@ input:disabled {
 
 .pill.failed {
   color: #f87171;
+}
+
+/* Small pulsing dot next to a quality pill while a VMAF/PSNR/SSIM score is
+   actively being computed — makes "computing" state legible at a glance
+   instead of just another static word in a list of pills. */
+.status-computing-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #67e8f9;
+  vertical-align: middle;
+  animation: status-computing-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes status-computing-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 .hint,
 .muted {

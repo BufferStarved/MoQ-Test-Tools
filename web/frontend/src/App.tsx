@@ -1048,6 +1048,9 @@ function App() {
                                   leg.job.encoder_psnr_db,
                                   leg.job.encoder_ssim,
                                 )}
+                                {isQualityStatusInProgress(leg.job.encoder_vmaf_status) && (
+                                  <span className="status-computing-dot" title="Computing…" />
+                                )}
                               </strong>
                             </div>
                           )}
@@ -1057,6 +1060,9 @@ function App() {
                               <strong className={`pill ${leg.job.vmaf_status ?? "disabled"}`}>
                                 {formatVmafStatus(leg.job.vmaf_status)}
                                 {formatQualityScores(leg.job.vmaf_score, leg.job.psnr_db, leg.job.ssim)}
+                                {isQualityStatusInProgress(leg.job.vmaf_status) && (
+                                  <span className="status-computing-dot" title="Computing…" />
+                                )}
                               </strong>
                             </div>
                           )}
@@ -1180,6 +1186,17 @@ function formatVmafStatus(status?: string | null): string {
     return "disabled";
   }
   return status.replaceAll("_", " ");
+}
+
+/** True while a quality score is actively queued/uploading/computing (not yet
+ * a final completed/failed/disabled state) — used to show the pulsing dot. */
+function isQualityStatusInProgress(status?: string | null): boolean {
+  return (
+    status === "computing" ||
+    status === "uploading_reference" ||
+    status === "waiting_for_upload" ||
+    status === "waiting_for_encode"
+  );
 }
 
 function formatQualityScores(

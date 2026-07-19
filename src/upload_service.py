@@ -132,6 +132,10 @@ class UploadJob:
     cancel_event: Optional[threading.Event] = None
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
+    # JobManager sets this so the UI can show "computing" the moment the
+    # encoder-side VMAF/PSNR/SSIM run actually starts, instead of only ever
+    # seeing "waiting for encode" until the whole job (encode + VMAF) is done.
+    on_encoder_vmaf_status: Optional[Callable[[str], None]] = field(default=None, repr=False)
     ffmpeg_cmd: List[str] = field(default_factory=list, init=False)
     # Allocated once per job for managed Zixi MPEG-TS (Fast HLS timeline fix).
     _zixi_output_ts_offset_sec: Optional[float] = field(default=None, init=False, repr=False)
@@ -1524,6 +1528,11 @@ class UploadService:
         if job.compute_vmaf_encoder:
             capture_path = job.encoder_capture_path
             if capture_path and os.path.exists(capture_path) and os.path.getsize(capture_path) > 0:
+                if job.on_encoder_vmaf_status:
+                    try:
+                        job.on_encoder_vmaf_status("computing")
+                    except Exception:
+                        logger.warning("on_encoder_vmaf_status callback failed", exc_info=True)
                 encoder_result = compute_vmaf(job.media_path, capture_path)
                 if encoder_result is not None:
                     quality_legs["encoder"] = quality_leg_from_vmaf_result(
