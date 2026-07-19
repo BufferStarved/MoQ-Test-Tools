@@ -407,6 +407,8 @@ export default function HlsPlayer({
     let destroyed = false;
     let hlsInstance: { destroy: () => void } | null = null;
     let lastRequestUrl = "";
+    let playRetryTimer: ReturnType<typeof window.setTimeout> | null = null;
+    let lastRecoverMediaErrorAt = 0;
     sessionRef.current = {
       fragmentLoads: 0,
       videoBuffers: 0,
@@ -447,6 +449,35 @@ export default function HlsPlayer({
       if (time > 0.25) {
         pushDiag("video_playback=ok");
       }
+    }
+
+    function attemptPlay() {
+      if (destroyed) {
+        return;
+      }
+      void video.play().catch((err: unknown) => {
+        if (destroyed) {
+          return;
+        }
+        // hls.js reattaching media / swapping the source right after
+        // MANIFEST_PARSED routinely aborts an in-flight play() call — that's
+        // a benign race, not a real browser autoplay policy block (the video
+        // element is already muted, so NotAllowedError shouldn't happen at
+        // all here). Retry briefly instead of permanently failing a stream
+        // that's actually still buffering and playing fine underneath.
+        const name = err instanceof DOMException ? err.name : "";
+        if (name === "AbortError") {
+          pushDiag("play_aborted=retrying");
+          if (playRetryTimer == null) {
+            playRetryTimer = window.setTimeout(() => {
+              playRetryTimer = null;
+              attemptPlay();
+            }, 300);
+          }
+          return;
+        }
+        fail(`Autoplay blocked (${name || "play() rejected"}). Press play on the video controls.`);
+      });
     }
 
     async function start() {
@@ -556,9 +587,7 @@ export default function HlsPlayer({
         sessionRef.current.manifestParsed = true;
         pushDiag("hls_manifest_parsed=ok");
         setStatus("Playing");
-        void video.play().catch(() => {
-          fail("Autoplay blocked. Press play on the video controls.");
-        });
+        attemptPlay();
       });
 
       // When Zixi finally rolls past a stale edge, jump to live instead of
@@ -637,12 +666,23 @@ export default function HlsPlayer({
           pushDiag(`frag_error url=${data.frag?.url ?? lastRequestUrl}`);
         }
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !data.fatal) {
-          pushDiag("media_error_recoverable=trying");
           if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
             sessionRef.current.sawBufferStall = true;
             sessionRef.current.hlsBufferStalls += 1;
           }
-          hls.recoverMediaError();
+          // MediaMTX LL-HLS fills its early live window with #EXT-X-GAP
+          // filler segments — buffering across them can retrigger
+          // BUFFER_STALLED_ERROR immediately after recovery, and with no
+          // cooldown that becomes a tight loop firing thousands of times a
+          // second (seen live: 75k+ "errors" in a 15s job) while playback
+          // was actually fine. recoverMediaError() itself needs time to take
+          // effect — retrying it faster than that just thrashes.
+          const now = Date.now();
+          if (now - lastRecoverMediaErrorAt >= 2000) {
+            lastRecoverMediaErrorAt = now;
+            pushDiag("media_error_recoverable=trying");
+            hls.recoverMediaError();
+          }
         }
         if (!data.fatal) {
           return;
@@ -720,6 +760,10 @@ export default function HlsPlayer({
 
     return () => {
       destroyed = true;
+      if (playRetryTimer != null) {
+        window.clearTimeout(playRetryTimer);
+        playRetryTimer = null;
+      }
       hlsInstance?.destroy();
       video.removeAttribute("src");
       video.load();
