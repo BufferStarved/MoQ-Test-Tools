@@ -32,6 +32,20 @@ In the Benchmark **Run recipe**:
 
 Repo VOD assets (Color Bars / BBB) stay available only for **Cloud VM** encode — they are not shown for This machine.
 
+## Smoke test
+
+With API + agent already running:
+
+```bash
+DURATION=10 ./scripts/smoke-local-publisher.sh
+```
+
+This uploads a synthetic clip (not a VOD preset), asserts local media gates, runs a short
+MediaMTX SRT job through the agent, and checks samples land on the API.
+
+Unit / API gate coverage lives under `tests/test_publisher_*.py`,
+`tests/test_device_webcam.py`, and `tests/test_local_publisher_api_gates.py`.
+
 ## How it works
 
 ```text
