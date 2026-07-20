@@ -4,6 +4,7 @@ import {
   defaultPlaybackModeForProtocol,
   defaultWhepPlaybackUrl,
   isPlaybackModeCompatible,
+  playbackModeLabelForSelection,
   playbackModesForSelection,
   playbackSelectionCopy,
   resolvePlaybackTarget,
@@ -72,7 +73,7 @@ export function StreamPlayer({
   protocol,
   endpointUrl,
   ingestEndpointId,
-  playbackMode = "auto",
+  playbackMode,
   playbackDvr = false,
   whepPlaybackUrl = "",
   moqRelayUrl = "",
@@ -96,14 +97,19 @@ export function StreamPlayer({
   onWhepPlaybackUrlChange,
   compactHeader = false,
 }: StreamPlayerProps) {
+  const resolvedMode =
+    playbackMode && isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
+      ? playbackMode
+      : defaultPlaybackModeForProtocol(protocol, ingestEndpointId);
+
   useEffect(() => {
     if (!onPlaybackModeChange) {
       return;
     }
-    if (!isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)) {
-      onPlaybackModeChange(defaultPlaybackModeForProtocol(protocol, ingestEndpointId));
+    if (playbackMode !== resolvedMode) {
+      onPlaybackModeChange(resolvedMode);
     }
-  }, [playbackMode, protocol, ingestEndpointId, onPlaybackModeChange]);
+  }, [playbackMode, resolvedMode, onPlaybackModeChange]);
 
   const target = useMemo(
     () =>
@@ -111,7 +117,7 @@ export function StreamPlayer({
         protocol,
         endpointUrl,
         ingestEndpointId,
-        playbackMode,
+        playbackMode: resolvedMode,
         playbackDvr,
         whepPlaybackUrl,
         moqRelayUrl,
@@ -124,7 +130,7 @@ export function StreamPlayer({
       protocol,
       endpointUrl,
       ingestEndpointId,
-      playbackMode,
+      resolvedMode,
       playbackDvr,
       whepPlaybackUrl,
       moqRelayUrl,
@@ -135,20 +141,22 @@ export function StreamPlayer({
     ],
   );
 
-  const showWhepField = playbackMode === "whep";
+  const showWhepField = resolvedMode === "whep";
   const whepPlaceholder = defaultWhepPlaybackUrl(
     parseHostSafe(endpointUrl) ?? "34.9.217.178",
     "benchmark",
   );
   const playerModes = playbackModesForSelection(protocol, ingestEndpointId);
-  const selectMode = playerModes.some((item) => item.id === playbackMode)
-    ? playbackMode
-    : defaultPlaybackModeForProtocol(protocol, ingestEndpointId);
-  const selectionCopy = playbackSelectionCopy(selectMode, target, protocol);
+  const selectionCopy = playbackSelectionCopy(
+    resolvedMode,
+    target,
+    protocol,
+    ingestEndpointId,
+  );
   const hlsLowLatency =
-    target.note === "lowLatencyMode" || playbackMode === "ll-hls";
+    target.note === "lowLatencyMode" || resolvedMode === "ll-hls";
   const dashLowLatency =
-    target.note === "lowLatencyDash" || playbackMode === "ll-dash";
+    target.note === "lowLatencyDash" || resolvedMode === "ll-dash";
   // Wait for the per-job MoQ namespace before going live — using the preset
   // default ("benchmark") then flipping causes a Player/MediaSource remount.
   const moqReadyNamespace = (target.moqNamespace || moqNamespace || "").trim();
@@ -176,13 +184,13 @@ export function StreamPlayer({
           <label>
             Video player
             <select
-              value={selectMode}
+              value={resolvedMode}
               onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
               disabled={controlsLocked || playerModes.length <= 1}
             >
               {playerModes.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.label}
+                  {playbackModeLabelForSelection(item.id, protocol, ingestEndpointId)}
                 </option>
               ))}
             </select>

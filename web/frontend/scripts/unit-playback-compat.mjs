@@ -17,8 +17,8 @@ function isZixiManagedIngest(id) {
 }
 
 function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
+  if (mode === "auto") return false;
   if (protocol === "moq") return mode === "moq";
-  if (mode === "auto") return true;
   if (mode === "moq") return false;
   const mediamtx = isMediaMtxManaged(ingestEndpointId);
   const zixi = isZixiManagedIngest(ingestEndpointId);
@@ -35,14 +35,46 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
 
 function defaultPlaybackModeForProtocol(protocol, ingestEndpointId = "") {
   if (protocol === "moq") return "moq";
+  if (protocol === "webrtc") return "whep";
+  if (protocol === "hls") return "mpegts";
   if (isMediaMtxManaged(ingestEndpointId)) return "ll-hls";
-  return "auto";
+  if (isZixiManagedIngest(ingestEndpointId)) return "hls";
+  if (protocol === "dash") return "dash";
+  return "hls";
 }
 
-// Auto defaults used by the site
+function playbackModeLabelForSelection(mode, protocol, ingestEndpointId = "") {
+  const labels = {
+    hls: "HLS Playback (Live)",
+    "ll-hls": "LL-HLS (MediaMTX)",
+    moq: "MoQ Playback (Playa)",
+  };
+  const base = labels[mode] ?? mode;
+  if (mode === defaultPlaybackModeForProtocol(protocol, ingestEndpointId)) {
+    return `${base} (recommended)`;
+  }
+  return base;
+}
+
+// Concrete defaults used by the site (no Auto sentinel)
 assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_mediamtx"), "ll-hls");
-assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "auto");
+assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "hls");
 assert.equal(defaultPlaybackModeForProtocol("moq", "gcp_moq_relay"), "moq");
+assert.equal(defaultPlaybackModeForProtocol("srt", "custom"), "hls");
+
+assert.equal(
+  playbackModeLabelForSelection("ll-hls", "srt", "gcp_mediamtx"),
+  "LL-HLS (MediaMTX) (recommended)",
+);
+assert.equal(
+  playbackModeLabelForSelection("hls", "rtmp", "gcp_zixi"),
+  "HLS Playback (Live) (recommended)",
+);
+assert.equal(playbackModeLabelForSelection("mpegts", "rtmp", "gcp_zixi"), "mpegts");
+
+// Legacy Auto is not selectable
+assert.equal(isPlaybackModeCompatible("auto", "rtmp", "gcp_zixi"), false);
+assert.equal(isPlaybackModeCompatible("auto", "srt", "gcp_mediamtx"), false);
 
 // Zixi must not offer MTX-only or broken embed modes
 for (const mode of ["ll-hls", "ll-dash", "whep", "dash", "zixi-embed", "webrtc", "moq"]) {
@@ -56,7 +88,7 @@ assert.equal(isPlaybackModeCompatible("hls", "rtmp", "gcp_zixi"), true);
 assert.equal(isPlaybackModeCompatible("mpegts", "srt", "gcp_zixi"), true);
 
 // MediaMTX matrix
-for (const mode of ["ll-hls", "ll-dash", "hls", "whep", "auto"]) {
+for (const mode of ["ll-hls", "ll-dash", "hls", "whep"]) {
   assert.equal(isPlaybackModeCompatible(mode, "srt", "gcp_mediamtx"), true, mode);
 }
 assert.equal(isPlaybackModeCompatible("mpegts", "srt", "gcp_mediamtx"), false);

@@ -100,7 +100,7 @@ function buildDefaultEndpoints(): EndpointConfig[] {
       endpointUrl: "",
       vmafAvailable: false,
       serverMetricsAvailable: false,
-      playbackMode: "auto",
+      playbackMode: "hls",
       playbackDvr: false,
     },
   ];
@@ -1113,7 +1113,7 @@ function App() {
 
                     <div className="stream-column-preview">
                       <StreamPlayer
-                        key={`${endpoint.id}:${endpoint.playbackMode ?? "auto"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
+                        key={`${endpoint.id}:${endpoint.playbackMode ?? "default"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
                         title={`Stream ${index + 1}`}
                         compactHeader
                         protocol={endpoint.protocol}

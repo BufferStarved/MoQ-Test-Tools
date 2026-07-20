@@ -15,11 +15,6 @@ const MEDIAMTX_PATH = "benchmark";
 
 export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: string }[] = [
   {
-    id: "auto",
-    label: "Auto (recommended)",
-    hint: "",
-  },
-  {
     id: "hls",
     label: "HLS Playback (Live)",
     hint: "HTTP Live Streaming via hls.js (Zixi Fast HLS or classic).",
@@ -71,12 +66,13 @@ export function isPlaybackModeCompatible(
   protocol: string,
   ingestEndpointId?: string,
 ): boolean {
-  // MoQ ingest only plays through Playa — no Auto / HLS / WHEP fallbacks.
+  // Legacy "auto" is no longer selectable — coerce via defaultPlaybackModeForProtocol.
+  if (mode === "auto") {
+    return false;
+  }
+  // MoQ ingest only plays through Playa — no HLS / WHEP fallbacks.
   if (protocol === "moq") {
     return mode === "moq";
-  }
-  if (mode === "auto") {
-    return true;
   }
   if (mode === "moq") {
     return false;
@@ -110,6 +106,7 @@ export function isPlaybackModeCompatible(
   return false;
 }
 
+/** Concrete default player for a protocol + ingest host (no "auto" sentinel). */
 export function defaultPlaybackModeForProtocol(
   protocol: string,
   ingestEndpointId?: string,
@@ -117,10 +114,23 @@ export function defaultPlaybackModeForProtocol(
   if (protocol === "moq") {
     return "moq";
   }
-  if (isMediaMtxManaged(ingestEndpointId ?? "")) {
+  if (protocol === "webrtc") {
+    return "whep";
+  }
+  if (protocol === "hls") {
+    return "mpegts";
+  }
+  const ingest = ingestEndpointId ?? "";
+  if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
-  return "auto";
+  if (isZixiManagedIngest(ingest)) {
+    return "hls";
+  }
+  if (protocol === "dash") {
+    return "dash";
+  }
+  return "hls";
 }
 
 /** Compatible player options only — keeps MoQ (and other locked paths) uncluttered. */
@@ -131,6 +141,21 @@ export function playbackModesForSelection(
   return PLAYBACK_MODE_OPTIONS.filter((item) =>
     isPlaybackModeCompatible(item.id, protocol, ingestEndpointId),
   );
+}
+
+/** Option / breadcrumb label; marks the host's default player as recommended. */
+export function playbackModeLabelForSelection(
+  mode: PlaybackMode,
+  protocol: string,
+  ingestEndpointId?: string,
+): string {
+  const base =
+    PLAYBACK_MODE_OPTIONS.find((item) => item.id === mode)?.label ??
+    (mode === "moq" ? "MoQ Playback (Playa)" : mode);
+  if (mode === defaultPlaybackModeForProtocol(protocol, ingestEndpointId)) {
+    return base.includes("(recommended)") ? base : `${base} (recommended)`;
+  }
+  return base;
 }
 
 /** Map a resolved playback target back to a concrete mode option (for Auto copy). */
@@ -163,30 +188,24 @@ export function resolvedPlaybackModeOption(target: {
   return PLAYBACK_MODE_OPTIONS.find((item) => item.label === target.label);
 }
 
-/** Label + description shown under the Video player select (including Auto). */
+/** Label + description shown under the Video player select. */
 export function playbackSelectionCopy(
   mode: PlaybackMode,
   target: { engine: string; label: string; note?: string },
   protocol: string,
+  ingestEndpointId?: string,
 ): { label: string; description: string } {
   if (protocol === "moq" || mode === "moq") {
     return {
-      label: "MoQ Playback (Playa)",
+      label: playbackModeLabelForSelection("moq", protocol, ingestEndpointId),
       description: "MoQ ingest plays only through MoQ Playback (Playa).",
     };
   }
-  if (mode === "auto") {
-    const resolved = resolvedPlaybackModeOption(target);
-    return {
-      label: `Auto → ${target.label}`,
-      description:
-        resolved?.hint ||
-        `Automatically selects ${target.label} for this protocol and host.`,
-    };
-  }
-  const option = PLAYBACK_MODE_OPTIONS.find((item) => item.id === mode);
+  const resolvedMode =
+    mode === "auto" ? defaultPlaybackModeForProtocol(protocol, ingestEndpointId) : mode;
+  const option = PLAYBACK_MODE_OPTIONS.find((item) => item.id === resolvedMode);
   return {
-    label: option?.label ?? target.label,
+    label: playbackModeLabelForSelection(resolvedMode, protocol, ingestEndpointId),
     description: option?.hint || target.note || "",
   };
 }
@@ -440,7 +459,10 @@ export function resolvePlaybackTarget(options: {
   zixiStreamId?: string;
   zixiPlaybackStreamId?: string;
 }): PlaybackTarget {
-  const mode = options.playbackMode ?? "auto";
+  const mode =
+    options.playbackMode && options.playbackMode !== "auto"
+      ? options.playbackMode
+      : defaultPlaybackModeForProtocol(options.protocol, options.ingestEndpointId);
   const dvr = options.playbackDvr ?? false;
   const host = parseHost(options.endpointUrl);
   const streamId = parseStreamId(
@@ -603,8 +625,7 @@ export function proxiedPlaybackUrl(remoteUrl: string): string {
 }
 
 export function showWhepUrlField(mode: PlaybackMode | undefined, _protocol?: string): boolean {
-  // Only when explicitly selecting WHEP — Auto uses Zixi HLS for SRT without a gateway URL.
-  return (mode ?? "auto") === "whep";
+  return mode === "whep";
 }
 
 export function showMoqUrlFields(
@@ -615,6 +636,5 @@ export function showMoqUrlFields(
   if (ingestEndpointId && isManagedMoqRelay(ingestEndpointId)) {
     return false;
   }
-  const resolved = mode ?? "auto";
-  return resolved === "moq" || protocol === "moq";
+  return mode === "moq" || protocol === "moq";
 }

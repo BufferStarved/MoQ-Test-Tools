@@ -11,7 +11,7 @@ import {
   isManagedMoqRelay,
   managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
-  playbackModesForSelection,
+  playbackModeLabelForSelection,
   relayWebTransportUrl,
   showMoqUrlFields,
 } from "./playbackUrls";
@@ -82,13 +82,17 @@ function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string 
 }
 
 function playerShortLabel(endpoint: EndpointConfig): string {
-  const modes = playbackModesForSelection(endpoint.protocol, endpoint.ingestEndpointId);
   const mode = endpoint.playbackMode ?? defaultPlaybackModeForProtocol(
     endpoint.protocol,
     endpoint.ingestEndpointId,
   );
-  return modes.find((item) => item.id === mode)?.label
-    ?? (endpoint.protocol === "moq" ? "MoQ Playback (Playa)" : "Auto");
+  return playbackModeLabelForSelection(
+    mode === "auto"
+      ? defaultPlaybackModeForProtocol(endpoint.protocol, endpoint.ingestEndpointId)
+      : mode,
+    endpoint.protocol,
+    endpoint.ingestEndpointId,
+  );
 }
 
 export function EndpointSection({

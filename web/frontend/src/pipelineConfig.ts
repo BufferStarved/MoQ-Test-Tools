@@ -47,7 +47,7 @@ function playbackLabel(mode?: string | null): string {
     case undefined:
     case null:
     case "":
-      return "Auto (host default)";
+      return "Host default player";
     default:
       return mode;
   }
