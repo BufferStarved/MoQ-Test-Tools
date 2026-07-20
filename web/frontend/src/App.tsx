@@ -1343,7 +1343,9 @@ function App() {
                         encodeLadder={leg?.job.encode_ladder ?? encodeLadder}
                         playbackGate={playbackGateForJob(leg?.job, loading)}
                         jobId={leg?.job.id}
-                        encodeStartedAtEpoch={leg?.job.started_at_epoch}
+                        encodeStartedAtEpoch={
+                          leg?.job.first_sample_at_epoch ?? leg?.job.started_at_epoch
+                        }
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;
                           if (!jobId) {

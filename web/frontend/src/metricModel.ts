@@ -180,14 +180,23 @@ export function metricUnavailableMessage(metricKey: string, protocol: ProtocolId
  * Estimated glass-to-glass latency for a realtime encode:
  * (wall clock since encode start) − (media time shown in the player).
  *
+ * `playbackVideoTimeSec` must be *session-relative* (seconds of media played
+ * back in this run), not an absolute/container timestamp — callers rebase
+ * raw `video.currentTime` before calling this (see HlsPlayer's
+ * `sessionRelativeVideoTime` and MoqPlayer's join-relative MSE timeline).
+ * Managed Zixi SRT applies a monotonic `-output_ts_offset` to
+ * `video.currentTime` directly (see src/zixi_ts_offset.py); an un-rebased
+ * absolute value there would corrupt this formula.
+ *
  * This includes intentional live buffers (e.g. HLS liveSyncDurationCount ≈ 2
  * segments). Do not subtract them — the metric is meant to reflect what the
  * viewer experiences, not theoretical transport-only delay.
  * Requires roughly NTP-aligned clocks on browser and publisher host.
  *
- * Caveat: MoQ MSE often remaps the live edge to currentTime≈0 after join, so
- * wall−vt collapses to join delay and stays flat. Prefer
- * {@link estimateMoqE2eLatencyMs} for MoQ.
+ * For MoQ, this collapses to (join wall-clock time − encode start), i.e. the
+ * time-to-join, because MSE remaps the live edge to currentTime≈0 on join.
+ * That is a legitimate glass-to-glass estimate, not an artifact to discard —
+ * see {@link estimateMoqE2eLatencyMs}.
  */
 export function estimateE2eLatencyMs(
   encodeStartedAtEpoch: number | null | undefined,
@@ -211,9 +220,19 @@ export function estimateE2eLatencyMs(
 /**
  * MoQ glass-to-glass estimate.
  *
- * Prefer player-reported CaptureTimestamp latency when present. Otherwise, when
- * wall−vt looks like a stuck join-delay artifact (≫ buffer + target), report
- * buffer lead + a small encode fudge — the MSE timeline is relative to join.
+ * Prefer player-reported CaptureTimestamp latency when present. Otherwise
+ * trust wall−vt: once MSE remaps the live edge to currentTime≈0 on join,
+ * wall−vt reduces to (join time − encode start), i.e. the actual
+ * time-to-join glass-to-glass latency.
+ *
+ * IMPORTANT: do not replace a "large" wall−vt with a small buffer-based
+ * guess here. A previous version treated any wall−vt clearly above the
+ * live buffer as a "stuck timeline artifact" and silently substituted
+ * `bufferSec + 250ms` — which is indistinguishable from, and strictly
+ * smaller than, genuinely high latency. That made slow MoQ joins (e.g.
+ * ~10s glass-to-glass) misreport as the fastest leg in a comparison. Only
+ * fall back to the buffer-based guess when wall−vt is unavailable
+ * (encode start or video time unknown).
  */
 export function estimateMoqE2eLatencyMs(options: {
   encodeStartedAtEpoch?: number | null;
@@ -228,12 +247,15 @@ export function estimateMoqE2eLatencyMs(options: {
   }
 
   const wallVt = estimateE2eLatencyMs(options.encodeStartedAtEpoch, options.videoTimeSec);
-  const bufferMs = Math.max(0, options.bufferSec) * 1000;
-  const target = Math.max(100, options.targetLatencyMs ?? 800);
-
-  if (wallVt != null && bufferMs > 80 && wallVt > bufferMs + target + 500) {
-    // Relative MSE live edge: viewer latency ≈ buffered lead + encode pipeline.
-    return Math.round(bufferMs + 250);
+  if (wallVt != null) {
+    return wallVt;
   }
-  return wallVt;
+
+  // Wall-clock anchor or video time isn't available yet (e.g. before join) —
+  // fall back to a rough buffer-lead guess so the UI has something to show.
+  const bufferMs = Math.max(0, options.bufferSec) * 1000;
+  if (bufferMs <= 0) {
+    return null;
+  }
+  return Math.round(bufferMs + 250);
 }

@@ -120,6 +120,12 @@ export interface UploadJob {
   preview_ready?: boolean;
   created_at: string;
   started_at_epoch?: number | null;
+  /** Wall-clock time of the first sample with real encode data (bitrate/fps
+   * > 0). Prefer this over started_at_epoch for e2e latency: protocol setup
+   * time before frames flow (endpoint probes, Zixi SRT ingest lock wait,
+   * etc.) varies a lot by protocol and otherwise biases cross-protocol
+   * latency comparisons toward whichever protocol takes longer to set up. */
+  first_sample_at_epoch?: number | null;
   csv_path?: string | null;
   summary_path?: string | null;
   error?: string | null;

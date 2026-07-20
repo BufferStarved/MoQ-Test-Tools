@@ -291,6 +291,9 @@ export default function HlsPlayer({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Waiting for encode...");
   const [diagLines, setDiagLines] = useState<string[]>([]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
+  const [elapsedSec, setElapsedSec] = useState(0);
   const lastErrorRef = useRef<string | null>(null);
   const sessionRef = useRef({
     fragmentLoads: 0,
@@ -299,6 +302,15 @@ export default function HlsPlayer({
     manifestParsed: false,
     uniqueFragUrls: new Set<string>(),
     maxVideoTime: 0,
+    // Managed Zixi SRT publishes advance MPEG-TS PTS with a monotonic
+    // -output_ts_offset so the Fast HLS packager survives republish (see
+    // src/zixi_ts_offset.py). That offset lands directly in
+    // video.currentTime, so raw currentTime is an *absolute* stream-lifetime
+    // position, not "seconds into this session" — on a long-lived shared
+    // stream id this can read in the hours. Rebase to session-relative time
+    // from the first currentTime we observe so metrics/UI reflect what the
+    // viewer actually experienced in this run.
+    videoTimeOrigin: null as number | null,
     sawStaleFrag: false,
     sawBufferStall: false,
     hlsErrors: 0,
@@ -308,6 +320,19 @@ export default function HlsPlayer({
     liveStartedAtMs: 0,
     bufferSec: 0,
   });
+
+  function sessionRelativeVideoTime(video: HTMLVideoElement): number {
+    const session = sessionRef.current;
+    const raw = video.currentTime;
+    if (session.videoTimeOrigin == null) {
+      if (raw > 0.05) {
+        session.videoTimeOrigin = raw;
+        return 0;
+      }
+      return 0;
+    }
+    return Math.max(0, raw - session.videoTimeOrigin);
+  }
   const rebufferRef = useRef(new RebufferTracker());
 
   const getPlaybackSnapshot = useCallback(
@@ -416,6 +441,7 @@ export default function HlsPlayer({
       manifestParsed: false,
       uniqueFragUrls: new Set<string>(),
       maxVideoTime: 0,
+      videoTimeOrigin: null,
       sawStaleFrag: false,
       sawBufferStall: false,
       hlsErrors: 0,
@@ -425,6 +451,7 @@ export default function HlsPlayer({
       liveStartedAtMs: Date.now(),
       bufferSec: 0,
     };
+    setElapsedSec(0);
     rebufferRef.current.reset();
 
     function pushDiag(line: string) {
@@ -440,13 +467,14 @@ export default function HlsPlayer({
     }
 
     function noteVideoProgress(source: string) {
-      const time = video.currentTime;
-      sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, time);
+      const relTime = sessionRelativeVideoTime(video);
+      sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
+      setElapsedSec(sessionRef.current.maxVideoTime);
       const { videoWidth, videoHeight } = video;
       pushDiag(
-        `video_${source} time=${time.toFixed(2)} ready=${video.readyState} size=${videoWidth}x${videoHeight}`,
+        `video_${source} time=${relTime.toFixed(2)} (raw=${video.currentTime.toFixed(2)}) ready=${video.readyState} size=${videoWidth}x${videoHeight}`,
       );
-      if (time > 0.25) {
+      if (relTime > 0.25) {
         pushDiag("video_playback=ok");
       }
     }
@@ -730,12 +758,11 @@ export default function HlsPlayer({
         if (destroyed) {
           return;
         }
-        sessionRef.current.maxVideoTime = Math.max(
-          sessionRef.current.maxVideoTime,
-          video.currentTime,
-        );
+        const relTime = sessionRelativeVideoTime(video);
+        sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
+        setElapsedSec(sessionRef.current.maxVideoTime);
         sessionRef.current.bufferSec = bufferedAheadSec(video);
-        if (sessionRef.current.ttffMs <= 0 && video.currentTime > 0.25) {
+        if (sessionRef.current.ttffMs <= 0 && relTime > 0.25) {
           sessionRef.current.ttffMs = Math.max(
             0,
             Date.now() - sessionRef.current.liveStartedAtMs,
@@ -743,6 +770,8 @@ export default function HlsPlayer({
           pushDiag(`ttff_ms=${sessionRef.current.ttffMs}`);
         }
       });
+      video.addEventListener("play", () => setIsPlaying(true));
+      video.addEventListener("pause", () => setIsPlaying(false));
       video.addEventListener("error", () => {
         if (destroyed) {
           return;
@@ -773,9 +802,62 @@ export default function HlsPlayer({
   const gateMessage =
     playbackGate !== "live" ? playbackGateLabel(playbackGate, "hls") : null;
 
+  function togglePlayPause() {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    if (video.paused) {
+      void video.play().catch(() => undefined);
+    } else {
+      video.pause();
+    }
+  }
+
+  function toggleMute() {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
+  }
+
+  function formatElapsed(totalSec: number): string {
+    const safe = Math.max(0, Math.floor(totalSec));
+    const mm = Math.floor(safe / 60);
+    const ss = safe % 60;
+    return `${mm}:${ss.toString().padStart(2, "0")}`;
+  }
+
   return (
     <div className="player-surface">
-      <video ref={videoRef} className="player-video" controls playsInline muted autoPlay />
+      {/*
+        No native `controls` here on purpose. Managed Zixi SRT streams shift
+        video.currentTime by a monotonic Fast-HLS republish offset (see
+        zixi_ts_offset.py), so the browser's own seek bar would show an
+        absolute, ever-growing stream-lifetime position instead of "seconds
+        into this run" — that is what previously looked like "hours of
+        media" while barely anything played. The elapsed readout below is
+        rebased to this session instead.
+      */}
+      <video ref={videoRef} className="player-video" playsInline muted autoPlay />
+      <div className="player-controls">
+        <button
+          type="button"
+          className="ghost-button"
+          disabled={playbackGate !== "live"}
+          onClick={togglePlayPause}
+        >
+          {isPlaying ? "Pause" : "Play"}
+        </button>
+        <button type="button" className="ghost-button" onClick={toggleMute}>
+          {isMuted ? "Unmute" : "Mute"}
+        </button>
+        {playbackGate === "live" && (
+          <span className="hint player-elapsed">Elapsed {formatElapsed(elapsedSec)}</span>
+        )}
+      </div>
       <div className="player-meta">
         <span>{label}</span>
         <span className="hint">{status}</span>

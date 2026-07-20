@@ -14,14 +14,23 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
 # Stay under ~33-bit MPEG-TS wrap (~95_000 s) per Zixi guidance.
 _MAX_OFFSET_SEC = 95_000
 _DEFAULT_STEP_FLOOR_SEC = 300
+# If nobody has published to this Zixi stream id in this long, the packager has
+# almost certainly gone idle/reinitialized on its own — restart our counter at 0
+# instead of accumulating forever. A live site reused across many benchmark runs
+# (same default "SRT Test" stream id) would otherwise walk the offset into the
+# hours within a single day, which surfaces to viewers as an absolute (not
+# session-relative) HLS playhead showing "hours" of media while only the last
+# few seconds are actually buffered/playable.
+_DEFAULT_STALE_RESET_SEC = 1800
 _LOCK = threading.Lock()
 
 _DEFAULT_STATE_DIRS = (
@@ -53,26 +62,40 @@ def _state_path() -> Path:
     return Path("/tmp/moq-web-zixi-ts-offset/zixi_ts_offset.json")
 
 
-def _load(path: Path) -> Dict[str, int]:
+def stale_reset_seconds() -> int:
+    floor = int(
+        os.environ.get("ZIXI_TS_OFFSET_STALE_RESET_SEC", str(_DEFAULT_STALE_RESET_SEC))
+    )
+    return max(0, floor)
+
+
+def _load(path: Path) -> Dict[str, Tuple[int, float]]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
     if not isinstance(raw, dict):
         return {}
-    out: Dict[str, int] = {}
+    out: Dict[str, Tuple[int, float]] = {}
     for key, value in raw.items():
         try:
-            out[str(key)] = int(value)
+            if isinstance(value, dict):
+                out[str(key)] = (int(value.get("index", 0)), float(value.get("updated_at", 0.0)))
+            else:
+                # Legacy format: bare integer index, no timestamp.
+                out[str(key)] = (int(value), 0.0)
         except (TypeError, ValueError):
             continue
     return out
 
 
-def _save(path: Path, data: Dict[str, int]) -> None:
+def _save(path: Path, data: Dict[str, Tuple[int, float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    serializable = {
+        key: {"index": index, "updated_at": updated_at} for key, (index, updated_at) in data.items()
+    }
+    tmp.write_text(json.dumps(serializable, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
@@ -85,7 +108,10 @@ def step_seconds(duration_sec: int) -> int:
 def allocate_output_ts_offset(stream_id: str, *, duration_sec: int) -> float:
     """Return the next offset (seconds) for this stream and persist the counter.
 
-    Returns 0 when disabled or stream_id is empty.
+    Returns 0 when disabled or stream_id is empty. Auto-resets to 0 when the
+    stream id has been idle longer than ``stale_reset_seconds()`` — a long gap
+    means the Zixi Fast HLS packager has almost certainly gone idle on its own,
+    so there is no continuity to preserve and no reason to keep accumulating.
     """
     if not ts_offset_enabled():
         return 0.0
@@ -94,10 +120,20 @@ def allocate_output_ts_offset(stream_id: str, *, duration_sec: int) -> float:
         return 0.0
 
     step = step_seconds(duration_sec)
+    stale_after = stale_reset_seconds()
+    now = time.time()
     path = _state_path()
     with _LOCK:
         data = _load(path)
-        index = int(data.get(key, 0))
+        index, updated_at = data.get(key, (0, 0.0))
+        if stale_after and updated_at and (now - updated_at) > stale_after:
+            logger.info(
+                "Zixi output_ts_offset for '%s' idle %.0fs > %ss threshold; resetting to 0.",
+                key,
+                now - updated_at,
+                stale_after,
+            )
+            index = 0
         offset = index * step
         if offset >= _MAX_OFFSET_SEC:
             logger.warning(
@@ -107,7 +143,7 @@ def allocate_output_ts_offset(stream_id: str, *, duration_sec: int) -> float:
             )
             index = 0
             offset = 0
-        data[key] = index + 1
+        data[key] = (index + 1, now)
         try:
             _save(path, data)
         except OSError:
@@ -117,7 +153,7 @@ def allocate_output_ts_offset(stream_id: str, *, duration_sec: int) -> float:
             key,
             offset,
             step,
-            data[key],
+            index + 1,
         )
         return float(offset)
 

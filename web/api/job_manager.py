@@ -87,6 +87,16 @@ class UploadJobRecord:
     encoder_ssim: Optional[float] = None
     encoder_vmaf_error: Optional[str] = None
     started_at_epoch: Optional[float] = None
+    # Wall-clock time of the first sample carrying real encode data (bitrate
+    # or fps > 0), as opposed to `started_at_epoch` (job thread creation).
+    # Protocol setup cost before frames flow — endpoint probes, Zixi SRT
+    # ingest lock wait, HLS preview gating — varies a lot by protocol, so
+    # anchoring glass-to-glass latency at thread-start biases slower-to-set-up
+    # protocols (e.g. RTMP endpoint probing) toward reporting inflated e2e
+    # latency versus protocols that start encoding sooner. This is the fairer
+    # cross-protocol anchor; started_at_epoch remains as a fallback for
+    # clients that haven't picked up the new field yet.
+    first_sample_at_epoch: Optional[float] = None
     playback_samples: List[dict] = field(default_factory=list)
     playback_engine: str = ""
     publisher_host: str = "cloud"
@@ -268,6 +278,10 @@ class JobManager:
             with self._lock:
                 record = self._jobs.get(job_id)
                 if record:
+                    if record.first_sample_at_epoch is None and (
+                        sample.encoded_bitrate_kbps > 0 or sample.fps > 0
+                    ):
+                        record.first_sample_at_epoch = time.time()
                     self._apply_playback_fields(payload, record.playback_samples)
                     record.samples.append(payload)
 
@@ -615,6 +629,7 @@ class JobManager:
                 encoder_ssim=record.encoder_ssim,
                 encoder_vmaf_error=record.encoder_vmaf_error,
                 started_at_epoch=record.started_at_epoch,
+                first_sample_at_epoch=record.first_sample_at_epoch,
                 playback_samples=list(record.playback_samples),
                 playback_engine=record.playback_engine,
             )

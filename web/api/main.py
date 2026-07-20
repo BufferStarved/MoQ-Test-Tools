@@ -195,6 +195,7 @@ def job_to_dict(job) -> dict:
         "encoder_ssim": job.encoder_ssim,
         "encoder_vmaf_error": job.encoder_vmaf_error,
         "started_at_epoch": job.started_at_epoch,
+        "first_sample_at_epoch": getattr(job, "first_sample_at_epoch", None),
     }
 
 
