@@ -7,6 +7,14 @@ export function webcamCaptureSeconds(): number {
   return LIVE_WEBCAM_MAX_DURATION_SEC;
 }
 
+// A stuck mic permission prompt, a misbehaving audio driver, or (as found
+// during QA) certain sandboxed/headless browser environments can leave
+// getUserMedia({audio: true, ...}) pending forever instead of rejecting —
+// the try/catch fallback below never runs because nothing ever throws. Race
+// against a timeout so a broken audio device degrades to video-only instead
+// of hanging the whole comparison indefinitely.
+const AUDIO_VIDEO_ATTEMPT_TIMEOUT_MS = 6_000;
+
 export async function openWebcamStream(deviceId?: string): Promise<MediaStream> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error("This browser does not support webcam capture (getUserMedia).");
@@ -16,9 +24,21 @@ export async function openWebcamStream(deviceId?: string): Promise<MediaStream> 
     : { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } };
 
   try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video,
+    return await new Promise<MediaStream>((resolve, reject) => {
+      const timer = window.setTimeout(
+        () => reject(new Error("getUserMedia(audio+video) timed out")),
+        AUDIO_VIDEO_ATTEMPT_TIMEOUT_MS,
+      );
+      navigator.mediaDevices.getUserMedia({ audio: true, video }).then(
+        (stream) => {
+          window.clearTimeout(timer);
+          resolve(stream);
+        },
+        (err) => {
+          window.clearTimeout(timer);
+          reject(err);
+        },
+      );
     });
   } catch {
     return navigator.mediaDevices.getUserMedia({ audio: false, video });
@@ -118,6 +138,7 @@ export function startLiveWebcamBroadcast(options: {
     if (maxTimer != null) {
       window.clearTimeout(maxTimer);
     }
+    window.clearTimeout(readyTimer);
     try {
       if (recorder.state !== "inactive") {
         recorder.stop();
@@ -179,14 +200,33 @@ export function startLiveWebcamBroadcast(options: {
     }
   };
 
+  // MediaRecorder blobs form ONE continuous WebM byte stream (this is a
+  // single long-lived recording session, not independent per-chunk files) —
+  // the server ffmpeg bridge depends on receiving bytes in the exact order
+  // they were produced to keep the WebM container framing (clusters/blocks)
+  // valid. `Blob.arrayBuffer()` is async and its resolution order across
+  // separate blobs is not guaranteed by spec, so awaiting each chunk
+  // independently could occasionally send a later chunk before an earlier
+  // one under load/GC pressure, corrupting the byte stream mid-cluster.
+  // ffmpeg's webm demuxer then bails ("truncated cluster"), the bridge
+  // restarts with a fresh PTS clock while downstream SRT/RTMP/MoQ encoders
+  // are still reading the same live feed — surfacing as HLS.js
+  // bufferAppendError crashes and SRT segment churn. Chain sends so byte
+  // order is guaranteed regardless of promise resolution order.
+  let sendChain: Promise<void> = Promise.resolve();
   recorder.ondataavailable = (event) => {
-    if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-      void event.data.arrayBuffer().then((buf) => {
+    if (event.data.size === 0) {
+      return;
+    }
+    const blob = event.data;
+    sendChain = sendChain
+      .then(() => blob.arrayBuffer())
+      .then((buf) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(buf);
         }
-      });
-    }
+      })
+      .catch(() => undefined);
   };
 
   recorder.onerror = () => {

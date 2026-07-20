@@ -105,6 +105,34 @@ def _hls_stale_rolling_threshold_sec(target_latency_ms: int) -> float:
     return max(_HLS_STALE_ROLLING_SEC, (target_latency_ms / 1000.0) * 8.0)
 
 
+_MOQ_PREVIEW_GRACE_SEC_VOD = 8.0
+_MOQ_PREVIEW_GRACE_SEC_LIVE_MIN = 8.0
+_MOQ_PREVIEW_GRACE_SEC_LIVE_MAX = 30.0
+
+
+def moq_preview_ready_grace_sec(media_path: str, duration_sec: float) -> float:
+    """How long to wait for a *confirmed* relay namespace-publish success
+    before falling back to an unconditional "preview ready" (see the
+    MoQ pipeline loop for why lying here is dangerous — a premature "ready"
+    signal makes the frontend start subscribing before openmoq-publisher has
+    announced the namespace, guaranteeing a "no such namespace or track"
+    refusal that eats the frontend's whole retry budget for nothing).
+
+    A live browser-webcam source sits behind a much longer startup chain
+    (browser MediaRecorder -> WS -> ffmpeg bridge -> UDP tee -> this
+    per-destination ffmpeg -> openmoq-publisher) than a VOD file, whose
+    ffmpeg starts reading immediately — so it gets a proportionally longer,
+    but still bounded (capped, and never exceeding the job's own duration),
+    grace period.
+    """
+    if not is_live_media_source(media_path):
+        return _MOQ_PREVIEW_GRACE_SEC_VOD
+    return min(
+        _MOQ_PREVIEW_GRACE_SEC_LIVE_MAX,
+        max(_MOQ_PREVIEW_GRACE_SEC_LIVE_MIN, duration_sec - 5.0),
+    )
+
+
 @dataclass
 class UploadJob:
     media_path: str
@@ -1331,6 +1359,26 @@ class UploadService:
         prev_moqx_retrans = 0
         prev_moqx_sent = 0
 
+        # Establish the moqx relay counter baseline now, before this job's
+        # publisher has had any chance to register its namespace — see
+        # job_manager.py's needs_publish_preview for why this matters (MoQ
+        # has no reliable playback-rate catch-up, so a slow "is it live yet"
+        # signal here becomes a permanent latency floor for the viewer).
+        if moqx_poller.enabled:
+            moqx_poller.poll()
+        preview_ready_notified = False
+        # If moqx metrics are unreachable/disabled, or the relay never shows a
+        # namespace-publish success within this window, don't strand the
+        # player on "waiting" forever — fall back to the old immediate-live
+        # behavior after a bounded grace period. See moq_preview_ready_grace_sec
+        # for why live webcam sources need much more of it than VOD files
+        # (confirmed via QA harness: the old fixed 8s fired *before* the relay
+        # had confirmed the namespace, producing the exact "no such namespace
+        # or track" refusal + wasted retry budget this gate exists to avoid).
+        preview_ready_deadline = start_time + moq_preview_ready_grace_sec(
+            job.media_path, job.duration_sec
+        )
+
         try:
             while time.time() - start_time < job.duration_sec:
                 if job.is_cancelled():
@@ -1364,6 +1412,13 @@ class UploadService:
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
                 moqx_deltas = moqx_poller.job_window_deltas() if moqx_poller.enabled else None
+                if not preview_ready_notified:
+                    publish_confirmed = (
+                        moqx_poller.enabled and moqx_poller.publish_namespace_success_delta() >= 1
+                    )
+                    if publish_confirmed or not moqx_poller.enabled or time.time() >= preview_ready_deadline:
+                        preview_ready_notified = True
+                        self._notify_preview_ready(job, True)
                 quic_stats = qlog_tailer.poll() if qlog_tailer and qlog_tailer.enabled else None
                 path_rtt = path_rtt_probe.poll() if path_rtt_probe.enabled else None
                 elapsed = int(time.time() - start_time)

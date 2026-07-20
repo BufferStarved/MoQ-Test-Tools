@@ -29,6 +29,30 @@ except ImportError:  # pragma: no cover — unit imports without web/api on path
     publisher_hub = None  # type: ignore
 
 
+def needs_publish_preview(
+    protocol: str,
+    *,
+    zixi_stream_id: str = "",
+    ingest_provider: str = "",
+) -> bool:
+    """True when the browser player must wait for a live-readiness signal
+    before subscribing/loading, instead of starting the instant job.status
+    flips to "running".
+
+    Zixi Fast HLS and MediaMTX LL-HLS need a confirmed readable segment.
+    MoQ needs a confirmed relay namespace-publish success — without this,
+    MoqPlayer used to start subscribing before openmoq-publisher had a
+    chance to register the namespace on a live webcam source (browser
+    record -> WS -> bridge ffmpeg -> UDP tee -> per-destination encode ->
+    publisher is a multi-hop chain that can take several seconds), which
+    produced a near-guaranteed "no such namespace or track" refusal, a
+    fixed multi-second retry wait, and — because MoQ has no reliable
+    catch-up without LOC CaptureTimestamps (see moqCatchUpConfig) — a
+    permanent latency floor for the rest of the session.
+    """
+    return bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx" or protocol == "moq"
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -159,11 +183,14 @@ class JobManager:
             or job.destination.ingest_provider
             or ""
         ).strip().lower()
-        # Gate browser HLS until UploadService confirms a readable segment
-        # (Zixi Fast HLS or MediaMTX LL-HLS). HTTP-TS PUT presets are encode-only
-        # on current Broadcaster settings — do not gate them on missing playback.
-        needs_hls_preview = bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx"
-        preview_ready = not needs_hls_preview
+        # HTTP-TS PUT presets are encode-only on current Broadcaster settings —
+        # do not gate them on missing playback. See needs_publish_preview for
+        # why MoQ needs this gate too, not just Zixi/MediaMTX HLS.
+        preview_ready = not needs_publish_preview(
+            job.destination.protocol,
+            zixi_stream_id=zixi_stream_id or "",
+            ingest_provider=ingest_provider,
+        )
 
         publisher_host = (getattr(job, "publisher_host", None) or "cloud").strip().lower()
         if publisher_host not in {"cloud", "local"}:

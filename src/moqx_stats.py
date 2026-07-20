@@ -88,8 +88,22 @@ class MoqxStatsPoller:
                 quic_packet_retransmissions=self._latest.quic_packet_retransmissions,
                 quic_packets_sent=self._latest.quic_packets_sent,
                 quic_bytes_written=self._latest.quic_bytes_written,
+                publish_namespace_success=self._latest.publish_namespace_success,
             )
         return self._latest
+
+    def publish_namespace_success_delta(self) -> int:
+        """This job's own successful namespace publishes since baseline.
+
+        moqx's Prometheus counters are relay-lifetime cumulative, not scoped
+        to a namespace/session — a busy relay can already show 50+ successes
+        before this job's publisher even connects. Callers use this to detect
+        "did *this* job's publish actually go live" without needing a
+        per-namespace metric from moqx.
+        """
+        if self._baseline is None:
+            return 0
+        return max(0, self._latest.publish_namespace_success - self._baseline.publish_namespace_success)
 
     def job_window_deltas(self) -> MoqxStatsSnapshot:
         """Return QUIC counters relative to the first successful poll in this job."""
@@ -151,3 +165,4 @@ class MoqxBaseline:
     quic_packet_retransmissions: int = 0
     quic_packets_sent: int = 0
     quic_bytes_written: int = 0
+    publish_namespace_success: int = 0

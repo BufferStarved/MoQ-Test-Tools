@@ -56,6 +56,16 @@ class LiveWebcamSession:
             f"[f=mpegts:onfail=ignore]udp://127.0.0.1:{port}?pkt_size=1316"
             for port in self.ports
         )
+        # A restart starts a brand-new ffmpeg with PTS at ~0, but the downstream
+        # per-destination SRT/RTMP/MoQ encoders are still reading the same UDP
+        # ports mid-stream. A sudden PTS rewind there breaks HLS.js's MSE
+        # SourceBuffer append (bufferAppendError) and shows up as SRT segment
+        # churn. Keep this restart's timeline above where the session already
+        # is, mirroring the Zixi Fast HLS -output_ts_offset trick.
+        offset_sec = max(0.0, time.time() - self.created_at)
+        offset_args: List[str] = []
+        if offset_sec > 0.5:
+            offset_args = ["-output_ts_offset", f"{offset_sec:.3f}"]
         cmd = [
             ffmpeg,
             "-hide_banner",
@@ -99,6 +109,7 @@ class LiveWebcamSession:
             "48000",
             "-ac",
             "2",
+            *offset_args,
             "-f",
             "tee",
             tee_targets,
