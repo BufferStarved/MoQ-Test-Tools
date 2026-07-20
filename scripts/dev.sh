@@ -40,6 +40,12 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   source "$ROOT_DIR/.env"
   set +a
 fi
+
+# Local publisher agent (laptop ffmpeg) — enabled for dev only.
+# Hosted/prod must NOT set LOCAL_PUBLISHER_ENABLED (cloud VM keeps encoding).
+export LOCAL_PUBLISHER_ENABLED="${LOCAL_PUBLISHER_ENABLED:-1}"
+export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
+
 uvicorn main:app --reload --host 127.0.0.1 --port 8000 --app-dir web/api &
 API_PID=$!
 
@@ -49,6 +55,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "API running at http://127.0.0.1:8000"
+echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN)"
+echo "  In another terminal: ./scripts/run-local-publisher.sh"
 echo "Starting frontend at http://127.0.0.1:5173"
 echo ""
 

@@ -65,6 +65,11 @@ from job_manager import (  # noqa: E402
     list_result_files,
     read_result_summary,
 )
+from publisher_hub import (  # noqa: E402
+    local_publisher_enabled,
+    local_publisher_token,
+    publisher_hub,
+)
 
 UPLOADS_DIR = ROOT_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
@@ -99,6 +104,8 @@ class CreateUploadRequest(BaseModel):
     comparison_id: Optional[str] = None
     stream_index: int = Field(default=0, ge=0, le=9)
     stream_label: str = ""
+    # "cloud" = encode on API host (default). "local" = laptop publisher agent.
+    publisher_host: str = "cloud"
 
 
 def probe_media_duration_sec(media_path: str) -> int:
@@ -163,6 +170,7 @@ def job_to_dict(job) -> dict:
         "preset_id": job.preset_id,
         "encode_ladder": getattr(job, "encode_ladder", None),
         "target_latency_ms": getattr(job, "target_latency_ms", None),
+        "publisher_host": getattr(job, "publisher_host", "cloud"),
         "moq_namespace": job.moq_namespace,
         "zixi_stream_id": job.zixi_stream_id,
         "zixi_playback_stream_id": getattr(job, "zixi_playback_stream_id", None),
@@ -191,6 +199,41 @@ def job_to_dict(job) -> dict:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/features")
+def features():
+    """Feature flags for the UI. Local publisher stays off unless explicitly enabled."""
+    hub = publisher_hub.status()
+    return {
+        "local_publisher": bool(hub.get("enabled")),
+        "local_publisher_connected": bool(hub.get("connected")),
+        "local_publisher_agents": hub.get("agents") or [],
+    }
+
+
+@app.websocket("/api/publisher-agent/ws")
+async def publisher_agent_ws(websocket: WebSocket):
+    """Outbound connection from a laptop publisher agent (dev / future hosted users)."""
+    if not local_publisher_enabled():
+        await websocket.close(code=1008)
+        return
+    token = (websocket.query_params.get("token") or "").strip()
+    if token != local_publisher_token():
+        await websocket.close(code=1008)
+        return
+    agent_id = (websocket.query_params.get("agent_id") or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
+    await websocket.accept()
+    conn = await publisher_hub.register(websocket, agent_id)
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if isinstance(message, dict):
+                await publisher_hub.handle_agent_message(conn, message)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        publisher_hub.unregister(agent_id, websocket)
 
 
 @app.get("/api/encode-profiles")
@@ -658,6 +701,37 @@ def create_upload(request: CreateUploadRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     target_latency_ms = clamp_target_latency_ms(request.target_latency_ms)
 
+    publisher_host = (request.publisher_host or "cloud").strip().lower()
+    if publisher_host not in {"cloud", "local"}:
+        raise HTTPException(status_code=400, detail="publisher_host must be 'cloud' or 'local'")
+    if publisher_host == "local":
+        if not local_publisher_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Local publisher is not enabled on this API. "
+                    "Use ./scripts/dev.sh (sets LOCAL_PUBLISHER_ENABLED=1)."
+                ),
+            )
+        if not publisher_hub.status().get("connected"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No local publisher agent connected. "
+                    "Run ./scripts/run-local-publisher.sh in another terminal."
+                ),
+            )
+        # Encoder VMAF runs on the agent host; leave the flag as requested.
+        # Live webcam UDP bridges still live on the API host — reject for now.
+        if is_live:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Webcam + local publisher is not wired yet "
+                    "(bridge ffmpeg still runs on the API host). Use Color Bars for local publish."
+                ),
+            )
+
     job = UploadJob(
         media_path=media_path,
         destination=destination,
@@ -669,6 +743,7 @@ def create_upload(request: CreateUploadRequest):
         comparison_id=request.comparison_id or "",
         stream_index=request.stream_index,
         stream_label=request.stream_label,
+        publisher_host=publisher_host,
     )
     record = job_manager.create_job(job, preset_id=request.preset_id or destination.preset_id)
     return job_to_dict(record)

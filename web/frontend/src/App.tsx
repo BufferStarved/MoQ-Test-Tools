@@ -4,6 +4,7 @@ import {
   checkHealth,
   createLiveSession,
   createUpload,
+  fetchFeatures,
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
@@ -13,6 +14,7 @@ import {
   resultFilenameFromPath,
   stopUpload,
   subscribeToUpload,
+  type FeatureFlags,
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
 import { ComparisonCharts } from "./ComparisonCharts";
@@ -163,6 +165,12 @@ function App() {
   const [targetLatencyMs, setTargetLatencyMs] = useState(DEFAULT_TARGET_LATENCY_MS);
   const [latencyDraft, setLatencyDraft] = useState(String(DEFAULT_TARGET_LATENCY_MS));
   const [latencyFocused, setLatencyFocused] = useState(false);
+  const [publisherHost, setPublisherHost] = useState<"cloud" | "local">("cloud");
+  const [features, setFeatures] = useState<FeatureFlags>({
+    local_publisher: false,
+    local_publisher_connected: false,
+    local_publisher_agents: [],
+  });
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
   const [encoderVmafUnavailableReason, setEncoderVmafUnavailableReason] = useState<string | null>(null);
   const [vmafUnavailableReason, setVmafUnavailableReason] = useState<string | null>(null);
@@ -228,10 +236,22 @@ function App() {
       await checkHealth();
       setApiOnline(true);
 
-      const [protocolData, presetData] = await Promise.all([fetchProtocols(), fetchPresets()]);
+      const [protocolData, presetData, featureData] = await Promise.all([
+        fetchProtocols(),
+        fetchPresets(),
+        fetchFeatures().catch(() => ({
+          local_publisher: false,
+          local_publisher_connected: false,
+          local_publisher_agents: [],
+        })),
+      ]);
 
       setProtocols(protocolData.protocols);
       setPresets(presetData.presets);
+      setFeatures(featureData);
+      if (!featureData.local_publisher) {
+        setPublisherHost("cloud");
+      }
       setEndpoints((current) =>
         current.length >= MIN_ENDPOINTS ? current : buildDefaultEndpoints(),
       );
@@ -248,6 +268,29 @@ function App() {
   useEffect(() => {
     void loadBootstrapData();
   }, [loadBootstrapData]);
+
+  // Poll agent connection while the local-publisher feature is on.
+  useEffect(() => {
+    if (!apiOnline || !features.local_publisher) {
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await fetchFeatures();
+        if (!cancelled) {
+          setFeatures(next);
+        }
+      } catch {
+        /* ignore transient poll errors */
+      }
+    };
+    const id = window.setInterval(() => void tick(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [apiOnline, features.local_publisher]);
 
   useEffect(() => {
     if (!apiOnline || presets.length === 0) {
@@ -521,6 +564,7 @@ function App() {
     preset_id?: string;
     protocol?: string;
     endpoint_url?: string;
+    publisher_host?: "cloud" | "local";
   } {
     const presetId = resolvePresetId(endpoint);
     const isLive = resolvedMediaPath.toLowerCase().startsWith("udp://");
@@ -535,6 +579,7 @@ function App() {
       comparison_id: comparisonId,
       stream_index: streamIndex,
       stream_label: endpointLabel(endpoint, streamIndex),
+      publisher_host: features.local_publisher ? publisherHost : "cloud",
       ...(isCustomIngestEndpoint(endpoint.ingestEndpointId)
         ? {
             protocol: endpoint.protocol,
@@ -684,6 +729,21 @@ function App() {
       setError("Enter an endpoint URL for streams using Custom URL.");
       setLoading(false);
       return;
+    }
+
+    if (features.local_publisher && publisherHost === "local") {
+      if (!features.local_publisher_connected) {
+        setError(
+          "Local publisher selected but no agent is connected. Run ./scripts/run-local-publisher.sh",
+        );
+        setLoading(false);
+        return;
+      }
+      if (mediaSource === "webcam") {
+        setError("Webcam is not supported with local publisher yet. Use Color Bars.");
+        setLoading(false);
+        return;
+      }
     }
 
     try {
@@ -896,6 +956,11 @@ function App() {
                   {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
                     encodeLadder}{" "}
                   · {targetLatencyMs} ms
+                  {features.local_publisher
+                    ? publisherHost === "local"
+                      ? " · This machine"
+                      : " · Cloud encode"
+                    : ""}
                   {computeVmaf && mediaSource !== "webcam" ? " · VMAF on" : ""}
                 </span>
               </button>
@@ -903,6 +968,42 @@ function App() {
               {recipeOpen && (
                 <>
                   <div className="benchmark-shared-grid">
+                    {features.local_publisher && (
+                      <div className="source-media-section">
+                        <h3>Publisher</h3>
+                        <label>
+                          Where ffmpeg runs
+                          <select
+                            value={publisherHost}
+                            onChange={(e) => {
+                              const next = e.target.value as "cloud" | "local";
+                              setPublisherHost(next);
+                              if (next === "local" && mediaSource === "webcam") {
+                                setMediaSource("dummy");
+                                setMediaPath("dummy.mp4");
+                                setMediaLabel("Default Color Bars");
+                              }
+                            }}
+                            disabled={bootstrapping || !apiOnline || loading}
+                          >
+                            <option value="cloud">Cloud VM (API host)</option>
+                            <option value="local">This machine (local agent)</option>
+                          </select>
+                          <span className="field-hint">
+                            {publisherHost === "local"
+                              ? features.local_publisher_connected
+                                ? `Agent connected${
+                                    features.local_publisher_agents[0]?.hostname
+                                      ? ` · ${features.local_publisher_agents[0].hostname}`
+                                      : ""
+                                  }`
+                                : "Waiting for agent — run ./scripts/run-local-publisher.sh"
+                              : "Encode on the API host (datacenter path, not last-mile)."}
+                          </span>
+                        </label>
+                      </div>
+                    )}
+
                     <div className="source-media-section">
                       <h3>Media</h3>
                       <label>
@@ -926,7 +1027,10 @@ function App() {
                           <option value="bbb" disabled>
                             Big Buck Bunny (coming soon)
                           </option>
-                          <option value="webcam">Webcam</option>
+                          <option value="webcam" disabled={publisherHost === "local"}>
+                            Webcam
+                            {publisherHost === "local" ? " (cloud publisher only for now)" : ""}
+                          </option>
                         </select>
                         {mediaSource === "dummy" && (
                           <span className="field-hint">

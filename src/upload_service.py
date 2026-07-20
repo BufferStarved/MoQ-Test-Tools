@@ -129,6 +129,9 @@ class UploadJob:
     distorted_path: str = ""
     encoder_capture_path: str = ""
     compute_vmaf: bool = False
+    # "cloud" = encode on the API host (default). "local" = dispatch to a
+    # connected publisher agent (laptop) for true internet-acquisition tests.
+    publisher_host: str = "cloud"
     cancel_event: Optional[threading.Event] = None
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)

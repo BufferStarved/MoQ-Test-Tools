@@ -22,6 +22,12 @@ from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback
 from quality_metrics import patch_summary_quality_leg
 from upload_service import UploadJob, UploadSample, UploadService
 
+try:
+    from publisher_hub import local_publisher_enabled, publisher_hub
+except ImportError:  # pragma: no cover — unit imports without web/api on path
+    local_publisher_enabled = lambda: False  # type: ignore
+    publisher_hub = None  # type: ignore
+
 
 class JobStatus(str, Enum):
     PENDING = "pending"
@@ -83,6 +89,7 @@ class UploadJobRecord:
     started_at_epoch: Optional[float] = None
     playback_samples: List[dict] = field(default_factory=list)
     playback_engine: str = ""
+    publisher_host: str = "cloud"
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
@@ -148,6 +155,11 @@ class JobManager:
         needs_hls_preview = bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx"
         preview_ready = not needs_hls_preview
 
+        publisher_host = (getattr(job, "publisher_host", None) or "cloud").strip().lower()
+        if publisher_host not in {"cloud", "local"}:
+            publisher_host = "cloud"
+        job.publisher_host = publisher_host
+
         record = UploadJobRecord(
             id=job_id,
             status=JobStatus.PENDING,
@@ -164,6 +176,7 @@ class JobManager:
             compute_vmaf_encoder=job.compute_vmaf_encoder,
             encode_ladder=job.encode_ladder,
             target_latency_ms=job.target_latency_ms,
+            publisher_host=publisher_host,
             vmaf_status=(
                 VmafStatus.WAITING_FOR_UPLOAD.value
                 if job.compute_vmaf_on_ingest
@@ -258,7 +271,26 @@ class JobManager:
                     self._apply_playback_fields(payload, record.playback_samples)
                     record.samples.append(payload)
 
-        result = self._service.run(job, on_sample=on_sample)
+        if job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
+            result = publisher_hub.run_remote(
+                job,
+                on_sample=on_sample,
+                on_preview_ready=job.on_preview_ready,
+                on_encoder_vmaf_status=job.on_encoder_vmaf_status,
+            )
+        else:
+            if job.publisher_host == "local" and not local_publisher_enabled():
+                from upload_service import UploadResult as _UploadResult
+
+                result = _UploadResult(
+                    success=False,
+                    error=(
+                        "publisher_host=local requires LOCAL_PUBLISHER_ENABLED=1 "
+                        "(use ./scripts/dev.sh + ./scripts/run-local-publisher.sh)."
+                    ),
+                )
+            else:
+                result = self._service.run(job, on_sample=on_sample)
         end_epoch = time.time()
 
         try:
@@ -569,6 +601,9 @@ class JobManager:
                 samples=list(record.samples),
                 compute_vmaf_on_ingest=record.compute_vmaf_on_ingest,
                 compute_vmaf_encoder=record.compute_vmaf_encoder,
+                encode_ladder=record.encode_ladder,
+                target_latency_ms=record.target_latency_ms,
+                publisher_host=record.publisher_host,
                 vmaf_status=record.vmaf_status,
                 vmaf_score=record.vmaf_score,
                 psnr_db=record.psnr_db,
@@ -604,6 +639,9 @@ class JobManager:
                     summary_path=record.summary_path,
                     error=record.error,
                     samples=[],
+                    encode_ladder=record.encode_ladder,
+                    target_latency_ms=record.target_latency_ms,
+                    publisher_host=record.publisher_host,
                     compute_vmaf_on_ingest=record.compute_vmaf_on_ingest,
                     compute_vmaf_encoder=record.compute_vmaf_encoder,
                     vmaf_status=record.vmaf_status,

@@ -36,6 +36,24 @@ export function checkHealth(): Promise<{ status: string }> {
   return request("/health");
 }
 
+export interface LocalPublisherAgentInfo {
+  agent_id: string;
+  hostname: string;
+  ready?: boolean;
+  platform?: string;
+  active_jobs?: number;
+}
+
+export interface FeatureFlags {
+  local_publisher: boolean;
+  local_publisher_connected: boolean;
+  local_publisher_agents: LocalPublisherAgentInfo[];
+}
+
+export function fetchFeatures(): Promise<FeatureFlags> {
+  return request("/features");
+}
+
 export function fetchProtocols(): Promise<{ protocols: Protocol[] }> {
   return request("/protocols");
 }
@@ -106,6 +124,7 @@ export function createUpload(payload: {
   comparison_id?: string;
   stream_index?: number;
   stream_label?: string;
+  publisher_host?: "cloud" | "local";
 }): Promise<UploadJob> {
   return request("/uploads", {
     method: "POST",

@@ -73,6 +73,16 @@ npm install --prefix web/frontend
 - API: http://127.0.0.1:8000
 - Frontend: http://127.0.0.1:5173
 
+### Local publisher (laptop ffmpeg)
+
+For a true internet-acquisition path (encode on your machine → remote ingest), run a second terminal:
+
+```bash
+./scripts/run-local-publisher.sh
+```
+
+Then in Benchmark → Run recipe → **Publisher → This machine**. See [docs/LOCAL-PUBLISHER.md](docs/LOCAL-PUBLISHER.md). The hosted site keeps cloud encoding; this flag is for local/dev (and future opt-in).
+
 Use the **Benchmark** tab to configure streams and start a comparison. Live charts update during the run; when it finishes, open **Session Details** for the scorecard and CSV/JSON downloads. **About** covers architecture and contact info.
 
 ### CLI
@@ -180,11 +190,14 @@ moq-test-tools/
 │   ├── moqx/               # MoQ relay Terraform + runbooks
 │   └── zixi/               # Zixi ingest Terraform + runbooks
 ├── ingest_agent/           # Recording, media health, VMAF sidecar
-├── scripts/dev.sh          # Start API + frontend
-├── results/                # Benchmark output (gitignored)
+├── scripts/dev.sh                 # Start API + frontend
+├── scripts/run-local-publisher.sh # Laptop ffmpeg agent
+├── publisher_agent/               # Local publisher agent package
+├── results/                       # Benchmark output (gitignored)
 └── docs/
-    ├── ARCHITECTURE.md     # System design
-    └── METRICS.md          # Metric definitions and sources
+    ├── ARCHITECTURE.md            # System design
+    ├── LOCAL-PUBLISHER.md         # Laptop encode / agent
+    └── METRICS.md                 # Metric definitions and sources
 ```
 
 ## Deployment

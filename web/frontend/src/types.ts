@@ -110,6 +110,7 @@ export interface UploadJob {
   preset_id?: string;
   encode_ladder?: string | null;
   target_latency_ms?: number | null;
+  publisher_host?: "cloud" | "local" | string | null;
   moq_namespace?: string | null;
   zixi_stream_id?: string | null;
   /** Error-concealed derived stream for HLS playback, when Zixi concealment

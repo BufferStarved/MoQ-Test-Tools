@@ -123,6 +123,28 @@ def zixi_http_push_stream_id_for_preset(preset_id: str) -> Optional[str]:
     return None
 
 
+def mediamtx_loopback_enabled() -> bool:
+    """Whether publish URLs should rewrite MediaMTX's public IP → 127.0.0.1.
+
+    Required on the co-located web VM (hairpin to the external IP fails).
+    Must stay **off** on laptop publisher agents and other remote encoders.
+    """
+    raw = (os.environ.get("MEDIAMTX_LOOPBACK_PUBLISH") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Auto-detect: MediaMTX control API on loopback (present on moq-web, not laptops).
+    try:
+        import urllib.error
+        import urllib.request
+
+        urllib.request.urlopen("http://127.0.0.1:9997/v3/config/global/get", timeout=0.25)
+        return True
+    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
 def mediamtx_loopback_publish_url(url: str) -> str:
     """Rewrite co-located MediaMTX public host → 127.0.0.1 for ffmpeg publish.
 
@@ -130,9 +152,11 @@ def mediamtx_loopback_publish_url(url: str) -> str:
     SRT/RTMP/WHIP from moq-web to ``34.x.x.x`` often dies after a few seconds.
     Browser playback URLs keep the public host; only the publish endpoint is
     localized. Override with ``MEDIAMTX_PUBLIC_HOST`` (comma-separated hosts).
+
+    Set ``MEDIAMTX_LOOPBACK_PUBLISH=0`` on local publisher agents.
     """
     text = (url or "").strip()
-    if not text:
+    if not text or not mediamtx_loopback_enabled():
         return url
     hosts = [
         h.strip()
