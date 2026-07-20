@@ -128,21 +128,18 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="encoded_bitrate_kbps"
               data={points}
               series={comparisonSeries(activeLegs, "encoded_bitrate_kbps", "kbps")}
-              height={280}
             />
             <MetricChart
               title="Frame rate"
               metricKey="fps"
               data={points}
               series={comparisonSeries(activeLegs, "fps", "fps")}
-              height={280}
             />
             <MetricChart
               title="Send rate"
               metricKey="net_send_mbps"
               data={points}
               series={comparisonSeries(activeLegs, "net_send_mbps", "Mbps")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -150,7 +147,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="memory_mb"
               data={points}
               series={comparisonSeries(activeLegs, "memory_mb", "MB")}
-              height={260}
               keepZeroSeries
             />
             <MetricChart
@@ -158,7 +154,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
-              height={260}
               keepZeroSeries
             />
             {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) && (
@@ -167,7 +162,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="encode_lag_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
-                height={260}
               />
             )}
             {comparisonHasMetric(points, "fps_stability", activeLegs.length) && (
@@ -176,7 +170,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="fps_stability"
                 data={points}
                 series={comparisonSeries(activeLegs, "fps_stability", "cv")}
-                height={260}
               />
             )}
             {comparisonHasMetric(points, "speed", activeLegs.length) && (
@@ -185,7 +178,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="speed"
                 data={points}
                 series={comparisonSeries(activeLegs, "speed", "x")}
-                height={260}
               />
             )}
             <MetricChart
@@ -193,7 +185,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="vmaf_score_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "vmaf_score_encoder", "score")}
-              height={280}
+
               yDomain={[0, 100]}
               keepZeroSeries
             />
@@ -202,7 +194,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="psnr_db_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "psnr_db_encoder", "dB")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -210,7 +201,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="ssim_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "ssim_encoder", "score")}
-              height={280}
+
               yDomain={[0, 1]}
               keepZeroSeries
             />
@@ -224,14 +215,12 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "cpu_percent", "%")}
-              height={260}
             />
             <MetricChart
               title="Process memory"
               metricKey="memory_mb"
               data={points}
               series={comparisonSeries(activeLegs, "memory_mb", "MB")}
-              height={260}
             />
           </>
         )}
@@ -253,35 +242,30 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="net_rtt_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_rtt_ms", "ms")}
-              height={280}
             />
             <MetricChart
               title="Server network jitter"
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
-              height={260}
             />
             <MetricChart
               title="Server CPU"
               metricKey="server_cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_cpu_percent", "%")}
-              height={280}
             />
             <MetricChart
               title="Server memory"
               metricKey="server_memory_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_memory_percent", "%")}
-              height={280}
             />
             <MetricChart
               title="Path loss %"
               metricKey="net_loss_pct"
               data={points}
               series={comparisonSeries(activeLegs, "net_loss_pct", "%")}
-              height={260}
               keepZeroSeries
             />
             <MetricChart
@@ -289,7 +273,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="net_retrans_pct"
               data={points}
               series={comparisonSeries(activeLegs, "net_retrans_pct", "%")}
-              height={260}
               keepZeroSeries
             />
             {hasMoqLeg && (
@@ -299,7 +282,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                   metricKey="quic_packets_lost"
                   data={points}
                   series={comparisonSeries(activeLegs, "quic_packets_lost", "pkts")}
-                  height={260}
                   keepZeroSeries
                 />
                 {comparisonHasMetric(points, "quic_cwnd_bytes", activeLegs.length) && (
@@ -308,7 +290,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                     metricKey="quic_cwnd_bytes"
                     data={points}
                     series={comparisonSeries(activeLegs, "quic_cwnd_bytes", "bytes")}
-                    height={260}
                   />
                 )}
               </>
@@ -319,7 +300,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="pkt_fec_extra"
                 data={points}
                 series={comparisonSeries(activeLegs, "pkt_fec_extra", "pkts")}
-                height={260}
                 keepZeroSeries
               />
             )}
@@ -328,7 +308,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="vmaf_score_ingest"
               data={points}
               series={comparisonSeries(activeLegs, "vmaf_score_ingest", "score")}
-              height={280}
+
               yDomain={[0, 100]}
               keepZeroSeries
             />
@@ -337,7 +317,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="psnr_db_ingest"
               data={points}
               series={comparisonSeries(activeLegs, "psnr_db_ingest", "dB")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -345,7 +324,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="ssim_ingest"
               data={points}
               series={comparisonSeries(activeLegs, "ssim_ingest", "score")}
-              height={280}
+
               yDomain={[0, 1]}
               keepZeroSeries
             />
@@ -370,7 +349,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="ts_continuity_counter_errors"
                 data={points}
                 series={comparisonSeries(activeLegs, "ts_continuity_counter_errors", "count")}
-                height={260}
               />
             )}
             {comparisonHasMetric(points, "cmaf_seq_gap_count", activeLegs.length) && (
@@ -379,7 +357,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="cmaf_seq_gap_count"
                 data={points}
                 series={comparisonSeries(activeLegs, "cmaf_seq_gap_count", "count")}
-                height={260}
               />
             )}
             {comparisonHasMetric(points, "cmaf_tfdt_gap_count", activeLegs.length) && (
@@ -388,7 +365,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="cmaf_tfdt_gap_count"
                 data={points}
                 series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_count", "count")}
-                height={220}
               />
             )}
             {comparisonHasMetric(points, "cmaf_tfdt_gap_ms", activeLegs.length) && (
@@ -397,7 +373,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="cmaf_tfdt_gap_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_ms", "ms")}
-                height={220}
               />
             )}
             {comparisonHasMetric(points, "cmaf_parse_errors", activeLegs.length) && (
@@ -406,7 +381,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="cmaf_parse_errors"
                 data={points}
                 series={comparisonSeries(activeLegs, "cmaf_parse_errors", "count")}
-                height={220}
               />
             )}
           </>
@@ -420,7 +394,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "e2e_latency_ms", "ms")}
-                height={260}
               />
             )}
             {comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) && (
@@ -429,7 +402,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_ttff_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_ttff_ms", "ms")}
-                height={220}
               />
             )}
             {(comparisonHasMetricPresent(points, "playback_stall_count", activeLegs.length) ||
@@ -440,7 +412,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_stall_count"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_stall_count", "count")}
-                height={260}
                 keepZeroSeries
               />
             )}
@@ -450,7 +421,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_rebuffer_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_rebuffer_sec", "s")}
-                height={220}
                 keepZeroSeries
               />
             )}
@@ -460,7 +430,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_buffer_sec", "s")}
-                height={220}
               />
             )}
             {comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length) && (
@@ -469,7 +438,6 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_video_time_sec", "s")}
-                height={220}
               />
             )}
           </>

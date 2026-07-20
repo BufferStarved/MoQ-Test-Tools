@@ -87,7 +87,7 @@ export function MetricChart({
   metricKey,
   data,
   series,
-  height = 220,
+  height = 180,
   yDomain,
   keepZeroSeries = false,
 }: MetricChartProps) {

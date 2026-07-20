@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   checkHealth,
@@ -28,6 +28,8 @@ import { buildComparisonVerdict } from "./comparisonVerdict";
 import { protocolColor, protocolLabel } from "./protocolTheme";
 import { TopSummaryStrip } from "./TopSummaryStrip";
 import { ToastStack, useToasts } from "./Toast";
+import { PipelineConfigDetails } from "./PipelineConfigDetails";
+import { buildRecipePipelineSections } from "./pipelineConfig";
 import {
   INGEST_ENDPOINTS,
   defaultIngestForProtocol,
@@ -159,6 +161,8 @@ function App() {
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
   const [targetLatencyMs, setTargetLatencyMs] = useState(DEFAULT_TARGET_LATENCY_MS);
+  const [latencyDraft, setLatencyDraft] = useState(String(DEFAULT_TARGET_LATENCY_MS));
+  const [latencyFocused, setLatencyFocused] = useState(false);
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
   const [encoderVmafUnavailableReason, setEncoderVmafUnavailableReason] = useState<string | null>(null);
   const [vmafUnavailableReason, setVmafUnavailableReason] = useState<string | null>(null);
@@ -190,6 +194,31 @@ function App() {
         `${endpoint.id}:${endpoint.ingestEndpointId}:${endpoint.endpointUrl}:${endpoint.protocol}`,
     )
     .join("|");
+  const pipelineSections = useMemo(
+    () => buildRecipePipelineSections(encodeLadder, targetLatencyMs, endpoints),
+    [encodeLadder, targetLatencyMs, endpoints],
+  );
+
+  const commitLatencyDraft = useCallback((raw: string) => {
+    const parsed = Number(raw.trim());
+    const next = clampTargetLatencyMs(Number.isFinite(parsed) ? parsed : DEFAULT_TARGET_LATENCY_MS);
+    setTargetLatencyMs(next);
+    setLatencyDraft(String(next));
+  }, []);
+
+  const nudgeLatency = useCallback((delta: number) => {
+    setTargetLatencyMs((current) => {
+      const next = clampTargetLatencyMs(current + delta);
+      setLatencyDraft(String(next));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!latencyFocused) {
+      setLatencyDraft(String(targetLatencyMs));
+    }
+  }, [targetLatencyMs, latencyFocused]);
 
   const loadBootstrapData = useCallback(async () => {
     setBootstrapping(true);
@@ -858,127 +887,175 @@ function App() {
                 </span>
                 <span className="recipe-toggle-title">Run recipe</span>
                 <span className="recipe-toggle-summary">
-                  {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
-                    encodeLadder}{" "}
-                  · {targetLatencyMs} ms ·{" "}
                   {mediaSource === "webcam"
                     ? "Webcam"
                     : mediaSource === "dummy"
                       ? "Color bars"
-                      : mediaLabel}
+                      : mediaLabel}{" "}
+                  ·{" "}
+                  {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
+                    encodeLadder}{" "}
+                  · {targetLatencyMs} ms
                   {computeVmaf && mediaSource !== "webcam" ? " · VMAF on" : ""}
                 </span>
               </button>
 
               {recipeOpen && (
-                <div className="benchmark-shared-grid">
-                  <div className="source-media-section">
-                    <h3>Encode profile</h3>
-                    <div className="encode-profile-grid">
+                <>
+                  <div className="benchmark-shared-grid">
+                    <div className="source-media-section">
+                      <h3>Media</h3>
                       <label>
-                        Target bitrate / resolution
+                        Source
                         <select
-                          value={encodeLadder}
-                          onChange={(e) => setEncodeLadder(e.target.value)}
-                          disabled={bootstrapping || !apiOnline || loading}
+                          value={mediaSource}
+                          onChange={(e) => {
+                            const next = e.target.value as MediaSourceId;
+                            setMediaSource(next);
+                            if (next === "dummy") {
+                              setMediaPath("dummy.mp4");
+                              setMediaLabel("Default Color Bars");
+                            } else if (next === "bbb") {
+                              setMediaLabel("Big Buck Bunny (coming soon)");
+                            } else {
+                              setMediaLabel("Webcam");
+                            }
+                          }}
                         >
-                          {ENCODE_LADDER_OPTIONS.map((ladder) => (
-                            <option key={ladder.id} value={ladder.id}>
-                              {ladder.label}
-                            </option>
-                          ))}
+                          <option value="dummy">Default Color Bars</option>
+                          <option value="bbb" disabled>
+                            Big Buck Bunny (coming soon)
+                          </option>
+                          <option value="webcam">Webcam</option>
                         </select>
+                        {mediaSource === "dummy" && (
+                          <span className="field-hint">
+                            Color Bars with time counter, 60 second asset
+                          </span>
+                        )}
+                        {mediaSource !== "webcam" && mediaSource !== "dummy" && (
+                          <span className="field-hint">Using: {mediaLabel}</span>
+                        )}
                       </label>
-                      <label>
-                        Target latency (ms)
+                      {mediaSource === "webcam" && (
+                        <div className="webcam-preview-block">
+                          <video
+                            ref={webcamPreviewRef}
+                            className="webcam-preview"
+                            muted
+                            playsInline
+                            autoPlay
+                          />
+                          <span className="field-hint">
+                            {webcamStatus ??
+                              `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="source-media-section">
+                      <h3>Encode profile</h3>
+                      <div className="encode-profile-grid">
+                        <label>
+                          Target bitrate / resolution
+                          <select
+                            value={encodeLadder}
+                            onChange={(e) => setEncodeLadder(e.target.value)}
+                            disabled={bootstrapping || !apiOnline || loading}
+                          >
+                            {ENCODE_LADDER_OPTIONS.map((ladder) => (
+                              <option key={ladder.id} value={ladder.id}>
+                                {ladder.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Target latency (ms)
+                          <div className="latency-input-row">
+                            <button
+                              type="button"
+                              className="latency-nudge"
+                              disabled={bootstrapping || !apiOnline || loading}
+                              onClick={() => nudgeLatency(-100)}
+                              aria-label="Decrease latency by 100 ms"
+                            >
+                              −100
+                            </button>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              autoComplete="off"
+                              spellCheck={false}
+                              value={latencyDraft}
+                              disabled={bootstrapping || !apiOnline || loading}
+                              onFocus={() => setLatencyFocused(true)}
+                              onChange={(e) => {
+                                const next = e.target.value.replace(/[^\d]/g, "");
+                                setLatencyDraft(next);
+                              }}
+                              onBlur={(e) => {
+                                setLatencyFocused(false);
+                                commitLatencyDraft(e.target.value);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.currentTarget.blur();
+                                } else if (e.key === "ArrowUp") {
+                                  e.preventDefault();
+                                  nudgeLatency(e.shiftKey ? 100 : 50);
+                                } else if (e.key === "ArrowDown") {
+                                  e.preventDefault();
+                                  nudgeLatency(e.shiftKey ? -100 : -50);
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="latency-nudge"
+                              disabled={bootstrapping || !apiOnline || loading}
+                              onClick={() => nudgeLatency(100)}
+                              aria-label="Increase latency by 100 ms"
+                            >
+                              +100
+                            </button>
+                          </div>
+                          <span className="field-hint">
+                            Type a value ({MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS}), use ±100,
+                            or ↑/↓ (Shift for ±100). Tunes GOP/VBV, SRT latency, MoQ catch-up, HLS
+                            buffer.
+                          </span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="vmaf-section">
+                      <h3>Quality</h3>
+                      <label className="checkbox-row">
                         <input
-                          type="number"
-                          min={MIN_TARGET_LATENCY_MS}
-                          max={MAX_TARGET_LATENCY_MS}
-                          step={50}
-                          value={targetLatencyMs}
-                          disabled={bootstrapping || !apiOnline || loading}
-                          onChange={(e) =>
-                            setTargetLatencyMs(clampTargetLatencyMs(Number(e.target.value)))
-                          }
+                          type="checkbox"
+                          checked={computeVmaf && mediaSource !== "webcam"}
+                          disabled={!vmafSelectable || mediaSource === "webcam"}
+                          onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
-                        <span className="field-hint">
-                          Tunes encoder GOP/VBV, SRT/Zixi latency, MoQ catch-up, and HLS live buffer.
-                        </span>
+                        <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
                       </label>
+                      <span className="field-hint">
+                        Encoder scores local capture; ingest scores the remote recording.
+                      </span>
+                      {vmafUnavailableReason && (
+                        <span className="field-hint">{vmafUnavailableReason}</span>
+                      )}
                     </div>
                   </div>
 
-                  <div className="source-media-section">
-                    <h3>Media</h3>
-                    <label>
-                      Source
-                      <select
-                        value={mediaSource}
-                        onChange={(e) => {
-                          const next = e.target.value as MediaSourceId;
-                          setMediaSource(next);
-                          if (next === "dummy") {
-                            setMediaPath("dummy.mp4");
-                            setMediaLabel("Default Color Bars");
-                          } else if (next === "bbb") {
-                            setMediaLabel("Big Buck Bunny (coming soon)");
-                          } else {
-                            setMediaLabel("Webcam");
-                          }
-                        }}
-                      >
-                        <option value="dummy">Default Color Bars</option>
-                        <option value="bbb" disabled>
-                          Big Buck Bunny (coming soon)
-                        </option>
-                        <option value="webcam">Webcam</option>
-                      </select>
-                      {mediaSource === "dummy" && (
-                        <span className="field-hint">
-                          Color Bars with time counter, 60 second asset
-                        </span>
-                      )}
-                      {mediaSource !== "webcam" && mediaSource !== "dummy" && (
-                        <span className="field-hint">Using: {mediaLabel}</span>
-                      )}
-                    </label>
-                    {mediaSource === "webcam" && (
-                      <div className="webcam-preview-block">
-                        <video
-                          ref={webcamPreviewRef}
-                          className="webcam-preview"
-                          muted
-                          playsInline
-                          autoPlay
-                        />
-                        <span className="field-hint">
-                          {webcamStatus ??
-                            `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="vmaf-section">
-                    <h3>Quality</h3>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={computeVmaf && mediaSource !== "webcam"}
-                        disabled={!vmafSelectable || mediaSource === "webcam"}
-                        onChange={(e) => setComputeVmaf(e.target.checked)}
-                      />
-                      <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
-                    </label>
-                    <span className="field-hint">
-                      Encoder scores local capture; ingest scores the remote recording.
-                    </span>
-                    {vmafUnavailableReason && (
-                      <span className="field-hint">{vmafUnavailableReason}</span>
-                    )}
-                  </div>
-                </div>
+                  <PipelineConfigDetails
+                    sections={pipelineSections}
+                    buttonLabel="View pipeline config"
+                  />
+                </>
               )}
 
               {error && <p className="error">{error}</p>}

@@ -111,21 +111,18 @@ export function ResultCharts({
               metricKey="encoded_bitrate_kbps"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "encoded_bitrate_kbps")}
-              height={280}
             />
             <MetricChart
               title="Frame rate"
               metricKey="fps"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "fps")}
-              height={280}
             />
             <MetricChart
               title="Send rate"
               metricKey="net_send_mbps"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "net_send_mbps")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -133,7 +130,6 @@ export function ResultCharts({
               metricKey="memory_mb"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "memory_mb")}
-              height={260}
               keepZeroSeries
             />
             <MetricChart
@@ -141,7 +137,6 @@ export function ResultCharts({
               metricKey="net_jitter_ms"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "net_jitter_ms")}
-              height={260}
               keepZeroSeries
             />
             {(hasData(points, "encode_lag_ms") ||
@@ -157,7 +152,6 @@ export function ResultCharts({
                     series.key === "fps_stability" ||
                     series.key === "speed",
                 )}
-                height={280}
               />
             )}
             <MetricChart
@@ -165,7 +159,7 @@ export function ResultCharts({
               metricKey="vmaf_score_encoder"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "vmaf_score_encoder")}
-              height={280}
+
               yDomain={[0, 100]}
               keepZeroSeries
             />
@@ -174,7 +168,6 @@ export function ResultCharts({
               metricKey="psnr_db_encoder"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "psnr_db_encoder")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -182,7 +175,7 @@ export function ResultCharts({
               metricKey="ssim_encoder"
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "ssim_encoder")}
-              height={280}
+
               yDomain={[0, 1]}
               keepZeroSeries
             />
@@ -190,7 +183,7 @@ export function ResultCharts({
         )}
 
         {currentGroup.id === "client" && clientGroup && (
-          <MetricChart title="Client (publisher host)" metricKey="cpu_percent" data={points} series={clientGroup.series} height={260} />
+          <MetricChart title="Client (publisher host)" metricKey="cpu_percent" data={points} series={clientGroup.series} />
         )}
 
         {currentGroup.id === "ingest" && ingestGroup && (
@@ -211,14 +204,12 @@ export function ResultCharts({
               metricKey="net_rtt_ms"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "net_rtt_ms")}
-              height={280}
             />
             <MetricChart
               title="Server network jitter"
               metricKey="net_jitter_ms"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "net_jitter_ms")}
-              height={260}
             />
             <MetricChart
               title="Ingest host"
@@ -230,14 +221,12 @@ export function ResultCharts({
                   series.key === "server_memory_percent" ||
                   series.key === "server_disk_percent",
               )}
-              height={280}
             />
             <MetricChart
               title="Path loss %"
               metricKey="net_loss_pct"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "net_loss_pct")}
-              height={260}
               keepZeroSeries
             />
             <MetricChart
@@ -245,7 +234,6 @@ export function ResultCharts({
               metricKey="net_retrans_pct"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "net_retrans_pct")}
-              height={260}
               keepZeroSeries
             />
             {isMoq && (
@@ -255,7 +243,6 @@ export function ResultCharts({
                   metricKey="quic_packets_lost"
                   data={points}
                   series={ingestGroup.series.filter((series) => series.key === "quic_packets_lost")}
-                  height={260}
                   keepZeroSeries
                 />
                 {hasData(points, "quic_cwnd_bytes") && (
@@ -264,7 +251,6 @@ export function ResultCharts({
                     metricKey="quic_cwnd_bytes"
                     data={points}
                     series={ingestGroup.series.filter((series) => series.key === "quic_cwnd_bytes")}
-                    height={260}
                   />
                 )}
               </>
@@ -275,7 +261,6 @@ export function ResultCharts({
                 metricKey="pkt_fec_extra"
                 data={points}
                 series={ingestGroup.series.filter((series) => series.key === "pkt_fec_extra")}
-                height={260}
                 keepZeroSeries
               />
             )}
@@ -284,7 +269,7 @@ export function ResultCharts({
               metricKey="vmaf_score_ingest"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "vmaf_score_ingest")}
-              height={280}
+
               yDomain={[0, 100]}
               keepZeroSeries
             />
@@ -293,7 +278,6 @@ export function ResultCharts({
               metricKey="psnr_db_ingest"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "psnr_db_ingest")}
-              height={280}
               keepZeroSeries
             />
             <MetricChart
@@ -301,7 +285,7 @@ export function ResultCharts({
               metricKey="ssim_ingest"
               data={points}
               series={ingestGroup.series.filter((series) => series.key === "ssim_ingest")}
-              height={280}
+
               yDomain={[0, 1]}
               keepZeroSeries
             />
@@ -325,7 +309,6 @@ export function ResultCharts({
               metricKey="ts_continuity_counter_errors"
               data={points}
               series={mediaHealthGroup.series.filter((series) => hasData(points, series.key))}
-              height={260}
             />
           </>
         )}
@@ -338,7 +321,6 @@ export function ResultCharts({
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "e2e_latency_ms")}
-                height={260}
               />
             )}
             <MetricChart
@@ -352,7 +334,6 @@ export function ResultCharts({
                   series.key === "playback_error_count" ||
                   series.key === "playback_frames_rendered",
               )}
-              height={260}
               keepZeroSeries
             />
             {hasData(points, "playback_rebuffer_sec") && (
@@ -361,7 +342,6 @@ export function ResultCharts({
                 metricKey="playback_rebuffer_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_rebuffer_sec")}
-                height={220}
                 keepZeroSeries
               />
             )}
@@ -371,7 +351,6 @@ export function ResultCharts({
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_buffer_sec")}
-                height={220}
               />
             )}
             {hasData(points, "playback_video_time_sec") && (
@@ -380,7 +359,6 @@ export function ResultCharts({
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_video_time_sec")}
-                height={220}
               />
             )}
           </>

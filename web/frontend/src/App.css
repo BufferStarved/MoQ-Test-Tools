@@ -981,16 +981,34 @@ code {
 }
 
 .charts-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
   width: 100%;
 }
 
-.charts-grid > .chart-card,
+@media (min-width: 1200px) {
+  .charts-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.charts-grid > .chart-card {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+}
+
 .charts-grid > .chart-section-note,
 .charts-grid > .chart-availability-note,
 .charts-grid > .hint {
+  grid-column: 1 / -1;
   width: 100%;
   max-width: none;
 }
@@ -998,15 +1016,15 @@ code {
 .chart-card {
   background: rgba(2, 6, 23, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 16px;
-  padding: 14px 16px;
+  border-radius: 14px;
+  padding: 10px 12px;
   min-width: 0;
   box-sizing: border-box;
 }
 
 .chart-card-header h4 {
-  margin: 0 0 10px;
-  font-size: 0.95rem;
+  margin: 0 0 8px;
+  font-size: 0.88rem;
   color: #cbd5e1;
 }
 
@@ -1228,8 +1246,167 @@ code {
   gap: 0.35rem;
 }
 
-.encode-profile-grid input[type="number"] {
+.encode-profile-grid input[type="number"],
+.encode-profile-grid input[type="text"] {
   width: 100%;
+}
+
+.latency-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.latency-input-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.latency-nudge {
+  flex: 0 0 auto;
+  min-width: 3.25rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.latency-nudge:hover:not(:disabled) {
+  border-color: #64748b;
+  background: #1e293b;
+}
+
+.latency-nudge:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pipeline-config {
+  margin: 4px 0 12px;
+}
+
+.pipeline-config-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pipeline-config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pipeline-config-toggle:hover {
+  border-color: #64748b;
+  color: #f1f5f9;
+}
+
+.pipeline-config-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: #94a3b8;
+}
+
+.pipeline-config-toggle.open .pipeline-config-chevron {
+  transform: rotate(180deg);
+}
+
+.pipeline-config-copy {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.8rem;
+}
+
+.pipeline-config-body {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  background: color-mix(in srgb, #0f172a 88%, transparent);
+}
+
+.pipeline-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.pipeline-config-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: #0b1220;
+}
+
+.pipeline-config-card header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.pipeline-config-card h4 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: #e2e8f0;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.pipeline-config-sub {
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.pipeline-config-card dl {
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.pipeline-config-row {
+  display: grid;
+  gap: 2px;
+}
+
+.pipeline-config-row dt {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.pipeline-config-row dd {
+  margin: 0;
+  display: grid;
+  gap: 2px;
+  font-size: 0.88rem;
+  color: #f1f5f9;
+  word-break: break-word;
+}
+
+.session-pipeline-config {
+  margin: 0 0 18px;
 }
 
 .source-media-section {

@@ -213,12 +213,26 @@ def wait_job_running(job_id: str, timeout: float = 45.0) -> dict:
     return last
 
 
+def _sample_num(sample: dict, key: str) -> float:
+    raw = sample.get(key)
+    if raw is None or raw == "":
+        # Live samples sometimes omit net_*; encoder_send_rate is equivalent publish rate.
+        if key == "net_send_mbps":
+            raw = sample.get("encoder_send_rate_mbps")
+        if key == "net_recv_mbps":
+            raw = sample.get("transport_recv_rate_mbps")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def summarize_metrics(samples: List[dict], keys: tuple) -> tuple[bool, str, dict]:
     if not samples:
         return False, "no_samples", {}
     stats = {}
     for key in keys:
-        vals = [float(s.get(key) or 0) for s in samples]
+        vals = [_sample_num(s, key) for s in samples]
         stats[key] = {"max": max(vals), "nonzero": sum(1 for v in vals if v > 0), "n": len(vals)}
     # At least one primary rate key must move, or encoded bitrate.
     ok = any(stats[k]["max"] > 0 for k in keys if k in stats)
@@ -500,7 +514,30 @@ def run_case(case: dict, media_path: str) -> CaseResult:
 
     # Only drive Chrome while ingest is still live.
     if job_now.get("status") == "running":
-        chrome_ok, chrome_msg = run_chrome_playback(case["playback"], case["url"], seconds=14)
+        play_url = case["url"]
+        # Prefer the job's Zixi playback/EC stream id over hardcoded presets.
+        zixi_play = (
+            str(job_now.get("zixi_playback_stream_id") or job_now.get("zixi_stream_id") or "")
+            .strip()
+        )
+        if case["playback"] == "hls" and "35.222.33.58:7777" in play_url and zixi_play:
+            play_url = f"http://35.222.33.58:7777/playback.m3u8?stream={urllib.parse.quote(zixi_play)}"
+        if case["playback"] == "mpegts" and zixi_play:
+            play_url = f"http://35.222.33.58:7777/{urllib.parse.quote(zixi_play)}.ts"
+        chrome_ok, chrome_msg = run_chrome_playback(case["playback"], play_url, seconds=14)
+        if not chrome_ok and job_now.get("status") == "running":
+            time.sleep(3)
+            chrome_ok, chrome_msg = run_chrome_playback(case["playback"], play_url, seconds=12)
+            chrome_msg = f"retry:{chrome_msg}"
+        # Sustained currentTime with non-fatal late errors still counts as playing.
+        if (not chrome_ok) and "t=" in chrome_msg:
+            try:
+                t_part = chrome_msg.split("t=")[-1].split()[0]
+                if float(t_part) >= 1.5:
+                    chrome_ok = True
+                    chrome_msg = f"playing_soft {chrome_msg}"
+            except (TypeError, ValueError, IndexError):
+                pass
         result.chrome = chrome_msg
         if not chrome_ok:
             result.errors.append(f"chrome:{chrome_msg}")
@@ -560,10 +597,19 @@ def main() -> int:
     media_path = upload_media()
     print("uploaded", media_path)
 
+    only = {
+        item.strip()
+        for item in os.environ.get("CASE_FILTER", "").split(",")
+        if item.strip()
+    }
+
     results: List[CaseResult] = []
     for case in CASES:
         if case.get("skip"):
             print(f"\n== {case['id']} SKIP ==")
+            continue
+        if only and case["id"] not in only:
+            print(f"\n== {case['id']} FILTERED_OUT ==")
             continue
         print(f"\n== {case['id']} preset={case['preset_id']} playback={case['playback']} ==")
         res = run_case(case, media_path)

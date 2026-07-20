@@ -4,6 +4,8 @@ import { buildComparisonVerdict } from "./comparisonVerdict";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
+import { PipelineConfigDetails } from "./PipelineConfigDetails";
+import { buildSessionPipelineSections } from "./pipelineConfig";
 import { protocolColor } from "./protocolTheme";
 import type { ResultSummary } from "./types";
 
@@ -93,6 +95,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
   }, [streams, labels]);
 
   const verdict = useMemo(() => buildComparisonVerdict(streams, labels), [streams, labels]);
+  const pipelineSections = useMemo(() => buildSessionPipelineSections(streams), [streams]);
 
   if (streams.length === 0) {
     return (
@@ -176,6 +179,14 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
           </button>
         </div>
       </div>
+
+      {pipelineSections.length > 0 && (
+        <PipelineConfigDetails
+          sections={pipelineSections}
+          buttonLabel="Session pipeline config"
+          className="session-pipeline-config"
+        />
+      )}
 
       {chartLegs.length > 0 && (
         <section className="scorecard-section session-charts-section">
