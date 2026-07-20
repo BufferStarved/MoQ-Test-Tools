@@ -22,6 +22,8 @@ digest.txt
 # Benchmark run artifacts
 results/
 !results/.gitkeep
+uploads/
+!uploads/.gitkeep
 
 # Built/native tool trees (install scripts recreate these)
 tools/moq5/
