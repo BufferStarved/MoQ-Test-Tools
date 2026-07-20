@@ -1741,6 +1741,21 @@ code {
   color: #fca5a5;
 }
 
+.player-error-reload {
+  margin-top: 8px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #fca5a5;
+  background: transparent;
+  color: #fca5a5;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.player-error-reload:hover {
+  background: rgba(252, 165, 165, 0.12);
+}
+
 .player-loading,
 .player-unsupported {
   min-height: 180px;
