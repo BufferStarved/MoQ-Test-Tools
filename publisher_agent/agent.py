@@ -167,12 +167,18 @@ class PublisherAgent:
         try:
             job = upload_job_from_dict(job_payload)
             job.cancel_event = cancel_event
-            # Resolve relative media against the repo (same as API cwd for dummy.mp4).
-            media = Path(job.media_path)
-            if not media.is_absolute():
-                candidate = ROOT_DIR / job.media_path
-                if candidate.exists():
-                    job.media_path = str(candidate)
+            media_raw = (job.media_path or "").strip()
+            if media_raw.lower().startswith("device:webcam"):
+                job.media_path = "device:webcam"
+            else:
+                # Absolute uploads/ paths from the API, or repo-relative files.
+                media = Path(media_raw)
+                if not media.is_absolute():
+                    candidate = ROOT_DIR / media_raw
+                    if candidate.exists():
+                        job.media_path = str(candidate)
+                elif not media.exists():
+                    raise FileNotFoundError(f"Local media not found on agent: {media_raw}")
 
             def on_sample(sample: Any) -> None:
                 payload = {

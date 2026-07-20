@@ -14,6 +14,7 @@ import {
   resultFilenameFromPath,
   stopUpload,
   subscribeToUpload,
+  uploadMedia,
   type FeatureFlags,
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
@@ -61,7 +62,8 @@ import {
 } from "./encodeProfiles";
 import { isSafariBrowser } from "./browserDetect";
 
-type MediaSourceId = "dummy" | "bbb" | "webcam";
+type MediaSourceId = "dummy" | "bbb" | "webcam" | "local-file";
+const LOCAL_DEVICE_WEBCAM = "device:webcam";
 
 type Tab = "benchmark" | "metrics" | "about";
 
@@ -157,9 +159,10 @@ function App() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
   const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
-  const [, setMediaPath] = useState("dummy.mp4");
+  const [mediaPath, setMediaPath] = useState("dummy.mp4");
   const [mediaLabel, setMediaLabel] = useState("Default Color Bars");
   const [uploadingMedia, setUploadingMedia] = useState(false);
+  const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
   const [targetLatencyMs, setTargetLatencyMs] = useState(DEFAULT_TARGET_LATENCY_MS);
@@ -739,8 +742,13 @@ function App() {
         setLoading(false);
         return;
       }
-      if (mediaSource === "webcam") {
-        setError("Webcam is not supported with local publisher yet. Use Color Bars.");
+      if (mediaSource === "local-file" && !mediaPath) {
+        setError("Choose a local video file before starting.");
+        setLoading(false);
+        return;
+      }
+      if (mediaSource === "dummy" || mediaSource === "bbb") {
+        setError("VOD presets are for cloud encode. Use Webcam or a local file on This machine.");
         setLoading(false);
         return;
       }
@@ -756,7 +764,26 @@ function App() {
       let durationSec: number | undefined;
       liveBroadcastRef.current = null;
 
-      if (mediaSource === "webcam") {
+      if (publisherHost === "local" && mediaSource === "webcam") {
+        // Agent opens the machine camera via ffmpeg — release browser preview first
+        // so macOS AVFoundation can claim the device.
+        if (webcamStreamRef.current) {
+          webcamStreamRef.current.getTracks().forEach((track) => track.stop());
+          webcamStreamRef.current = null;
+        }
+        if (webcamPreviewRef.current) {
+          webcamPreviewRef.current.srcObject = null;
+        }
+        setWebcamStatus(
+          `Agent will open this machine’s camera — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
+        );
+        mediaPaths = endpoints.map(() => LOCAL_DEVICE_WEBCAM);
+        durationSec = LIVE_WEBCAM_MAX_DURATION_SEC;
+        setMediaPath(LOCAL_DEVICE_WEBCAM);
+      } else if (publisherHost === "local" && mediaSource === "local-file") {
+        mediaPaths = endpoints.map(() => mediaPath);
+        durationSec = undefined; // API probes duration
+      } else if (mediaSource === "webcam") {
         setUploadingMedia(true);
         setWebcamStatus("Starting live webcam session…");
         const live = await createLiveSession({
@@ -949,9 +976,11 @@ function App() {
                 <span className="recipe-toggle-summary">
                   {mediaSource === "webcam"
                     ? "Webcam"
-                    : mediaSource === "dummy"
-                      ? "Color bars"
-                      : mediaLabel}{" "}
+                    : mediaSource === "local-file"
+                      ? mediaLabel || "Local file"
+                      : mediaSource === "dummy"
+                        ? "Color bars"
+                        : mediaLabel}{" "}
                   ·{" "}
                   {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
                     encodeLadder}{" "}
@@ -978,7 +1007,12 @@ function App() {
                             onChange={(e) => {
                               const next = e.target.value as "cloud" | "local";
                               setPublisherHost(next);
-                              if (next === "local" && mediaSource === "webcam") {
+                              if (next === "local") {
+                                setMediaSource("webcam");
+                                setMediaPath(LOCAL_DEVICE_WEBCAM);
+                                setMediaLabel("Webcam");
+                                setComputeVmaf(false);
+                              } else if (mediaSource === "local-file") {
                                 setMediaSource("dummy");
                                 setMediaPath("dummy.mp4");
                                 setMediaLabel("Default Color Bars");
@@ -1009,7 +1043,11 @@ function App() {
                       <label>
                         Source
                         <select
-                          value={mediaSource}
+                          value={
+                            publisherHost === "local" && mediaSource === "dummy"
+                              ? "webcam"
+                              : mediaSource
+                          }
                           onChange={(e) => {
                             const next = e.target.value as MediaSourceId;
                             setMediaSource(next);
@@ -1018,30 +1056,87 @@ function App() {
                               setMediaLabel("Default Color Bars");
                             } else if (next === "bbb") {
                               setMediaLabel("Big Buck Bunny (coming soon)");
-                            } else {
+                            } else if (next === "local-file") {
+                              setMediaPath("");
+                              setMediaLabel("Choose a local file");
+                              setComputeVmaf(false);
+                              window.setTimeout(() => localFileInputRef.current?.click(), 0);
+                            } else if (next === "webcam") {
                               setMediaLabel("Webcam");
+                              setMediaPath(
+                                publisherHost === "local" ? LOCAL_DEVICE_WEBCAM : "dummy.mp4",
+                              );
+                              setComputeVmaf(false);
                             }
                           }}
                         >
-                          <option value="dummy">Default Color Bars</option>
-                          <option value="bbb" disabled>
-                            Big Buck Bunny (coming soon)
-                          </option>
-                          <option value="webcam" disabled={publisherHost === "local"}>
-                            Webcam
-                            {publisherHost === "local" ? " (cloud publisher only for now)" : ""}
-                          </option>
+                          {publisherHost !== "local" && (
+                            <>
+                              <option value="dummy">Default Color Bars</option>
+                              <option value="bbb" disabled>
+                                Big Buck Bunny (coming soon)
+                              </option>
+                            </>
+                          )}
+                          <option value="webcam">Webcam</option>
+                          {publisherHost === "local" && (
+                            <option value="local-file">Local file…</option>
+                          )}
                         </select>
-                        {mediaSource === "dummy" && (
+                        {mediaSource === "dummy" && publisherHost !== "local" && (
                           <span className="field-hint">
                             Color Bars with time counter, 60 second asset
                           </span>
                         )}
-                        {mediaSource !== "webcam" && mediaSource !== "dummy" && (
-                          <span className="field-hint">Using: {mediaLabel}</span>
+                        {mediaSource === "local-file" && (
+                          <span className="field-hint">
+                            {mediaPath
+                              ? `Using: ${mediaLabel}`
+                              : "Choose a video file on this computer"}
+                          </span>
                         )}
                       </label>
-                      {mediaSource === "webcam" && (
+                      {publisherHost === "local" && mediaSource === "local-file" && (
+                        <div className="button-row" style={{ marginTop: 0 }}>
+                          <input
+                            ref={localFileInputRef}
+                            type="file"
+                            accept="video/*,.mp4,.mov,.mkv,.webm"
+                            hidden
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) {
+                                return;
+                              }
+                              setUploadingMedia(true);
+                              setError(null);
+                              void uploadMedia(file)
+                                .then((result) => {
+                                  setMediaPath(result.media_path);
+                                  setMediaLabel(result.filename);
+                                })
+                                .catch((err) => {
+                                  setError(
+                                    err instanceof Error ? err.message : "Failed to upload media",
+                                  );
+                                  setMediaPath("");
+                                  setMediaLabel("Choose a local file");
+                                })
+                                .finally(() => setUploadingMedia(false));
+                              e.target.value = "";
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={bootstrapping || !apiOnline || loading || uploadingMedia}
+                            onClick={() => localFileInputRef.current?.click()}
+                          >
+                            {uploadingMedia ? "Uploading…" : mediaPath ? "Choose another file" : "Choose file"}
+                          </button>
+                        </div>
+                      )}
+                      {mediaSource === "webcam" && publisherHost !== "local" && (
                         <div className="webcam-preview-block">
                           <video
                             ref={webcamPreviewRef}
@@ -1055,6 +1150,12 @@ function App() {
                               `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
                           </span>
                         </div>
+                      )}
+                      {mediaSource === "webcam" && publisherHost === "local" && (
+                        <span className="field-hint">
+                          {webcamStatus ??
+                            `Agent opens this machine’s camera via ffmpeg (AVFoundation / V4L2). Preview is released at start so the device is free. Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
+                        </span>
                       )}
                     </div>
 
@@ -1174,7 +1275,13 @@ function App() {
                     !apiOnline ||
                     endpoints.length < MIN_ENDPOINTS ||
                     uploadingMedia ||
-                    mediaSource === "bbb"
+                    mediaSource === "bbb" ||
+                    (publisherHost === "local" &&
+                      mediaSource === "local-file" &&
+                      !mediaPath) ||
+                    (publisherHost === "local" &&
+                      features.local_publisher &&
+                      !features.local_publisher_connected)
                   }
                 >
                   {uploadingMedia

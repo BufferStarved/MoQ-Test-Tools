@@ -53,7 +53,9 @@ from encode_profile import (  # noqa: E402
 )
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
+    DEVICE_WEBCAM_MEDIA,
     MPEGTS_VIDEO_BSF,
+    is_device_webcam_source,
     with_srt_stream_id,
     zixi_srt_streamid_value,
 )
@@ -646,12 +648,67 @@ async def live_session_ws(websocket: WebSocket, session_id: str):
 @app.post("/api/uploads")
 def create_upload(request: CreateUploadRequest):
     media_path = request.media_path.strip()
-    is_live = media_path.lower().startswith(("udp://", "tcp://", "rtsp://"))
-    if not is_live:
-        if not os.path.isabs(media_path):
-            media_path = str(ROOT_DIR / media_path)
-        if not os.path.exists(media_path):
-            raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
+    device_webcam = is_device_webcam_source(media_path)
+    is_udp_live = media_path.lower().startswith(("udp://", "tcp://", "rtsp://"))
+    is_live = is_udp_live or device_webcam
+
+    publisher_host = (request.publisher_host or "cloud").strip().lower()
+    if publisher_host not in {"cloud", "local"}:
+        raise HTTPException(status_code=400, detail="publisher_host must be 'cloud' or 'local'")
+
+    if publisher_host == "local":
+        if not local_publisher_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Local publisher is not enabled on this API. "
+                    "Use ./scripts/dev.sh (sets LOCAL_PUBLISHER_ENABLED=1)."
+                ),
+            )
+        if not publisher_hub.status().get("connected"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "No local publisher agent connected. "
+                    "Run ./scripts/run-local-publisher.sh in another terminal."
+                ),
+            )
+        # Local acquisition: webcam device or a user-chosen file — not repo VOD.
+        if is_udp_live:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "UDP webcam bridge is for cloud encode. "
+                    "Use media_path 'device:webcam' or a local file with publisher_host=local."
+                ),
+            )
+        lower = media_path.lower()
+        if lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "VOD presets are for cloud encode only. "
+                    "Pick a local file or webcam (device:webcam) for This machine."
+                ),
+            )
+        if not device_webcam:
+            if not os.path.isabs(media_path):
+                media_path = str(ROOT_DIR / media_path)
+            if not os.path.exists(media_path):
+                raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
+            # Prefer files the user uploaded into uploads/ (shared with the agent).
+            try:
+                media_path = str(Path(media_path).resolve())
+            except OSError:
+                pass
+        else:
+            media_path = DEVICE_WEBCAM_MEDIA
+    else:
+        if not is_live:
+            if not os.path.isabs(media_path):
+                media_path = str(ROOT_DIR / media_path)
+            if not os.path.exists(media_path):
+                raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
 
     try:
         destination = resolve_destination_request(
@@ -681,10 +738,14 @@ def create_upload(request: CreateUploadRequest):
             )
 
     if compute_vmaf_encoder and not libvmaf_available():
-        raise HTTPException(
-            status_code=400,
-            detail="Encoder VMAF requires ffmpeg with libvmaf on this machine.",
-        )
+        # Encoder VMAF for local publisher runs on the agent — still require
+        # libvmaf on the API host for cloud; for local we allow the request and
+        # let the agent fail clearly if libvmaf is missing there.
+        if publisher_host != "local":
+            raise HTTPException(
+                status_code=400,
+                detail="Encoder VMAF requires ffmpeg with libvmaf on this machine.",
+            )
 
     duration_sec = request.duration_sec
     if duration_sec is None:
@@ -700,37 +761,6 @@ def create_upload(request: CreateUploadRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     target_latency_ms = clamp_target_latency_ms(request.target_latency_ms)
-
-    publisher_host = (request.publisher_host or "cloud").strip().lower()
-    if publisher_host not in {"cloud", "local"}:
-        raise HTTPException(status_code=400, detail="publisher_host must be 'cloud' or 'local'")
-    if publisher_host == "local":
-        if not local_publisher_enabled():
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Local publisher is not enabled on this API. "
-                    "Use ./scripts/dev.sh (sets LOCAL_PUBLISHER_ENABLED=1)."
-                ),
-            )
-        if not publisher_hub.status().get("connected"):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "No local publisher agent connected. "
-                    "Run ./scripts/run-local-publisher.sh in another terminal."
-                ),
-            )
-        # Encoder VMAF runs on the agent host; leave the flag as requested.
-        # Live webcam UDP bridges still live on the API host — reject for now.
-        if is_live:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Webcam + local publisher is not wired yet "
-                    "(bridge ffmpeg still runs on the API host). Use Color Bars for local publish."
-                ),
-            )
 
     job = UploadJob(
         media_path=media_path,

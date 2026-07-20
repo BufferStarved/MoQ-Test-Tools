@@ -312,13 +312,82 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
     )
 
 
-def is_live_media_source(media_path: str) -> bool:
-    """True for live UDP/TCP/RTSP inputs (already realtime — do not use -re)."""
+# Local publisher agent captures the machine camera/mic (not a repo VOD asset).
+DEVICE_WEBCAM_MEDIA = "device:webcam"
+
+
+def is_device_webcam_source(media_path: str) -> bool:
     value = (media_path or "").strip().lower()
-    return value.startswith(("udp://", "tcp://", "rtsp://", "srt://"))
+    return value == DEVICE_WEBCAM_MEDIA or value.startswith("device:webcam")
+
+
+def is_live_media_source(media_path: str) -> bool:
+    """True for live UDP/TCP/RTSP/device inputs (already realtime — do not use -re)."""
+    value = (media_path or "").strip().lower()
+    return value.startswith(("udp://", "tcp://", "rtsp://", "srt://")) or is_device_webcam_source(
+        media_path
+    )
+
+
+def build_device_webcam_input_args(*, duration_sec: Optional[int] = None) -> List[str]:
+    """ffmpeg input args for the laptop camera (local publisher agent).
+
+    macOS: AVFoundation default video+audio (``0:0``).
+    Linux: V4L2 ``/dev/video0`` + silent audio (anullsrc) unless Pulse is present.
+    """
+    import platform
+    import shutil
+
+    duration_args: List[str] = []
+    if duration_sec is not None and duration_sec > 0:
+        duration_args = ["-t", str(int(duration_sec))]
+
+    system = platform.system().lower()
+    if system == "darwin":
+        # framerate before -i is required by avfoundation for stable CFR.
+        # Leave size to the device default — forcing 1280x720 fails on many Macs.
+        return [
+            "-f",
+            "avfoundation",
+            "-framerate",
+            "30",
+            *duration_args,
+            "-i",
+            os.environ.get("LOCAL_WEBCAM_AVFOUNDATION", "0:0").strip() or "0:0",
+        ]
+
+    # Linux — prefer v4l2 + pulse when available.
+    video_dev = (os.environ.get("LOCAL_WEBCAM_DEVICE") or "/dev/video0").strip() or "/dev/video0"
+    if shutil.which("pactl") or os.path.exists("/dev/snd"):
+        # Dual input: camera + default Pulse source, then explicit maps later via -map
+        # is awkward here; use pulse as audio companion with filter_complex-free
+        # lavfi anullsrc fallback for broad compatibility.
+        pass
+    return [
+        "-f",
+        "v4l2",
+        "-framerate",
+        "30",
+        "-video_size",
+        "1280x720",
+        *duration_args,
+        "-i",
+        video_dev,
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-shortest",
+    ]
 
 
 def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = None) -> List[str]:
+    if is_device_webcam_source(media_path):
+        return build_device_webcam_input_args(duration_sec=duration_sec)
     if is_live_media_source(media_path):
         # Webcam bridge → UDP is often VFR / discontinuous; regenerate PTS so
         # the second encode + MoQ fMP4 tfdt stay monotonic.
