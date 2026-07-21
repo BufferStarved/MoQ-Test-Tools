@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1001,7 +1001,7 @@ def _rewrite_mpd_manifest(manifest_url: str, content: bytes) -> bytes:
 
 
 @app.get("/api/playback/fetch")
-def playback_fetch(url: str):
+def playback_fetch(url: str, request: Request):
     url = _unwrap_nested_playback_fetch_url(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -1010,6 +1010,24 @@ def playback_fetch(url: str):
         raise HTTPException(status_code=400, detail="Invalid playback URL")
 
     safe_url = _sanitize_fetch_url(url)
+
+    # Forward any query params the player appended to the *proxy* URL onto the
+    # upstream URL. This is load-bearing for LL-HLS: hls.js appends
+    # _HLS_msn/_HLS_part/_HLS_skip to the (rewritten, proxied) playlist URL to
+    # request a *blocking* reload — "hold this response until that part
+    # exists". Dropping them made MediaMTX answer instantly with a stale
+    # playlist, so hls.js got older data than it asked for, thrashed duplicate
+    # part loads, and stalled (root cause of the frozen/stuttering SRT leg —
+    # direct-to-MediaMTX playback with identical player config was flawless,
+    # 2026-07-21).
+    extra_params = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if key != "url"
+    ]
+    if extra_params:
+        joiner = "&" if urlparse(safe_url).query else "?"
+        safe_url = safe_url + joiner + urlencode(extra_params)
     path_lower = (parsed.path or "").lower()
     likely_m3u8 = path_lower.endswith(".m3u8") or "m3u8" in path_lower
     likely_mpd = path_lower.endswith(".mpd") or ".mpd" in path_lower
