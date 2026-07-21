@@ -48,14 +48,16 @@ class MoqGopLatencyTests(unittest.TestCase):
         self.assertEqual(gop_frames_for_latency(4000), 60)   # 2s segment
         self.assertEqual(gop_frames_for_latency(800), 60)    # 2s floor
         self.assertEqual(gop_frames_for_latency(10_000), 150)  # 5s segment
-        self.assertEqual(moq_gop_frames_for_latency(4000), 60)
+        # MoQ cadence is capped at 1s — 2s objects arrive in bursts that read
+        # as inconsistent playback speed (2026-07-21 webcam run).
+        self.assertEqual(moq_gop_frames_for_latency(4000), 30)
 
     def test_gop_floor_for_ultra_low_targets(self):
         # 100ms target can't be met by GOP alone; floor at 0.5s for x264 sanity.
         self.assertEqual(moq_gop_frames_for_latency(100), 15)
 
     def test_gop_cap_for_very_high_targets(self):
-        self.assertEqual(moq_gop_frames_for_latency(10_000), 60)
+        self.assertEqual(moq_gop_frames_for_latency(10_000), 30)
 
     def test_build_ffmpeg_moq_cmd_uses_moq_gop(self):
         cmd = build_ffmpeg_moq_cmd(
@@ -66,9 +68,9 @@ class MoqGopLatencyTests(unittest.TestCase):
             duration_sec=30,
         )
         g_index = cmd.index("-g")
-        self.assertEqual(cmd[g_index + 1], "60")
+        self.assertEqual(cmd[g_index + 1], "30")
         keyint_index = cmd.index("-keyint_min")
-        self.assertEqual(cmd[keyint_index + 1], "60")
+        self.assertEqual(cmd[keyint_index + 1], "30")
 
 
 if __name__ == "__main__":

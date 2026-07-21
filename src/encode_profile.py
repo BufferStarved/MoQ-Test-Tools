@@ -137,9 +137,12 @@ def srt_latency_us(target_latency_ms: int) -> int:
 
 # MoQ GOP bounds (seconds). Floor keeps x264 overhead sane; ceiling keeps the
 # group cadence short enough that join-offset + fragment accumulation stay
-# inside the latency budget.
+# inside the latency budget. Ceiling lowered 2.0 -> 1.0 after the 2026-07-21
+# webcam run: 2s objects held a rock-steady 7.5s e2e but the 2s arrival
+# bursts read as "inconsistent playback speed" to the viewer; 1s objects
+# halve the burst granularity and shave ~1-2s off the latency floor.
 MOQ_GOP_SEC_MIN = 0.5
-MOQ_GOP_SEC_MAX = 2.0
+MOQ_GOP_SEC_MAX = 1.0
 
 
 def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:

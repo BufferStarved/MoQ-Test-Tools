@@ -643,24 +643,46 @@ export default function HlsPlayer({
         const behind = liveSync - video.currentTime;
         const jumpThreshold = shallow ? LIVE_JUMP_BEHIND_SHALLOW_SEC : LIVE_JUMP_BEHIND_SEC;
         if (behind >= jumpThreshold) {
-          video.currentTime = liveSync;
-          pushDiag(`hls_live_jump behind=${behind.toFixed(2)}s to=${liveSync.toFixed(2)}`);
+          // Clamp the jump into buffered media: a seek to an unbuffered
+          // liveSyncPosition never completes (video.seeking sticks) and
+          // freezes the playhead harder than the backlog it was escaping.
+          let jumpTo = -1;
+          for (let i = 0; i < video.buffered.length; i += 1) {
+            const end = video.buffered.end(i);
+            if (end > jumpTo) {
+              jumpTo = end;
+            }
+          }
+          jumpTo = jumpTo > 0 ? Math.min(liveSync, jumpTo - 0.5) : liveSync;
+          if (jumpTo > video.currentTime + 1) {
+            video.currentTime = jumpTo;
+            pushDiag(
+              `hls_live_jump behind=${behind.toFixed(2)}s to=${jumpTo.toFixed(2)} live_sync=${liveSync.toFixed(2)}`,
+            );
+          }
         }
       });
 
       // Stuck-playhead watchdog: a discontinuity in the appended timeline (a
       // "hole" — e.g. MediaMTX LL-HLS gap filler, or a PTS jump after a
       // webcam-bridge restart) leaves currentTime frozen while fragments keep
-      // buffering *past* the hole. hls.js's own gap nudging misses multi-second
-      // holes, and the LEVEL_UPDATED live-jump only helps when liveSyncPosition
-      // is meaningful. Detect "frozen playhead + media buffered ahead of a gap"
-      // directly and seek across it. (Observed live 2026-07-21: playhead pinned
-      // at 0.70s for 40+ seconds while 232 fragments appended fine.)
+      // buffering *past* the hole.
+      //
+      // Hard-won rules (each disabled a previous incarnation of this rescue):
+      //  - Do NOT pause/skip the check while video.seeking or video.paused —
+      //    a seek pending into UNBUFFERED space keeps seeking=true forever,
+      //    which suppressed this watchdog for 37s straight on the live site
+      //    (2026-07-21 run 2: playhead pinned at vt=10.35 from t+24 to t+61).
+      //  - Only ever seek to a *buffered* position. Seeking to a raw
+      //    liveSyncPosition that isn't buffered just creates the pending-seek
+      //    trap above all over again.
+      //  - If two rescues at the same position change nothing, the decoder
+      //    itself is wedged (data present, no frames) — recoverMediaError.
       let stuckSinceMs = 0;
       let lastWatchdogTime = -1;
+      let rescuesAtSamePosition = 0;
       stuckWatchdog = window.setInterval(() => {
-        if (destroyed || video.paused || video.seeking) {
-          stuckSinceMs = 0;
+        if (destroyed) {
           return;
         }
         const now = video.currentTime;
@@ -670,6 +692,7 @@ export default function HlsPlayer({
         if (Math.abs(now - lastWatchdogTime) > 0.05) {
           lastWatchdogTime = now;
           stuckSinceMs = 0;
+          rescuesAtSamePosition = 0;
           return;
         }
         stuckSinceMs += STUCK_WATCHDOG_POLL_MS;
@@ -677,31 +700,67 @@ export default function HlsPlayer({
           return;
         }
         stuckSinceMs = 0;
-        // Find the next buffered range beyond the playhead (the far side of
-        // the hole). Prefer the live sync point when it's inside real buffer.
-        let nextStart = -1;
+
+        if (video.paused) {
+          pushDiag(`stuck_paused_at=${now.toFixed(2)} play_retry`);
+          attemptPlay();
+          return;
+        }
+
+        // Pick the most live-ward buffered range with usable room and land
+        // safely inside it (never at/past its end, never in a gap).
+        let bestStart = -1;
+        let bestEnd = -1;
         for (let i = 0; i < video.buffered.length; i += 1) {
           const start = video.buffered.start(i);
-          if (start > now + 0.1 && (nextStart < 0 || start < nextStart)) {
-            nextStart = start;
+          const end = video.buffered.end(i);
+          if (end > now + 0.3 && end > bestEnd) {
+            bestStart = start;
+            bestEnd = end;
           }
         }
+        if (bestEnd < 0) {
+          pushDiag(`stuck_no_buffered_escape at=${now.toFixed(2)} ranges=${video.buffered.length}`);
+          return;
+        }
         const liveSync = hls.liveSyncPosition;
-        let target = -1;
-        if (liveSync != null && Number.isFinite(liveSync) && liveSync > now + 0.25) {
+        let target = bestEnd - 0.5;
+        if (
+          liveSync != null &&
+          Number.isFinite(liveSync) &&
+          liveSync >= bestStart &&
+          liveSync <= bestEnd - 0.3
+        ) {
           target = liveSync;
-        } else if (nextStart > 0) {
-          target = nextStart + 0.1;
         }
-        if (target > 0) {
-          pushDiag(
-            `stuck_rescue frozen_at=${now.toFixed(2)} jump_to=${target.toFixed(2)} next_range=${nextStart.toFixed(2)} live_sync=${liveSync == null ? "-" : liveSync.toFixed(2)}`,
-          );
-          video.currentTime = target;
-          attemptPlay();
-        } else {
-          pushDiag(`stuck_no_escape frozen_at=${now.toFixed(2)} buffered_ranges=${video.buffered.length}`);
+        target = Math.max(target, Math.min(bestStart + 0.1, bestEnd - 0.1));
+
+        if (target <= now + 0.2) {
+          // Data exists right at the playhead but nothing renders — decoder
+          // wedge, not a hole. Give the media pipeline a kick.
+          rescuesAtSamePosition += 1;
+          if (rescuesAtSamePosition >= 2) {
+            rescuesAtSamePosition = 0;
+            pushDiag(`stuck_decoder_recover at=${now.toFixed(2)}`);
+            try {
+              hls.recoverMediaError();
+            } catch {
+              /* ignore */
+            }
+            attemptPlay();
+          } else {
+            pushDiag(`stuck_nudge at=${now.toFixed(2)}`);
+            video.currentTime = now + 0.1;
+            attemptPlay();
+          }
+          return;
         }
+
+        pushDiag(
+          `stuck_rescue frozen_at=${now.toFixed(2)} jump_to=${target.toFixed(2)} buffered=[${bestStart.toFixed(2)},${bestEnd.toFixed(2)}] live_sync=${liveSync == null ? "-" : liveSync.toFixed(2)}`,
+        );
+        video.currentTime = target;
+        attemptPlay();
       }, STUCK_WATCHDOG_POLL_MS);
 
       hls.on(Hls.Events.FRAG_LOADED, () => {
