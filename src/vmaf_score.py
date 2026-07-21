@@ -88,6 +88,20 @@ def compute_vmaf(
         return None
 
     log_path = f"{distorted_path}.vmaf.json"
+    # setpts=PTS-STARTPTS: live-source references are stream-copied mid-timeline
+    # (bridge PTS continues across the session) while the distorted encode
+    # restarts at 0 — libvmaf's framesync pairs frames by timestamp, so without
+    # rebasing both to 0 it would never align them. Harmless for file sources
+    # (both already start near 0). scale2ref upscales the distorted leg to the
+    # reference geometry so lower ladder rungs (540p/360p) can be scored, per
+    # standard VMAF practice.
+    filter_graph = (
+        "[0:v]setpts=PTS-STARTPTS[dis];"
+        "[1:v]setpts=PTS-STARTPTS[ref];"
+        "[dis][ref]scale2ref[dis2][ref2];"
+        f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads=4:"
+        f"{LIBVMAF_FILTER_FEATURES}"
+    )
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
@@ -98,10 +112,7 @@ def compute_vmaf(
         "-i",
         reference_path,
         "-lavfi",
-        (
-            f"libvmaf=log_fmt=json:log_path={log_path}:n_threads=4:"
-            f"{LIBVMAF_FILTER_FEATURES}"
-        ),
+        filter_graph,
         "-f",
         "null",
         "-",

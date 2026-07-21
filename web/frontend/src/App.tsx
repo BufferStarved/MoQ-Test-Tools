@@ -454,7 +454,9 @@ function App() {
     }
     if (mediaSource === "webcam") {
       setVmafUnavailableReason(
-        "VMAF / PSNR / SSIM need a file reference — disabled for live webcam. Use the color-bar asset to score quality.",
+        encoderVmafAvailable
+          ? "Live webcam: encoder scores compare each protocol's encode against the shared normalized camera capture. Ingest-side scoring needs a file reference and stays off."
+          : "Live webcam quality scoring needs ffmpeg/libvmaf on the encode host.",
       );
       return;
     }
@@ -581,9 +583,11 @@ function App() {
     return {
       media_path: resolvedMediaPath,
       ...(durationSec != null ? { duration_sec: durationSec } : {}),
-      // Live webcam has no file reference for VMAF.
+      // Live webcam: encoder VMAF scores against a per-job stream-copy of the
+      // bridge-normalized input (server side). Ingest VMAF still needs a file
+      // reference on the ingest host, so it stays off for live sources.
       compute_vmaf_on_ingest: computeVmaf && endpoint.vmafAvailable && !isLive,
-      compute_vmaf_encoder: computeVmaf && encoderVmafAvailable && !isLive,
+      compute_vmaf_encoder: computeVmaf && encoderVmafAvailable,
       encode_ladder: encodeLadder,
       target_latency_ms: clampTargetLatencyMs(targetLatencyMs),
       comparison_id: comparisonId,
@@ -846,7 +850,7 @@ function App() {
         latestSample: null,
         ingestVmafRequested:
           computeVmaf && endpoints[index].vmafAvailable && mediaSource !== "webcam",
-        encoderVmafRequested: computeVmaf && encoderVmafAvailable && mediaSource !== "webcam",
+        encoderVmafRequested: computeVmaf && encoderVmafAvailable,
       }));
       setComparisonLegs(legs);
       pushToast(`Started comparison — ${endpoints.length} streams`, "info");
@@ -992,7 +996,9 @@ function App() {
                       ? " · This machine"
                       : " · Cloud encode"
                     : ""}
-                  {computeVmaf && mediaSource !== "webcam" ? " · VMAF on" : ""}
+                  {computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)
+                    ? " · VMAF on"
+                    : ""}
                 </span>
               </button>
 
@@ -1237,8 +1243,14 @@ function App() {
                       <label className="checkbox-row">
                         <input
                           type="checkbox"
-                          checked={computeVmaf && mediaSource !== "webcam"}
-                          disabled={!vmafSelectable || mediaSource === "webcam"}
+                          checked={
+                            computeVmaf &&
+                            (mediaSource !== "webcam" || encoderVmafAvailable)
+                          }
+                          disabled={
+                            !vmafSelectable ||
+                            (mediaSource === "webcam" && !encoderVmafAvailable)
+                          }
                           onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
                         <span>VMAF / PSNR / SSIM (encoder + ingest)</span>

@@ -421,6 +421,7 @@ def build_ffmpeg_moq_cmd(
     encode_ladder: str = DEFAULT_ENCODE_LADDER_ID,
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
     duration_sec: Optional[int] = None,
+    vmaf_reference_path: str = "",
 ) -> List[str]:
     # MoQ must NOT use the shared latency-sized GOP: openmoq ships one CMAF
     # fragment (= one GOP via frag_keyframe) per MoQ group/object, and the
@@ -458,6 +459,14 @@ def build_ffmpeg_moq_cmd(
         "-f",
         "mp4",
         "pipe:1",
+        # Optional second output: stream-copy of the exact consumed input,
+        # used as the VMAF reference for live sources (no file to score
+        # against). -c:v copy applies to this output only.
+        *(
+            ["-map", "0:v:0", "-c:v", "copy", "-f", "mpegts", vmaf_reference_path]
+            if vmaf_reference_path
+            else []
+        ),
     ]
 
 

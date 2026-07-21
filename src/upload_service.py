@@ -33,6 +33,7 @@ from moq_publish import (
     build_moq_publisher_cmd,
     find_ffmpeg,
     find_moq_publisher,
+    is_device_webcam_source,
     is_live_media_source,
     mediamtx_loopback_publish_url,
     with_srt_stream_id,
@@ -156,6 +157,13 @@ class UploadJob:
     ingest_agent_token: str = ""
     distorted_path: str = ""
     encoder_capture_path: str = ""
+    # Live sources (webcam bridge UDP) have no file to score against. When
+    # encoder VMAF is requested, the encode ffmpeg also stream-copies the
+    # exact input it consumed to this path — reference and distorted then
+    # share the same first decodable frame and frame cadence, so libvmaf
+    # alignment is inherent, and every leg scores against the same
+    # bridge-normalized capture.
+    vmaf_reference_capture_path: str = ""
     compute_vmaf: bool = False
     # "cloud" = encode on the API host (default). "local" = dispatch to a
     # connected publisher agent (laptop) for true internet-acquisition tests.
@@ -233,6 +241,29 @@ class UploadJob:
             if self.destination.protocol == "webrtc"
             else BROWSER_COMPAT_AUDIO_ARGS
         )
+        # Live sources: stream-copy the consumed input as the VMAF reference
+        # (see vmaf_reference_capture_path). Positioned as a second output so
+        # the -c:v copy only applies to it, not the network encode. Device
+        # webcams (local agent) are excluded — their input is raw video,
+        # which cannot be stream-copied into MPEG-TS.
+        reference_args: List[str] = []
+        if (
+            capture_path
+            and is_live_media_source(self.media_path)
+            and not is_device_webcam_source(self.media_path)
+        ):
+            self.vmaf_reference_capture_path = os.path.join(
+                os.path.dirname(capture_path), "vmaf_reference.ts"
+            )
+            reference_args = [
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-f",
+                "mpegts",
+                self.vmaf_reference_capture_path,
+            ]
         return [
             find_ffmpeg(),
             *build_ffmpeg_input_args(self.media_path, duration_sec=self.duration_sec),
@@ -243,6 +274,7 @@ class UploadJob:
             "-nostats",
             *offset_args,
             *output_args,
+            *reference_args,
         ]
 
     def _is_mediamtx_destination(self) -> bool:
@@ -1255,12 +1287,19 @@ class UploadService:
             qlog_dir = os.path.join(temp_dir, "qlog")
             os.makedirs(qlog_dir, exist_ok=True)
 
+        if (
+            job.compute_vmaf_encoder
+            and is_live_media_source(job.media_path)
+            and not is_device_webcam_source(job.media_path)
+        ):
+            job.vmaf_reference_capture_path = os.path.join(temp_dir, "vmaf_reference.ts")
         ffmpeg_cmd = build_ffmpeg_moq_cmd(
             job.media_path,
             progress_path=progress_path,
             encode_ladder=job.encode_ladder,
             target_latency_ms=job.target_latency_ms,
             duration_sec=job.duration_sec,
+            vmaf_reference_path=job.vmaf_reference_capture_path,
         )
         publisher_cmd = build_moq_publisher_cmd(
             publisher_bin,
@@ -1585,13 +1624,38 @@ class UploadService:
 
         if job.compute_vmaf_encoder:
             capture_path = job.encoder_capture_path
-            if capture_path and os.path.exists(capture_path) and os.path.getsize(capture_path) > 0:
+            # Live sources score against the per-job stream-copied input
+            # capture (same frames the encoder consumed), not the media_path
+            # (a udp:// URL that no longer exists once the job ends).
+            reference_path = job.media_path
+            if is_live_media_source(job.media_path):
+                reference_path = job.vmaf_reference_capture_path
+            reference_ok = bool(
+                reference_path
+                and os.path.exists(reference_path)
+                and os.path.getsize(reference_path) > 0
+            )
+            if not reference_ok:
+                encoder_vmaf_error = (
+                    "VMAF reference capture missing or empty for live source"
+                    if is_live_media_source(job.media_path)
+                    else "VMAF reference media file missing or empty"
+                )
+                quality_legs["encoder"] = quality_leg_from_vmaf_result(
+                    None,
+                    status="failed",
+                    computed_on="local",
+                    distorted_path=capture_path,
+                    error=encoder_vmaf_error,
+                )
+                encoder_vmaf_status = "failed"
+            elif capture_path and os.path.exists(capture_path) and os.path.getsize(capture_path) > 0:
                 if job.on_encoder_vmaf_status:
                     try:
                         job.on_encoder_vmaf_status("computing")
                     except Exception:
                         logger.warning("on_encoder_vmaf_status callback failed", exc_info=True)
-                encoder_result = compute_vmaf(job.media_path, capture_path)
+                encoder_result = compute_vmaf(reference_path, capture_path)
                 if encoder_result is not None:
                     quality_legs["encoder"] = quality_leg_from_vmaf_result(
                         encoder_result,

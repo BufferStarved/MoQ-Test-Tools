@@ -720,9 +720,14 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Live webcam has no stable reference file for VMAF.
+    # Live webcam (browser bridge): encoder VMAF is supported — the encode
+    # ffmpeg stream-copies the exact bridge-normalized input it consumed as
+    # the per-job reference (see UploadJob.vmaf_reference_capture_path).
+    # Ingest VMAF stays disabled for live sources (no reference on the ingest
+    # host), and device webcams stay disabled entirely (raw video input
+    # cannot be stream-copied as a reference).
     compute_vmaf_on_ingest = request.compute_vmaf_on_ingest and not is_live
-    compute_vmaf_encoder = request.compute_vmaf_encoder and not is_live
+    compute_vmaf_encoder = request.compute_vmaf_encoder and not device_webcam
 
     if compute_vmaf_on_ingest:
         preset = PRESET_BY_ID.get(request.preset_id or destination.preset_id)
