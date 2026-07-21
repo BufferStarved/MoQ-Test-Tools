@@ -14,6 +14,7 @@ import psutil
 
 from destinations import DestinationProfile
 from encode_profile import (
+    ASSUMED_FPS,
     DEFAULT_ENCODE_LADDER_ID,
     DEFAULT_TARGET_LATENCY_MS,
     build_video_encode_args,
@@ -189,6 +190,15 @@ class UploadJob:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
 
     def _video_args(self) -> List[str]:
+        # MediaMTX is configured with hlsSegmentDuration=1s, but LL-HLS can
+        # only cut segments on IDRs — a 2s GOP silently doubles the segment
+        # (and therefore part/sync) granularity. Match the packager.
+        if self._is_mediamtx_destination():
+            return build_video_encode_args(
+                self.encode_ladder,
+                self.target_latency_ms,
+                gop_frames=ASSUMED_FPS,  # 1s keyframe interval
+            )
         return build_video_encode_args(self.encode_ladder, self.target_latency_ms)
 
     def _uses_zixi_mpegts_output(self) -> bool:

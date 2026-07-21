@@ -40,13 +40,13 @@ async function main() {
   await page.evaluate(
     ({ url, lowLatencyMode }) => {
       const video = document.getElementById("v");
+      // Mirrors HlsPlayer.tsx: LL-HLS uses hls.js's own part-level live sync.
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode,
-        liveSyncDurationCount: 2,
-        liveMaxLatencyDurationCount: 5,
-        maxLiveSyncPlaybackRate: 1.5,
-        maxBufferLength: 20,
+        ...(lowLatencyMode
+          ? { maxLiveSyncPlaybackRate: 1.5, maxBufferLength: 12, maxMaxBufferLength: 30 }
+          : { liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 5, maxLiveSyncPlaybackRate: 1.5, maxBufferLength: 20 }),
         backBufferLength: 30,
       });
       window.__stats = { errors: [], events: [] };

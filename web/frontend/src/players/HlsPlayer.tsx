@@ -595,11 +595,22 @@ export default function HlsPlayer({
         hlsSyncDurationForPlaylist(manifestBody, requestedSec),
       );
       const syncCount = Math.max(1, Math.round(syncSec / Math.max(1, targetDuration)));
-      const hls = new Hls({
-        enableWorker: true,
-        // MediaMTX Apple LL-HLS needs lowLatencyMode; Zixi Fast HLS does not.
-        lowLatencyMode,
-        // Use segment counts (more reliable than liveSyncDuration on 1-deep Zixi).
+      // LL-HLS (MediaMTX, PDT + parts): let hls.js's own low-latency engine
+      // manage the live edge. Overriding liveSyncDurationCount there pinned
+      // playback a fixed segment count behind and *disabled* part-level sync:
+      // measured live 2026-07-21, the player idled 5-6s behind MediaMTX with
+      // zero catch-up pressure (liveMaxLatency was 10s), turning a ~4s chain
+      // into ~10s glass-to-glass. LL-HLS defaults sync to ~3 part durations
+      // and engage catch-up rate automatically.
+      const llHlsTuning = {
+        maxLiveSyncPlaybackRate: 1.5,
+        maxBufferLength: 12,
+        maxMaxBufferLength: 30,
+      };
+      // Zixi Fast HLS (no parts, 2s chunks, often 1-deep): keep explicit
+      // segment-count sync — LL defaults assume part signaling that Zixi
+      // never provides.
+      const zixiTuning = {
         liveSyncDurationCount: syncCount,
         liveMaxLatencyDurationCount: shallow
           ? Math.max(syncCount + 2, 3)
@@ -609,6 +620,12 @@ export default function HlsPlayer({
         // Hold enough media for 2-segment operation; more when shallow.
         maxBufferLength: shallow ? 30 : Math.max(20, syncSec * 3),
         maxMaxBufferLength: shallow ? 60 : 40,
+      };
+      const hls = new Hls({
+        enableWorker: true,
+        // MediaMTX Apple LL-HLS needs lowLatencyMode; Zixi Fast HLS does not.
+        lowLatencyMode,
+        ...(lowLatencyMode ? llHlsTuning : zixiTuning),
         backBufferLength: 30,
         // Proxy manifest timeout is 5s (Zixi long-poll) — client timeout must
         // clear that with margin, or hls.js fires a fatal error mid-request.
@@ -627,7 +644,9 @@ export default function HlsPlayer({
         },
       });
       pushDiag(
-        `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
+        lowLatencyMode
+          ? `hls_live_sync=ll-defaults targetduration=${targetDuration}s depth=${depth}`
+          : `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
       );
       hlsInstance = hls;
       hls.loadSource(manifestUrl);
