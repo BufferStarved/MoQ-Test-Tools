@@ -129,6 +129,33 @@ def srt_latency_us(target_latency_ms: int) -> int:
     return clamp_target_latency_ms(target_latency_ms) * 1000
 
 
+# MoQ GOP bounds (seconds). Floor keeps x264 overhead sane; ceiling keeps the
+# group cadence short enough that join-offset + fragment accumulation stay
+# inside the latency budget.
+MOQ_GOP_SEC_MIN = 0.5
+MOQ_GOP_SEC_MAX = 2.0
+
+
+def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
+    """MoQ keyframe interval: ~half the latency budget, NOT the whole budget.
+
+    gop_frames_for_latency() sizes the GOP to the full latency target because
+    Zixi HLS segments must land on IDR boundaries. But openmoq maps one CMAF
+    fragment (= one GOP with -movflags frag_keyframe) to one MoQ group/object,
+    and the player joins on NextGroupStart with no catch-up (no LOC
+    CaptureTimestamps). So for MoQ the GOP *is* the latency floor twice over:
+    a fragment ships only after the whole GOP is encoded (+1 GOP), and a
+    subscriber waits up to a GOP for the next join point (+0..1 GOP) — an
+    offset that then persists for the entire session. With a 4s target the old
+    shared mapping produced 4s GOPs -> ~1.9MB objects every 4-5s and a real
+    glass-to-glass of 9-11s (relay logs, 2026-07-20). GOP = target/2 keeps
+    worst-case join latency (2 x GOP) at or under the target.
+    """
+    ms = clamp_target_latency_ms(target_latency_ms)
+    seconds = min(MOQ_GOP_SEC_MAX, max(MOQ_GOP_SEC_MIN, ms / 2000.0))
+    return max(1, int(round(seconds * fps)))
+
+
 def hls_live_sync_duration_sec(target_latency_ms: int) -> float:
     """hls.js liveSyncDuration (seconds of intentional live buffer).
 
@@ -175,10 +202,12 @@ def with_srt_latency(url: str, target_latency_ms: int) -> str:
 def build_video_encode_args(
     ladder_id: str | None,
     target_latency_ms: int | None,
+    *,
+    gop_frames: int | None = None,
 ) -> List[str]:
     ladder = resolve_encode_ladder(ladder_id)
     latency_ms = clamp_target_latency_ms(target_latency_ms)
-    gop = gop_frames_for_latency(latency_ms)
+    gop = gop_frames if gop_frames and gop_frames > 0 else gop_frames_for_latency(latency_ms)
     # VBV buffer: ~1–2× bitrate over the latency window (smaller = snappier, less stable).
     window_sec = max(0.25, latency_ms / 1000.0)
     bufsize_kb = max(ladder.maxrate_kbps, int(round(ladder.maxrate_kbps * window_sec * 2)))
@@ -276,6 +305,7 @@ __all__ = [
     "encode_profile_summary",
     "ensure_known_ladder",
     "gop_frames_for_latency",
+    "moq_gop_frames_for_latency",
     "hls_live_sync_count",
     "hls_live_sync_duration_sec",
     "hls_segment_sec",

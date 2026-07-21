@@ -143,8 +143,18 @@ class MoqxStatsPoller:
         return MoqxStatsSnapshot(
             subscribe_success=self._metric_value(body, "moqx_pubSubscribeSuccess_total"),
             subscribe_error=self._metric_value(body, "moqx_pubSubscribeError_total"),
-            publish_namespace_success=self._metric_value(
-                body, "moqx_pubPublishNamespaceSuccess_total"
+            # moqx prefixes counters by the *relay's* role in that session:
+            # a publisher's PUBLISH_NAMESPACE lands on the relay's
+            # subscriber-side handler (sub*), not pub*. On the live relay
+            # moqx_pubPublishNamespaceSuccess_total is permanently 0 while
+            # moqx_subPublishNamespaceSuccess_total counts every real publish
+            # (verified 2026-07-20). Reading only pub* made the MoQ
+            # preview-ready gate never confirm, so every live run silently
+            # burned the full fallback grace period before playback started.
+            # Sum both so either relay build/version works.
+            publish_namespace_success=(
+                self._metric_value(body, "moqx_pubPublishNamespaceSuccess_total")
+                + self._metric_value(body, "moqx_subPublishNamespaceSuccess_total")
             ),
             publish_received=self._metric_value(body, "moqx_moqPublishReceived_total"),
             publish_done=self._metric_value(body, "moqx_pubPublishDone_total"),

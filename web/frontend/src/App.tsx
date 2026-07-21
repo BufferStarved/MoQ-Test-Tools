@@ -49,6 +49,7 @@ import {
   startLiveWebcamBroadcast,
   webcamCaptureSeconds,
 } from "./webcamCapture";
+import { WebcamPreview } from "./WebcamPreview";
 import {
   DEFAULT_ENCODE_LADDER_ID,
   DEFAULT_TARGET_LATENCY_MS,
@@ -191,7 +192,11 @@ function App() {
   const [apiOnline, setApiOnline] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
-  const webcamPreviewRef = useRef<HTMLVideoElement | null>(null);
+  // State mirror of webcamStreamRef so preview <video> elements can (re)bind
+  // srcObject declaratively wherever they mount — the old single ref-wired
+  // element lived inside the collapsible recipe panel and went dark (or
+  // disappeared entirely) as soon as the benchmark collapsed that panel.
+  const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
@@ -474,9 +479,7 @@ function App() {
         existing.getTracks().forEach((track) => track.stop());
         webcamStreamRef.current = null;
       }
-      if (webcamPreviewRef.current) {
-        webcamPreviewRef.current.srcObject = null;
-      }
+      setWebcamStream(null);
       if (mediaSource !== "webcam") {
         setWebcamStatus(null);
         return;
@@ -489,10 +492,7 @@ function App() {
           return;
         }
         webcamStreamRef.current = stream;
-        if (webcamPreviewRef.current) {
-          webcamPreviewRef.current.srcObject = stream;
-          void webcamPreviewRef.current.play().catch(() => undefined);
-        }
+        setWebcamStream(stream);
         setWebcamStatus("Webcam ready — capture starts when you run the comparison.");
       } catch (err) {
         setWebcamStatus(err instanceof Error ? err.message : "Could not open webcam.");
@@ -507,6 +507,7 @@ function App() {
         stream.getTracks().forEach((track) => track.stop());
         webcamStreamRef.current = null;
       }
+      setWebcamStream(null);
     };
   }, [mediaSource]);
 
@@ -771,9 +772,7 @@ function App() {
           webcamStreamRef.current.getTracks().forEach((track) => track.stop());
           webcamStreamRef.current = null;
         }
-        if (webcamPreviewRef.current) {
-          webcamPreviewRef.current.srcObject = null;
-        }
+        setWebcamStream(null);
         setWebcamStatus(
           `Agent will open this machine’s camera — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
         );
@@ -797,9 +796,7 @@ function App() {
         if (!stream || stream.getTracks().every((track) => track.readyState === "ended")) {
           stream = await openWebcamStream();
           webcamStreamRef.current = stream;
-          if (webcamPreviewRef.current) {
-            webcamPreviewRef.current.srcObject = stream;
-          }
+          setWebcamStream(stream);
         }
 
         const liveBroadcast = startLiveWebcamBroadcast({
@@ -886,9 +883,7 @@ function App() {
         track.stop();
       }
       webcamStreamRef.current = null;
-      if (webcamPreviewRef.current) {
-        webcamPreviewRef.current.srcObject = null;
-      }
+      setWebcamStream(null);
     }
     await Promise.all(
       comparisonLegs.map((leg) =>
@@ -1138,13 +1133,7 @@ function App() {
                       )}
                       {mediaSource === "webcam" && publisherHost !== "local" && (
                         <div className="webcam-preview-block">
-                          <video
-                            ref={webcamPreviewRef}
-                            className="webcam-preview"
-                            muted
-                            playsInline
-                            autoPlay
-                          />
+                          <WebcamPreview stream={webcamStream} />
                           <span className="field-hint">
                             {webcamStatus ??
                               `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
@@ -1263,6 +1252,20 @@ function App() {
                 </>
               )}
 
+              {/* Starting a run collapses the recipe (and its embedded
+                  preview) — keep the live camera visible alongside the
+                  protocol players so the source is always on screen. */}
+              {!recipeOpen && mediaSource === "webcam" && webcamStream && (
+                <div className="webcam-preview-block webcam-preview-live">
+                  <WebcamPreview stream={webcamStream} />
+                  <span className="field-hint">
+                    {loading
+                      ? "Live camera (source feed) — streaming to all protocols"
+                      : webcamStatus ?? "Live camera preview"}
+                  </span>
+                </div>
+              )}
+
               {error && <p className="error">{error}</p>}
 
               <div className="button-row">
@@ -1378,6 +1381,16 @@ function App() {
                           leg?.job.target_latency_ms ?? targetLatencyMs,
                         )}
                         controlsLocked={bootstrapping || !apiOnline}
+                        sourceHasAudio={
+                          // Browser-webcam capture only publishes audio when the
+                          // MediaStream actually has a mic track (openWebcamStream
+                          // falls back to video-only on denied/hung audio). The
+                          // local-agent webcam path (ffmpeg AVFoundation/V4L2)
+                          // always includes an audio input, as do VOD sources.
+                          mediaSource !== "webcam" ||
+                          publisherHost === "local" ||
+                          (webcamStream?.getAudioTracks().length ?? 0) > 0
+                        }
                         onPlaybackModeChange={(mode) =>
                           updateEndpoint(endpoint.id, { playbackMode: mode })
                         }

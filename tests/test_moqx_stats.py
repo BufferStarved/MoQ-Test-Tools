@@ -27,6 +27,16 @@ def _metrics_body(publish_namespace_success: int, subscribe_success: int = 0) ->
     )
 
 
+def _sub_side_metrics_body(sub_publish_namespace_success: int) -> str:
+    """What the live relay actually reports: a publisher's PUBLISH_NAMESPACE
+    lands on the relay's *subscriber-side* handler, so pub* stays 0 forever
+    while sub* counts every real publish (observed live 2026-07-20)."""
+    return (
+        "moqx_pubPublishNamespaceSuccess_total 0\n"
+        f"moqx_subPublishNamespaceSuccess_total {sub_publish_namespace_success}\n"
+    )
+
+
 class MoqxStatsPollerTests(unittest.TestCase):
     def _poller_with_responses(self, bodies: list[str]) -> MoqxStatsPoller:
         poller = MoqxStatsPoller("https://relay.example.com:4433/moq-relay?namespace=benchmark")
@@ -76,6 +86,30 @@ class MoqxStatsPollerTests(unittest.TestCase):
         poller.poll()  # still not registered
         self.assertEqual(poller.publish_namespace_success_delta(), 0)
         poller.poll()  # publisher registered its namespace
+        self.assertEqual(poller.publish_namespace_success_delta(), 1)
+
+    def test_sub_side_namespace_counter_is_recognized(self):
+        """Regression: the preview-ready gate never confirmed on the live
+        relay because only pub* was read — every MoQ run silently waited out
+        the whole fallback grace period before playback could start."""
+        poller = self._poller_with_responses(
+            [_sub_side_metrics_body(50), _sub_side_metrics_body(51)]
+        )
+        poller.poll()  # baseline (relay already at 50 from earlier runs)
+        self.assertEqual(poller.publish_namespace_success_delta(), 0)
+        poller.poll()  # this job's publish registers on the sub-side counter
+        self.assertEqual(poller.publish_namespace_success_delta(), 1)
+
+    def test_pub_and_sub_counters_are_summed(self):
+        poller = self._poller_with_responses(
+            [
+                "moqx_pubPublishNamespaceSuccess_total 2\nmoqx_subPublishNamespaceSuccess_total 10\n",
+                "moqx_pubPublishNamespaceSuccess_total 2\nmoqx_subPublishNamespaceSuccess_total 11\n",
+            ]
+        )
+        poller.poll()
+        self.assertEqual(poller.publish_namespace_success_delta(), 0)
+        poller.poll()
         self.assertEqual(poller.publish_namespace_success_delta(), 1)
 
     def test_disabled_poller_returns_zero(self):

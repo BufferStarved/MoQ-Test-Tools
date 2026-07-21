@@ -3,7 +3,7 @@ import { Player } from "@playa/player";
 import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
-import { OPENMOQ_BENCHMARK_CATALOG } from "../moqOpenmoqCatalog";
+import { openmoqBenchmarkCatalog } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
 import {
   markMoqCatalogReady,
@@ -31,6 +31,14 @@ interface MoqPlayerProps {
   encodeDurationSec?: number;
   /** Glass-to-glass budget from upload config (ms). */
   targetLatencyMs?: number;
+  /**
+   * Whether the publish source actually carries an audio track. Advertising
+   * audio in the injected catalog when the capture is video-only (no/denied
+   * mic) makes the player subscribe to a track the publisher never registers
+   * — the relay refuses it and the player fatally tears down the healthy
+   * video subscription with it (reproduced via QA harness, 2026-07-20).
+   */
+  sourceHasAudio?: boolean;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -63,6 +71,7 @@ export default function MoqPlayer({
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 400,
+  sourceHasAudio = true,
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -335,7 +344,10 @@ export default function MoqPlayer({
       lastTimelineDiagRef.current = 0;
       setStatus("Waiting for publisher...");
       pushDiag(`relay=${relayUrl} namespace=${namespace}`, true);
-      pushDiag("catalog_mode=injected openmoq vide_1+soun_2", true);
+      pushDiag(
+        `catalog_mode=injected openmoq vide_1${sourceHasAudio ? "+soun_2" : " (video-only source)"}`,
+        true,
+      );
       pushDiag(`publisher_forward=1 warmup=${PUBLISHER_WARMUP_MS / 1000}s`, true);
       setIsReady(false);
 
@@ -381,7 +393,7 @@ export default function MoqPlayer({
           // Catch-up + subscribe filter must go through moqtPlayerConfig —
           // @playa/player only forwards a subset of top-level options.
           moqtPlayerConfig: {
-            catalog: OPENMOQ_BENCHMARK_CATALOG,
+            catalog: openmoqBenchmarkCatalog(sourceHasAudio),
             // Catch-up disabled: openmoq CMAF has no LOC CaptureTimestamps.
             maxCatchUpRate: catchUp.maxCatchUpRate,
             catchUpThresholdMs: catchUp.catchUpThresholdMs,
@@ -663,7 +675,7 @@ export default function MoqPlayer({
     };
     // encodeDurationSec is read once at start for catalog timeout — keep it out of
     // deps so a late duration update does not tear down a healthy Player/MediaSource.
-  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs]);
+  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs, sourceHasAudio]);
 
   async function togglePlayPause() {
     const player = playerRef.current;

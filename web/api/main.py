@@ -1315,7 +1315,12 @@ def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
         "moqx_pubSubscribeError_by_code_total",
         'code="track_not_exist"',
     )
-    result["publish_namespace_success"] = metric_value("moqx_pubPublishNamespaceSuccess_total")
+    # A publisher's PUBLISH_NAMESPACE lands on the relay's subscriber-side
+    # (sub*) handler — pub* stays 0 on the live relay. Sum both prefixes so
+    # either moqx build reports correctly (matches src/moqx_stats.py).
+    result["publish_namespace_success"] = (
+        metric_value("moqx_pubPublishNamespaceSuccess_total") or 0
+    ) + (metric_value("moqx_subPublishNamespaceSuccess_total") or 0)
     result["publish_received"] = metric_value("moqx_moqPublishReceived_total")
     result["publish_done"] = metric_value("moqx_pubPublishDone_total")
 

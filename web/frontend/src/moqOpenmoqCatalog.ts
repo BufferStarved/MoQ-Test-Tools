@@ -55,3 +55,21 @@ export const OPENMOQ_BENCHMARK_CATALOG = {
     },
   ],
 };
+
+/**
+ * Catalog for the actual media the source produces. Advertising soun_2 when
+ * the capture has no audio track (no/denied/broken microphone — or the QA
+ * harness's simulated no-mic environment) makes the player subscribe to a
+ * track the publisher never registers; the relay refuses it ("no such
+ * namespace or track") and @playa/player escalates to a fatal
+ * all-tracks-refused teardown that kills the perfectly good video
+ * subscription with it. Video-only sources must advertise video only.
+ */
+export function openmoqBenchmarkCatalog(includeAudio: boolean) {
+  if (includeAudio) {
+    return OPENMOQ_BENCHMARK_CATALOG;
+  }
+  return {
+    tracks: OPENMOQ_BENCHMARK_CATALOG.tracks.filter((track) => track.role !== "audio"),
+  };
+}

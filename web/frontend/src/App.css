@@ -1195,6 +1195,17 @@ code {
   border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
+.webcam-preview-live {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.webcam-preview-live .webcam-preview {
+  max-width: 320px;
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
 .endpoint-section h3 {
   margin: 0 0 14px;
   font-size: 0.95rem;

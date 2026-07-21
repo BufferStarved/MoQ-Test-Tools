@@ -62,6 +62,8 @@ interface StreamPlayerProps {
   onWhepPlaybackUrlChange?: (url: string) => void;
   /** When true, omit the card title (stream column already has a header). */
   compactHeader?: boolean;
+  /** False when the publish source is video-only (e.g. webcam without a mic). */
+  sourceHasAudio?: boolean;
 }
 
 function PlayerFallback() {
@@ -96,6 +98,7 @@ export function StreamPlayer({
   onPlaybackModeChange,
   onWhepPlaybackUrlChange,
   compactHeader = false,
+  sourceHasAudio = true,
 }: StreamPlayerProps) {
   const resolvedMode =
     playbackMode && isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
@@ -275,6 +278,7 @@ export function StreamPlayer({
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
               targetLatencyMs={targetLatencyMs}
+              sourceHasAudio={sourceHasAudio}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

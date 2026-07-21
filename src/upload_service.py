@@ -484,7 +484,7 @@ class UploadService:
             path_rtt_probe = PathRttProbe(
                 job.destination.url,
                 port=whip_parsed.port or 8889,
-            )
+        )
         start_time = time.time()
 
         try:
@@ -1742,8 +1742,8 @@ class UploadService:
     def _terminate_process(self, process: Optional[subprocess.Popen]) -> None:
         if process is None:
             return
-        if process.poll() is None:
-            process.terminate()
+            if process.poll() is None:
+                process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:

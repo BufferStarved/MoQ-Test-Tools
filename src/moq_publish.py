@@ -25,6 +25,7 @@ from encode_profile import (  # noqa: E402
     DEFAULT_ENCODE_LADDER_ID,
     DEFAULT_TARGET_LATENCY_MS,
     build_video_encode_args,
+    moq_gop_frames_for_latency,
 )
 
 BROWSER_COMPAT_VIDEO_ARGS = build_video_encode_args(
@@ -421,7 +422,16 @@ def build_ffmpeg_moq_cmd(
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
     duration_sec: Optional[int] = None,
 ) -> List[str]:
-    video_args = build_video_encode_args(encode_ladder, target_latency_ms)
+    # MoQ must NOT use the shared latency-sized GOP: openmoq ships one CMAF
+    # fragment (= one GOP via frag_keyframe) per MoQ group/object, and the
+    # player joins on NextGroupStart with no rate catch-up — so GOP duration
+    # is paid twice (fragment accumulation + join offset) and persists all
+    # session. See moq_gop_frames_for_latency for the sizing rationale.
+    video_args = build_video_encode_args(
+        encode_ladder,
+        target_latency_ms,
+        gop_frames=moq_gop_frames_for_latency(target_latency_ms),
+    )
     return [
         find_ffmpeg(),
         *build_ffmpeg_input_args(media_path, duration_sec=duration_sec),

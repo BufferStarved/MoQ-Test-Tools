@@ -133,10 +133,30 @@ async function main() {
   await startButton.click();
 
   const endAt = Date.now() + watchSec * 1000;
+  let previewCheckDone = false;
   while (Date.now() < endAt) {
     await sleep(5000);
     const statuses = await page.locator(".stream-column-status .pill").allTextContents();
     console.log(`[t+${Math.round((watchSec * 1000 - (endAt - Date.now())) / 1000)}s] job statuses: ${statuses.join(", ")}`);
+    if (!previewCheckDone) {
+      previewCheckDone = true;
+      // The run collapses the recipe panel; the live source preview must
+      // stay on screen and actually render frames (videoWidth > 0).
+      const preview = page.locator(".webcam-preview-live video");
+      const previewState = await preview
+        .evaluate((el) => ({
+          width: el.videoWidth,
+          height: el.videoHeight,
+          paused: el.paused,
+          hasStream: Boolean(el.srcObject),
+        }))
+        .catch(() => null);
+      console.log(
+        previewState
+          ? `[preview-during-run] visible=yes stream=${previewState.hasStream} playing=${!previewState.paused} size=${previewState.width}x${previewState.height}`
+          : "[preview-during-run] visible=NO (regression: preview disappeared)",
+      );
+    }
   }
 
   console.log("\n=== Per-stream diagnostics ===");
