@@ -41,6 +41,9 @@ const STALE_FRAG_FAIL_AFTER = 8;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
+/** Playhead frozen this long while data keeps buffering => escape the hole. */
+const STUCK_PLAYHEAD_RESCUE_MS = 4000;
+const STUCK_WATCHDOG_POLL_MS = 1000;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -434,6 +437,7 @@ export default function HlsPlayer({
     let lastRequestUrl = "";
     let playRetryTimer: ReturnType<typeof window.setTimeout> | null = null;
     let lastRecoverMediaErrorAt = 0;
+    let stuckWatchdog: ReturnType<typeof window.setInterval> | null = null;
     sessionRef.current = {
       fragmentLoads: 0,
       videoBuffers: 0,
@@ -621,17 +625,19 @@ export default function HlsPlayer({
       // When Zixi finally rolls past a stale edge, jump to live instead of
       // draining a multi-second backlog. On 1-deep playlists, jump less often —
       // seeking to the only segment mid-decode causes visible stutters.
+      //
+      // Deliberately NO video.readyState guard here: a playhead starved
+      // inside a buffered-timeline hole reports readyState < 2, which is
+      // exactly the state this jump exists to escape. The old readyState<2
+      // guard disabled the rescue precisely when it was needed — confirmed
+      // live 2026-07-21: MediaMTX LL-HLS playback froze at t=0.70s for an
+      // entire run while 232 fragments appended fine past a hole.
       hls.on(Hls.Events.LEVEL_UPDATED, () => {
         if (destroyed) {
           return;
         }
         const liveSync = hls.liveSyncPosition;
-        if (
-          liveSync == null ||
-          !Number.isFinite(liveSync) ||
-          video.readyState < 2 ||
-          video.currentTime <= 0
-        ) {
+        if (liveSync == null || !Number.isFinite(liveSync) || video.currentTime <= 0) {
           return;
         }
         const behind = liveSync - video.currentTime;
@@ -641,6 +647,62 @@ export default function HlsPlayer({
           pushDiag(`hls_live_jump behind=${behind.toFixed(2)}s to=${liveSync.toFixed(2)}`);
         }
       });
+
+      // Stuck-playhead watchdog: a discontinuity in the appended timeline (a
+      // "hole" — e.g. MediaMTX LL-HLS gap filler, or a PTS jump after a
+      // webcam-bridge restart) leaves currentTime frozen while fragments keep
+      // buffering *past* the hole. hls.js's own gap nudging misses multi-second
+      // holes, and the LEVEL_UPDATED live-jump only helps when liveSyncPosition
+      // is meaningful. Detect "frozen playhead + media buffered ahead of a gap"
+      // directly and seek across it. (Observed live 2026-07-21: playhead pinned
+      // at 0.70s for 40+ seconds while 232 fragments appended fine.)
+      let stuckSinceMs = 0;
+      let lastWatchdogTime = -1;
+      stuckWatchdog = window.setInterval(() => {
+        if (destroyed || video.paused || video.seeking) {
+          stuckSinceMs = 0;
+          return;
+        }
+        const now = video.currentTime;
+        if (now <= 0) {
+          return;
+        }
+        if (Math.abs(now - lastWatchdogTime) > 0.05) {
+          lastWatchdogTime = now;
+          stuckSinceMs = 0;
+          return;
+        }
+        stuckSinceMs += STUCK_WATCHDOG_POLL_MS;
+        if (stuckSinceMs < STUCK_PLAYHEAD_RESCUE_MS) {
+          return;
+        }
+        stuckSinceMs = 0;
+        // Find the next buffered range beyond the playhead (the far side of
+        // the hole). Prefer the live sync point when it's inside real buffer.
+        let nextStart = -1;
+        for (let i = 0; i < video.buffered.length; i += 1) {
+          const start = video.buffered.start(i);
+          if (start > now + 0.1 && (nextStart < 0 || start < nextStart)) {
+            nextStart = start;
+          }
+        }
+        const liveSync = hls.liveSyncPosition;
+        let target = -1;
+        if (liveSync != null && Number.isFinite(liveSync) && liveSync > now + 0.25) {
+          target = liveSync;
+        } else if (nextStart > 0) {
+          target = nextStart + 0.1;
+        }
+        if (target > 0) {
+          pushDiag(
+            `stuck_rescue frozen_at=${now.toFixed(2)} jump_to=${target.toFixed(2)} next_range=${nextStart.toFixed(2)} live_sync=${liveSync == null ? "-" : liveSync.toFixed(2)}`,
+          );
+          video.currentTime = target;
+          attemptPlay();
+        } else {
+          pushDiag(`stuck_no_escape frozen_at=${now.toFixed(2)} buffered_ranges=${video.buffered.length}`);
+        }
+      }, STUCK_WATCHDOG_POLL_MS);
 
       hls.on(Hls.Events.FRAG_LOADED, () => {
         sessionRef.current.fragmentLoads += 1;
@@ -792,6 +854,10 @@ export default function HlsPlayer({
       if (playRetryTimer != null) {
         window.clearTimeout(playRetryTimer);
         playRetryTimer = null;
+      }
+      if (stuckWatchdog != null) {
+        window.clearInterval(stuckWatchdog);
+        stuckWatchdog = null;
       }
       hlsInstance?.destroy();
       video.removeAttribute("src");

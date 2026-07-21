@@ -113,15 +113,21 @@ def hls_segment_sec(target_latency_ms: int) -> int:
 
 
 def gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
-    """Keyframe interval ≈ one GOP per latency budget (clamped for stability).
+    """Keyframe interval == intended HLS segment duration, NOT the latency budget.
 
-    Floor at HLS_SEGMENT_SEC_MIN seconds so Zixi HLS chunks land on IDR
-    boundaries instead of cutting ~1s packs when the latency target is low.
+    HLS packagers (Zixi Fast HLS, MediaMTX LL-HLS) can only cut segments on
+    IDR frames, so the effective segment duration is max(configured segment,
+    GOP). The old mapping sized the GOP to the *whole* latency budget, which
+    silently stretched every segment to match: a 4s target produced 4s GOPs
+    -> 4s chunks -> a 2-chunk player buffer of 8s -> ~16.7s real glass-to-
+    glass (measured live 2026-07-21, RTMP->Zixi leg pinned at e2e=16.7s the
+    entire run). Keying the GOP to hls_segment_sec keeps chunks at the size
+    the rest of the pipeline is tuned for (player live sync ~= 2 x segment
+    ~= the latency target).
     """
     ms = clamp_target_latency_ms(target_latency_ms)
-    frames = int(round((ms / 1000.0) * fps))
-    min_frames = HLS_SEGMENT_SEC_MIN * fps
-    return max(min_frames, min(150, frames))
+    seconds = hls_segment_sec(ms)
+    return max(fps, min(150, int(round(seconds * fps))))
 
 
 def srt_latency_us(target_latency_ms: int) -> int:

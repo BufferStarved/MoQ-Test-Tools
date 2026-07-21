@@ -40,9 +40,14 @@ class MoqGopLatencyTests(unittest.TestCase):
                 f"target={target_ms}ms gop={gop_sec}s",
             )
 
-    def test_moq_gop_much_smaller_than_shared_mapping_at_high_targets(self):
-        # Shared mapping: 4s target -> 120 frames. MoQ: capped at 2s -> 60.
-        self.assertEqual(gop_frames_for_latency(4000), 120)
+    def test_shared_hls_gop_tracks_segment_duration_not_latency_budget(self):
+        """The shared mapping keys the GOP to the HLS segment duration —
+        packagers cut segments on IDRs, so a latency-budget-sized GOP
+        silently stretched every segment (4s target -> 4s chunks -> 8s
+        player buffer -> 16.7s measured glass-to-glass, 2026-07-21)."""
+        self.assertEqual(gop_frames_for_latency(4000), 60)   # 2s segment
+        self.assertEqual(gop_frames_for_latency(800), 60)    # 2s floor
+        self.assertEqual(gop_frames_for_latency(10_000), 150)  # 5s segment
         self.assertEqual(moq_gop_frames_for_latency(4000), 60)
 
     def test_gop_floor_for_ultra_low_targets(self):

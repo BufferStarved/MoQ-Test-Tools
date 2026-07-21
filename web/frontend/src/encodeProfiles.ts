@@ -67,12 +67,15 @@ export function resolveEncodeLadder(ladderId: string | null | undefined): Encode
   return ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === key) ?? ENCODE_LADDER_OPTIONS[1];
 }
 
-/** Keyframe interval ≈ one GOP per latency budget (floor at 2s for HLS IDR alignment). */
+/**
+ * Keyframe interval == intended HLS segment duration (mirrors
+ * src/encode_profile.py). Packagers cut segments on IDRs only, so a GOP
+ * sized to the whole latency budget silently stretched every segment to
+ * match — which doubled again in the player's 2-segment live buffer.
+ */
 export function gopFramesForLatency(targetLatencyMs: number, fps = ASSUMED_FPS): number {
-  const ms = clampTargetLatencyMs(targetLatencyMs);
-  const frames = Math.round((ms / 1000) * fps);
-  const minFrames = HLS_SEGMENT_SEC_MIN * fps;
-  return Math.max(minFrames, Math.min(150, frames));
+  const seconds = hlsSegmentSec(clampTargetLatencyMs(targetLatencyMs));
+  return Math.max(fps, Math.min(150, Math.round(seconds * fps)));
 }
 
 export function vbvBufsizeKb(ladderId: string | null | undefined, targetLatencyMs: number): number {

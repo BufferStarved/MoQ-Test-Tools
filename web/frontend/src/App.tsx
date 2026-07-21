@@ -197,6 +197,12 @@ function App() {
   // element lived inside the collapsible recipe panel and went dark (or
   // disappeared entirely) as soon as the benchmark collapsed that panel.
   const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
+  // Definitive audio presence for the stream actually being recorded.
+  // Deriving this from webcamStream state at render time raced the start
+  // flow (observed live: publisher registered soun_2 while the player's
+  // injected catalog said video-only) — set explicitly wherever the
+  // broadcast stream is chosen instead.
+  const [broadcastHasAudio, setBroadcastHasAudio] = useState(true);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
@@ -798,6 +804,7 @@ function App() {
           webcamStreamRef.current = stream;
           setWebcamStream(stream);
         }
+        setBroadcastHasAudio(stream.getAudioTracks().length > 0);
 
         const liveBroadcast = startLiveWebcamBroadcast({
           stream,
@@ -1387,9 +1394,11 @@ function App() {
                           // falls back to video-only on denied/hung audio). The
                           // local-agent webcam path (ffmpeg AVFoundation/V4L2)
                           // always includes an audio input, as do VOD sources.
+                          // broadcastHasAudio is set from the exact stream handed
+                          // to MediaRecorder at start (state-race safe).
                           mediaSource !== "webcam" ||
                           publisherHost === "local" ||
-                          (webcamStream?.getAudioTracks().length ?? 0) > 0
+                          broadcastHasAudio
                         }
                         onPlaybackModeChange={(mode) =>
                           updateEndpoint(endpoint.id, { playbackMode: mode })
