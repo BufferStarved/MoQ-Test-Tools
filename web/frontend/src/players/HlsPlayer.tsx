@@ -322,15 +322,31 @@ export default function HlsPlayer({
     ttffMs: 0,
     liveStartedAtMs: 0,
     bufferSec: 0,
+    // PDT-based latency from hls.js (now − playhead PROGRAM-DATE-TIME).
+    // MediaMTX LL-HLS carries PDT; Zixi Fast HLS does not (stays 0).
+    playerLatencyMs: 0,
   });
+
+  // Zixi Fast HLS timelines are encode-anchored: with the per-run input
+  // reset, raw currentTime IS media position since encode start, so the
+  // wall−vt latency estimate must NOT rebase to the join position — that
+  // inflated e2e by exactly the join offset (~3s vs burnt-in timer,
+  // 2026-07-21: RTMP reported 10-11s while really ~7-8s). Rebase only when
+  // the timeline is clearly shifted by a managed Zixi -output_ts_offset
+  // (minutes/hours into a shared stream id).
+  //
+  // MediaMTX LL-HLS timelines start at an arbitrary muxer base (~10s), so
+  // rebasing stays on there — its true latency comes from hls.js's
+  // PDT-based `hls.latency` instead (see playerLatencyMs).
+  const OFFSET_REBASE_THRESHOLD_SEC = 120;
 
   function sessionRelativeVideoTime(video: HTMLVideoElement): number {
     const session = sessionRef.current;
     const raw = video.currentTime;
     if (session.videoTimeOrigin == null) {
       if (raw > 0.05) {
-        session.videoTimeOrigin = raw;
-        return 0;
+        session.videoTimeOrigin =
+          lowLatencyMode || raw > OFFSET_REBASE_THRESHOLD_SEC ? raw : 0;
       }
       return 0;
     }
@@ -353,6 +369,10 @@ export default function HlsPlayer({
       playback_video_time_sec: sessionRef.current.maxVideoTime,
       playback_buffer_sec: sessionRef.current.bufferSec,
       playback_rebuffer_sec: rebufferRef.current.totalSec,
+      // PDT-derived true latency (hls.js `latency`), when the playlist
+      // carries PROGRAM-DATE-TIME (MediaMTX LL-HLS). Preferred over the
+      // wall−vt estimate, which is skewed by the join position.
+      e2e_latency_ms: sessionRef.current.playerLatencyMs || undefined,
     }),
     [],
   );
@@ -454,6 +474,7 @@ export default function HlsPlayer({
       ttffMs: 0,
       liveStartedAtMs: Date.now(),
       bufferSec: 0,
+      playerLatencyMs: 0,
     };
     setElapsedSec(0);
     rebufferRef.current.reset();
@@ -883,6 +904,12 @@ export default function HlsPlayer({
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
         setElapsedSec(sessionRef.current.maxVideoTime);
         sessionRef.current.bufferSec = bufferedAheadSec(video);
+        // PDT-based glass latency (finite only when the playlist carries
+        // PROGRAM-DATE-TIME, e.g. MediaMTX LL-HLS).
+        const pdtLatency = hls.latency;
+        if (Number.isFinite(pdtLatency) && pdtLatency > 0) {
+          sessionRef.current.playerLatencyMs = Math.round(pdtLatency * 1000);
+        }
         if (sessionRef.current.ttffMs <= 0 && relTime > 0.25) {
           sessionRef.current.ttffMs = Math.max(
             0,

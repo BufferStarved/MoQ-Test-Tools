@@ -55,7 +55,12 @@ export function usePlaybackMetricsReporter(options: {
               playerLatencyMs: snapshot.e2e_latency_ms,
               targetLatencyMs,
             })
-          : estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
+          : // HLS: prefer the player's PDT-derived latency (MediaMTX LL-HLS
+            // playlists carry PROGRAM-DATE-TIME) — the wall−vt fallback is
+            // skewed by the join position on timelines that aren't
+            // encode-anchored.
+            snapshot.e2e_latency_ms ||
+            estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
       const playback_error_count =
         snapshot.playback_error_count ??
         (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);
