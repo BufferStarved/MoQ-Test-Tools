@@ -5,6 +5,7 @@ import {
   createLiveSession,
   createUpload,
   fetchFeatures,
+  fetchLiveSessionStatus,
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
@@ -203,6 +204,11 @@ function App() {
   // injected catalog said video-only) — set explicitly wherever the
   // broadcast stream is chosen instead.
   const [broadcastHasAudio, setBroadcastHasAudio] = useState(true);
+  // Capture->bridge-output lag polled from the live session — the shared
+  // upstream latency component every per-protocol player estimate is blind
+  // to (players only see their own leg's timeline or the packager clock).
+  const [bridgeLagMs, setBridgeLagMs] = useState(0);
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
@@ -519,6 +525,28 @@ function App() {
     };
   }, [mediaSource]);
 
+  // Poll the live bridge's capture->output lag during a webcam run so the
+  // players can fold the upstream chain into their latency estimates.
+  useEffect(() => {
+    if (!loading || !liveSessionId) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void fetchLiveSessionStatus(liveSessionId)
+        .then((status) => {
+          if (!cancelled) {
+            setBridgeLagMs(status.bridge_lag_ms || 0);
+          }
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [loading, liveSessionId]);
+
   function updateEndpoint(id: string, patch: Partial<EndpointConfig>) {
     setEndpoints((current) =>
       current.map((endpoint) => (endpoint.id === id ? { ...endpoint, ...patch } : endpoint)),
@@ -801,6 +829,8 @@ function App() {
         });
         durationSec = live.duration_sec;
         mediaPaths = live.media_paths;
+        setLiveSessionId(live.session_id);
+        setBridgeLagMs(0);
 
         let stream = webcamStreamRef.current;
         if (!stream || stream.getTracks().every((track) => track.readyState === "ended")) {
@@ -1368,6 +1398,8 @@ function App() {
                         encodeStartedAtEpoch={
                           leg?.job.first_sample_at_epoch ?? leg?.job.started_at_epoch
                         }
+                        bridgeLagMs={mediaSource === "webcam" ? bridgeLagMs : 0}
+                        encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;
                           if (!jobId) {

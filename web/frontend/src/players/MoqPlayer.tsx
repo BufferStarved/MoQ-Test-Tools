@@ -39,6 +39,8 @@ interface MoqPlayerProps {
    * video subscription with it (reproduced via QA harness, 2026-07-20).
    */
   sourceHasAudio?: boolean;
+  /** Capture->bridge-output lag (ms) for live webcam runs; 0 for VOD. */
+  bridgeLagMs?: number;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -72,6 +74,7 @@ export default function MoqPlayer({
   encodeDurationSec = 30,
   targetLatencyMs = 400,
   sourceHasAudio = true,
+  bridgeLagMs = 0,
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -96,8 +99,16 @@ export default function MoqPlayer({
     ttffMs: 0,
     videoTimeSec: 0,
     playerLatencyMs: 0,
+    // Latest MoQ media-timeline position (ms) from playa's timeupdate — the
+    // LEG ENCODER's output timeline (fMP4 tfdt starts ~0 at encode start),
+    // unlike video.currentTime which MSE re-zeroes at join. This is what
+    // makes a capture-anchored latency possible: wall-since-encode minus
+    // this position minus nothing else = encoder->glass.
+    moqTimelineMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
+  const lagRef = useRef({ bridgeMs: 0, epoch: 0 });
+  lagRef.current = { bridgeMs: bridgeLagMs, epoch: encodeStartedAtEpoch ?? 0 };
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
   // more than once for this component instance — e.g. because `namespace`
@@ -118,6 +129,28 @@ export default function MoqPlayer({
     }
   }, [jobId]);
 
+  /**
+   * Capture-anchored glass-to-glass estimate (ms), same anchor as the HLS
+   * legs: wall-since-encode-start minus the MoQ media-timeline position of
+   * the playhead (leg-encoder anchored, unlike the join-zeroed video clock),
+   * plus the browser->bridge chain. The old wall−videoTime estimate
+   * over-counted by the join offset (media that existed before subscribe).
+   */
+  function captureAnchoredE2eMs(): number | undefined {
+    const session = sessionRef.current;
+    // Native CaptureTimestamp latency from the player wins when present.
+    if (session.playerLatencyMs > 0) {
+      return session.playerLatencyMs;
+    }
+    const { bridgeMs, epoch } = lagRef.current;
+    const video = videoRef.current;
+    if (epoch > 0 && session.moqTimelineMs > 0 && video && session.firstFrame) {
+      const total = Date.now() - epoch * 1000 - session.moqTimelineMs + bridgeMs;
+      return total > 0 && total < 120_000 ? Math.round(total) : undefined;
+    }
+    return undefined;
+  }
+
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => ({
       playback_stats_events: sessionRef.current.statsEvents,
@@ -133,9 +166,9 @@ export default function MoqPlayer({
       playback_video_time_sec: sessionRef.current.videoTimeSec,
       playback_buffer_sec: bufferedAheadSec(videoRef.current),
       playback_rebuffer_sec: rebufferRef.current.totalSec,
-      // Prefer CaptureTimestamp latency from the player when present.
-      e2e_latency_ms: sessionRef.current.playerLatencyMs || undefined,
+      e2e_latency_ms: captureAnchoredE2eMs(),
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 
@@ -216,6 +249,7 @@ export default function MoqPlayer({
       ttffMs: 0,
       videoTimeSec: 0,
       playerLatencyMs: 0,
+      moqTimelineMs: 0,
     };
     rebufferRef.current.reset();
 
@@ -458,6 +492,11 @@ export default function MoqPlayer({
           if (destroyed) {
             return;
           }
+          if (currentTime > 0) {
+            // Leg-encoder-anchored playhead position — feeds the
+            // capture-anchored latency estimate.
+            sessionRef.current.moqTimelineMs = currentTime;
+          }
           if (video.currentTime > 0.25 && video.videoWidth > 0) {
             noteFirstFrame("player.timeupdate");
           } else if (currentTime > 0 && !sessionRef.current.catalogReady) {
@@ -548,6 +587,7 @@ export default function MoqPlayer({
                 ttffMs: 0,
                 videoTimeSec: 0,
                 playerLatencyMs: 0,
+                moqTimelineMs: 0,
               };
               setIsReady(false);
               await sleep(SUBSCRIBE_RETRY_MS);

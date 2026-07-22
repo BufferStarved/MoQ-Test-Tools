@@ -1580,7 +1580,19 @@ class UploadService:
             self._terminate_process(publisher_proc)
             self._terminate_process(ffmpeg_proc)
             if tee_proc is not None:
-                tee_proc.wait(timeout=5)
+                # tee can survive its neighbors (blocked write into the dead
+                # publisher's pipe). An uncaught TimeoutExpired here killed the
+                # whole job thread — the job stayed "running" forever and the
+                # player surfaced post-stop RESET_STREAM/starvation fatals
+                # (observed live 2026-07-22 01:05).
+                try:
+                    tee_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    tee_proc.kill()
+                    try:
+                        tee_proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.warning("MoQ capture tee did not exit after kill")
             if fanout_thread is not None:
                 fanout_thread.join(timeout=5)
             if drain_thread is not None:

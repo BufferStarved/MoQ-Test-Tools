@@ -64,6 +64,10 @@ interface StreamPlayerProps {
   compactHeader?: boolean;
   /** False when the publish source is video-only (e.g. webcam without a mic). */
   sourceHasAudio?: boolean;
+  /** Capture->bridge-output lag (live webcam runs); 0 for VOD sources. */
+  bridgeLagMs?: number;
+  /** This leg's encoder lag behind realtime (from -progress samples). */
+  encoderLagMs?: number;
 }
 
 function PlayerFallback() {
@@ -99,6 +103,8 @@ export function StreamPlayer({
   onWhepPlaybackUrlChange,
   compactHeader = false,
   sourceHasAudio = true,
+  bridgeLagMs = 0,
+  encoderLagMs = 0,
 }: StreamPlayerProps) {
   const resolvedMode =
     playbackMode && isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
@@ -245,6 +251,8 @@ export function StreamPlayer({
               targetLatencyMs={targetLatencyMs}
               zixiStreamId={zixiStreamId}
               lowLatencyMode={hlsLowLatency}
+              bridgeLagMs={bridgeLagMs}
+              encoderLagMs={encoderLagMs}
             />
           )}
           {target.engine === "dash" && (
@@ -279,6 +287,7 @@ export function StreamPlayer({
               encodeDurationSec={encodeDurationSec}
               targetLatencyMs={targetLatencyMs}
               sourceHasAudio={sourceHasAudio}
+              bridgeLagMs={bridgeLagMs}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

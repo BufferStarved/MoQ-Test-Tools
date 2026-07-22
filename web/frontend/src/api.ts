@@ -149,6 +149,14 @@ export function createLiveSession(payload: {
   });
 }
 
+export function fetchLiveSessionStatus(sessionId: string): Promise<{
+  session_id: string;
+  bridge_lag_ms: number;
+  failed: string | null;
+}> {
+  return request(`/live/sessions/${sessionId}`);
+}
+
 export interface PlaybackMetricsSnapshot {
   playback_stats_events: number;
   playback_stall_count: number;

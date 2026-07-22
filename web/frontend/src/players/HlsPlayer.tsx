@@ -26,6 +26,10 @@ interface HlsPlayerProps {
   zixiStreamId?: string;
   /** Enable hls.js lowLatencyMode (MediaMTX Apple LL-HLS). */
   lowLatencyMode?: boolean;
+  /** Capture->bridge-output lag (ms) for live webcam runs; 0 for VOD. */
+  bridgeLagMs?: number;
+  /** This leg's encoder lag behind realtime (ms). */
+  encoderLagMs?: number;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -289,6 +293,8 @@ export default function HlsPlayer({
   targetLatencyMs,
   zixiStreamId,
   lowLatencyMode = false,
+  bridgeLagMs = 0,
+  encoderLagMs = 0,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -354,6 +360,43 @@ export default function HlsPlayer({
   }
   const rebufferRef = useRef(new RebufferTracker());
 
+  // Live upstream lag components (props change every sample poll); refs keep
+  // the memoized snapshot getter reading fresh values.
+  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0, lowLatency: false });
+  lagRef.current = {
+    bridgeMs: bridgeLagMs,
+    encoderMs: encoderLagMs,
+    epoch: encodeStartedAtEpoch ?? 0,
+    lowLatency: lowLatencyMode,
+  };
+
+  /**
+   * Capture-anchored glass-to-glass estimate (ms). All protocols share the
+   * same anchor: the capture instant of the displayed frame.
+   *  - LL-HLS (MediaMTX): PDT latency covers packager->glass; add this leg's
+   *    encoder lag and the browser->bridge chain.
+   *  - Zixi Fast HLS: the timeline is encode-anchored, so wall - position
+   *    covers encoder->glass; add only the bridge chain.
+   * Validated against a burnt-in wall-clock timer (2026-07-21/22) after each
+   * estimate individually read 2.5-4s low/high with mismatched anchors.
+   */
+  function captureAnchoredE2eMs(): number | undefined {
+    const { bridgeMs, encoderMs, epoch, lowLatency } = lagRef.current;
+    const session = sessionRef.current;
+    if (lowLatency) {
+      if (session.playerLatencyMs > 0) {
+        const total = session.playerLatencyMs + encoderMs + bridgeMs;
+        return total > 0 && total < 120_000 ? Math.round(total) : undefined;
+      }
+      return undefined;
+    }
+    if (epoch > 0 && session.maxVideoTime > 0) {
+      const total = Date.now() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
+      return total > 0 && total < 120_000 ? Math.round(total) : undefined;
+    }
+    return undefined;
+  }
+
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => ({
       playback_stats_events: 0,
@@ -369,11 +412,9 @@ export default function HlsPlayer({
       playback_video_time_sec: sessionRef.current.maxVideoTime,
       playback_buffer_sec: sessionRef.current.bufferSec,
       playback_rebuffer_sec: rebufferRef.current.totalSec,
-      // PDT-derived true latency (hls.js `latency`), when the playlist
-      // carries PROGRAM-DATE-TIME (MediaMTX LL-HLS). Preferred over the
-      // wall−vt estimate, which is skewed by the join position.
-      e2e_latency_ms: sessionRef.current.playerLatencyMs || undefined,
+      e2e_latency_ms: captureAnchoredE2eMs(),
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 

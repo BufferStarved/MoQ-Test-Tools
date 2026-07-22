@@ -614,6 +614,20 @@ def create_live_session(request: CreateLiveSessionRequest):
     }
 
 
+@app.get("/api/live/sessions/{session_id}")
+def live_session_status(session_id: str):
+    session = live_webcam_manager.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    return {
+        "session_id": session.id,
+        # Capture->bridge-output lag: the shared upstream component every
+        # per-protocol latency estimate is blind to (see LiveWebcamSession).
+        "bridge_lag_ms": round(session.bridge_lag_ms),
+        "failed": session.failed,
+    }
+
+
 @app.websocket("/api/live/sessions/{session_id}/ws")
 async def live_session_ws(websocket: WebSocket, session_id: str):
     session = live_webcam_manager.get(session_id)

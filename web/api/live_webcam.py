@@ -45,6 +45,25 @@ class LiveWebcamSession:
     _bytes_in: int = 0
     _closed: bool = False
     _ready_notified: bool = False
+    # Latest ffmpeg -progress out_time (ms, includes -output_ts_offset so it
+    # stays continuous across restarts). Used for bridge_lag_ms.
+    _out_time_ms: float = 0.0
+
+    @property
+    def bridge_lag_ms(self) -> float:
+        """Capture-to-bridge-output delay estimate (ms).
+
+        The bridge timeline is wall-anchored at session creation (CFR output +
+        restart ts_offset = elapsed wall time), so wall-elapsed minus emitted
+        media duration is how far the whole browser->WS->bridge chain lags
+        realtime. This is the shared upstream blind spot of every per-protocol
+        latency estimate — without it, SRT's PDT figure and RTMP's encoder-
+        anchored figure both under-report true glass-to-glass by this amount.
+        """
+        if self._out_time_ms <= 0:
+            return 0.0
+        elapsed_ms = max(0.0, (time.time() - self.created_at) * 1000.0)
+        return max(0.0, elapsed_ms - self._out_time_ms)
 
     def start_bridge(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -75,6 +94,18 @@ class LiveWebcamSession:
             "+genpts+discardcorrupt+igndts",
             "-err_detect",
             "ignore_err",
+            # Chrome's MediaRecorder periodically starts a fresh WebM header
+            # mid-stream (observed at a consistent ~17.5MB), which EOFs this
+            # demuxer and triggers the restart path below. With default probe
+            # settings the NEW ffmpeg buffered up to ~5s of input before
+            # producing anything — a multi-second hole in every downstream
+            # protocol (SRT sawtooth lag, MoQ delivery starvation, 2026-07-22).
+            # The input is always Chrome WebM (VP8/VP9 + Opus); a tiny probe
+            # is safe and makes restarts near-seamless.
+            "-probesize",
+            "64k",
+            "-analyzeduration",
+            "500000",
             "-f",
             "webm",
             "-i",
@@ -110,6 +141,9 @@ class LiveWebcamSession:
             "-ac",
             "2",
             *offset_args,
+            "-progress",
+            "pipe:1",
+            "-nostats",
             "-f",
             "tee",
             tee_targets,
@@ -118,9 +152,30 @@ class LiveWebcamSession:
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+        def _watch_progress(proc: subprocess.Popen) -> None:
+            if proc.stdout is None:
+                return
+            try:
+                for line in iter(proc.stdout.readline, b""):
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if text.startswith("out_time_us="):
+                        try:
+                            self._out_time_ms = int(text.split("=", 1)[1]) / 1000.0
+                        except ValueError:
+                            continue
+            except (ValueError, OSError):
+                return
+
+        threading.Thread(
+            target=_watch_progress,
+            args=(self._proc,),
+            name=f"live-bridge-progress-{self.id}",
+            daemon=True,
+        ).start()
 
         def _watch_stderr() -> None:
             proc = self._proc
