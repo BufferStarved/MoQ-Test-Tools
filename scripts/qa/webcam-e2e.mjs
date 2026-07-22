@@ -134,10 +134,35 @@ async function main() {
 
   const endAt = Date.now() + watchSec * 1000;
   let previewCheckDone = false;
+  // Per-tile playhead tracker: the pass/fail signal that actually matches
+  // what a human calls "smooth" — playhead advancing wall-second by
+  // wall-second, no multi-second freezes.
+  const playhead = { last: [0, 0, 0], frozen: [0, 0, 0], advancing: [0, 0, 0], samples: 0, maxFreeze: [0, 0, 0], curFreeze: [0, 0, 0] };
   while (Date.now() < endAt) {
     await sleep(5000);
     const statuses = await page.locator(".stream-column-status .pill").allTextContents();
-    console.log(`[t+${Math.round((watchSec * 1000 - (endAt - Date.now())) / 1000)}s] job statuses: ${statuses.join(", ")}`);
+    const times = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll(".stream-column")).map((col) => {
+        const video = col.querySelector("video.player-video, video");
+        return video ? video.currentTime : -1;
+      });
+    });
+    playhead.samples += 1;
+    const deltas = times.map((t, i) => {
+      const d = t - playhead.last[i];
+      playhead.last[i] = t;
+      if (d > 2.5) playhead.advancing[i] += 1;
+      else if (t > 0) {
+        playhead.frozen[i] += 1;
+        playhead.curFreeze[i] += 5;
+        playhead.maxFreeze[i] = Math.max(playhead.maxFreeze[i], playhead.curFreeze[i]);
+      }
+      if (d > 2.5) playhead.curFreeze[i] = 0;
+      return d.toFixed(1);
+    });
+    console.log(
+      `[t+${Math.round((watchSec * 1000 - (endAt - Date.now())) / 1000)}s] job statuses: ${statuses.join(", ")} | playhead_d5s: ${deltas.join(", ")}`,
+    );
     if (!previewCheckDone) {
       previewCheckDone = true;
       // The run collapses the recipe panel; the live source preview must
@@ -157,6 +182,15 @@ async function main() {
           : "[preview-during-run] visible=NO (regression: preview disappeared)",
       );
     }
+  }
+
+  console.log("\n=== Playhead smoothness verdict ===");
+  for (let i = 0; i < 3; i += 1) {
+    const active = playhead.advancing[i] + playhead.frozen[i];
+    const pct = active > 0 ? Math.round((100 * playhead.advancing[i]) / active) : 0;
+    console.log(
+      `Stream ${i + 1}: advancing ${playhead.advancing[i]}/${active} intervals (${pct}%), longest freeze ~${playhead.maxFreeze[i]}s`,
+    );
   }
 
   console.log("\n=== Per-stream diagnostics ===");

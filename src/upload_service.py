@@ -528,6 +528,15 @@ class UploadService:
                 port=whip_parsed.port or 8889,
         )
         start_time = time.time()
+        # Zixi tears down and recreates its RTMP push input between runs; a
+        # push that lands during that window is rejected with an instant I/O
+        # error (ffmpeg exit 251 within seconds — reproduced during gauntlet
+        # runs 2026-07-22, and the likely cause of intermittent "RTMP never
+        # started" runs). Back-to-back benchmarks make this race common.
+        # Retry the connect a couple of times before declaring failure.
+        _EARLY_EXIT_RETRY_WINDOW_SEC = 8.0
+        _EARLY_EXIT_MAX_RETRIES = 2
+        early_exit_retries = 0
 
         try:
             while time.time() - start_time < job.duration_sec:
@@ -538,6 +547,32 @@ class UploadService:
                     if process.returncode == 0:
                         # Source ended cleanly before wall-clock duration — finalize + VMAF.
                         break
+                    ran_sec = time.time() - start_time
+                    if (
+                        job.destination.protocol == "rtmp"
+                        and ran_sec < _EARLY_EXIT_RETRY_WINDOW_SEC
+                        and early_exit_retries < _EARLY_EXIT_MAX_RETRIES
+                        and not job.is_cancelled()
+                    ):
+                        early_exit_retries += 1
+                        logger.warning(
+                            "RTMP publish for %s exited code %s after %.1fs — "
+                            "retrying connect (%d/%d, Zixi input recreate race)",
+                            job.job_id,
+                            process.returncode,
+                            ran_sec,
+                            early_exit_retries,
+                            _EARLY_EXIT_MAX_RETRIES,
+                        )
+                        time.sleep(2.0)
+                        process = subprocess.Popen(
+                            ffmpeg_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                        )
+                        progress_reader = FfmpegProgressReader(process.stdout)
+                        start_time = time.time()
+                        continue
                     return UploadResult(
                         success=False,
                         error=self._ffmpeg_failure_message(process),
