@@ -2123,6 +2123,30 @@ describe('MoqtPlayer', () => {
       return player;
     }
 
+    it('stats.loc exposes LOC diagnostics: zeroed counters and live timing gauges', async () => {
+      // Slice-1 observability (stutter correlation): counters start at zero,
+      // and the gap-timeout/render-cushion gauges are live once the LOC
+      // video pipeline exists. Behavior-neutral — values only.
+      const adapter = createMockAdapter();
+      const player = await loadWithCatalog(adapter);
+
+      const loc = player.stats.loc;
+      expect(loc.skipForwardCount).toBe(0);
+      expect(loc.backlogShedCount).toBe(0);
+      expect(loc.partialGroupAbandonedCount).toBe(0);
+      expect(loc.keyframeWaitingCount).toBe(0);
+      expect(loc.syncResetCount).toBe(0);
+      expect(loc.videoEffectiveGapTimeoutMs).toBeGreaterThan(0); // raw fuse gauge
+      // Slice A contract: the render cushion is smoothed and clamped
+      // INDEPENDENTLY of the raw fuse (which may exceed it when spiking) —
+      // bounded by the static floor and the render cap, never compared
+      // against the raw value.
+      expect(loc.renderCushionMs).not.toBeNull();
+      expect(loc.renderCushionMs).toBeGreaterThanOrEqual(50);  // ≥ static floor
+      expect(loc.renderCushionMs).toBeLessThanOrEqual(750);    // ≤ render cap
+      await player.destroy();
+    });
+
     it('creates pipelines for video and audio after catalog', async () => {
       // LOC §4.2: Pipeline processes objects in decode order.
       // After catalog triggers track selection, pipelines should exist.
@@ -4401,6 +4425,22 @@ describe('MoqtPlayer', () => {
       expect(adapter.connect).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ implementation: 'my-app' }),
+      );
+    });
+
+    it('passes authority to adapter.connect as setup options (§9.3.1.1)', async () => {
+      const adapter = createMockAdapter();
+      const player = new MoqtPlayer({
+        ...createConfig(adapter),
+        authority: 'proto-moq',
+      });
+      const loadPromise = player.load();
+      await resolveConnect(adapter);
+      await loadPromise;
+
+      expect(adapter.connect).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ authority: 'proto-moq' }),
       );
     });
 

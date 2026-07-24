@@ -243,7 +243,8 @@ PATH=\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
 PYTHONPATH=\${INSTALL_ROOT}/src:\${INSTALL_ROOT}/web/api
 MEDIAMTX_LOOPBACK_PUBLISH=1
 # Local publisher agent is a laptop/dev feature — keep off on the hosted web VM.
-LOCAL_PUBLISHER_ENABLED=0
+LOCAL_PUBLISHER_ENABLED=1
+LOCAL_PUBLISHER_TOKEN=dev-local-publisher
 ENVEOF
 chmod 600 "\$ENV_FILE"
 

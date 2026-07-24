@@ -67,24 +67,40 @@ export default function DashPlayer({
       setError(null);
       setStatus(lowLatencyMode ? "Connecting (LL-DASH)..." : "Connecting...");
       const proxied = proxiedPlaybackUrl(url);
-      try {
-        const probe = await fetch(proxied, { cache: "no-store" });
-        if (!probe.ok) {
+      // The LL-DASH sidecar only writes an MPD after RTSP video is probeable —
+      // a single probe at gate-open races the packager and surfaces as a hard
+      // 404 (job 29d1f559). Poll like HlsPlayer's waitForManifest.
+      const pollDeadline = Date.now() + 60_000;
+      let probeOk = false;
+      while (!destroyed && Date.now() < pollDeadline) {
+        try {
+          const probe = await fetch(proxied, { cache: "no-store" });
+          if (probe.ok) {
+            probeOk = true;
+            break;
+          }
           if (!destroyed) {
-            setStatus("DASH manifest missing");
-            setError(
-              lowLatencyMode
-                ? `LL-DASH manifest HTTP ${probe.status}. Is the MediaMTX LL-DASH packager running on :8891?`
-                : `DASH manifest HTTP ${probe.status}. Zixi per-input MPD needs an adaptive group — use HLS or MPEG-TS playback.`,
+            setStatus(`Waiting for DASH manifest (HTTP ${probe.status})...`);
+          }
+        } catch (err) {
+          if (!destroyed) {
+            setStatus(
+              err instanceof Error ? `Waiting for DASH manifest (${err.message})...` : "Waiting for DASH manifest...",
             );
           }
-          return;
         }
-      } catch (err) {
-        if (!destroyed) {
-          setStatus("DASH manifest unreachable");
-          setError(err instanceof Error ? err.message : "Failed to fetch DASH manifest");
-        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (destroyed) {
+        return;
+      }
+      if (!probeOk) {
+        setStatus("DASH manifest missing");
+        setError(
+          lowLatencyMode
+            ? "LL-DASH manifest never became ready (packager on :8891). Check moq-mediamtx-lldash."
+            : "DASH manifest HTTP missing. Zixi per-input MPD needs an adaptive group — use HLS or MPEG-TS playback.",
+        );
         return;
       }
       const dashjs = await import("dashjs");

@@ -42,9 +42,12 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
 fi
 
 # Local publisher agent (laptop ffmpeg) — enabled for dev only.
-# Hosted/prod must NOT set LOCAL_PUBLISHER_ENABLED (cloud VM keeps encoding).
+# Local publisher: run ffmpeg on a laptop agent (UI: Publisher → This machine).
+# Set LOCAL_PUBLISHER_ENABLED=0 to force cloud-only encode.
 export LOCAL_PUBLISHER_ENABLED="${LOCAL_PUBLISHER_ENABLED:-1}"
 export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
+# Direct ffmpeg→SRT is more stable on Zixi than srt-live-transmit (UDP hop).
+export SRT_USE_LIVE_TRANSMIT="${SRT_USE_LIVE_TRANSMIT:-0}"
 
 uvicorn main:app --reload --host 127.0.0.1 --port 8000 --app-dir web/api &
 API_PID=$!

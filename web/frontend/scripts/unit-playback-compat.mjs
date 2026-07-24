@@ -33,20 +33,11 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   return false;
 }
 
-function defaultPlaybackModeForProtocol(protocol, ingestEndpointId = "") {
-  if (protocol === "moq") return "moq";
-  if (protocol === "webrtc") return "whep";
-  if (protocol === "hls") return "mpegts";
-  if (isMediaMtxManaged(ingestEndpointId)) return "ll-hls";
-  if (isZixiManagedIngest(ingestEndpointId)) return "hls";
-  if (protocol === "dash") return "dash";
-  return "hls";
-}
-
 function playbackModeLabelForSelection(mode, protocol, ingestEndpointId = "") {
   const labels = {
-    hls: "HLS Playback (Live)",
-    "ll-hls": "LL-HLS (MediaMTX)",
+    hls: "HLS (hls.js)",
+    "ll-hls": "LL-HLS (hls.js)",
+    mpegts: "MPEG-TS (mpegts.js)",
     moq: "MoQ Playback (Playa)",
   };
   const base = labels[mode] ?? mode;
@@ -56,21 +47,32 @@ function playbackModeLabelForSelection(mode, protocol, ingestEndpointId = "") {
   return base;
 }
 
+function defaultPlaybackModeForProtocol(protocol, ingestEndpointId = "") {
+  if (protocol === "moq") return "moq";
+  if (protocol === "webrtc") return "whep";
+  if (protocol === "hls") return "mpegts";
+  if (isMediaMtxManaged(ingestEndpointId)) return "ll-hls";
+  if (isZixiManagedIngest(ingestEndpointId)) return "mpegts";
+  if (protocol === "dash") return "dash";
+  return "hls";
+}
+
 // Concrete defaults used by the site (no Auto sentinel)
 assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_mediamtx"), "ll-hls");
-assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "hls");
+assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "mpegts");
+assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_zixi"), "mpegts");
 assert.equal(defaultPlaybackModeForProtocol("moq", "gcp_moq_relay"), "moq");
 assert.equal(defaultPlaybackModeForProtocol("srt", "custom"), "hls");
 
 assert.equal(
   playbackModeLabelForSelection("ll-hls", "srt", "gcp_mediamtx"),
-  "LL-HLS (MediaMTX) (recommended)",
+  "LL-HLS (hls.js) (recommended)",
 );
 assert.equal(
-  playbackModeLabelForSelection("hls", "rtmp", "gcp_zixi"),
-  "HLS Playback (Live) (recommended)",
+  playbackModeLabelForSelection("mpegts", "rtmp", "gcp_zixi"),
+  "MPEG-TS (mpegts.js) (recommended)",
 );
-assert.equal(playbackModeLabelForSelection("mpegts", "rtmp", "gcp_zixi"), "mpegts");
+assert.equal(playbackModeLabelForSelection("hls", "rtmp", "gcp_zixi"), "HLS (hls.js)");
 
 // Legacy Auto is not selectable
 assert.equal(isPlaybackModeCompatible("auto", "rtmp", "gcp_zixi"), false);

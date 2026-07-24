@@ -73,13 +73,39 @@ function playlistDepth(body: string): number {
   }).length;
 }
 
+/** Zixi with large -output_ts_offset has advertised TARGETDURATION=292 while
+ *  EXTINF stays 2s — never trust an unbounded TARGETDURATION for liveSync. */
+const HLS_TARGET_DURATION_CAP_SEC = 6;
+
+function playlistExtinfMaxSec(body: string): number | null {
+  let max = 0;
+  for (const match of body.matchAll(/#EXTINF:(\d+(?:\.\d+)?)/g)) {
+    const value = Number(match[1]);
+    if (Number.isFinite(value) && value > max) {
+      max = value;
+    }
+  }
+  return max > 0 ? max : null;
+}
+
 function playlistTargetDurationSec(body: string): number {
   const match = body.match(/#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)/);
-  if (!match) {
-    return 2;
+  const declared = match ? Number(match[1]) : NaN;
+  const extinf = playlistExtinfMaxSec(body);
+  // Prefer real segment duration when the declared TARGETDURATION is absurd.
+  if (
+    extinf != null &&
+    (!Number.isFinite(declared) || declared > HLS_TARGET_DURATION_CAP_SEC * 2)
+  ) {
+    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, Math.ceil(extinf)));
   }
-  const value = Number(match[1]);
-  return Number.isFinite(value) && value > 0 ? value : 2;
+  if (Number.isFinite(declared) && declared > 0) {
+    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, declared));
+  }
+  if (extinf != null) {
+    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, Math.ceil(extinf)));
+  }
+  return 2;
 }
 
 /**
@@ -152,16 +178,17 @@ async function segmentFetchable(manifestRemoteUrl: string, segmentLine: string):
   }
 }
 
-/** Live sync in seconds, clamped to what the playlist depth can actually hold. */
+/** Live sync in seconds, never below one TARGETDURATION on non-LL Zixi packs. */
 function hlsSyncDurationForPlaylist(body: string, requestedSec: number): number {
   const depth = playlistDepth(body);
   const targetDuration = playlistTargetDurationSec(body);
-  const requested = Math.max(1, Math.min(20, requestedSec || 4));
+  const requested = Math.max(targetDuration, Math.min(20, requestedSec || 4));
   if (depth <= 1) {
-    return Math.min(requested, targetDuration);
+    // Shallow playlists can only hold ~one segment — sync to that floor.
+    return targetDuration;
   }
   const maxHold = Math.max(targetDuration, (depth - 1) * targetDuration);
-  return Math.max(1, Math.min(requested, maxHold));
+  return Math.max(targetDuration, Math.min(requested, maxHold));
 }
 
 async function fetchManifestBody(fetchUrl: string): Promise<string | null> {
@@ -645,8 +672,8 @@ export default function HlsPlayer({
       // and engage catch-up rate automatically.
       const llHlsTuning = {
         maxLiveSyncPlaybackRate: 1.5,
-        maxBufferLength: 12,
-        maxMaxBufferLength: 30,
+        maxBufferLength: 20,
+        maxMaxBufferLength: 40,
       };
       // Zixi Fast HLS (no parts, 2s chunks, often 1-deep): keep explicit
       // segment-count sync — LL defaults assume part signaling that Zixi

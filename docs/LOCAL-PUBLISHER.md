@@ -4,9 +4,9 @@ Run **ffmpeg on your laptop** while the UI/API orchestrates jobs and talks to re
 ingest (Zixi / MediaMTX / MoQ). That is the true internet-acquisition path: your
 ISP and Wi‑Fi sit between the encoder and the cloud ingest hosts.
 
-> **Hosted site:** `https://moq.sean-mccarthy.net` keeps encoding on the GCP web VM
-> (`LOCAL_PUBLISHER_ENABLED` is unset). This feature is for local development now
-> and is structured so hosted users can opt in later with the same agent.
+> **Hosted site:** Local publish is enabled by default (`LOCAL_PUBLISHER_ENABLED=1` on
+> the web VM). Choose **Publisher → This machine** in the UI and run the agent with the
+> shared token. Set `LOCAL_PUBLISHER_ENABLED=0` to force cloud-only encode.
 
 ## Quick start (dev)
 
@@ -60,7 +60,7 @@ Browser  →  local API (orchestrator, SSE, Results)
            Internet → Zixi / MediaMTX / MoQ ingest
 ```
 
-- Feature flag: `LOCAL_PUBLISHER_ENABLED=1` (set by `scripts/dev.sh`).
+- Feature flag: `LOCAL_PUBLISHER_ENABLED=1` (default in `scripts/dev.sh` and the web VM install).
 - Shared token: `LOCAL_PUBLISHER_TOKEN` (default `dev-local-publisher`).
 - Agent connects **outbound** to `ws://127.0.0.1:8000/api/publisher-agent/ws` (no inbound ports).
 - Create upload with `publisher_host: "local"`; JobManager dispatches to the agent instead of in-process ffmpeg.
@@ -119,7 +119,6 @@ flag is enabled server-side for that deployment.
 
 ## Roadmap toward hosted users
 
-1. Issue per-user agent tokens from the hosted API.
-2. Enable `LOCAL_PUBLISHER_ENABLED` on the web VM (UI already gates on `/api/features`).
-3. Agent default `--api https://moq.sean-mccarthy.net`.
-4. Stream chosen files to a remote agent (or upload directly to the agent) when API and laptop diverge.
+1. Issue per-user agent tokens from the hosted API (shared `LOCAL_PUBLISHER_TOKEN` is fine for a single operator).
+2. Point the agent at the hosted API: `--api https://moq.sean-mccarthy.net` (feature flag defaults on).
+3. Stream chosen files to a remote agent (or upload directly to the agent) when API and laptop diverge.

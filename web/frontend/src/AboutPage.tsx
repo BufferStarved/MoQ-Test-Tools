@@ -213,7 +213,7 @@ export function AboutPage() {
           </ArchStage>
           <FlowArrow />
           <ArchStage step="4" label="Playback" tone="client">
-            <FlowNode tone="client" title="HLS Playback (Live)" detail="hls.js ← Zixi egress" />
+            <FlowNode tone="client" title="HLS (hls.js)" detail="← Zixi Fast HLS egress" />
             <FlowNode tone="client" title="MoQ Playback (Playa)" detail="WebTransport ← moqx" />
           </ArchStage>
         </div>
@@ -263,7 +263,7 @@ export function AboutPage() {
           <FlowArrow />
           <ArchStage step="3" label="Preview" tone="client">
             <FlowNode tone="client" title="MoQ Playback (Playa)" detail="WebTransport" />
-            <FlowNode tone="client" title="HLS Playback (Live)" detail="hls.js · Zixi" />
+            <FlowNode tone="client" title="HLS (hls.js)" detail="Zixi Fast HLS" />
           </ArchStage>
           <FlowArrow />
           <ArchStage step="4" label="Report" tone="client">
@@ -280,9 +280,16 @@ export function AboutPage() {
             WebTransport-capable browser (Chrome / Edge).
           </li>
           <li>
-            Estimated E2E latency is wall-clock since encode start minus player{" "}
-            <code>currentTime</code>, including intentional HLS live buffer (default ~4s / 2×2s
-            segments; may tighten to 1s).
+            Estimated E2E latency is capture-anchored per player: Zixi HTTP-TS/HLS uses wall clock
+            minus encode-anchored playhead; MediaMTX LL-HLS uses PDT + encode lag; MoQ uses buffer
+            lead (MSE <code>currentTime</code> is join-relative — not glass-to-glass). TTFF stays a
+            separate join metric.
+          </li>
+          <li>
+            Every publish encode burns an <code>ENC …Z</code> UTC clock into the video via ffmpeg{" "}
+            <code>drawtext</code> from each frame&apos;s PTS (not a browser overlay, and not
+            wall-clock-at-filter-time). Players at different playheads show different stamps;
+            viewer UTC minus the stamp is glass-to-glass by eye.
           </li>
         </ul>
       </section>

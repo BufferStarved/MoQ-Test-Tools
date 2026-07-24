@@ -86,10 +86,16 @@ network/transport quality loss from encode-time loss.
 We added **`e2e_latency_ms`** (estimated):
 
 ```
-e2e_latency_ms ≈ (wall_clock_now − encode_started_at) − playback_video_time_sec × 1000
+e2e_latency_ms ≈ capture-anchored per player:
+  - Zixi HTTP-TS / Fast HLS: (wall_now − encode_start) − media_playhead (+ webcam bridge)
+  - MediaMTX LL-HLS: hls.js PDT latency + encode_lag + bridge
+  - MoQ: CaptureTimestamp when present; else live buffer lead + encode/bridge
+    (MSE currentTime is join-relative — wall−vt is join delay, not G2G)
 ```
 
-Assumptions: encode starts near wall clock T0; player `currentTime` tracks media timeline from that encode; browser and publisher clocks are roughly NTP-aligned. Values outside 0–120s are dropped as invalid.
+Assumptions: Zixi timelines are encode-anchored; LL-HLS needs PROGRAM-DATE-TIME; MoQ without
+CaptureTimestamps uses buffer lead. Browser and publisher clocks should be roughly NTP-aligned.
+Values outside 0–120s are dropped as invalid.
 
 **How to compare protocols:** run legs in parallel (or back-to-back with the same media), keep playback open during the encode, and compare the **`e2e_latency_ms`** series (and summary average) under **Browser playback**. Pair with TTFF, stall count, and **`playback_buffer_sec`** (seconds buffered ahead of the playhead) for a fuller viewer story.
 

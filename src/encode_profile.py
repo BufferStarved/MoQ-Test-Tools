@@ -9,13 +9,20 @@ Target latency is treated as a glass-to-glass *budget* (ms). It scales:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
 from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 MIN_TARGET_LATENCY_MS = 100
 MAX_TARGET_LATENCY_MS = 10_000
-DEFAULT_TARGET_LATENCY_MS = 800
+DEFAULT_TARGET_LATENCY_MS = 4000
+# SRT (libsrt + Zixi Fast HLS / MediaMTX LL-HLS) needs receiver buffer headroom.
+# Targets below 2s starve retransmits and make playback look "unusable".
+SRT_MIN_TARGET_LATENCY_MS = 2000
+# MediaMTX LL-HLS: cap caller latency so the first playlist is not delayed by
+# multi-second SRT TSBPD, but keep enough for jitter (1s was too tight).
+MEDIAMTX_SRT_MAX_CALLER_LATENCY_MS = 2000
 DEFAULT_ENCODE_LADDER_ID = "720p"
 ASSUMED_FPS = 30
 
@@ -78,6 +85,23 @@ def clamp_target_latency_ms(value: int | float | None) -> int:
     except (TypeError, ValueError):
         ms = DEFAULT_TARGET_LATENCY_MS
     return max(MIN_TARGET_LATENCY_MS, min(MAX_TARGET_LATENCY_MS, ms))
+
+
+def clamp_srt_target_latency_ms(value: int | float | None) -> int:
+    """Floor SRT jobs at SRT_MIN_TARGET_LATENCY_MS for stable delivery."""
+    return max(SRT_MIN_TARGET_LATENCY_MS, clamp_target_latency_ms(value))
+
+
+def effective_srt_caller_latency_ms(
+    target_latency_ms: int | float | None,
+    *,
+    mediamtx: bool = False,
+) -> int:
+    """Caller-side libsrt latency (ms) after SRT floor and MediaMTX cap."""
+    ms = clamp_srt_target_latency_ms(target_latency_ms)
+    if mediamtx:
+        ms = min(ms, MEDIAMTX_SRT_MAX_CALLER_LATENCY_MS)
+    return ms
 
 
 def resolve_encode_ladder(ladder_id: str | None) -> EncodeLadder:
@@ -208,25 +232,72 @@ def with_srt_latency(url: str, target_latency_ms: int) -> str:
     )
 
 
+def utc_burnin_drawtext(
+    *,
+    wallclock_pts: bool = False,
+    epoch_sec: int | None = None,
+) -> str:
+    """ffmpeg drawtext that stamps each frame from its PTS (not %{gmtime}).
+
+    Why not %{gmtime}? That is wall-clock at filter *execution*. Parallel
+    protocol encodes, catch-up bursts, and mux timeline offsets can make
+    different playheads show the same second even when they display different
+    content. %{pts:gmtime…} is tied to the frame's media time, so players at
+    different positions necessarily show different stamps.
+
+    - Live UDP/SRT/RTSP inputs use ``-use_wallclock_as_timestamps`` → PTS is
+      already unix time → ``%{pts\\:gmtime}``.
+    - File / device-webcam inputs have zero-based PTS → map with
+      ``%{pts\\:gmtime\\:<epoch>}`` where epoch is encode-start unix seconds.
+
+    Compare the burned ``ENC …Z`` time to a viewer UTC clock for glass-to-glass.
+    """
+    # Filtergraph escaping: pass as one argv element (no shell). Colons inside
+    # %{pts:…} must be backslash-escaped for the filter parser.
+    if wallclock_pts:
+        text = "ENC %{pts\\:gmtime}Z"
+    else:
+        epoch = int(time.time() if epoch_sec is None else epoch_sec)
+        text = f"ENC %{{pts\\:gmtime\\:{epoch}}}Z"
+    return (
+        "drawtext=fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=8:"
+        f"x=24:y=24:text='{text}'"
+    )
+
+
+# Back-compat alias for callers/tests that import a constant. Prefer
+# utc_burnin_drawtext() so epoch is captured at encode-command build time.
+UTC_BURNIN_DRAWTEXT = utc_burnin_drawtext()
+
+
 def build_video_encode_args(
     ladder_id: str | None,
     target_latency_ms: int | None,
     *,
     gop_frames: int | None = None,
+    wallclock_pts: bool = False,
+    burnin_epoch_sec: int | None = None,
+    vbv_stability: bool = False,
 ) -> List[str]:
     ladder = resolve_encode_ladder(ladder_id)
     latency_ms = clamp_target_latency_ms(target_latency_ms)
     gop = gop_frames if gop_frames and gop_frames > 0 else gop_frames_for_latency(latency_ms)
     # VBV buffer: ~1–2× bitrate over the latency window (smaller = snappier, less stable).
+    # SRT paths use a wider window (3.5×) to reduce TS pacing underruns under loss.
     window_sec = max(0.25, latency_ms / 1000.0)
-    bufsize_kb = max(ladder.maxrate_kbps, int(round(ladder.maxrate_kbps * window_sec * 2)))
-    # Scale only — do not insert an fps= filter here. Stacking fps=30 with -re
-    # pacing + openmoq --paced produced "half-speed" looking playback even when
-    # HTMLVideoElement.currentTime advanced at 1×. Webcam/UDP VFR is normalized
-    # in the live bridge (web/api/live_webcam.py) instead.
+    vbv_mult = 3.5 if vbv_stability else 2.0
+    bufsize_kb = max(ladder.maxrate_kbps, int(round(ladder.maxrate_kbps * window_sec * vbv_mult)))
+    burnin = utc_burnin_drawtext(
+        wallclock_pts=wallclock_pts,
+        epoch_sec=burnin_epoch_sec,
+    )
+    # Scale + PTS-anchored UTC burn-in — do not insert an fps= filter here.
+    # Stacking fps=30 with -re pacing + openmoq --paced produced "half-speed"
+    # looking playback even when HTMLVideoElement.currentTime advanced at 1×.
+    # Webcam/UDP VFR is normalized in the live bridge (web/api/live_webcam.py).
     args: List[str] = [
         "-vf",
-        f"scale=-2:{ladder.height}",
+        f"scale=-2:{ladder.height},{burnin}",
         "-fps_mode",
         "cfr",
         "-r",
@@ -309,8 +380,13 @@ __all__ = [
     "EncodeLadder",
     "MAX_TARGET_LATENCY_MS",
     "MIN_TARGET_LATENCY_MS",
+    "SRT_MIN_TARGET_LATENCY_MS",
+    "MEDIAMTX_SRT_MAX_CALLER_LATENCY_MS",
+    "UTC_BURNIN_DRAWTEXT",
     "build_video_encode_args",
+    "clamp_srt_target_latency_ms",
     "clamp_target_latency_ms",
+    "effective_srt_caller_latency_ms",
     "encode_profile_summary",
     "ensure_known_ladder",
     "gop_frames_for_latency",
@@ -323,5 +399,6 @@ __all__ = [
     "moq_player_target_latency_ms",
     "resolve_encode_ladder",
     "srt_latency_us",
+    "utc_burnin_drawtext",
     "with_srt_latency",
 ]

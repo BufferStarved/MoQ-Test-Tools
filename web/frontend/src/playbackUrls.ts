@@ -10,34 +10,42 @@ const DEFAULT_STREAM_ID = "benchmark";
 const DEFAULT_MOQ_NAMESPACE = "benchmark";
 /** GCP Zixi SRT push input stream ID (see infra/zixi/GCP-ZIXI-RUNBOOK.md). */
 const GCP_ZIXI_SRT_STREAM_ID = "SRT Test";
+/**
+ * Browser playback stream for managed Zixi SRT. The primary ``SRT Test``
+ * Fast HLS packager wedges after the first connection (TARGETDURATION balloons,
+ * media sequence freezes — reproduced 2026-07-22), and primary HTTP-TS is
+ * intermittent. Error-concealed ``SRT Test EC`` stays live for HLS + MPEG-TS;
+ * jobs also set ``zixi_playback_stream_id`` to this.
+ */
+const GCP_ZIXI_SRT_PLAYBACK_STREAM_ID = "SRT Test EC";
 /** Default MediaMTX path name for publish/play. */
 const MEDIAMTX_PATH = "benchmark";
 
 export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: string }[] = [
   {
     id: "hls",
-    label: "HLS Playback (Live)",
-    hint: "HTTP Live Streaming via hls.js (Zixi Fast HLS or classic).",
+    label: "HLS (hls.js)",
+    hint: "HTTP Live Streaming in the browser via hls.js (Zixi Fast HLS or classic HLS origin).",
   },
   {
     id: "ll-hls",
-    label: "LL-HLS (MediaMTX)",
-    hint: "Apple-style Low-Latency HLS via MediaMTX (hls.js lowLatencyMode).",
+    label: "LL-HLS (hls.js)",
+    hint: "Apple-style Low-Latency HLS in the browser via hls.js (lowLatencyMode). Origin is typically MediaMTX.",
   },
   {
     id: "dash",
-    label: "DASH",
-    hint: "MPEG-DASH via dash.js (Zixi CMAF when available).",
+    label: "DASH (dash.js)",
+    hint: "MPEG-DASH in the browser via dash.js (Zixi CMAF when available).",
   },
   {
     id: "ll-dash",
-    label: "LL-DASH (MediaMTX)",
-    hint: "CMAF low-latency DASH packaged beside MediaMTX (dash.js lowLatencyEnabled).",
+    label: "LL-DASH (dash.js)",
+    hint: "CMAF low-latency DASH in the browser via dash.js (lowLatencyEnabled). Origin is typically the MediaMTX LL-DASH sidecar.",
   },
   {
     id: "whep",
     label: "WHEP (WebRTC)",
-    hint: "WebRTC via MediaMTX WHEP (or another WHEP gateway).",
+    hint: "Native WebRTC via WHEP (MediaMTX or another WHEP gateway) — not hls.js.",
   },
   {
     id: "moq",
@@ -46,8 +54,8 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   },
   {
     id: "mpegts",
-    label: "MPEG-TS over HTTP",
-    hint: "Raw Zixi HTTP-TS (http_ts_auto_out) via mpegts.js — bypasses Fast HLS packager; auto-reconnects on republish.",
+    label: "MPEG-TS (mpegts.js)",
+    hint: "Raw Zixi HTTP-TS (http_ts_auto_out) via mpegts.js — bypasses Fast HLS. Requires a live SRT/RTMP input; offline .ts URLs return empty HTTP 200 and will keep reconnecting.",
   },
 ];
 
@@ -124,8 +132,10 @@ export function defaultPlaybackModeForProtocol(
   if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
+  // Zixi Fast HLS packs 2s chunks + live sync → slow join. HTTP-TS via
+  // mpegts.js bypasses the packager for the confidence monitor.
   if (isZixiManagedIngest(ingest)) {
-    return "hls";
+    return "mpegts";
   }
   if (protocol === "dash") {
     return "dash";
@@ -255,7 +265,23 @@ function parseStreamId(
   if (protocol === "srt" && zixiPlaybackStreamId?.trim()) {
     return zixiPlaybackStreamId.trim();
   }
+  // Pre-job / recipe: prefer EC over wedged primary for gcp_zixi SRT.
+  if (
+    protocol === "srt" &&
+    isZixiManagedIngest(ingestEndpointId ?? "") &&
+    !zixiStreamId?.trim()
+  ) {
+    return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
+  }
   if (protocol === "srt" && zixiStreamId?.trim()) {
+    // Publish id may be "SRT Test"; map to EC for playback unless caller
+    // already passed an explicit playback id above.
+    if (
+      isZixiManagedIngest(ingestEndpointId ?? "") &&
+      zixiStreamId.trim() === GCP_ZIXI_SRT_STREAM_ID
+    ) {
+      return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
+    }
     return zixiStreamId.trim();
   }
   if (!endpointUrl.trim()) {
@@ -575,18 +601,18 @@ export function resolvePlaybackTarget(options: {
       return {
         engine: "dash",
         url: mediaMtxLlDashUrl(resolvedHost, pathId),
-        label: "LL-DASH (MediaMTX)",
+        label: "LL-DASH (dash.js)",
         streamId: pathId,
         host: mediaMtxPublicHost(resolvedHost),
         note: "lowLatencyDash",
       };
     }
     // Zixi per-input MPD is not served without an adaptive group. Fall back to
-    // Fast HLS so "DASH Playback" still shows video instead of a silent blank player.
+    // Fast HLS so "DASH" still shows video instead of a silent blank player.
     return {
       engine: "hls",
       url: zixiHlsUrl(resolvedHost, streamId, dvr),
-      label: dvr ? "HLS (DASH unavailable · DVR)" : "HLS (DASH MPD unavailable)",
+      label: dvr ? "HLS (hls.js · DASH unavailable · DVR)" : "HLS (hls.js · DASH MPD unavailable)",
       streamId,
       host: resolvedHost,
       note: "zixiDashFallbackHls",
@@ -602,10 +628,10 @@ export function resolvePlaybackTarget(options: {
         ? mediaMtxHlsUrl(resolvedHost, pathId)
         : zixiHlsUrl(resolvedHost, streamId, dvr),
       label: useMediaMtxHls
-        ? "LL-HLS (MediaMTX)"
+        ? "LL-HLS (hls.js)"
         : dvr
-          ? "HLS Playback (DVR)"
-          : "HLS Playback (Live)",
+          ? "HLS (hls.js · DVR)"
+          : "HLS (hls.js)",
       streamId: useMediaMtxHls ? pathId : streamId,
       host: resolvedHost,
       note: useMediaMtxHls ? "lowLatencyMode" : undefined,

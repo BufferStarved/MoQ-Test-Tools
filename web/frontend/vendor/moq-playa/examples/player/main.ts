@@ -22,7 +22,7 @@ import { MoqtConnection } from '@moqt/webtransport';
 import { QlogTrace, varint } from '@moqt/transport';
 import { CATALOG_TRACK_NAME } from '@moqt/msf';
 import { log } from '../shared/log.js';
-import { relayUrl, namespace, namespaceArg, certHash, draftVersion } from '../shared/cert.js';
+import { relayUrl, namespace, namespaceArg, authority, warmStart, certHash, draftVersion } from '../shared/cert.js';
 import {
     AudioAlignedClock,
     WebCodecsVideoDecoder,
@@ -60,6 +60,8 @@ const catalogFromUrl = readCatalogParam();
     const backdrop = document.getElementById('settings-backdrop')!;
     const sUrl = document.getElementById('s-url') as HTMLInputElement;
     const sNs = document.getElementById('s-ns') as HTMLInputElement;
+    const sAuthority = document.getElementById('s-authority') as HTMLInputElement;
+    const sWarmStart = document.getElementById('s-warm-start') as HTMLInputElement;
     const sHash = document.getElementById('s-hash') as HTMLInputElement;
     const sVersion = document.getElementById('s-version') as HTMLSelectElement;
     const sCatalog = document.getElementById('s-catalog') as HTMLTextAreaElement;
@@ -74,6 +76,8 @@ const catalogFromUrl = readCatalogParam();
     function populateFields() {
         sUrl.value = params.get('url') ?? 'https://localhost:4443';
         sNs.value = params.get('ns') ?? 'live';
+        sAuthority.value = params.get('authority') ?? '';
+        sWarmStart.checked = params.get('warmStart') === '1';
         sHash.value = params.get('hash') ?? '';
         sVersion.value = params.get('v') ?? '';
         sLate.value = params.get('late') ?? '';
@@ -105,6 +109,7 @@ const catalogFromUrl = readCatalogParam();
         const newParams = new URLSearchParams();
         const url = sUrl.value.trim();
         const ns = sNs.value.trim();
+        const authorityValue = sAuthority.value.trim();
         const hash = sHash.value.trim();
         const v = sVersion.value;
         const late = sLate.value.trim();
@@ -113,6 +118,8 @@ const catalogFromUrl = readCatalogParam();
 
         if (url && url !== 'https://localhost:4443') newParams.set('url', url);
         if (ns && ns !== 'live') newParams.set('ns', ns);
+        if (authorityValue) newParams.set('authority', authorityValue);
+        if (sWarmStart.checked) newParams.set('warmStart', '1');
         if (hash) newParams.set('hash', hash);
         if (v) newParams.set('v', v);
         if (late) newParams.set('late', late);
@@ -885,7 +892,10 @@ async function prefetchCatalogViaFetch(): Promise<{
         };
     });
 
-    await connection.connect(transport, { maxRequestId: varint(100) });
+    await connection.connect(transport, {
+        maxRequestId: varint(100),
+        ...(authority ? { authority } : {}),
+    });
     const reqId = await connection.fetch(nsBytes, enc.encode(CATALOG_TRACK_NAME), {
         startGroup: varint(0n), startObject: varint(0n),
         endGroup: varint(0n), endObject: varint(0n),
@@ -906,6 +916,8 @@ async function startPlayback(): Promise<void> {
     const { ctx: audioCtx, clock: audioClock } = ensureAudio();
     log(`Relay: ${relayUrl}`);
     log(`Namespace: ${Array.isArray(namespaceArg) ? `[${namespaceArg.map(f => `"${f}"`).join(', ')}]` : namespaceArg}`);
+    if (authority) log(`Authority: ${authority}`);
+    if (warmStart) log('Warm start: joining FETCH for the current group (live LOC)');
     if (catalogFromUrl) log(`Catalog: injected (${catalogFromUrl.tracks.length} tracks)`);
     log('');
 
@@ -947,6 +959,10 @@ async function startPlayback(): Promise<void> {
     player = new MoqtPlayer({
         url: relayUrl,
         namespace: namespaceArg,
+        ...(authority ? { authority } : {}),
+        ...(warmStart ? { warmStartCurrentGroup: true } : {}),
+        // ?log=debug|info|warn|error — surface player-internal logs on the console.
+        ...(params.get('log') ? { logLevel: params.get('log') as 'debug' | 'info' | 'warn' | 'error' } : {}),
         ...(draftVersion ? { draftVersion } : {}),
         clock: audioClock,
         ...(videoConstraints ? { videoConstraints } : {}),
@@ -959,7 +975,9 @@ async function startPlayback(): Promise<void> {
         createVideoDecoder: () => new WebCodecsVideoDecoder({ preferSoftwareDecoder }),
         createAudioDecoder: () => new WebCodecsAudioDecoder(),
         createRenderer: () => renderer!,
-        createAudioOutput: () => new WebAudioOutput(audioCtx, undefined, 200, audioClock),
+        // Delay 0: the shared playout cushion is applied upstream by the
+        // CommandDispatcher (delay unification) — no independent audio delay.
+        createAudioOutput: () => new WebAudioOutput(audioCtx, undefined, 0, audioClock),
         createMediaSource: () => {
             const ms = new MseMediaSource(videoEl);
             // Playhead-wedge forensics into the PAGE log (the adapter's own

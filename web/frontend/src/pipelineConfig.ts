@@ -29,17 +29,17 @@ export interface StreamConfigInput {
 function playbackLabel(mode?: string | null): string {
   switch (mode) {
     case "hls":
-      return "HLS";
+      return "HLS (hls.js)";
     case "ll-hls":
-      return "LL-HLS";
+      return "LL-HLS (hls.js)";
     case "ll-dash":
-      return "LL-DASH";
+      return "LL-DASH (dash.js)";
     case "dash":
-      return "DASH";
+      return "DASH (dash.js)";
     case "whep":
-      return "WHEP";
+      return "WHEP (WebRTC)";
     case "mpegts":
-      return "MPEG-TS over HTTP";
+      return "MPEG-TS (mpegts.js)";
     case "moq":
     case "playa":
       return "MoQ / Playa";

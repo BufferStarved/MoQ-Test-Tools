@@ -36,6 +36,7 @@ describe('DEFAULT_PLAYER_CONFIG', () => {
     expect(DEFAULT_PLAYER_CONFIG.maxConsecutiveGaps).toBe(5);
     expect(DEFAULT_PLAYER_CONFIG.maxDecodeErrors).toBe(10);
     expect(DEFAULT_PLAYER_CONFIG.gapEscalationWindowMs).toBe(10_000);
+    expect(DEFAULT_PLAYER_CONFIG.cmafBootstrapTimeoutMs).toBe(10_000);
     expect(DEFAULT_PLAYER_CONFIG.livenessTimeoutMs).toBe(10_000);
     expect(DEFAULT_PLAYER_CONFIG.livenessResetProbeMs).toBe(2_000);
     expect(DEFAULT_PLAYER_CONFIG.livenessMaxRestarts).toBe(3);
@@ -113,6 +114,60 @@ describe('validateConfig', () => {
 
   it('accepts reconnectAttempts 0 (disable reconnect)', () => {
     expect(() => validateConfig(minConfig({ reconnectAttempts: 0 }))).not.toThrow();
+  });
+
+  // ── CMAF bootstrap ──
+
+  it('accepts cmafBootstrapTimeoutMs 0 (disables the bootstrap deadlines)', () => {
+    expect(() => validateConfig(minConfig({ cmafBootstrapTimeoutMs: 0 }))).not.toThrow();
+  });
+
+  it('rejects negative cmafBootstrapTimeoutMs', () => {
+    expect(() => validateConfig(minConfig({ cmafBootstrapTimeoutMs: -1 }))).toThrow(RangeError);
+  });
+
+  // ── warm start (joining FETCH) ──
+
+  it('accepts warmStartCurrentGroup true/false/undefined', () => {
+    expect(() => validateConfig(minConfig({ warmStartCurrentGroup: true }))).not.toThrow();
+    expect(() => validateConfig(minConfig({ warmStartCurrentGroup: false }))).not.toThrow();
+    expect(() => validateConfig(minConfig({}))).not.toThrow();
+  });
+
+  it('rejects warmStartCurrentGroup with an explicit non-LargestObject subscriptionFilter (d16 §9.16.2 fatality)', () => {
+    expect(() => validateConfig(minConfig({
+      warmStartCurrentGroup: true,
+      subscriptionFilter: { type: 'NextGroupStart' },
+    }))).toThrow(RangeError);
+  });
+
+  it('accepts warmStartCurrentGroup with an explicit LargestObject subscriptionFilter', () => {
+    expect(() => validateConfig(minConfig({
+      warmStartCurrentGroup: true,
+      subscriptionFilter: { type: 'LargestObject' },
+    }))).not.toThrow();
+  });
+
+  it('accepts warmStartCurrentGroup with the deprecated LatestObject compatibility alias', () => {
+    // LatestObject encodes as the same wire filter type (0x2) as LargestObject.
+    expect(() => validateConfig(minConfig({
+      warmStartCurrentGroup: true,
+      subscriptionFilter: { type: 'LatestObject' },
+    }))).not.toThrow();
+  });
+
+  // ── connection authority ──
+
+  it('accepts non-empty authority', () => {
+    expect(() => validateConfig(minConfig({ authority: 'proto-moq' }))).not.toThrow();
+  });
+
+  it('rejects empty authority', () => {
+    expect(() => validateConfig(minConfig({ authority: '' }))).toThrow(RangeError);
+  });
+
+  it('rejects blank authority', () => {
+    expect(() => validateConfig(minConfig({ authority: '   ' }))).toThrow(RangeError);
   });
 
   // ── media liveness ──

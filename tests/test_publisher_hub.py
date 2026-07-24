@@ -41,9 +41,14 @@ class LocalPublisherFlagTests(unittest.TestCase):
                 self.assertTrue(local_publisher_enabled(), msg=value)
 
     def test_disabled_falsy(self) -> None:
-        for value in ("0", "false", "", "no"):
+        for value in ("0", "false", "no", "off"):
             with patch.dict(os.environ, {"LOCAL_PUBLISHER_ENABLED": value}, clear=False):
                 self.assertFalse(local_publisher_enabled(), msg=repr(value))
+
+    def test_default_enabled_when_unset(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "LOCAL_PUBLISHER_ENABLED"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(local_publisher_enabled())
 
 
 class PublisherHubTests(unittest.TestCase):

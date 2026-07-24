@@ -1,6 +1,8 @@
 export const MIN_TARGET_LATENCY_MS = 100;
+/** SRT jobs are floored server-side at 2000 ms for stable libsrt / LL-HLS delivery. */
+export const SRT_MIN_TARGET_LATENCY_MS = 2000;
 export const MAX_TARGET_LATENCY_MS = 10_000;
-export const DEFAULT_TARGET_LATENCY_MS = 800;
+export const DEFAULT_TARGET_LATENCY_MS = 4000;
 export const DEFAULT_ENCODE_LADDER_ID = "720p";
 export const ASSUMED_FPS = 30;
 
@@ -100,7 +102,9 @@ export function hlsSegmentSec(targetLatencyMs: number): number {
 /**
  * hls.js liveSyncDuration (seconds of intentional live buffer).
  * Standard: 2 × segment (4s at the 2s floor). May tighten toward the latency
- * target, but never below one segment — sub-segment sync breaks non-LL Zixi HLS.
+ * target, but never below one segment — sub-segment sync breaks non-LL Zixi HLS
+ * (measured: chasing sub-TARGETDURATION left the playhead starving between
+ * 2s chunks). MediaMTX LL-HLS uses part-level defaults instead (see HlsPlayer).
  */
 export function hlsLiveSyncDurationSec(targetLatencyMs: number): number {
   const ms = clampTargetLatencyMs(targetLatencyMs);

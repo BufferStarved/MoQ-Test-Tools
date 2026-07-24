@@ -13,7 +13,7 @@ export function elapsedSecFromStart(startedAtEpoch?: number | null): number {
 
 export function usePlaybackMetricsReporter(options: {
   jobId?: string;
-  engine: "moq" | "hls";
+  engine: "moq" | "hls" | "mpegts";
   enabled: boolean;
   startedAtEpoch?: number | null;
   /** MoQ catch-up / live-edge target — used when wall−vt is a join-delay artifact. */
@@ -46,21 +46,27 @@ export function usePlaybackMetricsReporter(options: {
       }
       const snapshot = getSnapshotRef.current();
       const elapsed_sec = elapsedSecFromStart(startedAtEpoch);
-      const e2e =
-        engine === "moq"
-          ? estimateMoqE2eLatencyMs({
-              encodeStartedAtEpoch: startedAtEpoch,
-              videoTimeSec: snapshot.playback_video_time_sec,
-              bufferSec: snapshot.playback_buffer_sec,
-              playerLatencyMs: snapshot.e2e_latency_ms,
-              targetLatencyMs,
-            })
-          : // HLS: prefer the player's PDT-derived latency (MediaMTX LL-HLS
-            // playlists carry PROGRAM-DATE-TIME) — the wall−vt fallback is
-            // skewed by the join position on timelines that aren't
-            // encode-anchored.
-            snapshot.e2e_latency_ms ||
-            estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
+      let e2e: number | null | undefined;
+      if (engine === "moq") {
+        e2e = estimateMoqE2eLatencyMs({
+          encodeStartedAtEpoch: startedAtEpoch,
+          videoTimeSec: snapshot.playback_video_time_sec,
+          bufferSec: snapshot.playback_buffer_sec,
+          playerLatencyMs: snapshot.e2e_latency_ms,
+          targetLatencyMs,
+        });
+      } else if (engine === "mpegts") {
+        // HTTP-TS (Zixi): player snapshot is already capture-anchored; fall
+        // back to wall−vt only when the player hasn't stamped e2e yet.
+        e2e =
+          snapshot.e2e_latency_ms ||
+          estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
+      } else {
+        // HLS / LL-HLS: trust the player's capture-anchored estimate only.
+        // MediaMTX needs PDT (hls.latency); without it, wall−vt on a rebased
+        // join timeline invents junk samples that made SRT look wrongly low.
+        e2e = snapshot.e2e_latency_ms || undefined;
+      }
       const playback_error_count =
         snapshot.playback_error_count ??
         (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);

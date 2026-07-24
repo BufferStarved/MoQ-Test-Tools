@@ -71,6 +71,8 @@ type Tab = "benchmark" | "metrics" | "about";
 
 const MIN_ENDPOINTS = 2;
 const MAX_ENDPOINTS = 5;
+/** Fresh UI loads always seed the fair-race trio (RTMP / SRT / MoQ). */
+const DEFAULT_ENDPOINT_COUNT = 3;
 
 interface ComparisonLegState {
   id: string;
@@ -91,6 +93,16 @@ function buildDefaultEndpoints(): EndpointConfig[] {
   return [
     {
       id: createEndpointId(),
+      protocol: "rtmp",
+      ingestEndpointId: "gcp_zixi",
+      endpointUrl: "",
+      vmafAvailable: false,
+      serverMetricsAvailable: false,
+      playbackMode: "mpegts",
+      playbackDvr: false,
+    },
+    {
+      id: createEndpointId(),
       protocol: "srt",
       ingestEndpointId: "gcp_mediamtx",
       endpointUrl: "",
@@ -101,13 +113,16 @@ function buildDefaultEndpoints(): EndpointConfig[] {
     },
     {
       id: createEndpointId(),
-      protocol: "rtmp",
-      ingestEndpointId: "gcp_zixi",
+      protocol: "moq",
+      ingestEndpointId: "gcp_moq_relay",
       endpointUrl: "",
       vmafAvailable: false,
       serverMetricsAvailable: false,
-      playbackMode: "hls",
+      playbackMode: "moq",
       playbackDvr: false,
+      moqRelayUrl: "",
+      moqNamespace: "benchmark",
+      moqFingerprintUrl: "",
     },
   ];
 }
@@ -160,9 +175,11 @@ function App() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
-  const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
+  const [mediaSource, setMediaSource] = useState<MediaSourceId>("webcam");
+  // Placeholder until a live session path is assigned; cloud webcam encode
+  // replaces this at start. Local publisher uses device:webcam immediately.
   const [mediaPath, setMediaPath] = useState("dummy.mp4");
-  const [mediaLabel, setMediaLabel] = useState("Default Color Bars");
+  const [mediaLabel, setMediaLabel] = useState("Webcam");
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const [computeVmaf, setComputeVmaf] = useState(false);
@@ -273,7 +290,7 @@ function App() {
         setPublisherHost("cloud");
       }
       setEndpoints((current) =>
-        current.length >= MIN_ENDPOINTS ? current : buildDefaultEndpoints(),
+        current.length >= DEFAULT_ENDPOINT_COUNT ? current : buildDefaultEndpoints(),
       );
     } catch (err) {
       setApiOnline(false);
@@ -289,9 +306,9 @@ function App() {
     void loadBootstrapData();
   }, [loadBootstrapData]);
 
-  // Poll agent connection while the local-publisher feature is on.
+  // Poll agent connection whenever the API is up (local publish may be enabled).
   useEffect(() => {
-    if (!apiOnline || !features.local_publisher) {
+    if (!apiOnline) {
       return;
     }
     let cancelled = false;
@@ -300,17 +317,21 @@ function App() {
         const next = await fetchFeatures();
         if (!cancelled) {
           setFeatures(next);
+          if (!next.local_publisher && publisherHost === "local") {
+            setPublisherHost("cloud");
+          }
         }
       } catch {
         /* ignore transient poll errors */
       }
     };
+    void tick();
     const id = window.setInterval(() => void tick(), 3000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [apiOnline, features.local_publisher]);
+  }, [apiOnline, publisherHost]);
 
   useEffect(() => {
     if (!apiOnline || presets.length === 0) {
@@ -1021,11 +1042,9 @@ function App() {
                   {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
                     encodeLadder}{" "}
                   · {targetLatencyMs} ms
-                  {features.local_publisher
-                    ? publisherHost === "local"
+                  {publisherHost === "local"
                       ? " · This machine"
-                      : " · Cloud encode"
-                    : ""}
+                      : " · Cloud encode"}
                   {computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)
                     ? " · VMAF on"
                     : ""}
@@ -1035,46 +1054,51 @@ function App() {
               {recipeOpen && (
                 <>
                   <div className="benchmark-shared-grid">
-                    {features.local_publisher && (
-                      <div className="source-media-section">
-                        <h3>Publisher</h3>
-                        <label>
-                          Where ffmpeg runs
-                          <select
-                            value={publisherHost}
-                            onChange={(e) => {
-                              const next = e.target.value as "cloud" | "local";
-                              setPublisherHost(next);
-                              if (next === "local") {
-                                setMediaSource("webcam");
-                                setMediaPath(LOCAL_DEVICE_WEBCAM);
-                                setMediaLabel("Webcam");
-                                setComputeVmaf(false);
-                              } else if (mediaSource === "local-file") {
-                                setMediaSource("dummy");
-                                setMediaPath("dummy.mp4");
-                                setMediaLabel("Default Color Bars");
-                              }
-                            }}
-                            disabled={bootstrapping || !apiOnline || loading}
+                    <div className="source-media-section">
+                      <h3>Publisher</h3>
+                      <label>
+                        Where ffmpeg runs
+                        <select
+                          value={publisherHost}
+                          onChange={(e) => {
+                            const next = e.target.value as "cloud" | "local";
+                            setPublisherHost(next);
+                            if (next === "local") {
+                              setMediaSource("webcam");
+                              setMediaPath(LOCAL_DEVICE_WEBCAM);
+                              setMediaLabel("Webcam");
+                              setComputeVmaf(false);
+                            } else if (mediaSource === "local-file") {
+                              setMediaSource("dummy");
+                              setMediaPath("dummy.mp4");
+                              setMediaLabel("Default Color Bars");
+                            }
+                          }}
+                          disabled={bootstrapping || !apiOnline || loading}
+                        >
+                          <option value="cloud">Cloud VM (API host)</option>
+                          <option
+                            value="local"
+                            disabled={!features.local_publisher}
                           >
-                            <option value="cloud">Cloud VM (API host)</option>
-                            <option value="local">This machine (local agent)</option>
-                          </select>
-                          <span className="field-hint">
-                            {publisherHost === "local"
-                              ? features.local_publisher_connected
+                            This machine (local agent)
+                          </option>
+                        </select>
+                        <span className="field-hint">
+                          {publisherHost === "local"
+                            ? !features.local_publisher
+                              ? "Local publish is disabled on this API (set LOCAL_PUBLISHER_ENABLED=1)."
+                              : features.local_publisher_connected
                                 ? `Agent connected${
                                     features.local_publisher_agents[0]?.hostname
                                       ? ` · ${features.local_publisher_agents[0].hostname}`
                                       : ""
                                   }`
                                 : "Waiting for agent — run ./scripts/run-local-publisher.sh"
-                              : "Encode on the API host (datacenter path, not last-mile)."}
-                          </span>
-                        </label>
-                      </div>
-                    )}
+                            : "Encode on the API host (datacenter path). Choose This machine for last-mile / laptop ffmpeg."}
+                        </span>
+                      </label>
+                    </div>
 
                     <div className="source-media-section">
                       <h3>Media</h3>

@@ -42,7 +42,8 @@ CASES = [
         "id": "zixi_srt_hls",
         "preset_id": "moq_zixi_gcp",
         "playback": "hls",
-        "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test",
+        # Primary ``SRT Test`` Fast HLS packager wedges; EC is the live path.
+        "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test%20EC",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
     },
@@ -50,7 +51,7 @@ CASES = [
         "id": "zixi_srt_mpegts",
         "preset_id": "moq_zixi_gcp",
         "playback": "mpegts",
-        "url": "http://35.222.33.58:7777/SRT%20Test.ts",
+        "url": "http://35.222.33.58:7777/SRT%20Test%20EC.ts",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps",),
         "skip": True,  # covered via dual Chrome probe during zixi_srt_hls
@@ -62,6 +63,14 @@ CASES = [
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=benchmark",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+    },
+    {
+        "id": "zixi_rtmp_mpegts",
+        "preset_id": "moq_zixi_gcp_rtmp",
+        "playback": "mpegts",
+        "url": "http://35.222.33.58:7777/benchmark.ts",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps",),
     },
     {
         "id": "zixi_tsput_hls",

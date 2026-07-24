@@ -18,7 +18,9 @@ from encode_profile import (
     DEFAULT_ENCODE_LADDER_ID,
     DEFAULT_TARGET_LATENCY_MS,
     build_video_encode_args,
+    clamp_srt_target_latency_ms,
     clamp_target_latency_ms,
+    effective_srt_caller_latency_ms,
     encode_profile_summary,
     with_srt_latency,
 )
@@ -39,6 +41,7 @@ from moq_publish import (
     mediamtx_loopback_publish_url,
     with_srt_stream_id,
     zixi_http_push_stream_id_for_preset,
+    zixi_rtmp_stream_id_for_preset,
     zixi_srt_stream_id_for_preset,
 )
 from moqx_stats import MoqxStatsPoller
@@ -185,6 +188,8 @@ class UploadJob:
 
     def __post_init__(self):
         self.target_latency_ms = clamp_target_latency_ms(self.target_latency_ms)
+        if self.destination.protocol == "srt":
+            self.target_latency_ms = clamp_srt_target_latency_ms(self.target_latency_ms)
         self.encode_ladder = (self.encode_ladder or DEFAULT_ENCODE_LADDER_ID).strip().lower()
         if not self.ffmpeg_cmd:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
@@ -193,13 +198,26 @@ class UploadJob:
         # MediaMTX is configured with hlsSegmentDuration=1s, but LL-HLS can
         # only cut segments on IDRs — a 2s GOP silently doubles the segment
         # (and therefore part/sync) granularity. Match the packager.
+        # Live UDP/SRT inputs use -use_wallclock_as_timestamps; burn-in must
+        # read PTS as unix time. File / device-webcam PTS is zero-based.
+        wallclock_pts = is_live_media_source(self.media_path) and not is_device_webcam_source(
+            self.media_path
+        )
+        vbv_stable = self.destination.protocol == "srt"
         if self._is_mediamtx_destination():
             return build_video_encode_args(
                 self.encode_ladder,
                 self.target_latency_ms,
                 gop_frames=ASSUMED_FPS,  # 1s keyframe interval
+                wallclock_pts=wallclock_pts,
+                vbv_stability=vbv_stable,
             )
-        return build_video_encode_args(self.encode_ladder, self.target_latency_ms)
+        return build_video_encode_args(
+            self.encode_ladder,
+            self.target_latency_ms,
+            wallclock_pts=wallclock_pts,
+            vbv_stability=vbv_stable,
+        )
 
     def _uses_zixi_mpegts_output(self) -> bool:
         """True when this encode muxes MPEG-TS toward a managed Zixi SRT input."""
@@ -306,23 +324,26 @@ class UploadJob:
         return args
 
     def managed_zixi_stream_id(self) -> Optional[str]:
-        """Zixi SRT input stream ID for publish + HLS.
+        """Zixi SRT/RTMP input stream ID for publish + HLS.
 
         Prefer an explicit job.zixi_stream_id when set (legacy per-job ids);
-        otherwise the preset shared default ("SRT Test" for GCP Zixi).
+        otherwise the preset shared default ("SRT Test" / "benchmark").
         """
-        return self.zixi_stream_id or zixi_srt_stream_id_for_preset(self.destination.preset_id)
+        if self.zixi_stream_id:
+            return self.zixi_stream_id
+        return zixi_srt_stream_id_for_preset(
+            self.destination.preset_id
+        ) or zixi_rtmp_stream_id_for_preset(self.destination.preset_id)
 
     def _resolved_srt_destination_url(self) -> str:
         url = self.destination.url
         stream_id = self.managed_zixi_stream_id()
         if stream_id:
             url = with_srt_stream_id(url, stream_id)
-        # Cap MediaMTX SRT latency for LL-HLS — multi-second caller latency
-        # delays the first playlist and fights low-latency delivery.
-        latency_ms = self.target_latency_ms
-        if self._is_mediamtx_destination():
-            latency_ms = min(int(latency_ms), 1000)
+        latency_ms = effective_srt_caller_latency_ms(
+            self.target_latency_ms,
+            mediamtx=self._is_mediamtx_destination(),
+        )
         url = with_srt_latency(url, latency_ms)
         if self._is_mediamtx_destination():
             url = mediamtx_loopback_publish_url(url)
@@ -453,6 +474,7 @@ class UploadService:
                 job.destination.protocol,
                 job.destination.url,
                 job.media_path,
+                ingest_provider=job.destination.ingest_provider or "",
             )
             if not ok:
                 return UploadResult(success=False, error=probe_error)
@@ -745,9 +767,14 @@ class UploadService:
     def _managed_http_ts_stream_id(self, job: UploadJob) -> Optional[str]:
         if (job.destination.ingest_provider or "").strip().lower() != "gcp_zixi":
             return None
-        if job.destination.protocol not in {"hls", "dash"}:
-            return None
-        return zixi_http_push_stream_id_for_preset(job.destination.preset_id) or "benchmark"
+        if job.destination.protocol in {"hls", "dash"}:
+            return zixi_http_push_stream_id_for_preset(job.destination.preset_id) or "benchmark"
+        if job.destination.protocol in {"rtmp", "srt"}:
+            # Prefer the playback stream (EC for SRT when available) so mpegts.js
+            # and Fast HLS gate on the same media the browser will pull.
+            stream_id = (job.zixi_playback_stream_id or job.managed_zixi_stream_id() or "").strip()
+            return stream_id or None
+        return None
 
     def _reset_zixi_srt_input_if_managed(self, job: UploadJob) -> bool:
         """Delete+recreate the Zixi SRT push input (fresh Fast HLS packager).
@@ -818,7 +845,8 @@ class UploadService:
         """Mark preview_ready once delivery media is readable.
 
         MediaMTX → API/metrics path-ready (avoid slow LL-HLS probes).
-        Zixi SRT → HLS segment probe. TS-PUT → HTTP-TS when configured.
+        Zixi RTMP/SRT → HTTP-TS first (mpegts.js default), else Fast HLS segment.
+        TS-PUT → HTTP-TS when configured.
         """
         if self._is_mediamtx_destination(job):
             poller = MediaMtxStatsPoller(endpoint_url=job.destination.url)
@@ -840,10 +868,14 @@ class UploadService:
         http_ts_id = self._managed_http_ts_stream_id(job)
         if http_ts_id:
             while not stop_event.is_set():
-                if probe_http_ts_ready(http_ts_id, endpoint_url=job.destination.url).ok:
+                if probe_http_ts_ready(
+                    http_ts_id,
+                    endpoint_url=job.destination.url,
+                    timeout=2.5,
+                ).ok:
                     self._notify_preview_ready(job, True)
                     return
-                stop_event.wait(1.0)
+                stop_event.wait(0.5)
             return
         manifest_url = self._managed_hls_manifest_url(job)
         if not manifest_url:
@@ -854,7 +886,12 @@ class UploadService:
             if probe_hls_segment_ready(manifest_url).ok:
                 self._notify_preview_ready(job, True)
                 return
-            stop_event.wait(1.0)
+            stop_event.wait(0.5)
+
+    def _zixi_uses_error_concealment_playback(self, job: UploadJob) -> bool:
+        """True when the browser pulls the EC derivative, not the raw SRT input."""
+        playback_id = (job.zixi_playback_stream_id or "").strip()
+        return bool(playback_id and " EC" in playback_id)
 
     def _heal_srt_live_transmit(
         self,
@@ -917,9 +954,10 @@ class UploadService:
 
         live_transmit_flag = os.environ.get("SRT_USE_LIVE_TRANSMIT", "").strip().lower()
         srt_bin = find_srt_live_transmit()
-        use_live_transmit = live_transmit_flag in {"1", "true", "yes"} or (
-            live_transmit_flag not in {"0", "false", "no"} and bool(srt_bin)
-        )
+        # Default OFF: direct ffmpeg→SRT is more stable on Zixi (no UDP hop /
+        # live-transmit reconnect churn). Opt in with SRT_USE_LIVE_TRANSMIT=1 for
+        # libsrt pkt_* CSV stats.
+        use_live_transmit = live_transmit_flag in {"1", "true", "yes"} and bool(srt_bin)
         # MediaMTX: ffmpeg→UDP→srt-live-transmit connects SRT but delivers no
         # media (path stays empty, LL-HLS 404). Direct ffmpeg→SRT works; receiver
         # stats still come from MediaMTX Prometheus.
@@ -1144,7 +1182,11 @@ class UploadService:
                             >= _hls_stale_rolling_threshold_sec(job.target_latency_ms)
                             and health.depth <= 1
                         )
-                        if stale_rolling and heals_used < _HLS_HEAL_ATTEMPTS:
+                        if (
+                            stale_rolling
+                            and heals_used < _HLS_HEAL_ATTEMPTS
+                            and not self._zixi_uses_error_concealment_playback(job)
+                        ):
                             srt_proc, heal_error = self._heal_srt_live_transmit(
                                 job, srt_proc=srt_proc, srt_cmd=srt_cmd
                             )
@@ -1155,24 +1197,27 @@ class UploadService:
                             rolling_since = None
                             if heal_error:
                                 return UploadResult(success=False, error=heal_error)
-                    elif not is_mediamtx:
-                        if bad_since is None:
-                            bad_since = now
                         elif (
-                            now - bad_since
-                        ) >= _hls_stuck_threshold_sec(
-                            job.target_latency_ms
-                        ) and heals_used < _HLS_HEAL_ATTEMPTS:
-                            srt_proc, heal_error = self._heal_srt_live_transmit(
-                                job, srt_proc=srt_proc, srt_cmd=srt_cmd
-                            )
-                            heals_used += 1
-                            preview_ready = False
-                            bad_since = None
-                            rolling_sig = None
-                            rolling_since = None
-                            if heal_error:
-                                return UploadResult(success=False, error=heal_error)
+                            not is_mediamtx
+                            and not self._zixi_uses_error_concealment_playback(job)
+                        ):
+                            if bad_since is None:
+                                bad_since = now
+                            elif (
+                                now - bad_since
+                            ) >= _hls_stuck_threshold_sec(
+                                job.target_latency_ms
+                            ) and heals_used < _HLS_HEAL_ATTEMPTS:
+                                srt_proc, heal_error = self._heal_srt_live_transmit(
+                                    job, srt_proc=srt_proc, srt_cmd=srt_cmd
+                                )
+                                heals_used += 1
+                                preview_ready = False
+                                bad_since = None
+                                rolling_sig = None
+                                rolling_since = None
+                                if heal_error:
+                                    return UploadResult(success=False, error=heal_error)
                 client_host = read_client_host_metrics()
                 server_host = ingest_poller.poll() if ingest_poller.enabled else None
                 pids = [pid for pid in (ffmpeg_proc.pid, srt_proc.pid if srt_proc else None) if pid]

@@ -23,6 +23,8 @@ import type { MoqtPlayerConfig } from './config.js';
 import type { MediaSourceLike } from './interfaces.js';
 import { CommandDispatcher } from './command-dispatcher.js';
 import type { LoggerLike } from './logger.js';
+import type { LocDiagnosticKind } from './stats.js';
+import { RenderCushionSmoother } from './render-cushion.js';
 import type { QualityController } from './quality-controller.js';
 import type { TrackPackaging } from './subscription-manager.js';
 
@@ -88,6 +90,13 @@ export interface PipelineSet {
   recoveryController: RecoveryController;
   commandDispatcher: CommandDispatcher | null;
   mediaSource: MediaSourceLike | null;
+  /**
+   * READ-ONLY view of the SMOOTHED render cushion (µs) last applied to LOC
+   * video render times and audio scheduling — slew-limited and clamped,
+   * distinct from the raw adaptive gap fuse. Peeks without advancing the
+   * smoother (only scheduling does). Absent for CMAF-only sessions.
+   */
+  getRenderCushionUs?: () => number;
 }
 
 /** Context for handlePipelineEvent. */
@@ -98,6 +107,12 @@ export interface PipelineEventContext {
   syncResetThisTick: boolean;
   setSyncResetThisTick: (value: boolean) => void;
   recoveryHook: (action: RecoveryAction) => RecoveryAction | null;
+  /**
+   * Observability-only counter hook for LOC diagnostics (stats.loc).
+   * `sync_reset` is recorded exactly when the reset is actually performed,
+   * not on same-tick suppressed duplicates. Optional — absent = no counting.
+   */
+  recordDiagnostic?: (kind: LocDiagnosticKind) => void;
 }
 
 /** Callbacks for handleRecoveryAction. */
@@ -105,6 +120,27 @@ export interface RecoveryCallbacks {
   onQualityReduced: (newTrack: { name: string; codec?: string; bitrate?: number; width?: number; height?: number }) => void;
   onResubscribe: (mediaType: 'video' | 'audio', startGroup?: bigint) => void;
   onTerminate: (reason: string) => void;
+}
+
+/**
+ * The single playout-cushion POLICY for a LOC session (µs) — the one source
+ * consumed by both the video render-time recompute and audio scheduling
+ * (via the dispatcher's getPlaybackDelayUs hook). Video adopts the value
+ * per-frame; audio adopts it at anchor/underrun boundaries (a healthy audio
+ * chain is never retimed mid-run), so any divergence from a changed cushion
+ * persists until the next audio anchor/underrun/reset.
+ *
+ * `max(adaptive, static)`: the adaptive component is the video pipeline's
+ * effective gap timeout (arrival-jitter EMA); the static floor is 200 ms,
+ * or 50 ms when the WebTransport handshake RTT is under 5 ms (LAN/loopback).
+ */
+export function computePlaybackDelayUs(
+  effectiveGapTimeoutUs: number | undefined,
+  handshakeRttMs: number | undefined,
+): number {
+  const staticDelayUs = handshakeRttMs !== undefined && handshakeRttMs < 5
+    ? 50_000 : 200_000;
+  return Math.max(effectiveGapTimeoutUs ?? 0, staticDelayUs);
 }
 
 // ─── createPipelines ─────────────────────────────────────────────────
@@ -136,40 +172,14 @@ export function createPipelines(
   if (hasCmaf && config.createMediaSource) {
     mediaSource = config.createMediaSource();
 
-    // Defer initialize() when init data comes from a separate track (initTrack).
-    // The player will call mediaSource.initialize() when the init track object arrives.
+    // initialize() is NOT called here. The player owns CMAF initialization
+    // via its init-source state machine (inline initData, initTrack
+    // delivery, or an in-band ftyp+moov object) and calls initialize()
+    // exactly once with the COMPLETE config — never with empty init bytes,
+    // and never per-track (a partial first call would latch the adapter
+    // and orphan the other track's SourceBuffer).
     // @see draft-ietf-moq-cmsf-00 §3.1 (Initialization headers)
     // @see draft-ietf-moq-catalogformat-01 §3.2.16 (initTrack)
-    const needsDeferredInit =
-      (hasCmafVideo && trackInfo.video?.initTrack && !trackInfo.video?.initData) ||
-      (hasCmafAudio && trackInfo.audio?.initTrack && !trackInfo.audio?.initData);
-
-    if (!needsDeferredInit) {
-      // Inline initData — initialize immediately (existing path)
-      const msConfig: {
-        video?: { codec: string; initData: Uint8Array };
-        audio?: { codec: string; initData: Uint8Array };
-      } = {};
-
-      if (hasCmafVideo && trackInfo.video?.codec) {
-        msConfig.video = {
-          codec: trackInfo.video.codec,
-          initData: trackInfo.video.initData
-            ? Uint8Array.from(atob(trackInfo.video.initData), c => c.charCodeAt(0))
-            : new Uint8Array(0),
-        };
-      }
-      if (hasCmafAudio && trackInfo.audio?.codec) {
-        msConfig.audio = {
-          codec: trackInfo.audio.codec,
-          initData: trackInfo.audio.initData
-            ? Uint8Array.from(atob(trackInfo.audio.initData), c => c.charCodeAt(0))
-            : new Uint8Array(0),
-        };
-      }
-
-      mediaSource.initialize(msConfig);
-    }
 
     mediaSource.onFirstFrame = () => callbacks.onFirstFrame();
     mediaSource.onStall = (durationMs) => callbacks.onStall(durationMs);
@@ -210,6 +220,15 @@ export function createPipelines(
 
   let commandDispatcher: CommandDispatcher | null = null;
 
+  // Slice A: the stable render playout target. Smooths the raw adaptive gap
+  // timeout into the cushion used for RENDER scheduling (video recompute +
+  // audio scheduling) — the gap DETECTOR keeps the raw value.
+  const hasLoc = (trackInfo.video !== undefined && !hasCmafVideo)
+    || (trackInfo.audio !== undefined && !hasCmafAudio);
+  const cushionFloorUs = handshakeRttMs !== undefined && handshakeRttMs < 5
+    ? 50_000 : 200_000;
+  const renderCushion = hasLoc ? new RenderCushionSmoother({ floorUs: cushionFloorUs }, clock) : null;
+
   if (videoDecoder || audioDecoder) {
     commandDispatcher = new CommandDispatcher(defined({
       videoDecoder,
@@ -234,11 +253,13 @@ export function createPipelines(
       // Adds a playback delay cushion to absorb network jitter — frames are
       // scheduled slightly into the future so delivery stalls don't cause stutter.
       recomputeVideoRenderTime: (captureTimestampUs: bigint) => {
-        // Adaptive playback delay: absorbs network delivery jitter.
-        const adaptiveDelayUs = videoPipeline?.effectiveGapTimeoutUs ?? 0;
-        const staticDelayUs = (handshakeRttMs !== undefined && handshakeRttMs < 5)
-          ? 50_000 : 200_000;
-        const playbackDelayUs = Math.max(adaptiveDelayUs, staticDelayUs);
+        // The SMOOTHED shared playout cushion (the same smoothed value is
+        // passed to audio scheduling via getPlaybackDelayUs; audio adopts it
+        // at anchor/underrun boundaries) — slew-limited so raw gap-fuse
+        // swings cannot step render times (a stepwise collapse froze video
+        // in the field).
+        const playbackDelayUs = renderCushion?.update(videoPipeline?.effectiveGapTimeoutUs)
+          ?? cushionFloorUs;
 
         // Sync reference is guaranteed here — CommandDispatcher holds frames
         // until hasSyncReference() returns true, so this callback only fires
@@ -253,12 +274,8 @@ export function createPipelines(
         return timing.renderTimeUs + playbackDelayUs;
       },
       hasSyncReference: () => syncController.hasReference,
-      getPlaybackDelayUs: () => {
-        const adaptiveDelayUs = videoPipeline?.effectiveGapTimeoutUs ?? 0;
-        const staticDelayUs = (handshakeRttMs !== undefined && handshakeRttMs < 5)
-          ? 50_000 : 200_000;
-        return Math.max(adaptiveDelayUs, staticDelayUs);
-      },
+      getPlaybackDelayUs: () =>
+        renderCushion?.update(videoPipeline?.effectiveGapTimeoutUs) ?? cushionFloorUs,
     }));
   }
 
@@ -299,6 +316,12 @@ export function createPipelines(
     recoveryController,
     commandDispatcher,
     mediaSource,
+    ...(renderCushion ? {
+      // Observability contract: PEEK the smoothed value. Only the scheduling
+      // paths (video recompute, audio getPlaybackDelayUs) advance the
+      // smoother — polling player.stats must never mutate playback timing.
+      getRenderCushionUs: () => renderCushion.currentUs,
+    } : {}),
   };
 }
 
@@ -381,16 +404,19 @@ export function handlePipelineEvent(
 ): void {
   switch (evt.type) {
     case 'gap_detected':
+      ctx.recordDiagnostic?.('gap_detected');
       ctx.log.warn('Gap detected %s group=%s', mediaType, evt.groupId);
       ctx.emitEvent({
         type: 'gap_detected', mediaType, groupId: evt.groupId,
       });
       break;
     case 'skip_forward':
+      ctx.recordDiagnostic?.('skip_forward');
       ctx.log.warn('Skip forward %s group=%s→%s', mediaType, evt.fromGroupId, evt.toGroupId);
       if (!ctx.syncResetThisTick && ctx.syncController) {
         ctx.syncController.reset();
         ctx.setSyncResetThisTick(true);
+        ctx.recordDiagnostic?.('sync_reset');
       }
       ctx.emitEvent({
         type: 'skip_forward', mediaType,
@@ -398,6 +424,7 @@ export function handlePipelineEvent(
       });
       break;
     case 'keyframe_waiting':
+      ctx.recordDiagnostic?.('keyframe_waiting');
       ctx.emitEvent({
         type: 'keyframe_waiting', mediaType, groupId: evt.groupId,
       });
@@ -414,6 +441,7 @@ export function handlePipelineEvent(
     case 'recovery': {
       const action = ctx.recoveryHook(evt.action);
       if (action) {
+        ctx.recordDiagnostic?.('recovery_action');
         ctx.emitEvent({ type: 'recovery_action', action });
       }
       break;
@@ -442,6 +470,7 @@ export function handlePipelineEvent(
       });
       break;
     case 'partial_group_abandoned':
+      ctx.recordDiagnostic?.('partial_group_abandoned');
       ctx.log.warn('Partial group abandoned %s group=%s→%s reason=%s',
         mediaType, evt.fromGroupId, evt.toGroupId, evt.reason);
       ctx.emitEvent({
@@ -453,6 +482,7 @@ export function handlePipelineEvent(
       });
       break;
     case 'backlog_shed':
+      ctx.recordDiagnostic?.('backlog_shed');
       ctx.log.warn('Backlog shed %s: dropped=%d remaining=%d reason=%s',
         mediaType, evt.droppedGroups, evt.remainingGroups, evt.reason);
       ctx.emitEvent({

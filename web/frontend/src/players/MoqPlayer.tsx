@@ -41,6 +41,8 @@ interface MoqPlayerProps {
   sourceHasAudio?: boolean;
   /** Capture->bridge-output lag (ms) for live webcam runs; 0 for VOD. */
   bridgeLagMs?: number;
+  /** This leg's encoder lag behind realtime (ms). */
+  encoderLagMs?: number;
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -75,6 +77,7 @@ export default function MoqPlayer({
   targetLatencyMs = 400,
   sourceHasAudio = true,
   bridgeLagMs = 0,
+  encoderLagMs = 0,
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -107,8 +110,12 @@ export default function MoqPlayer({
     moqTimelineMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
-  const lagRef = useRef({ bridgeMs: 0, epoch: 0 });
-  lagRef.current = { bridgeMs: bridgeLagMs, epoch: encodeStartedAtEpoch ?? 0 };
+  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0 });
+  lagRef.current = {
+    bridgeMs: bridgeLagMs,
+    encoderMs: encoderLagMs,
+    epoch: encodeStartedAtEpoch ?? 0,
+  };
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
   // more than once for this component instance — e.g. because `namespace`
@@ -130,44 +137,48 @@ export default function MoqPlayer({
   }, [jobId]);
 
   /**
-   * Capture-anchored glass-to-glass estimate (ms), same anchor as the HLS
-   * legs: wall-since-encode-start minus the MoQ media-timeline position of
-   * the playhead (leg-encoder anchored, unlike the join-zeroed video clock),
-   * plus the browser->bridge chain. The old wall−videoTime estimate
-   * over-counted by the join offset (media that existed before subscribe).
+   * Glass-to-glass estimate (ms). Prefer CaptureTimestamp when playa reports
+   * it. Otherwise buffer lead + encode/bridge lag — never wall−MSE-currentTime
+   * (join-zeroed; freezes at join delay and disagrees with ENC burn-in).
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
-    // Native CaptureTimestamp latency from the player wins when present.
+    const { bridgeMs, encoderMs } = lagRef.current;
     if (session.playerLatencyMs > 0) {
-      return session.playerLatencyMs;
-    }
-    const { bridgeMs, epoch } = lagRef.current;
-    const video = videoRef.current;
-    if (epoch > 0 && session.moqTimelineMs > 0 && video && session.firstFrame) {
-      const total = Date.now() - epoch * 1000 - session.moqTimelineMs + bridgeMs;
+      const total = session.playerLatencyMs + encoderMs + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }
-    return undefined;
+    if (!session.firstFrame) {
+      return undefined;
+    }
+    const bufferMs = bufferedAheadSec(videoRef.current) * 1000;
+    if (bufferMs <= 0) {
+      return undefined;
+    }
+    const total = bufferMs + 250 + encoderMs + bridgeMs;
+    return total > 0 && total < 120_000 ? Math.round(total) : undefined;
   }
 
   const getPlaybackSnapshot = useCallback(
-    (): PlaybackMetricsSnapshot => ({
-      playback_stats_events: sessionRef.current.statsEvents,
-      playback_stall_count: sessionRef.current.stallCount,
-      playback_frames_rendered: sessionRef.current.framesRendered,
-      playback_frames_dropped: sessionRef.current.framesDropped,
-      playback_bitrate_bps: sessionRef.current.bitrateBps,
-      playback_ttff_ms: sessionRef.current.ttffMs,
-      playback_hls_errors: 0,
-      playback_hls_fatal_errors: 0,
-      playback_hls_buffer_stalls: 0,
-      playback_hls_frag_loads: 0,
-      playback_video_time_sec: sessionRef.current.videoTimeSec,
-      playback_buffer_sec: bufferedAheadSec(videoRef.current),
-      playback_rebuffer_sec: rebufferRef.current.totalSec,
-      e2e_latency_ms: captureAnchoredE2eMs(),
-    }),
+    (): PlaybackMetricsSnapshot => {
+      const session = sessionRef.current;
+      return {
+        playback_stats_events: session.statsEvents,
+        playback_stall_count: session.stallCount,
+        playback_frames_rendered: session.framesRendered,
+        playback_frames_dropped: session.framesDropped,
+        playback_bitrate_bps: session.bitrateBps,
+        playback_ttff_ms: session.ttffMs,
+        playback_hls_errors: 0,
+        playback_hls_fatal_errors: 0,
+        playback_hls_buffer_stalls: 0,
+        playback_hls_frag_loads: 0,
+        playback_video_time_sec: session.videoTimeSec,
+        playback_buffer_sec: bufferedAheadSec(videoRef.current),
+        playback_rebuffer_sec: rebufferRef.current.totalSec,
+        e2e_latency_ms: captureAnchoredE2eMs(),
+      };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -488,13 +499,12 @@ export default function MoqPlayer({
         });
 
         player.on("timeupdate", ({ currentTime }) => {
-          // @playa/player reports MoQ media-timeline PTS here (often 10k+), not <video> clock.
+          // With an active <video> sink, playa emits video.currentTime*1000
+          // (MSE join-relative). Keep for diagnostics; e2e uses buffer lead.
           if (destroyed) {
             return;
           }
           if (currentTime > 0) {
-            // Leg-encoder-anchored playhead position — feeds the
-            // capture-anchored latency estimate.
             sessionRef.current.moqTimelineMs = currentTime;
           }
           if (video.currentTime > 0.25 && video.videoWidth > 0) {

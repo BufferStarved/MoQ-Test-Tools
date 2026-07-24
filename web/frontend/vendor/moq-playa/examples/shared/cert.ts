@@ -40,6 +40,15 @@ export const namespaceArg: string | readonly string[] = (() => {
   return namespace;
 })();
 
+/** Optional CLIENT_SETUP AUTHORITY interop override for tenant-routed relays. */
+export const authority: string | undefined = (() => {
+  const value = params.get('authority')?.trim();
+  return value || undefined;
+})();
+
+/** `?warmStart=1`: joining-FETCH warm start of the current group (live LOC tracks). */
+export const warmStart: boolean = params.get('warmStart') === '1';
+
 /** Draft version override (e.g. ?v=14 for draft-14 relays, ?v=18 for draft-18). */
 export const draftVersion: 14 | 16 | 18 | undefined = (() => {
   const v = params.get('v');

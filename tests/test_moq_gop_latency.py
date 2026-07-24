@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from encode_profile import (  # noqa: E402
     ASSUMED_FPS,
+    build_video_encode_args,
     gop_frames_for_latency,
     moq_gop_frames_for_latency,
 )
@@ -71,6 +72,34 @@ class MoqGopLatencyTests(unittest.TestCase):
         self.assertEqual(cmd[g_index + 1], "30")
         keyint_index = cmd.index("-keyint_min")
         self.assertEqual(cmd[keyint_index + 1], "30")
+
+    def test_encode_args_include_utc_burnin(self):
+        args = build_video_encode_args("720p", 4000, burnin_epoch_sec=1_700_000_000)
+        vf = args[args.index("-vf") + 1]
+        self.assertIn("drawtext", vf)
+        self.assertIn("pts\\:gmtime\\:1700000000", vf)
+        self.assertIn("ENC ", vf)
+        live = build_video_encode_args("720p", 4000, wallclock_pts=True)
+        live_vf = live[live.index("-vf") + 1]
+        self.assertIn("pts\\:gmtime", live_vf)
+        self.assertNotIn("pts\\:gmtime\\:", live_vf)
+        moq = build_ffmpeg_moq_cmd(
+            "clip.mp4",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=4000,
+        )
+        moq_vf = moq[moq.index("-vf") + 1]
+        self.assertIn("pts\\:gmtime\\:", moq_vf)
+        live_moq = build_ffmpeg_moq_cmd(
+            "udp://127.0.0.1:9",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=4000,
+        )
+        live_moq_vf = live_moq[live_moq.index("-vf") + 1]
+        self.assertIn("pts\\:gmtime", live_moq_vf)
+        self.assertNotIn("pts\\:gmtime\\:", live_moq_vf)
 
 
 if __name__ == "__main__":

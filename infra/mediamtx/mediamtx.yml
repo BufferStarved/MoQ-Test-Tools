@@ -44,7 +44,7 @@ hlsEncryption: no
 hlsAllowOrigin: "*"
 hlsAlwaysRemux: yes
 hlsVariant: lowLatency
-hlsSegmentCount: 7
+hlsSegmentCount: 9
 hlsSegmentDuration: 1s
 hlsPartDuration: 200ms
 hlsSegmentMaxSize: 50M

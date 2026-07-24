@@ -119,9 +119,11 @@ SERVICE_PRESETS: List[ServicePreset] = [
         notes=(
             "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
             "upload adds streamid=#!::r=SRT Test,m=publish automatically. "
-            "HLS playback uses playback.m3u8?stream=SRT%20Test. "
-            "Publishes apply monotonic -output_ts_offset so Fast HLS survives file republish. "
-            "HTTP-TS: http://35.222.33.58:7777/SRT%20Test.ts (http_ts_auto_out). "
+            "Browser playback uses error-concealed 'SRT Test EC' "
+            "(primary Fast HLS packager wedges after first connect). "
+            "HLS: playback.m3u8?stream=SRT%20Test%20EC. "
+            "HTTP-TS: http://35.222.33.58:7777/SRT%20Test%20EC.ts. "
+            "Publishes apply monotonic -output_ts_offset. "
             "Upload transcodes to H.264 Main yuv420p for browser playback."
         ),
         supports_vmaf=True,
@@ -134,7 +136,14 @@ SERVICE_PRESETS: List[ServicePreset] = [
         name="Zixi Broadcaster gcp-us-central1",
         protocol="rtmp",
         url="rtmp://35.222.33.58:1935/live/benchmark",
-        notes="Managed Zixi RTMP ingest on GCP. Zixi stream ID must be benchmark.",
+        notes=(
+            "Managed Zixi RTMP ingest on GCP. Stream ID must be benchmark "
+            "(rtmp://host:1935/live/benchmark). "
+            "Default browser preview is HTTP-TS (mpegts.js) at "
+            "http://host:7777/benchmark.ts — bypasses Fast HLS for faster join. "
+            "HLS playback.m3u8?stream=benchmark remains available. "
+            "Offline .ts returns empty HTTP 200."
+        ),
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
         ingest_recording_dir="/opt/zixi_broadcaster-linux64",

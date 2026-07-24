@@ -57,7 +57,7 @@ import { StatsAccumulator } from './stats.js';
 import type { PlayerStats } from './stats.js';
 import type { CmafAssemblerLike } from './interfaces.js';
 import { buildConnectUrl, buildSetupOptions, buildSubscribeOptions } from './player-connect.js';
-import {
+import { computePlaybackDelayUs,
   createPipelines,
   configurePipelines,
   handlePipelineCommand as doPipelineCommand,
@@ -263,9 +263,30 @@ export class MoqtPlayer {
    * @see draft-ietf-moq-cmsf-00 §3 (CMAF Packaging)
    */
   private mediaSource: MediaSourceLike | null = null;
+  /** Smoothed LOC render cushion getter (slice A); null for CMAF sessions. */
+  private getRenderCushionUs: (() => number) | null = null;
 
   /** Whether mediaSource.initialize() has been called. */
   private cmafInitialized = false;
+
+  /**
+   * CMAF init-source state machine: one entry per selected CMAF track,
+   * `bytes` filled by whichever valid source arrives first — inline catalog
+   * initData, an initTrack delivery, or an in-band ftyp+moov object.
+   * initialize() fires exactly ONCE, when EVERY entry has bytes (the
+   * adapter latches on first call, so a partial call would orphan the
+   * other track's SourceBuffer).
+   */
+  private cmafPendingInit: {
+    video?: { codec: string; bytes: Uint8Array | null };
+    audio?: { codec: string; bytes: Uint8Array | null };
+  } | null = null;
+
+  /** Tracks already warned about pre-init media drops (once per track). */
+  private readonly cmafPreInitDropWarned = new Set<string>();
+
+  /** Whether the cmaf_init bootstrap deadline has been armed. */
+  private cmafInitDeadlineArmed = false;
 
   /** Whether we've seen a keyframe (group start) since init — video only. */
   private cmafVideoSynced = false;
@@ -489,7 +510,7 @@ export class MoqtPlayer {
    */
   private readonly activeFetches = new Map<
     bigint,
-    { trackName: string; mediaType: 'video' | 'audio'; trackAlias: bigint }
+    { trackName: string; mediaType: 'video' | 'audio'; trackAlias: bigint; warmStart?: boolean }
   >();
 
   /**
@@ -540,6 +561,44 @@ export class MoqtPlayer {
   private readonly fetchStreamAliases = new Map<bigint, bigint>();
 
   /**
+   * Fetch stream → FETCH request ID, so a stream FIN/reset can clean up the
+   * matching {@link activeFetches} entry (a fetch is complete when its single
+   * data stream ends, §9.16.3).
+   */
+  private readonly fetchStreamRequestIds = new Map<bigint, bigint>();
+
+  /**
+   * FETCH data streams whose request ID is not (yet) registered in
+   * {@link activeFetches}. §9.16.3 allows fetch data at any time relative to
+   * FETCH_OK — which can beat the joiningFetch()/fetch() promise continuation
+   * that registers the fetch. Objects buffer here (bounded) and replay
+   * through the normal alias remap once the fetch is registered; they are
+   * NEVER routed under their wire trackAlias 0.
+   */
+  private readonly pendingFetchStreams = new Map<
+    bigint,
+    { requestId: bigint; objects: MoqtObject[]; finished?: boolean }
+  >();
+
+  /**
+   * FETCH request IDs refused by REQUEST_ERROR BEFORE the fetch()/
+   * joiningFetch() continuation registered them (§9.16.3 races). Registration
+   * consults this so a refused request is never resurrected. Bounded FIFO.
+   */
+  private readonly refusedFetchRequests = new Map<bigint, { reason: string; code: bigint }>();
+  private static readonly MAX_REFUSED_FETCHES = 16;
+  /** Entry-count bound for pendingFetchStreams (FIFO eviction of the oldest). */
+  private static readonly MAX_PENDING_FETCH_STREAMS = 8;
+
+  /**
+   * Tombstones for OVERFLOWED unregistered fetch streams: their later objects
+   * must be swallowed (a fetch stream's wire trackAlias is 0, which can
+   * collide with a real alias-0 subscription). Entries clear on FIN/reset,
+   * so the set is bounded by the peer's concurrently-open streams.
+   */
+  private readonly droppedFetchStreams = new Set<bigint>();
+
+  /**
    * Media timeline state — populated when catalog contains a mediatimeline track.
    * Enables seek() via PTS→location lookup.
    * @see draft-ietf-moq-msf-00 §7 (Media Timeline track)
@@ -571,6 +630,20 @@ export class MoqtPlayer {
     // Fires timeout/warning events when expected lifecycle events don't arrive.
     this.watchdog = new WatchdogController({
       onTimeout: (e) => {
+        // CMAF bootstrap deadlines ESCALATE (fatal); all other
+        // expectations keep the historical diagnostic-only behavior.
+        if (e.event === 'cmaf_init' || e.event === 'cmaf_first_frame') {
+          const detail = e.event === 'cmaf_init'
+            ? 'CMAF media arriving but no init segment materialized (initData / initTrack / in-band ftyp+moov)'
+            : 'CMAF MediaSource initialized but no frame rendered (init/codec mismatch?)';
+          this.emitError(createPlayerError(
+            'fatal', 'catalog', PlayerErrorCode.CMAF_INIT_TIMEOUT,
+            `${detail} within ${e.timeoutMs}ms`,
+          ));
+          if (!this.isTerminalState()) this.transitionState(PlayerState.ERROR);
+          this.stopTicking();
+          return;
+        }
         this.log.warn('Watchdog timeout: %s after %dms', e.event, e.elapsedMs);
         this.emitter.emit('state_changed', {
           type: 'state_changed',
@@ -659,7 +732,15 @@ export class MoqtPlayer {
    * @see draft-jennings-moq-metrics-02 (informational)
    */
   get stats(): Readonly<PlayerStats> {
-    return Object.freeze(this._stats.snapshot());
+    // LOC timing gauges sampled at snapshot time (null on the CMAF path):
+    // the live adaptive gap fuse and the render cushion actually applied
+    // (same formula as recomputeVideoRenderTime — observability only).
+    const gapUs = this.videoPipeline?.effectiveGapTimeoutUs;
+    const locGauges = gapUs !== undefined ? {
+      videoEffectiveGapTimeoutMs: gapUs / 1000, // raw adaptive fuse
+      renderCushionMs: (this.getRenderCushionUs?.() ?? computePlaybackDelayUs(gapUs, this._handshakeRttMs)) / 1000,
+    } : undefined;
+    return Object.freeze(this._stats.snapshot(locGauges));
   }
 
   /**
@@ -1435,14 +1516,12 @@ export class MoqtPlayer {
       if (obj.kind !== 'data' || !obj.payload) return;
       if (this.stateMachine.state === PlayerState.PAUSED) return;
 
-      // Gate: don't send data to MSE until initialized (init track delivered)
+      // Gate: media cannot reach MSE before initialization. While init is
+      // pending, an in-band ftyp+moov object is accepted as the init
+      // source; moof/mdat is dropped loudly and arms the bootstrap
+      // deadline (no more silent pre-init drops).
       if (!this.cmafInitialized) {
-        // DEBUG: log first few drops per media type
-        if (mediaType === 'video' && BigInt(obj.objectId) === 0n) {
-          this.log.debug('[CMAF] gate: cmafInitialized=false, dropping %s g=%s o=%s %dB (assembler=%s, mediaSource=%s)',
-            mediaType, String(obj.groupId), String(obj.objectId), obj.payload.byteLength,
-            this.cmafAssembler ? 'exists' : 'null', this.mediaSource ? 'exists' : 'null');
-        }
+        this.handlePreInitCmafObject(mediaType, trackName, obj.payload);
         return;
       }
 
@@ -1603,18 +1682,6 @@ export class MoqtPlayer {
         (t: CatalogTrack) => t.role === 'audio' && t.initTrack === trackName,
       );
 
-      const msConfig: {
-        video?: { codec: string; initData: Uint8Array };
-        audio?: { codec: string; initData: Uint8Array };
-      } = {};
-
-      if (videoTrack?.codec) {
-        msConfig.video = { codec: videoTrack.codec, initData: obj.payload };
-      }
-      if (audioTrack?.codec) {
-        msConfig.audio = { codec: audioTrack.codec, initData: obj.payload };
-      }
-
       // Cache the init bytes so future codec-changing track switches
       // can call mediaSource.changeType() immediately instead of
       // re-fetching. Resolves any pending lazy-subscribe waiter.
@@ -1639,62 +1706,18 @@ export class MoqtPlayer {
         this.connection?.unsubscribe(varint(initReqId)).catch(() => {});
       }
 
-      // mediaSource.initialize() is idempotent on the MseMediaSource
-      // (early-returns once SourceBuffers exist), so re-firing on a
-      // second init-track delivery is safe — but we should NOT re-set
-      // cmafInitialized state machinery if already initialized.
-      const wasInitialized = this.cmafInitialized;
-      if (!wasInitialized) {
-        this.mediaSource.initialize(msConfig);
-        this.cmafInitialized = true;
-        this.cmafVideoSynced = false; // Wait for keyframe after init
-        // Record the codec the SourceBuffer was created with so codec-
-        // changing switches detect the need to call changeType(). Audio
-        // switches don't currently trigger changeType, so audio codec
-        // isn't tracked.
-        if (videoTrack?.codec) this.currentVideoCodec = videoTrack.codec;
-      }
-      // If already initialized, this onInitObject delivery is just
-      // cache-warming for a future codec switch — early-out before the
-      // assembler-recreation block below.
-      if (wasInitialized) return;
+      // Already initialized → this delivery is cache-warming for a future
+      // codec switch only (the cache write above did the work).
+      if (this.cmafInitialized) return;
 
-      // Create assembler: pairs moof+mdat, rebases tfdt to zero, emits segments
-      const ms = this.mediaSource;
-      const timestampOffsetSet = { video: false, audio: false };
-      if (!this.config.createCmafAssembler) {
-        throw new Error('CMAF tracks require createCmafAssembler in MoqtPlayerConfig');
-      }
-      this.cmafAssembler = this.config.createCmafAssembler({
-        onSegment: (mediaType: 'video' | 'audio', segment: Uint8Array, segTrackName: string, groupId: bigint) => {
-          if (!timestampOffsetSet[mediaType]) {
-            timestampOffsetSet[mediaType] = true;
-            if ('setTimestampOffset' in ms) {
-              (ms as { setTimestampOffset: (t: string, o: number) => void }).setTimestampOffset(mediaType, 0);
-            }
-          }
-          ms.appendChunk(mediaType, segment, segTrackName, groupId);
-        },
-        onDiscontinuity: (mediaType, trackName) => {
-          if ('clearTimeline' in ms) {
-            (ms as { clearTimeline: (t: string, tn: string) => void }).clearTimeline(mediaType, trackName);
-          }
-        },
-      });
-
-      // Hand the init bytes to the assembler so its strip path can fall
-      // back to trex defaults for streams that don't carry tfhd
-      // sample defaults. Same payload that just initialized the
-      // MediaSource above.
-      if (videoTrack?.codec) {
-        this.cmafAssembler.setInitSegment?.('video', obj.payload);
-      }
-      if (audioTrack?.codec) {
-        this.cmafAssembler.setInitSegment?.('audio', obj.payload);
-      }
-
-      this._stats.recordDecoderConfigured();
-      this.log.info('Init track "%s" received (%d bytes), MediaSource initialized', trackName, obj.payload.byteLength);
+      // Supply the bytes to the init state machine for every selected CMAF
+      // track referencing this init track. initialize() fires once ALL
+      // selected tracks have bytes (collect-then-initialize: split video/
+      // audio init tracks initialize TOGETHER — a partial first call would
+      // latch the adapter and orphan the other SourceBuffer).
+      this.log.info('Init track "%s" received (%d bytes)', trackName, obj.payload.byteLength);
+      if (videoTrack?.codec) this.supplyCmafInitBytes('video', obj.payload);
+      if (audioTrack?.codec) this.supplyCmafInitBytes('audio', obj.payload);
     };
 
     if (this._adapterOwned) {
@@ -2095,6 +2118,10 @@ export class MoqtPlayer {
     // belong to the old adapter and won't match new-session traffic.
     this.activeFetches.clear();
     this.fetchStreamAliases.clear();
+    this.fetchStreamRequestIds.clear();
+    this.pendingFetchStreams.clear();
+    this.refusedFetchRequests.clear();
+    this.droppedFetchStreams.clear();
     this.rejectPendingCatalogFetches('Session migrated — fetchCatalog cancelled');
 
     // Connect to new relay (CLIENT_SETUP → SERVER_SETUP) §3.3
@@ -2151,6 +2178,10 @@ export class MoqtPlayer {
     // belong to the old adapter and won't match new-session traffic.
     this.activeFetches.clear();
     this.fetchStreamAliases.clear();
+    this.fetchStreamRequestIds.clear();
+    this.pendingFetchStreams.clear();
+    this.refusedFetchRequests.clear();
+    this.droppedFetchStreams.clear();
     this.rejectPendingCatalogFetches('Session migrated — fetchCatalog cancelled');
 
     // Connect to new relay — createTransport is guaranteed available (checked by caller)
@@ -2196,6 +2227,7 @@ export class MoqtPlayer {
     options: { startGroup: number; startObject: number; endGroup: number; endObject: number },
   ): Promise<bigint> {
     if (!this.connection) throw new Error('Player not loaded');
+    const connAtCall = this.connection;
 
     const nsBytes = encodeNamespace(this.config.namespace, this.enc);
     const nameBytes = this.enc.encode(trackName);
@@ -2207,7 +2239,7 @@ export class MoqtPlayer {
       endObject: varint(BigInt(options.endObject)),
     };
 
-    const reqId = await this.connection.fetch(nsBytes, nameBytes, fetchOptions);
+    const reqId = await connAtCall.fetch(nsBytes, nameBytes, fetchOptions);
     const reqIdBigInt = BigInt(reqId);
 
     // Find the media type and track alias for this track name
@@ -2224,9 +2256,81 @@ export class MoqtPlayer {
       }
     }
 
-    this.activeFetches.set(reqIdBigInt, { trackName, mediaType, trackAlias });
+    // Completion crossed destroy()/migration: the request ID belongs to a
+    // dead session — a caller could neither receive objects nor cancel it
+    // (fetchCancel would target the NEW connection). Best-effort cancel on
+    // the captured old connection and reject loudly.
+    if (!this.subscriptionManager || this.connection !== connAtCall) {
+      try { await connAtCall.fetchCancel(reqId); } catch { /* old session gone */ }
+      throw new Error('fetch() aborted: player destroyed or session migrated while the FETCH was in flight');
+    }
+    this.registerMediaFetch(reqIdBigInt, { trackName, mediaType, trackAlias });
 
     return reqId;
+  }
+
+  /**
+   * Register an active media FETCH and resolve any data streams that arrived
+   * before registration (§9.16.3: fetch data may precede FETCH_OK — and the
+   * fetch()/joiningFetch() promise continuation). Buffered objects replay
+   * through the same alias remap as normally-ordered fetch objects.
+   */
+  private registerMediaFetch(
+    fetchReqId: bigint,
+    info: { trackName: string; mediaType: 'video' | 'audio'; trackAlias: bigint; warmStart?: boolean },
+  ): void {
+    // A REQUEST_ERROR that raced the fetch()/joiningFetch() continuation
+    // already refused this request — honor it instead of resurrecting a
+    // dead fetch (its buffered streams are dropped with it).
+    const refused = this.refusedFetchRequests.get(fetchReqId);
+    if (refused) {
+      this.refusedFetchRequests.delete(fetchReqId);
+      for (const [streamId, pending] of this.pendingFetchStreams) {
+        if (pending.requestId === fetchReqId) this.pendingFetchStreams.delete(streamId);
+      }
+      this.log.warn('[%s] media FETCH %s for "%s" was refused before registration: %s (code=0x%s) — continuing live-only',
+        info.warmStart ? 'warm-start' : 'fetch',
+        fetchReqId, info.trackName, refused.reason, refused.code.toString(16));
+      return;
+    }
+
+    // An alias remap (SUBSCRIBE_OK with a server-assigned alias) may have
+    // landed during the same await window — always register against the
+    // track's CURRENT alias, not the one captured before the await.
+    for (const sub of this.activeSubscriptions.values()) {
+      if (sub.trackName === info.trackName && sub.mediaType === info.mediaType) {
+        info = { ...info, trackAlias: sub.trackAlias };
+        break;
+      }
+    }
+
+    this.activeFetches.set(fetchReqId, info);
+    for (const [streamId, pending] of this.pendingFetchStreams) {
+      if (pending.requestId !== fetchReqId) continue;
+      this.pendingFetchStreams.delete(streamId);
+      for (const obj of pending.objects) {
+        this.routeFetchObject(streamId, info.trackAlias, obj);
+      }
+      if (pending.finished) {
+        // The stream already FINned: the pre-roll is complete — no live
+        // routing maps needed, and the fetch bookkeeping ends with it.
+        this.activeFetches.delete(fetchReqId);
+      } else {
+        this.fetchStreamAliases.set(streamId, info.trackAlias);
+        this.fetchStreamRequestIds.set(streamId, fetchReqId);
+      }
+    }
+  }
+
+  /**
+   * Route one FETCH data-stream object: remap the wire trackAlias (0 on a
+   * fetch stream, §10.4.4) to the live track's alias and hand it to the
+   * same SubscriptionManager path live objects use.
+   */
+  private routeFetchObject(streamId: bigint, alias: bigint, obj: MoqtObject): void {
+    if (this.subscriptionManager?.getMediaType(alias) === undefined) return;
+    const remapped: MoqtObject = { ...obj, trackAlias: varint(alias) };
+    this.subscriptionManager.routeObject(streamId, remapped);
   }
 
   /**
@@ -2637,6 +2741,10 @@ export class MoqtPlayer {
     this.pendingMediaSubs.clear();
     this.activeFetches.clear();
     this.fetchStreamAliases.clear();
+    this.fetchStreamRequestIds.clear();
+    this.pendingFetchStreams.clear();
+    this.refusedFetchRequests.clear();
+    this.droppedFetchStreams.clear();
     this.pendingObjectsByAlias.clear();
     // Clear make-before-break switch state
     this.pendingVideoSwitch = null;
@@ -2656,6 +2764,9 @@ export class MoqtPlayer {
     this.announcedNamespaces.clear();
     this.commandDispatcher?.destroy();
     this.commandDispatcher = null;
+    this.cmafPendingInit = null;
+    this.cmafPreInitDropWarned.clear();
+    this.cmafInitDeadlineArmed = false;
     this.watchdog.destroy();
     this.cmafAssembler?.destroy();
     this.cmafAssembler = null;
@@ -2878,9 +2989,22 @@ export class MoqtPlayer {
         // §10.4.4: Fetch stream objects carry trackAlias=0 — remap to correct alias
         const fetchAlias = this.fetchStreamAliases.get(streamId);
         if (fetchAlias !== undefined) {
-          if (this.subscriptionManager?.getMediaType(fetchAlias) !== undefined) {
-            const remapped: MoqtObject = { ...obj, trackAlias: varint(fetchAlias) };
-            this.subscriptionManager.routeObject(streamId, remapped);
+          this.routeFetchObject(streamId, fetchAlias, obj);
+          return;
+        }
+
+        // An OVERFLOWED fetch stream: still classified as fetch — swallow its
+        // objects rather than letting wire alias 0 fall through to a real
+        // alias-0 subscription.
+        if (this.droppedFetchStreams.has(streamId)) return;
+
+        // A fetch stream whose request isn't registered yet (§9.16.3: data
+        // may beat the fetch()/joiningFetch() continuation): buffer per
+        // stream and replay on registration. Never route as wire alias 0.
+        const pendingFetch = this.pendingFetchStreams.get(streamId);
+        if (pendingFetch) {
+          if (pendingFetch.objects.length < MoqtPlayer.MAX_PENDING_PER_ALIAS) {
+            pendingFetch.objects.push(obj);
           }
           return;
         }
@@ -2946,6 +3070,20 @@ export class MoqtPlayer {
             this.livenessMonitor?.noteStreamReset(subgroupAlias, performance.now());
           }
         }
+        // §9.16.3: a fetch's single data stream ending (FIN or reset) ends
+        // the fetch — drop its routing maps and active-fetch bookkeeping. An
+        // UNREGISTERED stream (data raced the fetch()/joiningFetch()
+        // continuation) keeps its buffered objects and is marked finished:
+        // registration will still replay the completed pre-roll.
+        const pendingFetch = this.pendingFetchStreams.get(streamId);
+        if (pendingFetch) pendingFetch.finished = true;
+        this.droppedFetchStreams.delete(streamId); // tombstone ends with the stream
+        const fetchReqId = this.fetchStreamRequestIds.get(streamId);
+        if (fetchReqId !== undefined) {
+          this.fetchStreamRequestIds.delete(streamId);
+          this.fetchStreamAliases.delete(streamId);
+          this.activeFetches.delete(fetchReqId);
+        }
         if (error !== undefined) {
           this.log.debug('Data stream %s reset with code 0x%s', streamId, error.toString(16));
         }
@@ -2974,6 +3112,27 @@ export class MoqtPlayer {
           const fetchInfo = this.activeFetches.get(reqId);
           if (fetchInfo) {
             this.fetchStreamAliases.set(streamId, fetchInfo.trackAlias);
+            this.fetchStreamRequestIds.set(streamId, reqId);
+          } else {
+            // §9.16.3: data can precede the fetch()/joiningFetch() promise
+            // continuation that registers the request. Park the stream;
+            // registerMediaFetch() resolves it and replays buffered objects.
+            // BOUNDED: a peer cycling unknown fetch streams must not grow
+            // this for the session lifetime — evict the oldest entry.
+            if (this.pendingFetchStreams.size >= MoqtPlayer.MAX_PENDING_FETCH_STREAMS) {
+              const oldest = this.pendingFetchStreams.keys().next().value;
+              if (oldest !== undefined) {
+                const evicted = this.pendingFetchStreams.get(oldest);
+                this.pendingFetchStreams.delete(oldest);
+                // Keep the CLASSIFICATION for a still-open stream: its later
+                // objects are dropped, never alias-routed. A stream that has
+                // already FINished gets NO tombstone — no close event will
+                // ever clear it, and repeated header→FIN→overflow cycles
+                // would grow the set forever.
+                if (!evicted?.finished) this.droppedFetchStreams.add(oldest);
+              }
+            }
+            this.pendingFetchStreams.set(streamId, { requestId: reqId, objects: [] });
           }
         }
       },
@@ -3136,6 +3295,42 @@ export class MoqtPlayer {
           ),
         });
       },
+      onMediaFetchError: (requestId, errorReason, errorCode) => {
+        const fetchInfo = this.activeFetches.get(requestId);
+        if (!fetchInfo) {
+          // Refusal raced the fetch()/joiningFetch() continuation — remember
+          // it (bounded) so registration honors the refusal, and drop any
+          // already-buffered streams for the dead request.
+          if (this.refusedFetchRequests.size >= MoqtPlayer.MAX_REFUSED_FETCHES) {
+            const oldest = this.refusedFetchRequests.keys().next().value;
+            if (oldest !== undefined) this.refusedFetchRequests.delete(oldest);
+          }
+          this.refusedFetchRequests.set(requestId, { reason: errorReason, code: errorCode });
+          for (const [streamId, pending] of this.pendingFetchStreams) {
+            if (pending.requestId === requestId) this.pendingFetchStreams.delete(streamId);
+          }
+          return;
+        }
+        this.activeFetches.delete(requestId);
+        // Non-fatal by design: a refused warm-start (or manual) media fetch
+        // just means no pre-roll — the live subscription is untouched and
+        // playback starts at the next group boundary.
+        this.log.warn('[%s] media FETCH %s for "%s" refused: %s (code=0x%s) — continuing live-only',
+          fetchInfo.warmStart ? 'warm-start' : 'fetch',
+          requestId, fetchInfo.trackName, errorReason, errorCode.toString(16));
+      },
+      onMediaAliasRemapped: (_requestId, oldAlias, newAlias) => {
+        // §9.10: the server assigned a different track alias — fetch
+        // bookkeeping registered under the optimistic alias must follow, or
+        // a warm-start fetch's objects orphan on relays that don't echo the
+        // request ID as the alias.
+        for (const info of this.activeFetches.values()) {
+          if (info.trackAlias === oldAlias) info.trackAlias = newAlias;
+        }
+        for (const [streamId, alias] of this.fetchStreamAliases) {
+          if (alias === oldAlias) this.fetchStreamAliases.set(streamId, newAlias);
+        }
+      },
     });
   }
 
@@ -3275,6 +3470,7 @@ export class MoqtPlayer {
     const pipelines = createPipelines(this.config, this.clock, trackInfo, {
       onFirstFrame: () => {
         this._stats.recordFirstFrameRendered();
+        this.watchdog.fulfill('cmaf_first_frame'); // bootstrap deadline met
         this.log.info('First frame rendered');
         this.emitter.emit('first_frame', { type: 'first_frame' });
       },
@@ -3349,6 +3545,18 @@ export class MoqtPlayer {
         // be rebuilt, which only the application can do (fresh tune-in).
         // FATAL, unlike ordinary decode errors: this is the public signal
         // apps reconnect on.
+        // MediaSource.isTypeSupported rejected the codec string — MSE can
+        // never be configured on this UA. Fatal (adapter names the mime).
+        if (error.name === 'CodecUnsupportedError') {
+          this.emitError(createPlayerError(
+            'fatal', 'decoder', PlayerErrorCode.CODEC_UNSUPPORTED, error.message,
+            { cause: error, context: { mediaType } },
+          ));
+          if (!this.isTerminalState()) this.transitionState(PlayerState.ERROR);
+          this.stopTicking();
+          return;
+        }
+
         if (error.name === 'PlayheadWedgeError') {
           this.emitError(createPlayerError(
             'fatal', 'decoder', PlayerErrorCode.MEDIA_ELEMENT_WEDGED, error.message,
@@ -3431,6 +3639,7 @@ export class MoqtPlayer {
     this.recoveryController = pipelines.recoveryController;
     this.commandDispatcher = pipelines.commandDispatcher;
     this.mediaSource = pipelines.mediaSource;
+    this.getRenderCushionUs = pipelines.getRenderCushionUs ?? null;
 
     // Wire MSE stall detection to ABR emergency downshift.
     // CMAF has no pipeline-level stall handler — the MseMediaSource
@@ -3465,57 +3674,191 @@ export class MoqtPlayer {
     // @see draft-ietf-moq-loc-01 §2.3.2.1 (Video Config)
     configurePipelines(pipelines, trackInfo);
 
-    // If MSE was initialized inline (initData in catalog, no initTrack),
-    // mark CMAF as ready for media data immediately.
+    // CMAF init-source state machine: register each selected CMAF track.
+    // Inline initData satisfies the entry immediately; initTrack deliveries
+    // and in-band ftyp+moov objects satisfy on arrival. initialize() fires
+    // exactly once, when every selected track has bytes — never with empty
+    // init data. (initData on TrackInfo is base64, CatalogTrack §5.1.20;
+    // selection-time validation already rejected undecodable/empty values.)
     if (this.mediaSource && !this.cmafInitialized) {
-      const needsInitTrack =
-        (trackInfo.video?.initTrack && !trackInfo.video?.initData) ||
-        (trackInfo.audio?.initTrack && !trackInfo.audio?.initData);
-      if (!needsInitTrack) {
-        this.cmafInitialized = true;
-        // Record the codec for change-type detection on future switches.
-        // (Audio codec switches aren't currently exposed in the API.)
-        if (trackInfo.video?.codec) this.currentVideoCodec = trackInfo.video.codec;
-
-        // Create assembler for inline-init path
-        const ms = this.mediaSource;
-        const timestampOffsetSet = { video: false, audio: false };
-        if (!this.config.createCmafAssembler) {
-          throw new Error('CMAF tracks require createCmafAssembler in MoqtPlayerConfig');
-        }
-        this.cmafAssembler = this.config.createCmafAssembler({
-          onSegment: (mediaType: 'video' | 'audio', segment: Uint8Array, segTrackName: string, groupId: bigint) => {
-            if (!timestampOffsetSet[mediaType]) {
-              timestampOffsetSet[mediaType] = true;
-              if ('setTimestampOffset' in ms) {
-                (ms as { setTimestampOffset: (t: string, o: number) => void }).setTimestampOffset(mediaType, 0);
-              }
-            }
-            ms.appendChunk(mediaType, segment, segTrackName, groupId);
-          },
-          onDiscontinuity: (mediaType, trackName) => {
-            if (ms && 'clearTimeline' in ms) {
-              (ms as { clearTimeline: (t: string, tn: string) => void }).clearTimeline(mediaType, trackName);
-            }
-          },
-        });
-
-        // Hand inline init bytes to the assembler for trex defaults
-        // (parallel to the initTrack path elsewhere). Required when the
-        // stream relies on trex for sample defaults rather than tfhd.
-        // initData on TrackInfo is base64 (per CatalogTrack §5.1.20).
-        const decodeBase64 = (b64: string): Uint8Array =>
-          Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-        if (trackInfo.video?.initData) {
-          this.cmafAssembler.setInitSegment?.('video', decodeBase64(trackInfo.video.initData));
-        }
-        if (trackInfo.audio?.initData) {
-          this.cmafAssembler.setInitSegment?.('audio', decodeBase64(trackInfo.audio.initData));
-        }
+      const decodeBase64 = (b64: string): Uint8Array =>
+        Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      this.cmafPendingInit = {};
+      if (trackInfo.video?.packaging === 'cmaf' && trackInfo.video.codec) {
+        this.cmafPendingInit.video = {
+          codec: trackInfo.video.codec,
+          bytes: trackInfo.video.initData ? decodeBase64(trackInfo.video.initData) : null,
+        };
       }
+      if (trackInfo.audio?.packaging === 'cmaf' && trackInfo.audio.codec) {
+        this.cmafPendingInit.audio = {
+          codec: trackInfo.audio.codec,
+          bytes: trackInfo.audio.initData ? decodeBase64(trackInfo.audio.initData) : null,
+        };
+      }
+      this.maybeApplyCmafInit();
     }
 
     this.pipelinesCreated = true;
+  }
+
+  // ─── CMAF init-source state machine ─────────────────────────────────
+
+  /**
+   * Record init bytes for a selected CMAF track from any valid source
+   * (initTrack delivery or in-band ftyp+moov). First source wins per
+   * track; initialization happens when all selected tracks are satisfied.
+   */
+  private supplyCmafInitBytes(mediaType: 'video' | 'audio', bytes: Uint8Array): void {
+    if (this.cmafInitialized) return;
+    const entry = this.cmafPendingInit?.[mediaType];
+    if (!entry || entry.bytes) return;
+    entry.bytes = bytes;
+    this.maybeApplyCmafInit();
+  }
+
+  /**
+   * Initialize MSE + assembler once EVERY selected CMAF track has init
+   * bytes. Called from pipeline creation (inline initData), initTrack
+   * delivery, and in-band init detection. The single call site guarantees
+   * the adapter's one-shot initialize() always receives the complete
+   * config (split video/audio init sources initialize together).
+   */
+  private maybeApplyCmafInit(): void {
+    if (this.cmafInitialized || !this.cmafPendingInit || !this.mediaSource) return;
+    const kinds: Array<'video' | 'audio'> = ['video', 'audio'];
+    const entries = kinds
+      .map((mt) => [mt, this.cmafPendingInit![mt]] as const)
+      .filter((pair): pair is readonly [('video' | 'audio'), { codec: string; bytes: Uint8Array | null }] => pair[1] !== undefined);
+    if (entries.length === 0) return;
+    if (entries.some(([, e]) => !e.bytes || e.bytes.byteLength === 0)) return; // still collecting
+
+    const msConfig: {
+      video?: { codec: string; initData: Uint8Array };
+      audio?: { codec: string; initData: Uint8Array };
+    } = {};
+    for (const [mt, e] of entries) msConfig[mt] = { codec: e.codec, initData: e.bytes! };
+
+    // ALL-OR-NOTHING contract: `false` means the adapter rejected the config
+    // (unsupported codec / invalid init), surfaced reasons via onError
+    // (which map to fatal player errors), and stayed un-latched. The player
+    // must NOT mark CMAF initialized or build the assembler on failure —
+    // the bootstrap deadline remains the backstop if no fatal fired.
+    if (this.mediaSource.initialize(msConfig) === false) {
+      this.log.warn('CMAF initialize rejected by the media source adapter — not marking initialized');
+      return;
+    }
+    this.cmafInitialized = true;
+    this.cmafVideoSynced = false; // wait for a keyframe after init
+    // Record the codec for change-type detection on future switches.
+    // (Audio codec switches aren't currently exposed in the API.)
+    if (this.cmafPendingInit.video?.codec) this.currentVideoCodec = this.cmafPendingInit.video.codec;
+
+    this.buildCmafAssembler();
+    // Hand init bytes to the assembler so its strip path can fall back to
+    // trex defaults for streams without tfhd sample defaults.
+    for (const [mt, e] of entries) this.cmafAssembler?.setInitSegment?.(mt, e.bytes!);
+
+    this._stats.recordDecoderConfigured();
+    this.watchdog.fulfill('cmaf_init');
+    if (this.config.cmafBootstrapTimeoutMs! > 0) {
+      // Second bootstrap deadline: initialized but never rendered a frame
+      // (codec/init mismatch class) must not be a silent black player.
+      this.watchdog.expect('cmaf_first_frame', this.config.cmafBootstrapTimeoutMs!);
+    }
+    this.log.info('CMAF MediaSource initialized (%s)',
+      entries.map(([mt, e]) => `${mt}=${e.bytes!.byteLength}B`).join(' '));
+  }
+
+  /** Create the moof+mdat assembler wired to the MediaSource (single site). */
+  private buildCmafAssembler(): void {
+    const ms = this.mediaSource!;
+    const timestampOffsetSet = { video: false, audio: false };
+    if (!this.config.createCmafAssembler) {
+      throw new Error('CMAF tracks require createCmafAssembler in MoqtPlayerConfig');
+    }
+    this.cmafAssembler = this.config.createCmafAssembler({
+      onSegment: (mediaType: 'video' | 'audio', segment: Uint8Array, segTrackName: string, groupId: bigint) => {
+        if (!timestampOffsetSet[mediaType]) {
+          timestampOffsetSet[mediaType] = true;
+          if ('setTimestampOffset' in ms) {
+            (ms as { setTimestampOffset: (t: string, o: number) => void }).setTimestampOffset(mediaType, 0);
+          }
+        }
+        ms.appendChunk(mediaType, segment, segTrackName, groupId);
+      },
+      onDiscontinuity: (mediaType, trackName) => {
+        if ('clearTimeline' in ms) {
+          (ms as { clearTimeline: (t: string, tn: string) => void }).clearTimeline(mediaType, trackName);
+        }
+      },
+    });
+  }
+
+  /**
+   * Whether a payload has the shape of an ISO-BMFF initialization segment:
+   * a top-level `moov` box, optionally preceded by non-media boxes (ftyp,
+   * styp, free, ...). Media payloads (moof/mdat before any moov), truncated
+   * boxes, and garbage are rejected — a first-box-only sniff would classify
+   * partial or malformed bytes as init and defer the real failure to the
+   * "no first frame" deadline with a misleading message.
+   */
+  private static looksLikeCmafInitSegment(payload: Uint8Array): boolean {
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    let offset = 0;
+    for (let i = 0; i < 16 && offset + 8 <= payload.byteLength; i++) {
+      const type = String.fromCharCode(
+        payload[offset + 4]!, payload[offset + 5]!, payload[offset + 6]!, payload[offset + 7]!);
+      if (!/^[a-zA-Z0-9 ]{4}$/.test(type)) return false; // not a box structure
+      if (type === 'moof' || type === 'mdat') return false; // media, not init
+      let size = dv.getUint32(offset);
+      if (size === 1) { // 64-bit largesize
+        if (offset + 16 > payload.byteLength) return false;
+        const big = dv.getBigUint64(offset + 8);
+        if (big > BigInt(Number.MAX_SAFE_INTEGER)) return false;
+        size = Number(big);
+      }
+      if (size < 8 || offset + size > payload.byteLength) return false; // truncated/malformed
+      if (type === 'moov') return true; // a COMPLETE top-level moov: init segment
+      offset += size;
+    }
+    return false; // no top-level moov found
+  }
+
+  /**
+   * A CMAF media object arrived before initialization. An in-band init
+   * segment (ftyp+moov) IS a valid init source (common fMP4-over-MoQ
+   * publisher pattern); moof/mdat before init is dropped loudly (once per
+   * track) and arms the bootstrap deadline so a missing init segment can
+   * never present as a silent black player.
+   */
+  private handlePreInitCmafObject(
+    mediaType: 'video' | 'audio',
+    trackName: string,
+    payload: Uint8Array,
+  ): void {
+    if (MoqtPlayer.looksLikeCmafInitSegment(payload)) {
+      this.log.info('[CMAF] in-band init segment on "%s" (%s, %dB)',
+        trackName, mediaType, payload.byteLength);
+      // Cache for codec-changing switches, same as initTrack deliveries.
+      this.initSegmentByTrack.set(trackName, payload);
+      this.supplyCmafInitBytes(mediaType, payload);
+      return;
+    }
+    const firstBox = payload.byteLength >= 8
+      ? String.fromCharCode(payload[4]!, payload[5]!, payload[6]!, payload[7]!)
+      : '(short)';
+    const key = `${mediaType}:${trackName}`;
+    if (!this.cmafPreInitDropWarned.has(key)) {
+      this.cmafPreInitDropWarned.add(key);
+      this.log.warn('[CMAF] dropping %s "%s" media before init (first box "%s") — '
+        + 'waiting for initData/initTrack/in-band init segment',
+        mediaType, trackName, firstBox);
+    }
+    if (!this.cmafInitDeadlineArmed && this.config.cmafBootstrapTimeoutMs! > 0) {
+      this.cmafInitDeadlineArmed = true;
+      this.watchdog.expect('cmaf_init', this.config.cmafBootstrapTimeoutMs!);
+    }
   }
 
   /**
@@ -3539,6 +3882,40 @@ export class MoqtPlayer {
       ...(this.config.disableVideo ? { disableVideo: true } : {}),
       ...(this.config.disableAudio ? { disableAudio: true } : {}),
     }));
+
+    // ── CMAF bootstrap validation: fail BEFORE any media SUBSCRIBE ──
+    // A selected CMAF track with no codec string, or inline initData that
+    // is not valid base64 / decodes to zero bytes, can never configure
+    // MSE — subscribing would produce media with nowhere to go (the old
+    // "clean subscribe, silent black player" failure). Absent init is
+    // FINE: initTrack or an in-band ftyp+moov may still provide it, under
+    // the bootstrap deadline.
+    const cmafSelections: Array<['video' | 'audio', CatalogTrack | undefined]> =
+      [['video', selected.video], ['audio', selected.audio]];
+    for (const [mediaType, track] of cmafSelections) {
+      if (!track || track.packaging !== 'cmaf') continue;
+      let reason: string | null = null;
+      if (!track.codec) {
+        reason = 'no codec string';
+      } else if (track.initData !== undefined) {
+        try {
+          if (Uint8Array.from(atob(track.initData), (c) => c.charCodeAt(0)).byteLength === 0) {
+            reason = 'initData decodes to zero bytes';
+          }
+        } catch {
+          reason = 'initData is not valid base64';
+        }
+      }
+      if (reason) {
+        this.emitError(createPlayerError(
+          'fatal', 'catalog', PlayerErrorCode.CMAF_INIT_INVALID,
+          `CMAF track "${track.name}" (${mediaType}): ${reason} — cannot configure MSE`,
+          { context: { trackName: track.name, mediaType } },
+        ));
+        if (!this.isTerminalState()) this.transitionState(PlayerState.ERROR);
+        return;
+      }
+    }
 
     // Build buffer-based ABR controller from the quality ladder
     const alts = this.qualityController!.alternatives;
@@ -3621,7 +3998,24 @@ export class MoqtPlayer {
       // Live media defaults to NextGroupStart (start at keyframe boundary).
       // Non-live/VOD defaults to AbsoluteStart {0,0} (start from beginning).
       const track = mediaType === 'video' ? selected.video : selected.audio;
-      const mediaOptions = subscribeOptions ?? defaultMediaSubscriptionFilter(track?.isLive === true);
+
+      // Warm start (§5.1.3): a live LOC track subscribes with the Largest
+      // Object filter so a relative Joining FETCH can prepend the current
+      // group's head (issued below). CMAF is excluded — its MSE append path
+      // is not warm-start safe (see cmafBootstrap notes) — and non-live
+      // tracks already start from group 0. Config validation guarantees any
+      // explicit subscriptionFilter is LargestObject when warm start is on.
+      const warmStart = this.config.warmStartCurrentGroup === true
+        && track?.isLive === true
+        && packaging !== 'cmaf';
+      if (this.config.warmStartCurrentGroup === true && packaging === 'cmaf') {
+        this.log.warn('[warm-start] CMAF track "%s" skipped — LOC only in this slice', name);
+      }
+      // Warm start overrides ONLY the filter — configured subscribe options
+      // (deliveryTimeout, subscriberPriority, groupOrder) are preserved.
+      const mediaOptions = warmStart
+        ? { ...(subscribeOptions ?? {}), subscriptionFilter: { type: 'LargestObject' as const } }
+        : (subscribeOptions ?? defaultMediaSubscriptionFilter(track?.isLive === true));
       const reqId = await this.connection.subscribe(nsBytes, nameBytes, mediaOptions);
       const reqIdBigInt = BigInt(reqId);
 
@@ -3634,6 +4028,38 @@ export class MoqtPlayer {
       // different alias, the registration is updated in handleControlMessage.
       this.subscriptionManager.registerTrack(reqIdBigInt, name, mediaType, packaging);
       this.pendingMediaSubs.set(reqIdBigInt, { trackName: name, mediaType, packaging });
+
+      if (warmStart) {
+        // §9.16.2 / §10.12.2: a Joining Fetch may reference a PENDING
+        // subscription, so this is issued immediately after SUBSCRIBE without
+        // awaiting SUBSCRIBE_OK. Registering the fetch under the LIVE track's
+        // alias routes its objects through the same pipeline as live delivery
+        // (onDataStream → fetchStreamAliases → onObject remap). Failure here
+        // is never fatal — playback continues live-only from the next group.
+        try {
+          const connAtCall = this.connection;
+          const fetchReqId = await this.connection.joiningFetch({
+            joiningFetchType: 'relative',
+            joiningRequestId: reqIdBigInt,
+            joiningStart: 0n,
+          });
+          // A late completion can cross destroy() or a session migration —
+          // never register into a destroyed player or a NEW session's maps
+          // with an OLD session's request ID.
+          if (!this.subscriptionManager || this.connection !== connAtCall) {
+            this.log.debug('[warm-start] joining FETCH %s completed after teardown/migration — ignored', fetchReqId);
+            return;
+          }
+          this.registerMediaFetch(BigInt(fetchReqId), {
+            trackName: name, mediaType, trackAlias: reqIdBigInt, warmStart: true,
+          });
+          this.log.info('[warm-start] joining FETCH requestId=%s for %s "%s" (subscribe %s)',
+            fetchReqId, mediaType, name, reqIdBigInt);
+        } catch (err) {
+          this.log.warn('[warm-start] joining FETCH failed for "%s" — continuing live-only: %s',
+            name, err instanceof Error ? err.message : String(err));
+        }
+      }
 
       this.log.info('Subscribe %s "%s" requestId=%s', mediaType, name, reqIdBigInt);
       this.emitter.emit('track_subscribed', {
@@ -3829,6 +4255,7 @@ export class MoqtPlayer {
       syncController: this.syncController,
       syncResetThisTick: this.syncResetThisTick,
       setSyncResetThisTick: (v) => { this.syncResetThisTick = v; },
+      recordDiagnostic: (kind) => this._stats.recordLocDiagnostic(kind),
       recoveryHook: (action) => {
         const result = this.hooks.onRecovery.run(action);
         if (result) {

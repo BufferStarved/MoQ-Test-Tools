@@ -75,7 +75,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   e2e_latency_ms: {
     label: "E2E latency (estimated)",
     description:
-      "Estimated glass-to-glass latency. HLS: (wall clock since encode start) − (player video currentTime), including ~2 live segments of intentional buffer. MoQ: prefers player CaptureTimestamp latency; otherwise buffer lead when the MSE timeline is relative to join (wall−vt alone is join delay). Distinct from TTFF.",
+      "Estimated glass-to-glass latency, capture-anchored per player. Zixi HTTP-TS / Fast HLS: wall clock since encode start − media playhead (+ webcam bridge lag). MediaMTX LL-HLS: hls.js PDT latency + encode lag + bridge. MoQ: CaptureTimestamp when present, else wall − MoQ media timeline (+ bridge). Distinct from TTFF.",
   },
   playback_error_count: {
     label: "Player errors",

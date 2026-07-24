@@ -40,6 +40,9 @@ class NeedsPublishPreviewTests(unittest.TestCase):
         self.assertFalse(needs_publish_preview("http"))
         self.assertFalse(needs_publish_preview("dash"))
 
+    def test_zixi_rtmp_with_stream_id_gates(self):
+        self.assertTrue(needs_publish_preview("rtmp", zixi_stream_id="benchmark"))
+
     def test_srt_without_zixi_or_mediamtx_does_not_gate(self):
         # e.g. a plain UDP-fed SRT preset with no managed Zixi input.
         self.assertFalse(needs_publish_preview("srt"))

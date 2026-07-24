@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="$ROOT_DIR/tools/openmoq-publisher"
 BIN_DIR="$INSTALL_DIR/bin"
-VERSION="${OPENMOQ_PUBLISHER_VERSION:-v0.3.2}"
+VERSION="${OPENMOQ_PUBLISHER_VERSION:-v0.3.4}"
 REPO="https://github.com/mondain/moqxr"
 DOCKER_IMAGE="${OPENMOQ_PUBLISHER_DOCKER_IMAGE:-ubuntu:24.04}"
 

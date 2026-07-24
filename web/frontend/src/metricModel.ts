@@ -193,10 +193,10 @@ export function metricUnavailableMessage(metricKey: string, protocol: ProtocolId
  * viewer experiences, not theoretical transport-only delay.
  * Requires roughly NTP-aligned clocks on browser and publisher host.
  *
- * For MoQ, this collapses to (join wall-clock time − encode start), i.e. the
- * time-to-join, because MSE remaps the live edge to currentTime≈0 on join.
- * That is a legitimate glass-to-glass estimate, not an artifact to discard —
- * see {@link estimateMoqE2eLatencyMs}.
+ * Only valid when `playbackVideoTimeSec` is encode-anchored (Zixi HTTP-TS /
+ * Fast HLS after optional ts_offset rebase). Do **not** use for MoQ MSE
+ * timelines that re-zero at join — that freezes at join delay, not
+ * glass-to-glass (see {@link estimateMoqE2eLatencyMs}).
  */
 export function estimateE2eLatencyMs(
   encodeStartedAtEpoch: number | null | undefined,
@@ -220,19 +220,15 @@ export function estimateE2eLatencyMs(
 /**
  * MoQ glass-to-glass estimate.
  *
- * Prefer player-reported CaptureTimestamp latency when present. Otherwise
- * trust wall−vt: once MSE remaps the live edge to currentTime≈0 on join,
- * wall−vt reduces to (join time − encode start), i.e. the actual
- * time-to-join glass-to-glass latency.
+ * Prefer player-reported CaptureTimestamp latency when present (playa still
+ * hardcodes `latencyMs: 0` today — MoqPlayer therefore stamps a buffer-based
+ * `e2e_latency_ms` into the snapshot). Otherwise estimate from the live
+ * buffer lead (+ a small decode/render pad).
  *
- * IMPORTANT: do not replace a "large" wall−vt with a small buffer-based
- * guess here. A previous version treated any wall−vt clearly above the
- * live buffer as a "stuck timeline artifact" and silently substituted
- * `bufferSec + 250ms` — which is indistinguishable from, and strictly
- * smaller than, genuinely high latency. That made slow MoQ joins (e.g.
- * ~10s glass-to-glass) misreport as the fastest leg in a comparison. Only
- * fall back to the buffer-based guess when wall−vt is unavailable
- * (encode start or video time unknown).
+ * Do **not** use wall−vt on the MSE `<video>` clock. Playa's `timeupdate` with
+ * an active video sink is `video.currentTime * 1000`, which re-zeros at join —
+ * so wall−vt freezes at (join wall − encode start). That is join delay / a
+ * TTFF cousin, not glass-to-glass, and disagreed with the burnt-in ENC clock.
  */
 export function estimateMoqE2eLatencyMs(options: {
   encodeStartedAtEpoch?: number | null;
@@ -246,13 +242,13 @@ export function estimateMoqE2eLatencyMs(options: {
     return Math.round(playerLatency);
   }
 
-  const wallVt = estimateE2eLatencyMs(options.encodeStartedAtEpoch, options.videoTimeSec);
-  if (wallVt != null) {
-    return wallVt;
-  }
+  // CaptureTimestamp / player stamp unavailable — buffer lead is the best
+  // viewer-facing proxy once media is flowing. Options kept for call-site
+  // compatibility / future SEI.
+  void options.encodeStartedAtEpoch;
+  void options.videoTimeSec;
+  void options.targetLatencyMs;
 
-  // Wall-clock anchor or video time isn't available yet (e.g. before join) —
-  // fall back to a rough buffer-lead guess so the UI has something to show.
   const bufferMs = Math.max(0, options.bufferSec) * 1000;
   if (bufferMs <= 0) {
     return null;

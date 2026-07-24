@@ -2,19 +2,11 @@
 /**
  * Regression check for web/frontend/src/metricModel.ts e2e latency math.
  *
- * Root cause this guards against: estimateMoqE2eLatencyMs used to replace any
- * "large" wall-vt estimate with a small `bufferSec + 250ms` guess, on the
- * theory that a high number must be a stuck-MSE-timeline artifact. In
- * practice that threshold (bufferMs + target + 500ms, often ~3s) is *lower*
- * than a normal MoQ join latency, so real ~10s glass-to-glass latency was
- * silently reported as ~2-4s — making the slowest leg look the fastest in
- * cross-protocol comparisons. See docs/METRICS.md and the 2026-07-19 prod
- * incident (SRT playhead + e2e latency bug report).
- *
- * No test framework is wired up for web/frontend yet, so this transpiles the
- * real module with esbuild (already a vite dependency) and runs plain
- * assertions against it — cheap, zero new dependencies, catches regressions
- * of this specific formula.
+ * MoQ MSE timelines re-zero at join (`video.currentTime ≈ 0`). wall−vt on that
+ * clock freezes at join delay and is **not** glass-to-glass — it disagreed with
+ * the burnt-in ENC clock while SRT/RTMP looked right. estimateMoqE2eLatencyMs
+ * must prefer CaptureTimestamp when present, otherwise buffer lead — never
+ * treat join-delay wall−vt as G2G.
  *
  * Run: node scripts/test-metric-model.mjs
  */
@@ -52,8 +44,7 @@ try {
     assert.ok(latency !== null && latency >= 0 && latency < 1000, `RTMP-like low latency, got ${latency}`);
   }
 
-  // --- The actual regression: MoQ must not collapse high latency to a low
-  // buffer-based guess. ~10s join latency, small live buffer (2s). ---
+  // --- MoQ must not treat join-delay wall−vt as glass-to-glass ---
   {
     const encodeStart = (Date.now() - 10_000) / 1000;
     const videoTimeSec = 0.5; // MSE remapped the live edge to ~0 on join.
@@ -70,23 +61,12 @@ try {
       playerLatencyMs: 0,
       targetLatencyMs,
     });
-    assert.ok(
-      moqE2e !== null && moqE2e > 9000 && moqE2e < 10_000,
-      `MoQ e2e must report the real ~9.5s join latency, not a low buffer-based guess. Got ${moqE2e}`,
-    );
-
-    // Guard the regression explicitly: the buggy fallback threshold used to
-    // fire for exactly this input and would have reported ~2.25s instead.
-    const buggyThreshold = bufferSec * 1000 + Math.max(100, targetLatencyMs) + 500;
-    assert.ok(
-      wallVt > buggyThreshold,
-      "sanity: this scenario must exceed the old (buggy) override threshold",
-    );
-    assert.notEqual(
+    assert.equal(
       moqE2e,
       Math.round(bufferSec * 1000 + 250),
-      "MoQ e2e must not equal the old low-latency fallback value",
+      `MoQ e2e must use buffer lead, not join-delay wall−vt. Got ${moqE2e}`,
     );
+    assert.notEqual(moqE2e, wallVt, "MoQ e2e must not equal join-delay wall−vt");
   }
 
   // --- Player-reported CaptureTimestamp latency still wins when present. ---
@@ -98,18 +78,18 @@ try {
       playerLatencyMs: 1234,
       targetLatencyMs: 800,
     });
-    assert.equal(moqE2e, 1234, "player-reported latency must take priority over wall-vt");
+    assert.equal(moqE2e, 1234, "player-reported latency must take priority over buffer");
   }
 
-  // --- Fallback only fires when wall-vt truly can't be computed. ---
+  // --- No buffer yet → null (waiting for first media). ---
   {
     const moqE2e = estimateMoqE2eLatencyMs({
       encodeStartedAtEpoch: null,
       videoTimeSec: 0.5,
-      bufferSec: 2.0,
+      bufferSec: 0,
       targetLatencyMs: 800,
     });
-    assert.equal(moqE2e, 2250, "fallback used only when wall-vt is unavailable");
+    assert.equal(moqE2e, null, "no buffer and no CaptureTimestamp -> null");
   }
 
   console.log("PASS: metricModel e2e latency regression checks");

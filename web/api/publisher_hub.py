@@ -1,7 +1,8 @@
 """In-process hub for connected local publisher agents.
 
-Enabled only when LOCAL_PUBLISHER_ENABLED=1 (scripts/dev.sh sets this).
-Hosted/prod installs leave it off so the cloud VM keeps encoding locally.
+Set LOCAL_PUBLISHER_ENABLED=1 (default in scripts/dev.sh and the web VM
+install) so browsers can choose “This machine” and run ffmpeg on a laptop
+agent. Set LOCAL_PUBLISHER_ENABLED=0 to force cloud-only encode.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ SampleCallback = Callable[[UploadSample], None]
 
 
 def local_publisher_enabled() -> bool:
-    raw = (os.environ.get("LOCAL_PUBLISHER_ENABLED") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    raw = (os.environ.get("LOCAL_PUBLISHER_ENABLED") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def local_publisher_token() -> str:

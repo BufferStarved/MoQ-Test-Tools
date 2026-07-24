@@ -45,6 +45,7 @@ from encode_profile import (  # noqa: E402
     MAX_TARGET_LATENCY_MS,
     MIN_TARGET_LATENCY_MS,
     build_video_encode_args,
+    SRT_MIN_TARGET_LATENCY_MS,
     clamp_target_latency_ms,
     encode_profile_summary,
     ensure_known_ladder,
@@ -247,6 +248,7 @@ def encode_profiles():
         "default_ladder": DEFAULT_ENCODE_LADDER_ID,
         "default_target_latency_ms": DEFAULT_TARGET_LATENCY_MS,
         "min_target_latency_ms": MIN_TARGET_LATENCY_MS,
+        "srt_min_target_latency_ms": SRT_MIN_TARGET_LATENCY_MS,
         "max_target_latency_ms": MAX_TARGET_LATENCY_MS,
         "example": encode_profile_summary(DEFAULT_ENCODE_LADDER_ID, DEFAULT_TARGET_LATENCY_MS),
         "notes": {

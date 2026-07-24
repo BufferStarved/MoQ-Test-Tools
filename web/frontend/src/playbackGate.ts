@@ -13,8 +13,9 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
     return "waiting";
   }
   if (job.status === "running") {
-    // Keep HLS players gated until the backend confirms a readable segment
-    // (Zixi Fast HLS or MediaMTX LL-HLS). Mounting hls.js earlier storms errors.
+    // Keep players gated until the backend confirms readable delivery media
+    // (Zixi HTTP-TS / Fast HLS, or MediaMTX LL-HLS). Attaching earlier storms
+    // empty-playlist / empty-.ts errors and inflates TTFF.
     if (job.preview_ready === false) {
       return "waiting";
     }

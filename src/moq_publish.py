@@ -16,7 +16,7 @@ DEFAULT_MOQ_FORWARD = 1
 # media objects). forward=1 proactively streams GOPs regardless of subscriber
 # presence, which is the only mode that has produced actual rendered frames
 # against this relay. Keep forward=1 unless moqx adds SUBSCRIBE forwarding.
-OPENMOQ_PUBLISHER_VERSION = "v0.3.2"
+OPENMOQ_PUBLISHER_VERSION = "v0.3.4"
 DEFAULT_MOQ_PUBLISHER_BACKEND = "auto"  # auto | moq5 | openmoq
 
 # Default H.264 Main + yuv420p ladder (720p). Prefer build_video_encode_args()
@@ -115,6 +115,25 @@ def zixi_srt_stream_id_for_preset(preset_id: str) -> Optional[str]:
     if preset_id == "moq_zixi_gcp":
         return "SRT Test"
     return None
+
+
+def zixi_rtmp_stream_id_for_preset(preset_id: str) -> Optional[str]:
+    """Zixi Fast HLS / HTTP-TS stream id for managed RTMP presets."""
+    if preset_id == "moq_zixi_gcp_rtmp":
+        return "benchmark"
+    return None
+
+
+def zixi_stream_id_from_rtmp_url(url: str) -> Optional[str]:
+    """Extract the RTMP stream key (last path segment) for Fast HLS gating."""
+    try:
+        path = (urlparse(url).path or "").strip("/")
+    except ValueError:
+        return None
+    if not path:
+        return None
+    key = path.rsplit("/", 1)[-1].strip()
+    return key or None
 
 
 def zixi_http_push_stream_id_for_preset(preset_id: str) -> Optional[str]:
@@ -428,10 +447,12 @@ def build_ffmpeg_moq_cmd(
     # player joins on NextGroupStart with no rate catch-up — so GOP duration
     # is paid twice (fragment accumulation + join offset) and persists all
     # session. See moq_gop_frames_for_latency for the sizing rationale.
+    wallclock_pts = is_live_media_source(media_path) and not is_device_webcam_source(media_path)
     video_args = build_video_encode_args(
         encode_ladder,
         target_latency_ms,
         gop_frames=moq_gop_frames_for_latency(target_latency_ms),
+        wallclock_pts=wallclock_pts,
     )
     return [
         find_ffmpeg(),

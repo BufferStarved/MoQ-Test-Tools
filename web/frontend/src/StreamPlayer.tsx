@@ -265,7 +265,18 @@ export function StreamPlayer({
             />
           )}
           {target.engine === "mpegts" && (
-            <MpegTsPlayer key={target.url} url={target.url} label={target.label} />
+            <MpegTsPlayer
+              key={target.url}
+              url={target.url}
+              label={target.label}
+              playbackGate={playbackGate}
+              jobId={jobId}
+              encodeStartedAtEpoch={encodeStartedAtEpoch}
+              onPlaybackSample={onPlaybackSample}
+              bridgeLagMs={bridgeLagMs}
+              encoderLagMs={encoderLagMs}
+              skipConnectProbe={playbackGate === "live"}
+            />
           )}
           {target.engine === "whep" && (
             <WhepPlayer key={target.url} url={target.url} label={target.label} />
@@ -288,6 +299,7 @@ export function StreamPlayer({
               targetLatencyMs={targetLatencyMs}
               sourceHasAudio={sourceHasAudio}
               bridgeLagMs={bridgeLagMs}
+              encoderLagMs={encoderLagMs}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

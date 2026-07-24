@@ -39,10 +39,10 @@ def needs_publish_preview(
     before subscribing/loading, instead of starting the instant job.status
     flips to "running".
 
-    Zixi Fast HLS and MediaMTX LL-HLS need a confirmed readable segment.
-    MoQ needs a confirmed relay namespace-publish success — without this,
-    MoqPlayer used to start subscribing before openmoq-publisher had a
-    chance to register the namespace on a live webcam source (browser
+    Zixi Fast HLS (SRT *and* RTMP ingest) and MediaMTX LL-HLS need a confirmed
+    readable segment. MoQ needs a confirmed relay namespace-publish success —
+    without this, MoqPlayer used to start subscribing before openmoq-publisher
+    had a chance to register the namespace on a live webcam source (browser
     record -> WS -> bridge ffmpeg -> UDP tee -> per-destination encode ->
     publisher is a multi-hop chain that can take several seconds), which
     produced a near-guaranteed "no such namespace or track" refusal, a
@@ -170,6 +170,20 @@ class JobManager:
                 zixi_playback_stream_id = (
                     ensure_error_concealed_stream(zixi_stream_id) or zixi_stream_id
                 )
+        elif job.destination.protocol == "rtmp":
+            from moq_publish import (
+                zixi_rtmp_stream_id_for_preset,
+                zixi_stream_id_from_rtmp_url,
+            )
+
+            # Gate RTMP→Zixi Fast HLS the same way as SRT: wait for a readable
+            # segment before the browser attaches (avoids burning TTFF on the
+            # preflight + empty-playlist poll). Stream id is the RTMP key
+            # (preset default "benchmark").
+            zixi_stream_id = zixi_rtmp_stream_id_for_preset(preset_id) or zixi_stream_id_from_rtmp_url(
+                job.destination.url
+            )
+            zixi_playback_stream_id = zixi_stream_id
 
         from destinations import PRESET_BY_ID, ingest_settings_for_preset
 
