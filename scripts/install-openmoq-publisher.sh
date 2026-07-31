@@ -8,7 +8,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="$ROOT_DIR/tools/openmoq-publisher"
 BIN_DIR="$INSTALL_DIR/bin"
-VERSION="${OPENMOQ_PUBLISHER_VERSION:-v0.3.4}"
+# Pinned to the newest release the deployed moqx relay accepts. v0.3.4+ changed
+# the WebTransport CONNECT handshake and the relay refuses it with status=0
+# ("HTTPTransactionIngress: invalid transition tried: Start onBody" relay-side).
+# Bump this together with the relay image (infra/moqx).
+VERSION="${OPENMOQ_PUBLISHER_VERSION:-v0.3.2}"
 REPO="https://github.com/mondain/moqxr"
 DOCKER_IMAGE="${OPENMOQ_PUBLISHER_DOCKER_IMAGE:-ubuntu:24.04}"
 
