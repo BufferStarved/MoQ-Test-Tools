@@ -46,6 +46,31 @@ resource "google_compute_firewall" "http_https" {
   target_tags   = ["moq-web"]
 }
 
+# MediaMTX runs on this VM. Cloud encodes publish over loopback, but
+# last-mile laptop agents publish to the public IP — without these ports the
+# SRT handshake dies instantly with no error reaching the UI.
+resource "google_compute_firewall" "mediamtx_ingest" {
+  name    = "${var.project_name}-allow-mediamtx"
+  network = google_compute_network.web.name
+
+  allow {
+    protocol = "udp"
+    ports    = ["8890"] # SRT ingest
+  }
+
+  allow {
+    protocol = "tcp"
+    ports = [
+      "1935", # RTMP ingest
+      "8888", # HLS playback
+      "8889", # WHIP ingest / WHEP playback
+    ]
+  }
+
+  source_ranges = [var.allowed_ingest_cidr]
+  target_tags   = ["moq-web"]
+}
+
 resource "google_compute_address" "web" {
   name   = "${var.project_name}-ip"
   region = var.region

@@ -39,6 +39,12 @@ variable "allowed_ssh_cidr" {
   type        = string
 }
 
+variable "allowed_ingest_cidr" {
+  description = "CIDR allowed to publish to MediaMTX on this VM (SRT/RTMP/WHIP) and fetch HLS/WHEP directly. Last-mile laptop agents publish from arbitrary home IPs, so default open like the Zixi ingest."
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
 variable "allowed_http_cidr" {
   description = "CIDR allowed to reach HTTP/HTTPS"
   type        = string
