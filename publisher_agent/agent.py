@@ -27,7 +27,12 @@ from publisher_protocol import (  # noqa: E402
 )
 from upload_service import UploadService  # noqa: E402
 
-from publisher_agent.deps import check_all, ensure_tool_path, required_ok  # noqa: E402
+from publisher_agent.deps import (  # noqa: E402
+    check_all,
+    ensure_tool_path,
+    list_webcam_devices,
+    required_ok,
+)
 
 logger = logging.getLogger("publisher-agent")
 
@@ -50,6 +55,10 @@ class PublisherAgent:
         self._service = UploadService()
         self._deps = check_all(ROOT_DIR)
         ensure_tool_path(self._deps)
+        ffmpeg_path = next(
+            (dep.path for dep in self._deps if dep.name == "ffmpeg" and dep.ok), ""
+        )
+        self._webcam_devices = list_webcam_devices(ffmpeg_path)
         # Never hairpin MediaMTX to loopback on a laptop agent — publish to the
         # public ingest IP over the real internet path under test.
         os.environ.setdefault("MEDIAMTX_LOOPBACK_PUBLISH", "0")
@@ -71,6 +80,7 @@ class PublisherAgent:
                 }
                 for d in self._deps
             ],
+            "webcam_devices": self._webcam_devices,
             "ready": required_ok(self._deps),
         }
 
@@ -169,7 +179,9 @@ class PublisherAgent:
             job.cancel_event = cancel_event
             media_raw = (job.media_path or "").strip()
             if media_raw.lower().startswith("device:webcam"):
-                job.media_path = "device:webcam"
+                # Keep the optional camera index (device:webcam:N) from the
+                # UI picker — build_ffmpeg_input_args maps it to the device.
+                job.media_path = media_raw.lower()
             else:
                 # Absolute uploads/ paths from the API, or repo-relative files.
                 media = Path(media_raw)

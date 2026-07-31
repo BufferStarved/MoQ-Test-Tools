@@ -49,17 +49,44 @@ export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
 # Direct ffmpeg→SRT is more stable on Zixi than srt-live-transmit (UDP hop).
 export SRT_USE_LIVE_TRANSMIT="${SRT_USE_LIVE_TRANSMIT:-0}"
 
+# Auto-start the laptop publisher agent alongside the API so last-mile webcam
+# "just works" — no second terminal. Set LOCAL_PUBLISHER_AUTOSTART=0 to opt out.
+export LOCAL_PUBLISHER_AUTOSTART="${LOCAL_PUBLISHER_AUTOSTART:-1}"
+
 uvicorn main:app --reload --host 127.0.0.1 --port 8000 --app-dir web/api &
 API_PID=$!
 
+AGENT_PID=""
+if [[ "$LOCAL_PUBLISHER_ENABLED" != "0" && "$LOCAL_PUBLISHER_AUTOSTART" == "1" ]]; then
+  (
+    # Wait for the API before connecting (the agent retries anyway; this just
+    # keeps the startup logs clean).
+    for _ in $(seq 1 30); do
+      if curl -sf http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    exec "$ROOT_DIR/scripts/run-local-publisher.sh"
+  ) &
+  AGENT_PID=$!
+fi
+
 cleanup() {
   kill "$API_PID" 2>/dev/null || true
+  if [[ -n "$AGENT_PID" ]]; then
+    kill "$AGENT_PID" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
 echo "API running at http://127.0.0.1:8000"
-echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN)"
-echo "  In another terminal: ./scripts/run-local-publisher.sh"
+if [[ -n "$AGENT_PID" ]]; then
+  echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN) — agent auto-started"
+else
+  echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN)"
+  echo "  In another terminal: ./scripts/run-local-publisher.sh"
+fi
 echo "Starting frontend at http://127.0.0.1:5173"
 echo ""
 

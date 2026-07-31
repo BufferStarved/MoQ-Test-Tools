@@ -341,6 +341,23 @@ def is_device_webcam_source(media_path: str) -> bool:
     return value == DEVICE_WEBCAM_MEDIA or value.startswith("device:webcam")
 
 
+def device_webcam_index(media_path: str) -> Optional[int]:
+    """Camera index from a ``device:webcam:N`` media path (None = platform default).
+
+    The UI camera picker appends the index the agent advertised; a malformed
+    suffix falls back to the default device rather than failing the job.
+    """
+    value = (media_path or "").strip().lower()
+    prefix = DEVICE_WEBCAM_MEDIA + ":"
+    if not value.startswith(prefix):
+        return None
+    try:
+        index = int(value[len(prefix):], 10)
+    except ValueError:
+        return None
+    return index if index >= 0 else None
+
+
 def is_live_media_source(media_path: str) -> bool:
     """True for live UDP/TCP/RTSP/device inputs (already realtime — do not use -re)."""
     value = (media_path or "").strip().lower()
@@ -349,11 +366,15 @@ def is_live_media_source(media_path: str) -> bool:
     )
 
 
-def build_device_webcam_input_args(*, duration_sec: Optional[int] = None) -> List[str]:
+def build_device_webcam_input_args(
+    *, duration_sec: Optional[int] = None, device_index: Optional[int] = None
+) -> List[str]:
     """ffmpeg input args for the laptop camera (local publisher agent).
 
     macOS: AVFoundation default video+audio (``0:0``).
     Linux: V4L2 ``/dev/video0`` + silent audio (anullsrc) unless Pulse is present.
+    ``device_index`` (from the UI camera picker) overrides the video device;
+    env vars keep working as the default when no index is given.
     """
     import platform
     import shutil
@@ -364,6 +385,13 @@ def build_device_webcam_input_args(*, duration_sec: Optional[int] = None) -> Lis
 
     system = platform.system().lower()
     if system == "darwin":
+        default_spec = os.environ.get("LOCAL_WEBCAM_AVFOUNDATION", "0:0").strip() or "0:0"
+        if device_index is not None:
+            # Picker chooses the camera; keep the configured audio input.
+            audio_part = default_spec.split(":", 1)[1] if ":" in default_spec else "0"
+            input_spec = f"{device_index}:{audio_part}"
+        else:
+            input_spec = default_spec
         # framerate before -i is required by avfoundation for stable CFR.
         # Leave size to the device default — forcing 1280x720 fails on many Macs.
         return [
@@ -373,11 +401,14 @@ def build_device_webcam_input_args(*, duration_sec: Optional[int] = None) -> Lis
             "30",
             *duration_args,
             "-i",
-            os.environ.get("LOCAL_WEBCAM_AVFOUNDATION", "0:0").strip() or "0:0",
+            input_spec,
         ]
 
     # Linux — prefer v4l2 + pulse when available.
-    video_dev = (os.environ.get("LOCAL_WEBCAM_DEVICE") or "/dev/video0").strip() or "/dev/video0"
+    if device_index is not None:
+        video_dev = f"/dev/video{device_index}"
+    else:
+        video_dev = (os.environ.get("LOCAL_WEBCAM_DEVICE") or "/dev/video0").strip() or "/dev/video0"
     if shutil.which("pactl") or os.path.exists("/dev/snd"):
         # Dual input: camera + default Pulse source, then explicit maps later via -map
         # is awkward here; use pulse as audio companion with filter_complex-free
@@ -407,7 +438,10 @@ def build_device_webcam_input_args(*, duration_sec: Optional[int] = None) -> Lis
 
 def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = None) -> List[str]:
     if is_device_webcam_source(media_path):
-        return build_device_webcam_input_args(duration_sec=duration_sec)
+        return build_device_webcam_input_args(
+            duration_sec=duration_sec,
+            device_index=device_webcam_index(media_path),
+        )
     if is_live_media_source(media_path):
         # Webcam bridge → UDP is often VFR / discontinuous; regenerate PTS so
         # the second encode + MoQ fMP4 tfdt stay monotonic.

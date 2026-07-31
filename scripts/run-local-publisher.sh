@@ -5,13 +5,22 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Fresh clones have no venv and macOS has no bare `python` — bootstrap one.
 if [[ -d ".venv" ]]; then
   # shellcheck disable=SC1091
   source .venv/bin/activate
 elif [[ -d "venv" ]]; then
   # shellcheck disable=SC1091
   source venv/bin/activate
+else
+  echo "Creating Python environment (.venv)…"
+  python3 -m venv .venv
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
 fi
+
+# Agent dependencies (websockets, psutil, …); no-op when already installed.
+python -m pip install -q -r requirements.txt
 
 # Match scripts/dev.sh tool discovery so ffmpeg/srt/moq are on PATH.
 if [[ -x "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" ]]; then

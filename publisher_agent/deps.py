@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import glob
 import os
+import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -136,3 +139,72 @@ def ensure_tool_path(deps: List[DepStatus]) -> None:
 
 def required_ok(deps: List[DepStatus]) -> bool:
     return all(dep.ok for dep in deps if dep.name == "ffmpeg")
+
+
+def list_webcam_devices(ffmpeg_path: str = "") -> List[Dict[str, object]]:
+    """Cameras this machine can capture, as ``[{"index": int, "name": str}]``.
+
+    Advertised in the agent hello so the browser can show a real device picker
+    instead of relying on env-var overrides. Enumeration only lists device
+    names — it does not open the camera, so no permission prompt fires here.
+    """
+    system = platform.system().lower()
+    if system == "darwin":
+        return _list_avfoundation_video_devices(ffmpeg_path)
+    if system == "linux":
+        return _list_v4l2_devices()
+    return []
+
+
+def _list_avfoundation_video_devices(ffmpeg_path: str) -> List[Dict[str, object]]:
+    path = ffmpeg_path or _which("ffmpeg") or ""
+    if not path:
+        return []
+    try:
+        # Exits non-zero by design (no real input) — the device list is on stderr.
+        completed = subprocess.run(
+            [path, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    devices: List[Dict[str, object]] = []
+    in_video_section = False
+    for line in (completed.stderr or "").splitlines():
+        if "AVFoundation video devices" in line:
+            in_video_section = True
+            continue
+        if "AVFoundation audio devices" in line:
+            break
+        if not in_video_section:
+            continue
+        match = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        name = match.group(2)
+        if name.lower().startswith("capture screen"):
+            continue  # screen-capture pseudo-devices are not webcams
+        devices.append({"index": int(match.group(1)), "name": name})
+    return devices
+
+
+def _list_v4l2_devices() -> List[Dict[str, object]]:
+    devices: List[Dict[str, object]] = []
+    for dev in sorted(glob.glob("/dev/video*")):
+        match = re.match(r"^/dev/video(\d+)$", dev)
+        if not match:
+            continue
+        index = int(match.group(1))
+        name = dev
+        sys_name = Path(f"/sys/class/video4linux/video{index}/name")
+        try:
+            if sys_name.is_file():
+                name = sys_name.read_text().strip() or dev
+        except OSError:
+            pass
+        devices.append({"index": index, "name": name})
+    return devices
