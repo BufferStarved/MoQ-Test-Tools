@@ -18,14 +18,15 @@ export function isLocalDevApi(origin: string): boolean {
  *
  * Must stay paste-safe for a default macOS zsh: no comments (interactive zsh
  * rejects `#` lines — parens in them become parse errors), no blank lines,
- * no backslash continuations.
+ * no backslash continuations. Re-run safe: an existing clone is fast-forwarded
+ * instead of left stale.
  */
 export function localPublisherAgentCommand(
   apiOrigin: string,
   token: string = DEFAULT_LOCAL_PUBLISHER_TOKEN,
 ): string {
   const api = apiOrigin.replace(/\/$/, "");
-  return `git clone ${GH_REPO}.git
+  return `git clone ${GH_REPO}.git 2>/dev/null || git -C MoQ-Test-Tools pull --ff-only
 cd MoQ-Test-Tools
 LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_TOKEN=${token} ./scripts/run-local-publisher.sh`;
 }
