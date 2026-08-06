@@ -74,6 +74,14 @@ MASTER_HARD_CAP_SEC = 15 * 60
 MASTER_BITRATE_KBPS = 5250
 MASTER_MAXRATE_KBPS = 6000
 MASTER_GOP_FRAMES = 60
+# Some MacBook cameras default to a *portrait* native AVFoundation capture
+# mode (e.g. 1080x1920) when no size is requested — confirmed 2026-08-06 on
+# a MacBook Pro built-in camera, with no rotation metadata to correct it.
+# Request landscape explicitly; build_device_webcam_input_args()'s docstring
+# notes forcing one fixed size has previously failed on some Macs, so this
+# is a preference we retry away from (see _start_after_join_window), not an
+# unconditional requirement.
+PREFERRED_LANDSCAPE_VIDEO_SIZE = "1280x720"
 
 
 def _pick_udp_port() -> int:
@@ -170,16 +178,35 @@ class WebcamBroker:
             session.started = True
             ports = list(session.ports)
             try:
-                session.process = self._spawn_capture(media_path, ports)
+                session.process = self._spawn_capture(
+                    media_path, ports, video_size=PREFERRED_LANDSCAPE_VIDEO_SIZE
+                )
                 self._check_early_exit(session)
+                if session.error is not None:
+                    # This camera/driver may not support the requested size —
+                    # fall back to whatever format it defaults to rather than
+                    # failing the whole comparison over an aspect-ratio
+                    # preference.
+                    logger.warning(
+                        "Shared webcam capture failed with an explicit %s "
+                        "request (%s); retrying with the device default format",
+                        PREFERRED_LANDSCAPE_VIDEO_SIZE,
+                        session.error,
+                    )
+                    session.error = None
+                    session.process = self._spawn_capture(media_path, ports, video_size=None)
+                    self._check_early_exit(session)
             except Exception as exc:  # noqa: BLE001 — surfaced to acquire() callers
                 session.error = f"Failed to start shared webcam capture: {exc}"
         session.ready.set()
 
-    def _spawn_capture(self, media_path: str, ports: List[int]) -> subprocess.Popen:
+    def _spawn_capture(
+        self, media_path: str, ports: List[int], *, video_size: Optional[str]
+    ) -> subprocess.Popen:
         input_args = build_device_webcam_input_args(
             duration_sec=MASTER_HARD_CAP_SEC,
             device_index=device_webcam_index(media_path),
+            video_size=video_size,
         )
         tee_targets = "|".join(
             f"[f=mpegts]udp://127.0.0.1:{port}?pkt_size=1316" for port in ports
