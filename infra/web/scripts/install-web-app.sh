@@ -68,14 +68,23 @@ if [[ -n "${INGEST_AGENT_TOKEN:-}" ]]; then
 else
   echo "Fetching ingest agent token from ${INGEST_HOST}..."
   INGEST_TOKEN="$(
-    ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$INGEST_KEY" \
+    ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -i "$INGEST_KEY" \
       "$INGEST_HOST" \
       'sudo grep ^INGEST_AGENT_TOKEN= /etc/moq-ingest-agent.env | cut -d= -f2-' \
-      | tr -d '\r'
-  )"
+      2>/dev/null | tr -d '\r'
+  )" || true
 fi
 if [[ -z "$INGEST_TOKEN" ]]; then
-  echo "Could not read INGEST_AGENT_TOKEN from ${INGEST_HOST}." >&2
+  # Deploy environments that can't reach INGEST_HOST directly (e.g. only the
+  # web VM is IAP-tunneled) shouldn't nuke a working prod token on redeploy —
+  # reuse whatever is already configured on the web VM instead of failing.
+  # This read happens entirely server-side on ${WEB_IP}; the value is never
+  # echoed by this script.
+  echo "Could not reach ${INGEST_HOST} directly; reusing INGEST_AGENT_TOKEN already configured on ${WEB_IP} (if any)..." >&2
+  INGEST_TOKEN="$(remote "sudo test -f '${ENV_FILE}' && sudo grep '^INGEST_AGENT_TOKEN=' '${ENV_FILE}' | cut -d= -f2-" 2>/dev/null || true)"
+fi
+if [[ -z "$INGEST_TOKEN" ]]; then
+  echo "Could not determine INGEST_AGENT_TOKEN: no direct route to ${INGEST_HOST} and none already configured on ${WEB_IP}." >&2
   exit 1
 fi
 
