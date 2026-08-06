@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   checkHealth,
-  createLiveSession,
   createUpload,
   fetchFeatures,
-  fetchLiveSessionStatus,
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
@@ -20,7 +18,7 @@ import {
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
 import { ComparisonCharts } from "./ComparisonCharts";
-import { EndpointSection } from "./EndpointSection";
+import { EndpointSection, playerShortLabel } from "./EndpointSection";
 import { AboutPage } from "./AboutPage";
 import { SessionMetrics } from "./SessionMetrics";
 import { SessionHistory } from "./SessionHistory";
@@ -37,6 +35,9 @@ import { buildRecipePipelineSections } from "./pipelineConfig";
 import {
   INGEST_ENDPOINTS,
   defaultIngestForProtocol,
+  ingestCollisionKey,
+  ingestEndpointLabel,
+  ingestEndpointsForProtocol,
   isCustomIngestEndpoint,
   presetIdForIngest,
   resolveEndpointUrl,
@@ -44,13 +45,15 @@ import {
 } from "./ingestEndpoints";
 import { defaultPlaybackModeForProtocol } from "./playbackUrls";
 import type { EndpointConfig, Preset, Protocol, ResultSummary, UploadJob, UploadSample } from "./types";
+import { LIVE_WEBCAM_MAX_DURATION_SEC, webcamCaptureSeconds } from "./webcamCapture";
 import {
-  LIVE_WEBCAM_MAX_DURATION_SEC,
-  openWebcamStream,
-  startLiveWebcamBroadcast,
-  webcamCaptureSeconds,
-} from "./webcamCapture";
-import { WebcamPreview } from "./WebcamPreview";
+  LOCAL_DEVICE_WEBCAM,
+  SourceSection,
+  type CloudEncodeHostId,
+  type EncoderId,
+  type MediaSourceId,
+} from "./SourceSection";
+import { WorkflowVisualization, type WorkflowStreamBranch } from "./WorkflowVisualization";
 import {
   DEFAULT_ENCODE_LADDER_ID,
   DEFAULT_TARGET_LATENCY_MS,
@@ -63,9 +66,20 @@ import {
   moqPlayerTargetLatencyMs,
 } from "./encodeProfiles";
 import { isSafariBrowser } from "./browserDetect";
+import { IconBroadcast, IconGauge } from "./Icons";
+import { StatusDot } from "./StatusDot";
 
-type MediaSourceId = "dummy" | "bbb" | "webcam" | "local-file";
-const LOCAL_DEVICE_WEBCAM = "device:webcam";
+const ENCODER_LABEL: Record<EncoderId, string> = {
+  ffmpeg: "ffmpeg",
+  obs: "OBS Studio",
+  wowza: "Wowza",
+};
+
+const CLOUD_ENCODE_HOST_LABEL: Record<CloudEncodeHostId, string> = {
+  gcp: "GCP us-central1",
+  linode: "Linode",
+  aws: "AWS",
+};
 
 type Tab = "benchmark" | "metrics" | "about";
 
@@ -127,8 +141,18 @@ function buildDefaultEndpoints(): EndpointConfig[] {
   ];
 }
 
-function endpointLabel(endpoint: EndpointConfig, index: number): string {
-  return `Stream ${index + 1} (${endpoint.protocol.toUpperCase()})`;
+function endpointLabel(
+  endpoint: EndpointConfig,
+  index: number,
+  presets: Preset[] = [],
+): string {
+  const base = `Stream ${index + 1} (${endpoint.protocol.toUpperCase()})`;
+  const presetId = presetIdForIngest(endpoint.ingestEndpointId, endpoint.protocol);
+  const preset = presetId ? presets.find((item) => item.id === presetId) : undefined;
+  if (preset?.cloud_provider && preset?.cloud_region) {
+    return `${base} · ${preset.cloud_provider}/${preset.cloud_region}`;
+  }
+  return base;
 }
 
 function sessionDownloadStreams(
@@ -153,6 +177,25 @@ function isIngestEndpointAvailable(endpoint: EndpointConfig): boolean {
   return INGEST_ENDPOINTS.find((item) => item.id === endpoint.ingestEndpointId)?.available ?? false;
 }
 
+function outputStatusTone(
+  leg: ComparisonLegState | undefined,
+  running: boolean,
+): "ok" | "warn" | "bad" | "idle" {
+  if (!leg) {
+    return running ? "warn" : "idle";
+  }
+  if (leg.job.status === "failed") {
+    return "bad";
+  }
+  if (leg.job.status === "completed") {
+    return "ok";
+  }
+  if (leg.job.status === "running") {
+    return leg.job.preview_ready === false ? "warn" : "ok";
+  }
+  return "idle";
+}
+
 function isEncodeFinished(job: UploadJob): boolean {
   return job.status === "completed" || job.status === "failed";
 }
@@ -175,19 +218,24 @@ function App() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
-  const [mediaSource, setMediaSource] = useState<MediaSourceId>("webcam");
-  // Placeholder until a live session path is assigned; cloud webcam encode
-  // replaces this at start. Local publisher uses device:webcam immediately.
+  const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
   const [mediaPath, setMediaPath] = useState("dummy.mp4");
-  const [mediaLabel, setMediaLabel] = useState("Webcam");
+  const [mediaLabel, setMediaLabel] = useState("Default Color Bars");
   const [uploadingMedia, setUploadingMedia] = useState(false);
-  const localFileInputRef = useRef<HTMLInputElement | null>(null);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
   const [targetLatencyMs, setTargetLatencyMs] = useState(DEFAULT_TARGET_LATENCY_MS);
   const [latencyDraft, setLatencyDraft] = useState(String(DEFAULT_TARGET_LATENCY_MS));
   const [latencyFocused, setLatencyFocused] = useState(false);
-  const [publisherHost, setPublisherHost] = useState<"cloud" | "local">("cloud");
+  // Source and encode location are coupled 1:1 (VOD → cloud, webcam → this
+  // machine) — no independent "Publisher" toggle needed anymore.
+  const publisherHost: "cloud" | "local" = mediaSource === "webcam" ? "local" : "cloud";
+  // Presentational for now — every cloud encode still runs on the single GCP
+  // API host; kept as real state so wiring a second region later is additive.
+  const [encoder, setEncoder] = useState<EncoderId>("ffmpeg");
+  const [encodeCloudHost, setEncodeCloudHost] = useState<CloudEncodeHostId>("gcp");
+  // Last-mile camera choice ("" = agent default device).
+  const [webcamDeviceIndex, setWebcamDeviceIndex] = useState("");
   const [features, setFeatures] = useState<FeatureFlags>({
     local_publisher: false,
     local_publisher_connected: false,
@@ -203,31 +251,12 @@ function App() {
   const [selectedSessionKey, setSelectedSessionKey] = useState<string | null>(null);
   const [sessionFromHistory, setSessionFromHistory] = useState(false);
   const [sessionHistoryRefreshToken, setSessionHistoryRefreshToken] = useState(0);
-  const [recipeOpen, setRecipeOpen] = useState(true);
   const { toasts, pushToast } = useToasts();
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
-  // State mirror of webcamStreamRef so preview <video> elements can (re)bind
-  // srcObject declaratively wherever they mount — the old single ref-wired
-  // element lived inside the collapsible recipe panel and went dark (or
-  // disappeared entirely) as soon as the benchmark collapsed that panel.
-  const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
-  // Definitive audio presence for the stream actually being recorded.
-  // Deriving this from webcamStream state at render time raced the start
-  // flow (observed live: publisher registered soun_2 while the player's
-  // injected catalog said video-only) — set explicitly wherever the
-  // broadcast stream is chosen instead.
-  const [broadcastHasAudio, setBroadcastHasAudio] = useState(true);
-  // Capture->bridge-output lag polled from the live session — the shared
-  // upstream latency component every per-protocol player estimate is blind
-  // to (players only see their own leg's timeline or the packager clock).
-  const [bridgeLagMs, setBridgeLagMs] = useState(0);
-  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
-  const webcamStreamRef = useRef<MediaStream | null>(null);
-  const liveBroadcastRef = useRef<ReturnType<typeof startLiveWebcamBroadcast> | null>(null);
 
   const anyIngestVmafAvailable = endpoints.some((endpoint) => endpoint.vmafAvailable);
   /** Enable checkbox when we can score at least one leg (encoder and/or ingest). */
@@ -243,6 +272,39 @@ function App() {
     () => buildRecipePipelineSections(encodeLadder, targetLatencyMs, endpoints),
     [encodeLadder, targetLatencyMs, endpoints],
   );
+
+  // Live "shape" of the run — mirrors the recipe as it's being configured, so
+  // the source/encode/fanout topology is visible before pressing Start.
+  const workflowStreams: WorkflowStreamBranch[] = useMemo(
+    () =>
+      endpoints.map((endpoint, index) => ({
+        id: endpoint.id,
+        label: `Output ${index + 1}`,
+        protocol: protocolLabel(endpoint.protocol),
+        ingestLabel: isCustomIngestEndpoint(endpoint.ingestEndpointId)
+          ? "Custom URL"
+          : ingestEndpointLabel(endpoint.ingestEndpointId),
+        playerLabel: playerShortLabel(endpoint),
+        accentColor: protocolColor(endpoint.protocol, index),
+      })),
+    [endpoints],
+  );
+  const workflowSourceTitle = mediaSource === "webcam" ? "Webcam" : "VOD asset";
+  const workflowSourceDetail =
+    mediaSource === "webcam"
+      ? features.local_publisher_connected
+        ? "This machine's camera — agent connected"
+        : "This machine's camera — waiting for agent"
+      : mediaSource === "dummy"
+        ? "Default Color Bars"
+        : mediaSource === "bbb"
+          ? "Big Buck Bunny (coming soon)"
+          : mediaLabel || "Choose a file to upload";
+  const workflowEncodeTitle = mediaSource === "webcam" ? "This machine" : "Cloud VM";
+  const workflowEncodeDetail =
+    mediaSource === "webcam"
+      ? "Local ffmpeg, over your real network"
+      : `${CLOUD_ENCODE_HOST_LABEL[encodeCloudHost]} · ${ENCODER_LABEL[encoder]}`;
 
   const commitLatencyDraft = useCallback((raw: string) => {
     const parsed = Number(raw.trim());
@@ -286,9 +348,6 @@ function App() {
       setProtocols(protocolData.protocols);
       setPresets(presetData.presets);
       setFeatures(featureData);
-      if (!featureData.local_publisher) {
-        setPublisherHost("cloud");
-      }
       setEndpoints((current) =>
         current.length >= DEFAULT_ENDPOINT_COUNT ? current : buildDefaultEndpoints(),
       );
@@ -317,8 +376,10 @@ function App() {
         const next = await fetchFeatures();
         if (!cancelled) {
           setFeatures(next);
-          if (!next.local_publisher && publisherHost === "local") {
-            setPublisherHost("cloud");
+          if (!next.local_publisher && mediaSource === "webcam") {
+            setMediaSource("dummy");
+            setMediaPath("dummy.mp4");
+            setMediaLabel("Default Color Bars");
           }
         }
       } catch {
@@ -331,7 +392,54 @@ function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [apiOnline, publisherHost]);
+  }, [apiOnline, mediaSource]);
+
+  // Cameras advertised by the connected agent, for the last-mile picker.
+  const agentWebcamDevices =
+    features.local_publisher_agents.find(
+      (agent) => agent.ready && (agent.webcam_devices?.length ?? 0) > 0,
+    )?.webcam_devices ?? [];
+
+  function lastMileWebcamMediaPath(): string {
+    return webcamDeviceIndex
+      ? `${LOCAL_DEVICE_WEBCAM}:${webcamDeviceIndex}`
+      : LOCAL_DEVICE_WEBCAM;
+  }
+
+  function handleMediaSourceChange(next: MediaSourceId) {
+    setMediaSource(next);
+    setWebcamStatus(null);
+    if (next === "dummy") {
+      setMediaPath("dummy.mp4");
+      setMediaLabel("Default Color Bars");
+    } else if (next === "bbb") {
+      setMediaLabel("Big Buck Bunny (coming soon)");
+    } else if (next === "upload") {
+      setMediaPath("");
+      setMediaLabel("Choose a local file");
+      setComputeVmaf(false);
+    } else if (next === "webcam") {
+      setMediaLabel("Webcam");
+      setMediaPath(lastMileWebcamMediaPath());
+      setComputeVmaf(false);
+    }
+  }
+
+  function handleUploadFile(file: File) {
+    setUploadingMedia(true);
+    setError(null);
+    void uploadMedia(file)
+      .then((result) => {
+        setMediaPath(result.media_path);
+        setMediaLabel(result.filename);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to upload media");
+        setMediaPath("");
+        setMediaLabel("Choose a local file");
+      })
+      .finally(() => setUploadingMedia(false));
+  }
 
   useEffect(() => {
     if (!apiOnline || presets.length === 0) {
@@ -505,69 +613,6 @@ function App() {
     mediaSource,
   ]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function syncWebcamPreview() {
-      const existing = webcamStreamRef.current;
-      if (existing) {
-        existing.getTracks().forEach((track) => track.stop());
-        webcamStreamRef.current = null;
-      }
-      setWebcamStream(null);
-      if (mediaSource !== "webcam") {
-        setWebcamStatus(null);
-        return;
-      }
-      setWebcamStatus("Requesting webcam…");
-      try {
-        const stream = await openWebcamStream();
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        webcamStreamRef.current = stream;
-        setWebcamStream(stream);
-        setWebcamStatus("Webcam ready — capture starts when you run the comparison.");
-      } catch (err) {
-        setWebcamStatus(err instanceof Error ? err.message : "Could not open webcam.");
-      }
-    }
-
-    void syncWebcamPreview();
-    return () => {
-      cancelled = true;
-      const stream = webcamStreamRef.current;
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
-        webcamStreamRef.current = null;
-      }
-      setWebcamStream(null);
-    };
-  }, [mediaSource]);
-
-  // Poll the live bridge's capture->output lag during a webcam run so the
-  // players can fold the upstream chain into their latency estimates.
-  useEffect(() => {
-    if (!loading || !liveSessionId) {
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setInterval(() => {
-      void fetchLiveSessionStatus(liveSessionId)
-        .then((status) => {
-          if (!cancelled) {
-            setBridgeLagMs(status.bridge_lag_ms || 0);
-          }
-        })
-        .catch(() => undefined);
-    }, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [loading, liveSessionId]);
-
   function updateEndpoint(id: string, patch: Partial<EndpointConfig>) {
     setEndpoints((current) =>
       current.map((endpoint) => (endpoint.id === id ? { ...endpoint, ...patch } : endpoint)),
@@ -579,8 +624,47 @@ function App() {
       if (current.length >= MAX_ENDPOINTS) {
         return current;
       }
-      const protocol = protocols.find((item) => item.id === "srt")?.id ?? protocols[0]?.id ?? "srt";
-      const ingestEndpointId = defaultIngestForProtocol(protocol);
+      // SRT/RTMP publish to a fixed stream path per ingest host (e.g. Zixi/MediaMTX
+      // "benchmark") — MediaMTX shares that single path across *every* protocol on
+      // the host, while Zixi keeps SRT ("SRT Test") independent from RTMP
+      // ("benchmark"). Two legs occupying the same physical path collide and the
+      // second publisher gets rejected outright, so pick a protocol+host combo
+      // whose collision key isn't already in use by another leg. Try SRT hosts
+      // first (existing default), then RTMP hosts, and only fall back to MoQ
+      // (randomized namespace per leg, never collides) once real ingest capacity
+      // across both protocols is exhausted.
+      const usedKeys = new Set(
+        current
+          .map((ep) => ingestCollisionKey(ep.ingestEndpointId, ep.protocol))
+          .filter((key): key is string => key !== null),
+      );
+      const candidateProtocols = [
+        protocols.find((item) => item.id === "srt")?.id,
+        protocols.find((item) => item.id === "rtmp")?.id,
+      ].filter((id): id is string => Boolean(id));
+
+      let protocol = candidateProtocols[0] ?? protocols[0]?.id ?? "srt";
+      let ingestEndpointId: IngestEndpointId | undefined;
+      for (const candidateProtocol of candidateProtocols) {
+        const available = ingestEndpointsForProtocol(candidateProtocol, presets).filter(
+          (item) => item.available && !isCustomIngestEndpoint(item.id),
+        );
+        const nonColliding = available.find(
+          (item) => !usedKeys.has(ingestCollisionKey(item.id, candidateProtocol) ?? ""),
+        );
+        if (nonColliding) {
+          protocol = candidateProtocol;
+          ingestEndpointId = nonColliding.id;
+          break;
+        }
+      }
+      if (!ingestEndpointId) {
+        // Real ingest capacity exhausted for SRT/RTMP — MoQ's randomized
+        // namespace per leg guarantees no collision instead of forcing a
+        // known-bad duplicate onto an already-occupied path.
+        protocol = protocols.find((item) => item.id === "moq")?.id ?? protocol;
+        ingestEndpointId = defaultIngestForProtocol(protocol);
+      }
       return [
         ...current,
         {
@@ -628,20 +712,19 @@ function App() {
     publisher_host?: "cloud" | "local";
   } {
     const presetId = resolvePresetId(endpoint);
-    const isLive = resolvedMediaPath.toLowerCase().startsWith("udp://");
+    const isLive = resolvedMediaPath.toLowerCase().startsWith(LOCAL_DEVICE_WEBCAM);
     return {
       media_path: resolvedMediaPath,
       ...(durationSec != null ? { duration_sec: durationSec } : {}),
-      // Live webcam: encoder VMAF scores against a per-job stream-copy of the
-      // bridge-normalized input (server side). Ingest VMAF still needs a file
-      // reference on the ingest host, so it stays off for live sources.
+      // Ingest VMAF needs a file reference on the ingest host, so it stays
+      // off for the live device-webcam source.
       compute_vmaf_on_ingest: computeVmaf && endpoint.vmafAvailable && !isLive,
       compute_vmaf_encoder: computeVmaf && encoderVmafAvailable,
       encode_ladder: encodeLadder,
       target_latency_ms: clampTargetLatencyMs(targetLatencyMs),
       comparison_id: comparisonId,
       stream_index: streamIndex,
-      stream_label: endpointLabel(endpoint, streamIndex),
+      stream_label: endpointLabel(endpoint, streamIndex, presets),
       publisher_host: features.local_publisher ? publisherHost : "cloud",
       ...(isCustomIngestEndpoint(endpoint.ingestEndpointId)
         ? {
@@ -771,7 +854,6 @@ function App() {
     setSessionMetricLabels([]);
     setSelectedSessionKey(null);
     setSessionFromHistory(false);
-    setRecipeOpen(false);
     setLoading(true);
 
     const unavailableEndpoint = endpoints.find(
@@ -794,24 +876,23 @@ function App() {
       return;
     }
 
-    if (features.local_publisher && publisherHost === "local") {
+    if (mediaSource === "webcam") {
+      if (!features.local_publisher) {
+        setError("Webcam requires the local publisher agent, which is not enabled on this deployment.");
+        setLoading(false);
+        return;
+      }
       if (!features.local_publisher_connected) {
         setError(
-          "Local publisher selected but no agent is connected. Run ./scripts/run-local-publisher.sh",
+          "No local publisher agent connected. Run the agent command shown under Webcam, then retry.",
         );
         setLoading(false);
         return;
       }
-      if (mediaSource === "local-file" && !mediaPath) {
-        setError("Choose a local video file before starting.");
-        setLoading(false);
-        return;
-      }
-      if (mediaSource === "dummy" || mediaSource === "bbb") {
-        setError("VOD presets are for cloud encode. Use Webcam or a local file on This machine.");
-        setLoading(false);
-        return;
-      }
+    } else if (mediaSource === "upload" && !mediaPath) {
+      setError("Choose a video file to upload before starting.");
+      setLoading(false);
+      return;
     }
 
     try {
@@ -822,60 +903,25 @@ function App() {
       const comparisonId = crypto.randomUUID();
       let mediaPaths: string[];
       let durationSec: number | undefined;
-      liveBroadcastRef.current = null;
 
-      if (publisherHost === "local" && mediaSource === "webcam") {
-        // Agent opens the machine camera via ffmpeg — release browser preview first
-        // so macOS AVFoundation can claim the device.
-        if (webcamStreamRef.current) {
-          webcamStreamRef.current.getTracks().forEach((track) => track.stop());
-          webcamStreamRef.current = null;
-        }
-        setWebcamStream(null);
+      if (mediaSource === "webcam") {
+        // setLoading(true) above already flips WebcamLivePreview's `running`
+        // prop, which stops its getUserMedia tracks — but that happens on
+        // the next render, asynchronously. Give the OS a beat to actually
+        // release the device before the agent's ffmpeg tries to open it
+        // exclusively, or the two consumers can race on some platforms.
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
         setWebcamStatus(
           `Agent will open this machine’s camera — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
         );
-        mediaPaths = endpoints.map(() => LOCAL_DEVICE_WEBCAM);
+        const deviceMediaPath = lastMileWebcamMediaPath();
+        mediaPaths = endpoints.map(() => deviceMediaPath);
         durationSec = LIVE_WEBCAM_MAX_DURATION_SEC;
-        setMediaPath(LOCAL_DEVICE_WEBCAM);
-      } else if (publisherHost === "local" && mediaSource === "local-file") {
-        mediaPaths = endpoints.map(() => mediaPath);
-        durationSec = undefined; // API probes duration
-      } else if (mediaSource === "webcam") {
-        setUploadingMedia(true);
-        setWebcamStatus("Starting live webcam session…");
-        const live = await createLiveSession({
-          stream_count: endpoints.length,
-          duration_sec: LIVE_WEBCAM_MAX_DURATION_SEC,
-        });
-        durationSec = live.duration_sec;
-        mediaPaths = live.media_paths;
-        setLiveSessionId(live.session_id);
-        setBridgeLagMs(0);
-
-        let stream = webcamStreamRef.current;
-        if (!stream || stream.getTracks().every((track) => track.readyState === "ended")) {
-          stream = await openWebcamStream();
-          webcamStreamRef.current = stream;
-          setWebcamStream(stream);
-        }
-        setBroadcastHasAudio(stream.getAudioTracks().length > 0);
-
-        const liveBroadcast = startLiveWebcamBroadcast({
-          stream,
-          wsPath: live.ws_path,
-          maxDurationSec: live.duration_sec,
-          onStatus: setWebcamStatus,
-        });
-        liveBroadcastRef.current = liveBroadcast;
-        await liveBroadcast.ready;
-        setUploadingMedia(false);
-        setWebcamStatus(
-          `Live camera streaming — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
-        );
+        setMediaPath(deviceMediaPath);
       } else {
-        mediaPaths = endpoints.map(() => "dummy.mp4");
-        setMediaPath("dummy.mp4");
+        // VOD (color bars or an uploaded file) — cloud ffmpeg probes duration.
+        mediaPaths = endpoints.map(() => mediaPath);
+        durationSec = undefined;
       }
 
       const jobs = await Promise.all(
@@ -894,7 +940,7 @@ function App() {
 
       const legs: ComparisonLegState[] = jobs.map((job, index) => ({
         id: job.id,
-        label: endpointLabel(endpoints[index], index),
+        label: endpointLabel(endpoints[index], index, presets),
         protocol: job.protocol,
         job,
         samples: [],
@@ -907,8 +953,6 @@ function App() {
       pushToast(`Started comparison — ${endpoints.length} streams`, "info");
 
       const finish = () => {
-        liveBroadcastRef.current?.stop();
-        liveBroadcastRef.current = null;
         setLoading(false);
         pushToast("Comparison finished", "success");
         if (mediaSource === "webcam") {
@@ -918,17 +962,12 @@ function App() {
       jobs.forEach((job, index) => {
         subscribeLeg(job, legs[index].ingestVmafRequested, finish);
       });
-      void liveBroadcastRef.current?.finished.then(() => {
-        setWebcamStatus((current) => current ?? "Live webcam send complete.");
-      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to start upload";
       setError(message);
       pushToast(message, "error");
       setLoading(false);
       setUploadingMedia(false);
-      liveBroadcastRef.current?.stop();
-      liveBroadcastRef.current = null;
     }
   }
 
@@ -937,16 +976,6 @@ function App() {
     setWebcamStatus(
       mediaSource === "webcam" ? "Stopping live webcam and encoders…" : "Stopping comparison…",
     );
-    liveBroadcastRef.current?.stop();
-    liveBroadcastRef.current = null;
-    const stream = webcamStreamRef.current;
-    if (stream) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      webcamStreamRef.current = null;
-      setWebcamStream(null);
-    }
     await Promise.all(
       comparisonLegs.map((leg) =>
         stopUpload(leg.id).catch(() => ({ ok: false, status: "error" })),
@@ -965,21 +994,33 @@ function App() {
         </div>
       )}
       <header className="hero">
-        <div>
-          <p className="eyebrow">Toolkit for streaming architects</p>
-          <h1>MOQ Ingest Testing</h1>
+        <div className="hero-brand">
+          <span className="hero-mark" aria-hidden="true">
+            <IconBroadcast size={20} />
+          </span>
+          <div>
+            <p className="eyebrow">Streaming benchmark toolkit</p>
+            <h1>MoQ Bench</h1>
+          </div>
         </div>
-        <nav className="tabs">
-          <button className={tab === "benchmark" ? "active" : ""} onClick={() => setTab("benchmark")}>
-            Benchmark
-          </button>
-          <button className={tab === "metrics" ? "active" : ""} onClick={() => setTab("metrics")}>
-            Results{sessionMetrics.length > 0 ? ` (${sessionMetrics.length})` : ""}
-          </button>
-          <button className={tab === "about" ? "active" : ""} onClick={() => setTab("about")}>
-            About
-          </button>
-        </nav>
+        <div className="hero-right">
+          <StatusDot
+            tone={bootstrapping ? "idle" : apiOnline ? "ok" : "bad"}
+            label={bootstrapping ? "Connecting…" : apiOnline ? "API online" : "API offline"}
+            className="hero-api-status"
+          />
+          <nav className="tabs">
+            <button className={tab === "benchmark" ? "active" : ""} onClick={() => setTab("benchmark")}>
+              Benchmark
+            </button>
+            <button className={tab === "metrics" ? "active" : ""} onClick={() => setTab("metrics")}>
+              Results{sessionMetrics.length > 0 ? ` (${sessionMetrics.length})` : ""}
+            </button>
+            <button className={tab === "about" ? "active" : ""} onClick={() => setTab("about")}>
+              About
+            </button>
+          </nav>
+        </div>
       </header>
 
       {bootstrapError && (
@@ -1013,331 +1054,144 @@ function App() {
                 <div>
                   <h2>Benchmark</h2>
                   <p className="hint">
-                    Compare ingest protocols, cloud endpoints, and player performance in a single,
-                    standardized test. Run a fair race to determine which configuration joins the
-                    fastest and delivers the smoothest playback for your specific use case.
+                    Compare publishing protocols, ingest endpoints, and upload performance in a single, standardized
+                    test.
                   </p>
                 </div>
               </div>
 
-              <button
-                type="button"
-                className={`recipe-toggle${recipeOpen ? " open" : ""}`}
-                onClick={() => setRecipeOpen((open) => !open)}
-                aria-expanded={recipeOpen}
-              >
-                <span className="recipe-toggle-chevron" aria-hidden="true">
-                  ▾
-                </span>
-                <span className="recipe-toggle-title">Run recipe</span>
-                <span className="recipe-toggle-summary">
-                  {mediaSource === "webcam"
-                    ? "Webcam"
-                    : mediaSource === "local-file"
-                      ? mediaLabel || "Local file"
-                      : mediaSource === "dummy"
-                        ? "Color bars"
-                        : mediaLabel}{" "}
-                  ·{" "}
-                  {ENCODE_LADDER_OPTIONS.find((ladder) => ladder.id === encodeLadder)?.label ??
-                    encodeLadder}{" "}
-                  · {targetLatencyMs} ms
-                  {publisherHost === "local"
-                      ? " · This machine"
-                      : " · Cloud encode"}
-                  {computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)
-                    ? " · VMAF on"
-                    : ""}
-                </span>
-              </button>
+              <div className="benchmark-shared-grid">
+                <SourceSection
+                  mediaSource={mediaSource}
+                  onMediaSourceChange={handleMediaSourceChange}
+                  mediaPath={mediaPath}
+                  mediaLabel={mediaLabel}
+                  uploadingMedia={uploadingMedia}
+                  onUploadFile={handleUploadFile}
+                  encoder={encoder}
+                  onEncoderChange={setEncoder}
+                  encodeCloudHost={encodeCloudHost}
+                  onEncodeCloudHostChange={setEncodeCloudHost}
+                  features={features}
+                  webcamDeviceIndex={webcamDeviceIndex}
+                  onWebcamDeviceIndexChange={(index) => {
+                    setWebcamDeviceIndex(index);
+                    setMediaPath(index ? `${LOCAL_DEVICE_WEBCAM}:${index}` : LOCAL_DEVICE_WEBCAM);
+                  }}
+                  agentWebcamDevices={agentWebcamDevices}
+                  captureMinutes={webcamCaptureSeconds() / 60}
+                  webcamStatus={webcamStatus}
+                  disabled={bootstrapping || !apiOnline || loading}
+                  running={loading}
+                />
 
-              {recipeOpen && (
-                <>
-                  <div className="benchmark-shared-grid">
-                    <div className="source-media-section">
-                      <h3>Publisher</h3>
-                      <label>
-                        Where ffmpeg runs
-                        <select
-                          value={publisherHost}
-                          onChange={(e) => {
-                            const next = e.target.value as "cloud" | "local";
-                            setPublisherHost(next);
-                            if (next === "local") {
-                              setMediaSource("webcam");
-                              setMediaPath(LOCAL_DEVICE_WEBCAM);
-                              setMediaLabel("Webcam");
-                              setComputeVmaf(false);
-                            } else if (mediaSource === "local-file") {
-                              setMediaSource("dummy");
-                              setMediaPath("dummy.mp4");
-                              setMediaLabel("Default Color Bars");
-                            }
-                          }}
-                          disabled={bootstrapping || !apiOnline || loading}
-                        >
-                          <option value="cloud">Cloud VM (API host)</option>
-                          <option
-                            value="local"
-                            disabled={!features.local_publisher}
-                          >
-                            This machine (local agent)
-                          </option>
-                        </select>
-                        <span className="field-hint">
-                          {publisherHost === "local"
-                            ? !features.local_publisher
-                              ? "Local publish is disabled on this API (set LOCAL_PUBLISHER_ENABLED=1)."
-                              : features.local_publisher_connected
-                                ? `Agent connected${
-                                    features.local_publisher_agents[0]?.hostname
-                                      ? ` · ${features.local_publisher_agents[0].hostname}`
-                                      : ""
-                                  }`
-                                : "Waiting for agent — run ./scripts/run-local-publisher.sh"
-                            : "Encode on the API host (datacenter path). Choose This machine for last-mile / laptop ffmpeg."}
-                        </span>
-                      </label>
-                    </div>
-
-                    <div className="source-media-section">
-                      <h3>Media</h3>
-                      <label>
-                        Source
-                        <select
-                          value={
-                            publisherHost === "local" && mediaSource === "dummy"
-                              ? "webcam"
-                              : mediaSource
-                          }
-                          onChange={(e) => {
-                            const next = e.target.value as MediaSourceId;
-                            setMediaSource(next);
-                            if (next === "dummy") {
-                              setMediaPath("dummy.mp4");
-                              setMediaLabel("Default Color Bars");
-                            } else if (next === "bbb") {
-                              setMediaLabel("Big Buck Bunny (coming soon)");
-                            } else if (next === "local-file") {
-                              setMediaPath("");
-                              setMediaLabel("Choose a local file");
-                              setComputeVmaf(false);
-                              window.setTimeout(() => localFileInputRef.current?.click(), 0);
-                            } else if (next === "webcam") {
-                              setMediaLabel("Webcam");
-                              setMediaPath(
-                                publisherHost === "local" ? LOCAL_DEVICE_WEBCAM : "dummy.mp4",
-                              );
-                              setComputeVmaf(false);
-                            }
-                          }}
-                        >
-                          {publisherHost !== "local" && (
-                            <>
-                              <option value="dummy">Default Color Bars</option>
-                              <option value="bbb" disabled>
-                                Big Buck Bunny (coming soon)
-                              </option>
-                            </>
-                          )}
-                          <option value="webcam">Webcam</option>
-                          {publisherHost === "local" && (
-                            <option value="local-file">Local file…</option>
-                          )}
-                        </select>
-                        {mediaSource === "dummy" && publisherHost !== "local" && (
-                          <span className="field-hint">
-                            Color Bars with time counter, 60 second asset
-                          </span>
-                        )}
-                        {mediaSource === "local-file" && (
-                          <span className="field-hint">
-                            {mediaPath
-                              ? `Using: ${mediaLabel}`
-                              : "Choose a video file on this computer"}
-                          </span>
-                        )}
-                      </label>
-                      {publisherHost === "local" && mediaSource === "local-file" && (
-                        <div className="button-row" style={{ marginTop: 0 }}>
-                          <input
-                            ref={localFileInputRef}
-                            type="file"
-                            accept="video/*,.mp4,.mov,.mkv,.webm"
-                            hidden
-                            onChange={(e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) {
-                                return;
-                              }
-                              setUploadingMedia(true);
-                              setError(null);
-                              void uploadMedia(file)
-                                .then((result) => {
-                                  setMediaPath(result.media_path);
-                                  setMediaLabel(result.filename);
-                                })
-                                .catch((err) => {
-                                  setError(
-                                    err instanceof Error ? err.message : "Failed to upload media",
-                                  );
-                                  setMediaPath("");
-                                  setMediaLabel("Choose a local file");
-                                })
-                                .finally(() => setUploadingMedia(false));
-                              e.target.value = "";
-                            }}
-                          />
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            disabled={bootstrapping || !apiOnline || loading || uploadingMedia}
-                            onClick={() => localFileInputRef.current?.click()}
-                          >
-                            {uploadingMedia ? "Uploading…" : mediaPath ? "Choose another file" : "Choose file"}
-                          </button>
-                        </div>
-                      )}
-                      {mediaSource === "webcam" && publisherHost !== "local" && (
-                        <div className="webcam-preview-block">
-                          <WebcamPreview stream={webcamStream} />
-                          <span className="field-hint">
-                            {webcamStatus ??
-                              `Live camera · Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
-                          </span>
-                        </div>
-                      )}
-                      {mediaSource === "webcam" && publisherHost === "local" && (
-                        <span className="field-hint">
-                          {webcamStatus ??
-                            `Agent opens this machine’s camera via ffmpeg (AVFoundation / V4L2). Preview is released at start so the device is free. Stop when finished · Auto-stops after ${webcamCaptureSeconds() / 60} min · VMAF off`}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="source-media-section">
-                      <h3>Encode profile</h3>
-                      <div className="encode-profile-grid">
-                        <label>
-                          Target bitrate / resolution
-                          <select
-                            value={encodeLadder}
-                            onChange={(e) => setEncodeLadder(e.target.value)}
-                            disabled={bootstrapping || !apiOnline || loading}
-                          >
-                            {ENCODE_LADDER_OPTIONS.map((ladder) => (
-                              <option key={ladder.id} value={ladder.id}>
-                                {ladder.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          Target latency (ms)
-                          <div className="latency-input-row">
-                            <button
-                              type="button"
-                              className="latency-nudge"
-                              disabled={bootstrapping || !apiOnline || loading}
-                              onClick={() => nudgeLatency(-100)}
-                              aria-label="Decrease latency by 100 ms"
-                            >
-                              −100
-                            </button>
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              pattern="[0-9]*"
-                              autoComplete="off"
-                              spellCheck={false}
-                              value={latencyDraft}
-                              disabled={bootstrapping || !apiOnline || loading}
-                              onFocus={() => setLatencyFocused(true)}
-                              onChange={(e) => {
-                                const next = e.target.value.replace(/[^\d]/g, "");
-                                setLatencyDraft(next);
-                              }}
-                              onBlur={(e) => {
-                                setLatencyFocused(false);
-                                commitLatencyDraft(e.target.value);
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.currentTarget.blur();
-                                } else if (e.key === "ArrowUp") {
-                                  e.preventDefault();
-                                  nudgeLatency(e.shiftKey ? 100 : 50);
-                                } else if (e.key === "ArrowDown") {
-                                  e.preventDefault();
-                                  nudgeLatency(e.shiftKey ? -100 : -50);
-                                }
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="latency-nudge"
-                              disabled={bootstrapping || !apiOnline || loading}
-                              onClick={() => nudgeLatency(100)}
-                              aria-label="Increase latency by 100 ms"
-                            >
-                              +100
-                            </button>
-                          </div>
-                          <span className="field-hint">
-                            Type a value ({MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS}), use ±100,
-                            or ↑/↓ (Shift for ±100). Tunes GOP/VBV, SRT latency, MoQ catch-up, HLS
-                            buffer.
-                          </span>
-                        </label>
-                      </div>
-                    </div>
-
-                    <div className="vmaf-section">
-                      <h3>Quality</h3>
-                      <label className="checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={
-                            computeVmaf &&
-                            (mediaSource !== "webcam" || encoderVmafAvailable)
-                          }
-                          disabled={
-                            !vmafSelectable ||
-                            (mediaSource === "webcam" && !encoderVmafAvailable)
-                          }
-                          onChange={(e) => setComputeVmaf(e.target.checked)}
-                        />
-                        <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
-                      </label>
-                      <span className="field-hint">
-                        Encoder scores local capture; ingest scores the remote recording.
-                      </span>
-                      {vmafUnavailableReason && (
-                        <span className="field-hint">{vmafUnavailableReason}</span>
-                      )}
-                    </div>
+                <div className="source-media-section">
+                  <div className="step-heading">
+                    <span className="step-badge">2</span>
+                    <h3>Encoder &amp; profile</h3>
                   </div>
-
-                  <PipelineConfigDetails
-                    sections={pipelineSections}
-                    buttonLabel="View pipeline config"
-                  />
-                </>
-              )}
-
-              {/* Starting a run collapses the recipe (and its embedded
-                  preview) — keep the live camera visible alongside the
-                  protocol players so the source is always on screen. */}
-              {!recipeOpen && mediaSource === "webcam" && webcamStream && (
-                <div className="webcam-preview-block webcam-preview-live">
-                  <WebcamPreview stream={webcamStream} />
-                  <span className="field-hint">
-                    {loading
-                      ? "Live camera (source feed) — streaming to all protocols"
-                      : webcamStatus ?? "Live camera preview"}
-                  </span>
+                  <div className="encode-profile-grid">
+                    <label>
+                      Target bitrate / resolution
+                      <select
+                        value={encodeLadder}
+                        onChange={(e) => setEncodeLadder(e.target.value)}
+                        disabled={bootstrapping || !apiOnline || loading}
+                      >
+                        {ENCODE_LADDER_OPTIONS.map((ladder) => (
+                          <option key={ladder.id} value={ladder.id}>
+                            {ladder.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Target latency (ms)
+                      <div className="latency-input-row">
+                        <button
+                          type="button"
+                          className="latency-nudge"
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onClick={() => nudgeLatency(-100)}
+                          aria-label="Decrease latency by 100 ms"
+                        >
+                          −100
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          autoComplete="off"
+                          spellCheck={false}
+                          value={latencyDraft}
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onFocus={() => setLatencyFocused(true)}
+                          onChange={(e) => {
+                            const next = e.target.value.replace(/[^\d]/g, "");
+                            setLatencyDraft(next);
+                          }}
+                          onBlur={(e) => {
+                            setLatencyFocused(false);
+                            commitLatencyDraft(e.target.value);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.currentTarget.blur();
+                            } else if (e.key === "ArrowUp") {
+                              e.preventDefault();
+                              nudgeLatency(e.shiftKey ? 100 : 50);
+                            } else if (e.key === "ArrowDown") {
+                              e.preventDefault();
+                              nudgeLatency(e.shiftKey ? -100 : -50);
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="latency-nudge"
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onClick={() => nudgeLatency(100)}
+                          aria-label="Increase latency by 100 ms"
+                        >
+                          +100
+                        </button>
+                      </div>
+                      <span className="field-hint">
+                        {MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS} ms · applies to every output below
+                      </span>
+                    </label>
+                  </div>
                 </div>
-              )}
+
+                <div className="vmaf-section">
+                  <h3>
+                    <IconGauge size={15} className="icon-inline" /> Calculate Quality
+                  </h3>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)}
+                      disabled={!vmafSelectable || (mediaSource === "webcam" && !encoderVmafAvailable)}
+                      onChange={(e) => setComputeVmaf(e.target.checked)}
+                    />
+                    <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
+                  </label>
+                  {vmafUnavailableReason && <span className="field-hint">{vmafUnavailableReason}</span>}
+                </div>
+              </div>
+
+              <WorkflowVisualization
+                sourceTitle={workflowSourceTitle}
+                sourceDetail={workflowSourceDetail}
+                encodeTitle={workflowEncodeTitle}
+                encodeDetail={workflowEncodeDetail}
+                streams={workflowStreams}
+              />
+
+              <PipelineConfigDetails
+                sections={pipelineSections}
+                buttonLabel="View pipeline config"
+              />
 
               {error && <p className="error">{error}</p>}
 
@@ -1352,19 +1206,16 @@ function App() {
                     endpoints.length < MIN_ENDPOINTS ||
                     uploadingMedia ||
                     mediaSource === "bbb" ||
-                    (publisherHost === "local" &&
-                      mediaSource === "local-file" &&
-                      !mediaPath) ||
-                    (publisherHost === "local" &&
-                      features.local_publisher &&
-                      !features.local_publisher_connected)
+                    (mediaSource === "upload" && !mediaPath) ||
+                    (mediaSource === "webcam" &&
+                      (!features.local_publisher || !features.local_publisher_connected))
                   }
                 >
                   {uploadingMedia
                     ? "Preparing media..."
                     : loading
                       ? "Running comparison..."
-                      : `Start comparison (${endpoints.length} streams)`}
+                      : `Start comparison (${endpoints.length} outputs)`}
                 </button>
                 {loading && (
                   <button
@@ -1377,6 +1228,10 @@ function App() {
               </div>
             </section>
 
+            <div className="step-heading">
+              <span className="step-badge">3</span>
+              <h3>Outputs</h3>
+            </div>
             <section className="benchmark-streams">
               {endpoints.map((endpoint, index) => {
                 const leg = comparisonLegs[index];
@@ -1386,6 +1241,11 @@ function App() {
                     className="stream-column panel"
                     style={{ "--protocol-accent": protocolColor(endpoint.protocol, index) } as CSSProperties}
                   >
+                    <StatusDot
+                      tone={outputStatusTone(leg, loading)}
+                      pulse={leg?.job.status === "running"}
+                      className="output-card-status-dot"
+                    />
                     <EndpointSection
                       index={index}
                       endpoint={endpoint}
@@ -1401,7 +1261,7 @@ function App() {
                     <div className="stream-column-preview">
                       <StreamPlayer
                         key={`${endpoint.id}:${endpoint.playbackMode ?? "default"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
-                        title={`Stream ${index + 1}`}
+                        title={`Output ${index + 1}`}
                         compactHeader
                         protocol={endpoint.protocol}
                         endpointUrl={resolveEndpointUrl(endpoint, presets)}
@@ -1422,7 +1282,6 @@ function App() {
                         encodeStartedAtEpoch={
                           leg?.job.first_sample_at_epoch ?? leg?.job.started_at_epoch
                         }
-                        bridgeLagMs={mediaSource === "webcam" ? bridgeLagMs : 0}
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;
@@ -1456,18 +1315,9 @@ function App() {
                           leg?.job.target_latency_ms ?? targetLatencyMs,
                         )}
                         controlsLocked={bootstrapping || !apiOnline}
-                        sourceHasAudio={
-                          // Browser-webcam capture only publishes audio when the
-                          // MediaStream actually has a mic track (openWebcamStream
-                          // falls back to video-only on denied/hung audio). The
-                          // local-agent webcam path (ffmpeg AVFoundation/V4L2)
-                          // always includes an audio input, as do VOD sources.
-                          // broadcastHasAudio is set from the exact stream handed
-                          // to MediaRecorder at start (state-race safe).
-                          mediaSource !== "webcam" ||
-                          publisherHost === "local" ||
-                          broadcastHasAudio
-                        }
+                        // Webcam is always captured by the local-agent path (ffmpeg
+                        // AVFoundation/V4L2), which always includes an audio input,
+                        // same as VOD sources — sourceHasAudio defaults to true.
                         onPlaybackModeChange={(mode) =>
                           updateEndpoint(endpoint.id, { playbackMode: mode })
                         }
@@ -1540,12 +1390,12 @@ function App() {
                   className="stream-add-chip"
                   onClick={addEndpoint}
                   disabled={bootstrapping || !apiOnline || loading}
-                  aria-label={`Add another stream (${endpoints.length} of ${MAX_ENDPOINTS})`}
+                  aria-label={`Add another output (${endpoints.length} of ${MAX_ENDPOINTS})`}
                 >
                   <span className="stream-add-chip-icon" aria-hidden="true">
                     +
                   </span>
-                  Add stream
+                  Add output
                   <span className="stream-add-chip-meta">
                     {endpoints.length}/{MAX_ENDPOINTS}
                   </span>

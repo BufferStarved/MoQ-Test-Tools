@@ -6,7 +6,6 @@ import {
   isPlaybackModeCompatible,
   playbackModeLabelForSelection,
   playbackModesForSelection,
-  playbackSelectionCopy,
   resolvePlaybackTarget,
 } from "./playbackUrls";
 
@@ -25,6 +24,7 @@ function parseHostSafe(endpointUrl: string): string | null {
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
+import { IconMonitor } from "./Icons";
 
 const HlsPlayer = lazy(() => import("./players/HlsPlayer"));
 const DashPlayer = lazy(() => import("./players/DashPlayer"));
@@ -156,12 +156,6 @@ export function StreamPlayer({
     "benchmark",
   );
   const playerModes = playbackModesForSelection(protocol, ingestEndpointId);
-  const selectionCopy = playbackSelectionCopy(
-    resolvedMode,
-    target,
-    protocol,
-    ingestEndpointId,
-  );
   const hlsLowLatency =
     target.note === "lowLatencyMode" || resolvedMode === "ll-hls";
   const dashLowLatency =
@@ -191,7 +185,9 @@ export function StreamPlayer({
       {onPlaybackModeChange && (
         <div className="player-playback-controls">
           <label>
-            Video player
+            <span className="field-label-with-icon">
+              <IconMonitor size={14} /> Player
+            </span>
             <select
               value={resolvedMode}
               onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
@@ -203,12 +199,6 @@ export function StreamPlayer({
                 </option>
               ))}
             </select>
-            <span className="player-mode-hint">
-              <strong className="player-mode-hint-label">{selectionCopy.label}</strong>
-              {selectionCopy.description ? (
-                <span className="hint">{selectionCopy.description}</span>
-              ) : null}
-            </span>
           </label>
           {showWhepField && onWhepPlaybackUrlChange && (
             <label>
@@ -276,6 +266,8 @@ export function StreamPlayer({
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               skipConnectProbe={playbackGate === "live"}
+              jobStatus={jobStatus}
+              benchmarkLoading={benchmarkLoading}
             />
           )}
           {target.engine === "whep" && (

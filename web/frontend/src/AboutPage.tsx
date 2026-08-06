@@ -1,8 +1,10 @@
-import type { ReactNode } from "react";
 import { METRIC_DEFINITIONS } from "./metricDefinitions";
+import { ArchStage, FlowArrow, FlowNode } from "./FlowDiagram";
 
 const GH_REPO = "https://github.com/BufferStarved/MoQ-Test-Tools";
 const GH_BLOB = `${GH_REPO}/blob/main`;
+const GH_LOCAL_PUBLISHER = `${GH_BLOB}/docs/LOCAL-PUBLISHER.md`;
+const GH_BYO_ENCODER = `${GH_BLOB}/docs/BYO-ENCODER.md`;
 
 /** Stable order for the About metric glossary (matches chart / scorecard groups). */
 const ABOUT_METRIC_KEYS = [
@@ -38,49 +40,6 @@ const ABOUT_METRIC_KEYS = [
   "total_bytes_sent",
   "peak_bandwidth_sent_mbps",
 ] as const;
-
-function FlowArrow() {
-  return <span className="about-flow-arrow" aria-hidden="true">→</span>;
-}
-
-function FlowNode({
-  title,
-  detail,
-  tone = "default",
-}: {
-  title: string;
-  detail?: string;
-  tone?: "default" | "client" | "transport" | "server" | "quality";
-}) {
-  return (
-    <div className={`about-flow-node tone-${tone}`}>
-      <strong>{title}</strong>
-      {detail ? <span>{detail}</span> : null}
-    </div>
-  );
-}
-
-function ArchStage({
-  step,
-  label,
-  tone,
-  children,
-}: {
-  step: string;
-  label: string;
-  tone: "client" | "server" | "transport" | "quality";
-  children: ReactNode;
-}) {
-  return (
-    <div className={`about-arch-stage tone-${tone}`}>
-      <div className="about-arch-stage-label">
-        <span className="about-arch-step">{step}</span>
-        {label}
-      </div>
-      <div className="about-arch-stage-body">{children}</div>
-    </div>
-  );
-}
 
 export function AboutPage() {
   return (
@@ -131,6 +90,51 @@ export function AboutPage() {
         </div>
       </section>
 
+      <section className="about-section">
+        <h3>Where ffmpeg runs (upload path)</h3>
+        <p className="hint">
+          The recipe couples source and encode location: VOD assets always encode on the cloud VM
+          (apples-to-apples player/ingest comparisons); webcam always encodes on your laptop
+          (realistic ISP/last-mile upload numbers).
+        </p>
+        <div className="about-encoder-grid">
+          <article className="about-encoder-card">
+            <h4>VOD asset → Cloud VM</h4>
+            <p>
+              ffmpeg on the API host in the same GCP region as ingest. Best for apples-to-apples
+              protocol and player comparisons. Upload RTT / retrans charts reflect datacenter
+              paths, not a home or studio network.
+            </p>
+          </article>
+          <article className="about-encoder-card recommended">
+            <span className="about-encoder-badge">Realistic upload numbers</span>
+            <h4>Webcam → this machine + agent</h4>
+            <p>
+              Choose <strong>Webcam</strong> in the recipe, start{" "}
+              <code>./scripts/run-local-publisher.sh</code> against this site, then run the recipe
+              once it shows &quot;Agent connected&quot; — ffmpeg on your laptop opens the camera and
+              publishes over your real network. Full upload + playback metrics. See{" "}
+              <a href={GH_LOCAL_PUBLISHER} target="_blank" rel="noreferrer">
+                Local publisher guide
+              </a>
+              .
+            </p>
+          </article>
+          <article className="about-encoder-card">
+            <h4>Your own encoder</h4>
+            <p>
+              Point OBS, hardware, or your ffmpeg at our public publish URLs with the same ladder
+              and latency settings as the UI. Playback metrics still work; upload charts need the
+              agent or ingest telemetry. See{" "}
+              <a href={GH_BYO_ENCODER} target="_blank" rel="noreferrer">
+                BYO encoder settings
+              </a>
+              .
+            </p>
+          </article>
+        </div>
+      </section>
+
       <div className="about-contact">
         <h3>Contribute & contact</h3>
         <p>
@@ -176,16 +180,18 @@ export function AboutPage() {
           Media path runs left → right: source and encode, then parallel ingest, then browser
           playback. Quality scoring runs on the ingest side.
         </p>
-        <div className="about-arch">
+        <div className="flow-diagram">
           <ArchStage step="1" label="Source" tone="client">
-            <FlowNode tone="client" title="Browser / camera" detail="file or webcam MediaRecorder" />
+            <FlowNode tone="client" title="VOD asset" detail="Color Bars, Big Buck Bunny, or your own upload" />
+            <FlowNode tone="client" title="Webcam" detail="camera attached to your laptop" />
           </ArchStage>
           <FlowArrow />
-          <ArchStage step="2" label="Encode (moq-web)" tone="server">
+          <ArchStage step="2" label="Encode" tone="server">
+            <FlowNode tone="server" title="Cloud VM ffmpeg" detail="for VOD assets — same region as ingest" />
             <FlowNode
               tone="server"
-              title="ffmpeg on moq-web VM"
-              detail="H.264/AAC · GCP today · multi-cloud ready"
+              title="Laptop ffmpeg (agent)"
+              detail="for webcam — AVFoundation/V4L2, or BYO encoder"
             />
             <FlowNode
               tone="server"
@@ -219,8 +225,10 @@ export function AboutPage() {
         </div>
         <ul className="about-list">
           <li>
-            <strong>Where ffmpeg runs:</strong> on the moq-web host (not in the browser). Webcam
-            bytes arrive over WebSocket; VOD uses a local file on that VM.
+            <strong>Where ffmpeg runs:</strong> VOD assets always encode on the cloud VM (apples-to-
+            apples protocol/player comparisons); webcam always encodes on your laptop via the
+            publisher agent, so upload metrics reflect your real ISP/last-mile connection. You can
+            also point your own encoder at our publish URLs — see the upload-path section above.
           </li>
           <li>
             <strong>VMAF:</strong> scored server-side by the ingest agent on the Zixi/relay worker —
@@ -252,9 +260,9 @@ export function AboutPage() {
 
       <section className="about-section">
         <h3>Client path</h3>
-        <div className="about-arch about-arch-compact">
+        <div className="flow-diagram flow-diagram-compact">
           <ArchStage step="1" label="Capture" tone="client">
-            <FlowNode tone="client" title="Media source" detail="dummy.mp4 or MediaRecorder" />
+            <FlowNode tone="client" title="Media source" detail="VOD asset or agent-captured webcam" />
           </ArchStage>
           <FlowArrow />
           <ArchStage step="2" label="Jobs" tone="server">
@@ -272,8 +280,8 @@ export function AboutPage() {
         </div>
         <ul className="about-list">
           <li>
-            Webcam uses a live WebSocket bridge — not a pre-recorded upload — with a 5‑minute safety
-            cap and user Stop.
+            Webcam is a live source, not a pre-recorded upload — the local publisher agent opens
+            your camera directly with a 5‑minute safety cap and user Stop.
           </li>
           <li>
             Browsers cannot play raw SRT/RTMP; traditional legs preview via Zixi HLS. MoQ requires a

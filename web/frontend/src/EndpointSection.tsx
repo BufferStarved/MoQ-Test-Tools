@@ -6,6 +6,7 @@ import {
   presetIdForIngest,
 } from "./ingestEndpoints";
 import type { EndpointConfig, Preset, Protocol } from "./types";
+import { IconBroadcast, IconTarget } from "./Icons";
 import {
   defaultPlaybackModeForProtocol,
   isManagedMoqRelay,
@@ -81,7 +82,7 @@ function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string 
   return publishUrl;
 }
 
-function playerShortLabel(endpoint: EndpointConfig): string {
+export function playerShortLabel(endpoint: EndpointConfig): string {
   const mode = endpoint.playbackMode ?? defaultPlaybackModeForProtocol(
     endpoint.protocol,
     endpoint.ingestEndpointId,
@@ -107,7 +108,7 @@ export function EndpointSection({
   onRemove,
 }: EndpointSectionProps) {
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
-  const hostOptions = ingestEndpointsForProtocol(endpoint.protocol);
+  const hostOptions = ingestEndpointsForProtocol(endpoint.protocol, presets);
   const selectedIngest = hostOptions.find((item) => item.id === endpoint.ingestEndpointId)
     ?? hostOptions[0];
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
@@ -127,7 +128,7 @@ export function EndpointSection({
         </p>
       )}
       <div className="endpoint-header">
-        <h3>Stream {index + 1}</h3>
+        <h3>Output {index + 1}</h3>
         {canRemove && (
           <button type="button" className="ghost-button" onClick={() => onRemove(endpoint.id)}>
             Remove
@@ -148,7 +149,9 @@ export function EndpointSection({
       </p>
 
       <label>
-        Protocol
+        <span className="field-label-with-icon">
+          <IconBroadcast size={14} /> Protocol
+        </span>
         <select
           value={endpoint.protocol}
           onChange={(e) => {
@@ -192,7 +195,9 @@ export function EndpointSection({
       </label>
 
       <label>
-        Host / ingest
+        <span className="field-label-with-icon">
+          <IconTarget size={14} /> Destination
+        </span>
         <select
           value={
             hostOptions.some((item) => item.id === endpoint.ingestEndpointId)
@@ -219,9 +224,6 @@ export function EndpointSection({
             </option>
           ))}
         </select>
-        {selectedIngest?.detail && selectedIngest.available && (
-          <span className="field-hint">{selectedIngest.detail}</span>
-        )}
         {selectedIngest && !selectedIngest.available && (
           <span className="hint">This host is not configured yet.</span>
         )}
