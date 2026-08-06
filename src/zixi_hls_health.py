@@ -72,7 +72,9 @@ def probe_http_ts_ready(
     """True when ``/<stream>.ts`` returns MPEG-TS sync bytes (TS-PUT / http_ts_auto_out)."""
     url = zixi_http_ts_playback_url(stream_id, endpoint_url=endpoint_url)
     try:
-        status, raw = _fetch(url, timeout=timeout)
+        # Live TS is endless — read just enough for sync-byte detection so the
+        # probe returns in well under a second on a healthy stream.
+        status, raw = _fetch(url, timeout=timeout, max_bytes=8 * _MIN_TS_BYTES)
     except Exception as exc:
         return HlsHealth(ok=False, detail=f"http_ts_probe_error={exc}")
     ready = status == 200 and _looks_like_media_bytes(raw)
@@ -201,15 +203,45 @@ def _sanitize_http_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
 
 
-def _fetch(url: str, *, timeout: float = 5.0) -> tuple[Optional[int], bytes]:
+# Manifests and probe segments are small; anything bigger means we're reading a
+# live stream, which must never happen in a readiness probe (see _read_capped).
+_FETCH_MAX_BYTES = 256 * 1024
+
+
+def _read_capped(response, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes`` from a response, never until EOF.
+
+    Zixi ``http_ts_auto_out`` URLs are *endless* live MPEG-TS: ``read()`` on a
+    healthy stream never reaches EOF and the socket timeout never fires because
+    data keeps arriving. An uncapped read left the preview-ready gate blocked
+    for the entire job (player stuck on "Waiting for live HTTP-TS…") while
+    buffering the stream into memory. A few KB is plenty to check sync bytes.
+    """
+    chunks: list[bytes] = []
+    remaining = max_bytes
+    while remaining > 0:
+        chunk = response.read(min(remaining, 65536))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _fetch(
+    url: str,
+    *,
+    timeout: float = 5.0,
+    max_bytes: int = _FETCH_MAX_BYTES,
+) -> tuple[Optional[int], bytes]:
     safe_url = _sanitize_http_url(url)
     request = urllib.request.Request(safe_url, headers={"Cache-Control": "no-store"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
+            return response.status, _read_capped(response, max_bytes)
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read()
+            body = _read_capped(exc, max_bytes)
         except Exception:
             body = b""
         return exc.code, body
