@@ -33,6 +33,7 @@ from publisher_agent.deps import (  # noqa: E402
     list_webcam_devices,
     required_ok,
 )
+from publisher_agent.webcam_broker import webcam_broker  # noqa: E402
 
 logger = logging.getLogger("publisher-agent")
 
@@ -178,10 +179,19 @@ class PublisherAgent:
             job = upload_job_from_dict(job_payload)
             job.cancel_event = cancel_event
             media_raw = (job.media_path or "").strip()
+            webcam_session = None
             if media_raw.lower().startswith("device:webcam"):
-                # Keep the optional camera index (device:webcam:N) from the
-                # UI picker — build_ffmpeg_input_args maps it to the device.
-                job.media_path = media_raw.lower()
+                # Multi-protocol comparisons start one job per leg at once;
+                # route them through the shared-capture broker so they don't
+                # race to open the same physical camera (see
+                # publisher_agent/webcam_broker.py). Each job still ends up
+                # with a normal live media_path (a loopback UDP URL) that
+                # UploadService already knows how to read.
+                job.media_path, webcam_session = webcam_broker.acquire(
+                    media_raw.lower(),
+                    duration_sec=job.duration_sec,
+                    cancel_event=cancel_event,
+                )
             else:
                 # Absolute uploads/ paths from the API, or repo-relative files.
                 media = Path(media_raw)
@@ -255,6 +265,8 @@ class PublisherAgent:
                 result = self._service.run(job, on_sample=on_sample)
             finally:
                 os.chdir(previous_cwd)
+                if webcam_session is not None:
+                    webcam_broker.release(webcam_session)
 
             done = {
                 "type": "job_done",
