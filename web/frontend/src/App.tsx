@@ -1338,6 +1338,9 @@ function App() {
                             <span>Job</span>
                             <code>{leg.job.id.slice(0, 8)}</code>
                           </div>
+                          {leg.job.status === "failed" && leg.job.error && (
+                            <p className="error">{leg.job.error}</p>
+                          )}
                           {leg.encoderVmafRequested && (
                             <div className="status-row">
                               <span>Encoder quality</span>
