@@ -1,9 +1,18 @@
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from cloud_placement import (
+    linode_relay_domain,
+    linode_region,
+    linode_stack_configured,
+    linode_web_ip,
+    linode_zixi_ip,
+    merge_placement,
+    placement_from_ingest_provider,
+)
 from moq_publish import MoqPublishTarget, parse_moq_publish_url
 
 
@@ -45,6 +54,8 @@ class ServicePreset:
     ingest_agent_url: str = ""
     ingest_recording_dir: str = ""
     ingest_provider: str = ""
+    cloud_provider: str = ""
+    cloud_region: str = ""
     web_visible: bool = True
     web_available: bool = True
 
@@ -56,6 +67,8 @@ class DestinationProfile:
     label: str = ""
     preset_id: str = ""
     ingest_provider: str = ""
+    cloud_provider: str = ""
+    cloud_region: str = ""
     moq_target: Optional[MoqPublishTarget] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -110,7 +123,7 @@ class DestinationProfile:
         raise DestinationConfigError(f"Unsupported protocol: {self.protocol}")
 
 
-SERVICE_PRESETS: List[ServicePreset] = [
+_SERVICE_PRESETS_RAW: List[ServicePreset] = [
     ServicePreset(
         id="moq_zixi_gcp",
         name="Zixi Broadcaster gcp-us-central1",
@@ -398,6 +411,171 @@ SERVICE_PRESETS: List[ServicePreset] = [
     ),
 ]
 
+LINODE_STUB_IDS = {
+    "zixi_linode_srt",
+    "zixi_linode_rtmp",
+    "zixi_linode_hls",
+    "zixi_linode_dash",
+}
+
+
+def _tag_cloud_presets(presets: List[ServicePreset]) -> List[ServicePreset]:
+    tagged: List[ServicePreset] = []
+    for preset in presets:
+        if preset.cloud_provider or preset.cloud_region:
+            tagged.append(preset)
+            continue
+        placement = placement_from_ingest_provider(preset.ingest_provider)
+        if not placement.cloud_provider:
+            tagged.append(preset)
+            continue
+        tagged.append(
+            replace(
+                preset,
+                cloud_provider=placement.cloud_provider,
+                cloud_region=placement.cloud_region,
+            )
+        )
+    return tagged
+
+
+def _build_linode_presets() -> List[ServicePreset]:
+    zixi_ip = linode_zixi_ip()
+    web_ip = linode_web_ip()
+    relay_ip = os.environ.get("LINODE_RELAY_IP", "").strip()
+    region = linode_region()
+    region_label = f"linode-{region}"
+    relay_domain = linode_relay_domain(relay_ip)
+    relay_base = f"https://{relay_domain}:4433"
+    relay_publish = f"{relay_base}/moq-relay?namespace=benchmark"
+    zixi_agent = f"http://{zixi_ip}:8090"
+    web_agent = f"http://{web_ip}:8090"
+    common = dict(
+        cloud_provider="linode",
+        cloud_region=region,
+        web_visible=True,
+        web_available=True,
+    )
+    return [
+        ServicePreset(
+            id="moq_zixi_linode",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="srt",
+            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000",
+            notes=(
+                "Managed Zixi SRT ingest on Linode. Stream ID 'SRT Test'; browser playback "
+                "uses error-concealed 'SRT Test EC' when configured. "
+                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."
+            ),
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="linode_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_linode_rtmp",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="rtmp",
+            url=f"rtmp://{zixi_ip}:1935/live/benchmark",
+            notes=(
+                "Managed Zixi RTMP ingest on Linode. HTTP-TS preview at "
+                f"http://{zixi_ip}:7777/benchmark.ts."
+            ),
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="linode_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_linode_hls",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="hls",
+            url=f"http://{zixi_ip}:7777/benchmark",
+            notes="TS over HTTP push ingest on Linode Zixi.",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="linode_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_linode_dash",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="dash",
+            url=f"http://{zixi_ip}:7777/benchmark",
+            notes="TS over HTTP push ingest on Linode Zixi (same caveats as GCP DASH preset).",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="linode_zixi",
+            web_available=False,
+            cloud_provider="linode",
+            cloud_region=region,
+            web_visible=True,
+        ),
+        ServicePreset(
+            id="moq_linode_relay",
+            name=f"OpenMOQ MOQ-X {region_label}",
+            protocol="moq",
+            url=relay_publish,
+            notes=f"OpenMOQ moqx relay on Linode ({relay_base}).",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/var/lib/moq-relay-recordings",
+            ingest_provider="linode_moq_relay",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_linode_srt",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="srt",
+            url=f"srt://{web_ip}:8890?mode=caller&latency=200000&streamid=publish:benchmark",
+            notes=(
+                "MediaMTX SRT on Linode web host → LL-HLS / WHEP. "
+                f"HLS: http://{web_ip}:8888/benchmark/index.m3u8."
+            ),
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="linode_mediamtx",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_linode_rtmp",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="rtmp",
+            url=f"rtmp://{web_ip}:1935/benchmark",
+            notes="MediaMTX RTMP on Linode web host.",
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="linode_mediamtx",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_linode_whip",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="webrtc",
+            url=f"http://{web_ip}:8889/benchmark/whip",
+            notes="ffmpeg WHIP publish into Linode MediaMTX (Opus audio required).",
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="linode_mediamtx",
+            **common,
+        ),
+    ]
+
+
+def _finalize_service_presets(raw: List[ServicePreset]) -> List[ServicePreset]:
+    tagged = _tag_cloud_presets(raw)
+    if not linode_stack_configured():
+        return tagged
+    kept = [preset for preset in tagged if preset.id not in LINODE_STUB_IDS]
+    return kept + _build_linode_presets()
+
+
+SERVICE_PRESETS: List[ServicePreset] = _finalize_service_presets(_SERVICE_PRESETS_RAW)
+
 PRESET_BY_ID: Dict[str, ServicePreset] = {preset.id: preset for preset in SERVICE_PRESETS}
 
 
@@ -413,7 +591,7 @@ def ingest_agent_url_for_preset(preset_id: str) -> str:
     if preset is not None and preset.ingest_agent_url:
         return preset.ingest_agent_url
     # MediaMTX is co-located on moq-web — never inherit the Zixi agent URL.
-    if preset is not None and (preset.ingest_provider or "").strip().lower() == "gcp_mediamtx":
+    if preset is not None and (preset.ingest_provider or "").strip().lower().endswith("_mediamtx"):
         return ""
     return os.environ.get("INGEST_AGENT_BASE_URL", "").strip()
 
@@ -472,12 +650,19 @@ def resolve_preset(preset_id: str) -> DestinationProfile:
         url = preset.url_template.format(**format_values)
 
     validate_destination_url(preset.protocol, url)
+    placement = merge_placement(
+        cloud_provider=preset.cloud_provider,
+        cloud_region=preset.cloud_region,
+        ingest_provider=preset.ingest_provider,
+    )
     return DestinationProfile(
         protocol=preset.protocol,
         url=url,
         label=preset.name,
         preset_id=preset.id,
         ingest_provider=preset.ingest_provider,
+        cloud_provider=placement.cloud_provider,
+        cloud_region=placement.cloud_region,
     )
 
 
@@ -613,6 +798,10 @@ def presets_for_api(*, web_only: bool = False) -> List[dict]:
             "requires_env": bool(preset.env_vars),
             "supports_vmaf": preset.supports_vmaf,
             "ingest_provider": preset.ingest_provider,
+            "cloud_provider": preset.cloud_provider
+            or placement_from_ingest_provider(preset.ingest_provider).cloud_provider,
+            "cloud_region": preset.cloud_region
+            or placement_from_ingest_provider(preset.ingest_provider).cloud_region,
             "web_available": preset.web_available,
         }
         for preset in presets

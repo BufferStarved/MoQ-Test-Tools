@@ -30,7 +30,7 @@ variable "allowed_ingest_cidr" {
 
 variable "srt_listen_port" {
   type    = number
-  default = 2088
+  default = 10080
 }
 
 variable "zixi_web_port" {

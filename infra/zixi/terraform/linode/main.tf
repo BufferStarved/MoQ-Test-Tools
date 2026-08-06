@@ -108,4 +108,12 @@ resource "linode_firewall" "zixi" {
     ports    = tostring(var.srt_listen_port)
     ipv4     = [var.allowed_ingest_cidr]
   }
+
+  inbound {
+    label    = "ingest-agent"
+    action   = "ACCEPT"
+    protocol = "TCP"
+    ports    = "8090"
+    ipv4     = [var.allowed_ingest_cidr]
+  }
 }

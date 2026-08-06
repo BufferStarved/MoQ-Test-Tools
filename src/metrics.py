@@ -16,6 +16,8 @@ CSV_COLUMNS = [
     "timestamp",
     "protocol",
     "endpoint",
+    "cloud_provider",
+    "cloud_region",
     "pid",
     "cpu_percent",
     "memory_mb",
@@ -115,9 +117,13 @@ class MetricsCollector:
         endpoint_url: str,
         output_dir: str = "results",
         run_id: str = "",
+        cloud_provider: str = "",
+        cloud_region: str = "",
     ):
         self.protocol = protocol
         self.endpoint_url = endpoint_url
+        self.cloud_provider = cloud_provider or ""
+        self.cloud_region = cloud_region or ""
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -263,6 +269,8 @@ class MetricsCollector:
                 "timestamp": now,
                 "protocol": self.protocol,
                 "endpoint": self.endpoint_url,
+                "cloud_provider": self.cloud_provider,
+                "cloud_region": self.cloud_region,
                 "pid": pid,
                 "cpu_percent": f"{cpu_total:.2f}",
                 "memory_mb": f"{mem_total:.2f}",
