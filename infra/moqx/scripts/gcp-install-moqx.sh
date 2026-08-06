@@ -102,7 +102,9 @@ name: moqx
 services:
   moqx:
     container_name: moqx
-    image: ghcr.io/openmoq/moqx:latest
+    # Pin to a known-good snapshot (draft-16). :latest on ghcr can lag weeks.
+    # Refresh from https://github.com/openmoq/moqx/releases/tag/snapshot-latest
+    image: ghcr.io/openmoq/moqx:329b98b
     restart: unless-stopped
     network_mode: host
     privileged: true

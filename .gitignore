@@ -31,8 +31,12 @@ tools/deps/
 tools/moq5-publisher/bin/
 tools/moq5-recorder/bin/
 tools/openmoq-publisher/bin/
+tools/openmoq-publisher/openmoq-publisher-*-macOS/
 tools/*/node_modules/
 tools/openmoq-recorder/node_modules/
+
+# Local scratch/debug tooling (not part of the app)
+.cache/
 
 # Vendor package install trees (keep source/dist; drop nested deps)
 web/frontend/vendor/**/node_modules/
