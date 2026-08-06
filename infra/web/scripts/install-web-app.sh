@@ -5,7 +5,7 @@
 #   infra/web/scripts/install-web-app.sh <web-public-ip> [domain]
 #
 # Optional env:
-#   WEB_SSH_USER, WEB_SSH_KEY
+#   WEB_SSH_USER, WEB_SSH_KEY, WEB_SSH_PORT (e.g. for a local IAP tunnel)
 #   INGEST_AGENT_HOST (default ubuntu@35.222.33.58)
 #   INGEST_SSH_KEY
 #   GIT_REMOTE (default https://github.com/BufferStarved/MoQ-Test-Tools.git)
@@ -37,7 +37,9 @@ INGEST_KEY="${INGEST_SSH_KEY:-$SSH_KEY}"
 GIT_REMOTE="${GIT_REMOTE:-https://github.com/BufferStarved/MoQ-Test-Tools.git}"
 GIT_REF="${GIT_REF:-main}"
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+SSH_PORT="${WEB_SSH_PORT:-22}"
+
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes -p "$SSH_PORT")
 if [[ -f "$SSH_KEY" ]]; then
   SSH_OPTS+=(-i "$SSH_KEY")
 fi
@@ -60,13 +62,18 @@ if ! remote "echo ok" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Fetching ingest agent token from ${INGEST_HOST}..."
-INGEST_TOKEN="$(
-  ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$INGEST_KEY" \
-    "$INGEST_HOST" \
-    'sudo grep ^INGEST_AGENT_TOKEN= /etc/moq-ingest-agent.env | cut -d= -f2-' \
-    | tr -d '\r'
-)"
+if [[ -n "${INGEST_AGENT_TOKEN:-}" ]]; then
+  echo "Using INGEST_AGENT_TOKEN from environment (skipping fetch from ${INGEST_HOST})."
+  INGEST_TOKEN="$INGEST_AGENT_TOKEN"
+else
+  echo "Fetching ingest agent token from ${INGEST_HOST}..."
+  INGEST_TOKEN="$(
+    ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i "$INGEST_KEY" \
+      "$INGEST_HOST" \
+      'sudo grep ^INGEST_AGENT_TOKEN= /etc/moq-ingest-agent.env | cut -d= -f2-' \
+      | tr -d '\r'
+  )"
+fi
 if [[ -z "$INGEST_TOKEN" ]]; then
   echo "Could not read INGEST_AGENT_TOKEN from ${INGEST_HOST}." >&2
   exit 1

@@ -33,6 +33,22 @@ resource "google_compute_firewall" "ssh" {
   target_tags   = ["moq-web"]
 }
 
+# Allows SSH via GCP Identity-Aware Proxy (IAP) tunneling from any network
+# authenticated to this project, alongside the static allowlisted CIDR above.
+# 35.235.240.0/20 is GCP's fixed, well-known range for IAP-forwarded traffic.
+resource "google_compute_firewall" "allow_iap_ssh" {
+  name    = "${var.project_name}-allow-iap-ssh"
+  network = google_compute_network.web.name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["35.235.240.0/20"]
+  target_tags   = ["moq-web"]
+}
+
 resource "google_compute_firewall" "http_https" {
   name    = "${var.project_name}-allow-http"
   network = google_compute_network.web.name
