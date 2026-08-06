@@ -1,10 +1,11 @@
 {
-  "name": "moq-webcam-qa",
+  "name": "moq-qa",
   "private": true,
   "type": "module",
-  "description": "Headless Chrome QA harness that drives the real app UI with a fake webcam device against the SRT/RTMP/MoQ comparison flow — not part of the production frontend bundle.",
+  "description": "Headless Chrome QA harnesses (HLS probing, Zixi I/O matrix) — not part of the production frontend bundle.",
   "scripts": {
-    "webcam-e2e": "node webcam-e2e.mjs"
+    "hls-probe": "node hls-probe.mjs",
+    "zixi-io-matrix": "node zixi-io-matrix.mjs"
   },
   "devDependencies": {
     "playwright": "^1.54.2"

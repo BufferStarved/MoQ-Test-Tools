@@ -48,6 +48,7 @@ from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
 from zixi_hls_health import (
+    mediamtx_hls_playback_url,
     mediamtx_hls_probe_url,
     probe_hls_segment_ready,
     probe_http_ts_ready,
@@ -306,7 +307,7 @@ class UploadJob:
         ]
 
     def _is_mediamtx_destination(self) -> bool:
-        return (self.destination.ingest_provider or "").strip().lower() == "gcp_mediamtx"
+        return _is_mediamtx_provider(self.destination.ingest_provider or "")
 
     def _browser_compat_output_args(self) -> List[str]:
         if self.destination.protocol == "srt":
@@ -385,6 +386,8 @@ class UploadSample:
     transport_recv_rate_mbps: float = 0.0
     client_memory_percent: float = 0.0
     client_disk_percent: float = 0.0
+    cloud_provider: str = ""
+    cloud_region: str = ""
     server_cpu_percent: float = 0.0
     server_memory_percent: float = 0.0
     server_disk_percent: float = 0.0
@@ -415,6 +418,21 @@ class UploadResult:
 
 
 SampleCallback = Callable[[UploadSample], None]
+
+
+def _sample_cloud_fields(destination: DestinationProfile) -> dict[str, str]:
+    return {
+        "cloud_provider": destination.cloud_provider or "",
+        "cloud_region": destination.cloud_region or "",
+    }
+
+
+def _is_mediamtx_provider(ingest_provider: str) -> bool:
+    return (ingest_provider or "").strip().lower().endswith("_mediamtx")
+
+
+def _is_zixi_provider(ingest_provider: str) -> bool:
+    return (ingest_provider or "").strip().lower().endswith("_zixi")
 
 
 def _pick_udp_port() -> int:
@@ -522,6 +540,8 @@ class UploadService:
             protocol=job.destination.protocol,
             endpoint_url=zixi_stats_url,
             run_id=job.job_id,
+            cloud_provider=job.destination.cloud_provider or "",
+            cloud_region=job.destination.cloud_region or "",
         )
         zixi_poller = ZixiStatsPoller(
             zixi_stats_url,
@@ -652,6 +672,7 @@ class UploadService:
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
+                    **_sample_cloud_fields(job.destination),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=process.pid,
@@ -709,7 +730,7 @@ class UploadService:
             logger.warning("on_preview_ready callback failed", exc_info=True)
 
     def _is_mediamtx_destination(self, job: UploadJob) -> bool:
-        return (job.destination.ingest_provider or "").strip().lower() == "gcp_mediamtx"
+        return _is_mediamtx_provider(job.destination.ingest_provider or "")
 
     def _mediamtx_poller_for_job(self, job: UploadJob) -> Optional[MediaMtxStatsPoller]:
         if not self._is_mediamtx_destination(job):
@@ -753,7 +774,14 @@ class UploadService:
 
     def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
         if self._is_mediamtx_destination(job):
-            # Probe via loopback; public playback URLs stay in the SPA/proxy.
+            if job.publisher_host == "local":
+                # The last-mile agent runs on the user's laptop, not the MediaMTX
+                # host — loopback (127.0.0.1) resolves to nothing there. Probe the
+                # same public HLS origin the browser uses instead.
+                return mediamtx_hls_playback_url("benchmark", endpoint_url=job.destination.url)
+            # Cloud encode is co-located with MediaMTX; probe via loopback. Hairpinning
+            # to the VM's own public IP can hang, so public playback URLs stay in the
+            # SPA/proxy for that case.
             return mediamtx_hls_probe_url("benchmark")
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
@@ -765,7 +793,7 @@ class UploadService:
         return zixi_hls_playback_url(playback_stream_id, endpoint_url=job.destination.url)
 
     def _managed_http_ts_stream_id(self, job: UploadJob) -> Optional[str]:
-        if (job.destination.ingest_provider or "").strip().lower() != "gcp_zixi":
+        if not _is_zixi_provider(job.destination.ingest_provider or ""):
             return None
         if job.destination.protocol in {"hls", "dash"}:
             return zixi_http_push_stream_id_for_preset(job.destination.preset_id) or "benchmark"
@@ -850,7 +878,7 @@ class UploadService:
         """
         if self._is_mediamtx_destination(job):
             poller = MediaMtxStatsPoller(endpoint_url=job.destination.url)
-            probe_url = mediamtx_hls_probe_url("benchmark")
+            probe_url = self._managed_hls_manifest_url(job)
             while not stop_event.is_set():
                 snap = poller.poll()
                 if snap.ready or snap.net_recv_mbps > 0 or snap.bytes_received > 0:
@@ -1074,6 +1102,8 @@ class UploadService:
             protocol=job.destination.protocol,
             endpoint_url=resolved_srt_url,
             run_id=job.job_id,
+            cloud_provider=job.destination.cloud_provider or "",
+            cloud_region=job.destination.cloud_region or "",
         )
         # Zixi API lookups on MediaMTX streamids (publish:benchmark) hang and
         # stall the sample loop — only poll Zixi for managed Zixi SRT.
@@ -1144,6 +1174,25 @@ class UploadService:
                         )
                         self._notify_preview_ready(job, True)
                         preview_ready = True
+                    elif job.publisher_host == "local" and manifest_url:
+                        # Last-mile jobs run off-VM — the MediaMTX metrics API stays
+                        # on loopback (127.0.0.1:9997/9998), so mtx_stats never
+                        # populates here. Fall back to a short, bounded probe of the
+                        # public HLS origin instead (same one the browser hits).
+                        try:
+                            if probe_hls_segment_ready(manifest_url, timeout=2.0).ok:
+                                logger.info(
+                                    "MediaMTX preview ready for job %s (public HLS probe)",
+                                    job.job_id,
+                                )
+                                self._notify_preview_ready(job, True)
+                                preview_ready = True
+                        except Exception:
+                            logger.debug(
+                                "MediaMTX HLS fallback probe failed for job %s",
+                                job.job_id,
+                                exc_info=True,
+                            )
 
                 # Zixi Fast HLS only: gate on segment readiness; auto-heal once if wedged.
                 if (
@@ -1276,6 +1325,7 @@ class UploadService:
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
+                    **_sample_cloud_fields(job.destination),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
@@ -1471,6 +1521,8 @@ class UploadService:
             protocol=job.destination.protocol,
             endpoint_url=job.destination.url,
             run_id=job.job_id,
+            cloud_provider=job.destination.cloud_provider or "",
+            cloud_region=job.destination.cloud_region or "",
         )
         # For MoQ, prefer GCP Monitoring on the relay VM (ingest agent is often
         # the shared Zixi/VMAF worker, not the relay itself).
@@ -1618,6 +1670,7 @@ class UploadService:
                     quic_rtt_ms=net_rtt,
                     quic_cwnd_bytes=quic_cwnd,
                     quic_packets_lost=quic_packets_lost,
+                    **_sample_cloud_fields(job.destination),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,

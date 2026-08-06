@@ -5,32 +5,45 @@ ingest (Zixi / MediaMTX / MoQ). That is the true internet-acquisition path: your
 ISP and Wi‑Fi sit between the encoder and the cloud ingest hosts.
 
 > **Hosted site:** Local publish is enabled by default (`LOCAL_PUBLISHER_ENABLED=1` on
-> the web VM). Choose **Publisher → This machine** in the UI and run the agent with the
-> shared token. Set `LOCAL_PUBLISHER_ENABLED=0` to force cloud-only encode.
+> the web VM). Choose **Webcam** under Source in the UI — the Run recipe shows a
+> copy-paste agent command for this site. Set `LOCAL_PUBLISHER_ENABLED=0` to disable the
+> Webcam option entirely (VOD-on-cloud remains available either way).
+>
+> **Hosted quick start** (after cloning the repo once):
+>
+> ```bash
+> LOCAL_PUBLISHER_API=https://moq.sean-mccarthy.net \
+> LOCAL_PUBLISHER_TOKEN=dev-local-publisher \
+> ./scripts/run-local-publisher.sh
+> ```
+>
+> Prefer OBS or your own ffmpeg? See [BYO-ENCODER.md](./BYO-ENCODER.md) for publish URLs and settings.
 
 ## Quick start (dev)
 
-Terminal 1 — API + UI (enables the feature flag):
+One terminal — API + UI + publisher agent (the agent auto-starts):
 
 ```bash
 ./scripts/dev.sh
 ```
 
-Terminal 2 — publisher agent (this machine’s ffmpeg):
+`dev.sh` launches the publisher agent alongside the API, so last-mile webcam
+works out of the box. Set `LOCAL_PUBLISHER_AUTOSTART=0` to opt out (e.g. when
+running the agent from a different machine), then start it manually:
 
 ```bash
 ./scripts/run-local-publisher.sh
 ```
 
-In the Benchmark **Run recipe**:
+In the Benchmark **Run recipe**, under **Source**, choose **Webcam** — this is the only
+source that runs on your machine. The agent opens the machine camera (AVFoundation on
+macOS, V4L2 on Linux); once it connects, a **Camera** dropdown lists the devices it
+found — pick one or leave "Auto (default camera)". Start a comparison, then **Stop** to
+end the webcam run early.
 
-1. Set **Publisher → This machine (local agent)**.
-2. Choose **Media**:
-   - **Webcam** — agent opens the machine camera (AVFoundation on macOS, V4L2 on Linux)
-   - **Local file…** — pick a video on this computer (uploaded to `uploads/`, read by the agent)
-3. Start a comparison. Use **Stop** to end a webcam run early.
-
-Repo VOD assets (Color Bars / BBB) stay available only for **Cloud VM** encode — they are not shown for This machine.
+**VOD asset** (Color Bars or an uploaded file) is the other Source option and always
+encodes on a cloud VM — there's no independent "encode location" toggle anymore; the
+source you pick fully determines where ffmpeg runs.
 
 ## Smoke test
 
@@ -69,10 +82,13 @@ Browser  →  local API (orchestrator, SSE, Results)
 
 | UI choice | `media_path` sent to API/agent |
 |-----------|--------------------------------|
-| Webcam (local) | `device:webcam` |
-| Local file | Absolute path under `uploads/` from `POST /api/media/upload` |
-| Color Bars (cloud only) | `dummy.mp4` |
-| Webcam (cloud) | `udp://127.0.0.1:…` via API live bridge |
+| Webcam | `device:webcam` — or `device:webcam:N` when a camera is picked in the UI |
+| Color Bars (VOD, cloud) | `dummy.mp4` |
+| Uploaded file (VOD, cloud) | Absolute path under `uploads/` from `POST /api/media/upload` |
+
+The API still accepts `publisher_host: "local"` with an uploaded file path (used by
+`smoke-local-publisher.sh` and the agent test suite) — it's just not exposed as a UI
+choice anymore, since Webcam is the only Source option that runs on your machine.
 
 ## Dependencies (Mac + Linux)
 
@@ -85,7 +101,8 @@ Browser  →  local API (orchestrator, SSE, Results)
 
 `./scripts/ensure-publisher-tools.sh` (called from `run-local-publisher.sh`) tries to install the optional pieces.
 
-Optional env overrides:
+Optional env overrides (defaults when no camera is picked in the UI — the UI
+Camera dropdown wins for the video device):
 
 - `LOCAL_WEBCAM_AVFOUNDATION=0:0` — macOS AVFoundation `video:audio` indices
 - `LOCAL_WEBCAM_DEVICE=/dev/video0` — Linux V4L2 device
@@ -116,6 +133,12 @@ flag is enabled server-side for that deployment.
 - Browser camera preview is released before start so macOS can hand the device to ffmpeg.
 - Local file upload assumes the agent can read the API host’s `uploads/` directory (same laptop in dev).
 - One or more agents can connect; jobs go to the least-busy ready agent.
+
+## Related docs
+
+- [BYO-ENCODER.md](./BYO-ENCODER.md) — publish with OBS / your ffmpeg (playback monitoring)
+- [RTMP-STARTUP.md](./RTMP-STARTUP.md) — RTMP join latency
+- [METRICS.md](./METRICS.md) — chart definitions
 
 ## Roadmap toward hosted users
 

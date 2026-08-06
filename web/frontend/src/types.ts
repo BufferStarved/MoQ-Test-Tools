@@ -16,6 +16,8 @@ export interface Preset {
   requires_env: boolean;
   supports_vmaf?: boolean;
   ingest_provider?: string;
+  cloud_provider?: string;
+  cloud_region?: string;
   web_available?: boolean;
 }
 
@@ -59,6 +61,8 @@ export interface UploadSample {
   transport_recv_rate_mbps?: number;
   client_memory_percent?: number;
   client_disk_percent?: number;
+  cloud_provider?: string;
+  cloud_region?: string;
   server_cpu_percent?: number;
   server_memory_percent?: number;
   server_disk_percent?: number;

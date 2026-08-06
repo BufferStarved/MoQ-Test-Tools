@@ -18,7 +18,10 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from live_webcam import DEFAULT_LIVE_DURATION_SEC, MAX_LIVE_DURATION_SEC, live_webcam_manager
+# Max duration for a live source (device webcam via the local publisher
+# agent) — user can stop earlier from the UI.
+DEFAULT_LIVE_DURATION_SEC = 300
+MAX_LIVE_DURATION_SEC = 300
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
@@ -54,7 +57,6 @@ from encode_profile import (  # noqa: E402
 )
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
-    DEVICE_WEBCAM_MEDIA,
     MPEGTS_VIDEO_BSF,
     is_device_webcam_source,
     with_srt_stream_id,
@@ -594,80 +596,13 @@ def presets(protocol: Optional[str] = None):
     return {"presets": items}
 
 
-class CreateLiveSessionRequest(BaseModel):
-    stream_count: int = Field(default=2, ge=1, le=9)
-    duration_sec: int = Field(default=DEFAULT_LIVE_DURATION_SEC, ge=5, le=MAX_LIVE_DURATION_SEC)
-
-
-@app.post("/api/live/sessions")
-def create_live_session(request: CreateLiveSessionRequest):
-    try:
-        session = live_webcam_manager.create(
-            stream_count=request.stream_count,
-            duration_sec=request.duration_sec,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "session_id": session.id,
-        "duration_sec": session.duration_sec,
-        "media_paths": session.media_paths,
-        "ws_path": f"/api/live/sessions/{session.id}/ws",
-    }
-
-
-@app.get("/api/live/sessions/{session_id}")
-def live_session_status(session_id: str):
-    session = live_webcam_manager.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Live session not found")
-    return {
-        "session_id": session.id,
-        # Capture->bridge-output lag: the shared upstream component every
-        # per-protocol latency estimate is blind to (see LiveWebcamSession).
-        "bridge_lag_ms": round(session.bridge_lag_ms),
-        "failed": session.failed,
-    }
-
-
-@app.websocket("/api/live/sessions/{session_id}/ws")
-async def live_session_ws(websocket: WebSocket, session_id: str):
-    session = live_webcam_manager.get(session_id)
-    if session is None:
-        await websocket.close(code=4404)
-        return
-
-    await websocket.accept()
-    await websocket.send_json({"type": "accepted", "session_id": session_id})
-    try:
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-            data = message.get("bytes")
-            if data:
-                session.write(data)
-                if session.failed:
-                    await websocket.send_json({"type": "error", "message": session.failed})
-                    break
-                if session.ready.is_set() and not session._ready_notified:
-                    session._ready_notified = True
-                    await websocket.send_json({"type": "ready", "bytes_in": session._bytes_in})
-            text = message.get("text")
-            if text == "end":
-                break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        live_webcam_manager.close(session_id)
-
-
 @app.post("/api/uploads")
 def create_upload(request: CreateUploadRequest):
     media_path = request.media_path.strip()
     device_webcam = is_device_webcam_source(media_path)
-    is_udp_live = media_path.lower().startswith(("udp://", "tcp://", "rtsp://"))
-    is_live = is_udp_live or device_webcam
+    # The only live source left after removing the browser webcam bridge is
+    # the local publisher agent opening a machine camera directly.
+    is_live = device_webcam
 
     publisher_host = (request.publisher_host or "cloud").strip().lower()
     if publisher_host not in {"cloud", "local"}:
@@ -691,14 +626,6 @@ def create_upload(request: CreateUploadRequest):
                 ),
             )
         # Local acquisition: webcam device or a user-chosen file — not repo VOD.
-        if is_udp_live:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "UDP webcam bridge is for cloud encode. "
-                    "Use media_path 'device:webcam' or a local file with publisher_host=local."
-                ),
-            )
         lower = media_path.lower()
         if lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
             raise HTTPException(
@@ -719,7 +646,9 @@ def create_upload(request: CreateUploadRequest):
             except OSError:
                 pass
         else:
-            media_path = DEVICE_WEBCAM_MEDIA
+            # Normalize case but keep the optional camera index from the UI
+            # picker (device:webcam:N) so the agent opens the chosen device.
+            media_path = lower
     else:
         if not is_live:
             if not os.path.isabs(media_path):
@@ -736,9 +665,6 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Live webcam (browser bridge): encoder VMAF is supported — the encode
-    # ffmpeg stream-copies the exact bridge-normalized input it consumed as
-    # the per-job reference (see UploadJob.vmaf_reference_capture_path).
     # Ingest VMAF stays disabled for live sources (no reference on the ingest
     # host), and device webcams stay disabled entirely (raw video input
     # cannot be stream-copied as a reference).
@@ -1308,7 +1234,8 @@ def _probe_segment_decodable(segment: bytes) -> dict:
 MOQ_RELAY_CERT_SHA256: dict[str, str] = {
     # ECDSA self-signed cert (14-day) for WebTransport browser pinning — see
     # infra/moqx/scripts/configure-webtransport-cert.sh
-    "34-28-164-90.sslip.io": "7115b12274dcf092c3e77d763111f0a2088a0f2029efc8e1f223a9584b1f5b54",
+    # Rotated 2026-07-31 (14-day WebTransport ECDSA pin; renew before Aug 14)
+    "34-28-164-90.sslip.io": "2f970ef055830e421d1060f53ab9d1388b3ca8196a44aab1c723438801facf7d",
 }
 
 

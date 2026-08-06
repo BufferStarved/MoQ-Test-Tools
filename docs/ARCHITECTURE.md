@@ -23,7 +23,9 @@ file / webcam  →  ffmpeg on moq-web VM  →  Zixi (SRT/RTMP → HLS :7777)  �
                                       Ingest agent :8090
                                       (server-side VMAF / CMAF)
 
-Demo hosts are GCP us-central1 today; AWS/Linode Zixi presets are planned.
+Demo hosts are GCP us-central1 today; a **Linode mirror stack** activates when
+`LINODE_STACK_ENABLED=1` and `LINODE_ZIXI_IP` / `LINODE_WEB_IP` / `LINODE_RELAY_IP`
+are set on the web VM (see `infra/linode/LINODE-STACK-RUNBOOK.md`). AWS Zixi presets remain planned.
 ```
 
 Typical GCP layout (us-central1):
@@ -36,8 +38,10 @@ Typical GCP layout (us-central1):
 
 ## Client path
 
-1. User configures two or more ingest endpoints and a media source (dummy MP4 or webcam).
-2. Webcam mode: `getUserMedia` → `MediaRecorder` → WebSocket → API ffmpeg bridge → per-leg UDP MPEG-TS sources.
+1. User picks one of two source/encode pairings: a VOD asset encoded on the cloud VM, or a webcam
+   encoded by the local publisher agent on the user's own machine (real ISP/last-mile upload path).
+2. Webcam mode: local publisher agent opens the machine's camera (AVFoundation / V4L2) directly
+   with ffmpeg — no browser capture or bridge involved.
 3. API starts one `UploadJob` per leg; UI subscribes to SSE samples.
 4. Preview players:
    - **MoQ:** vendored [moq-playa](../web/frontend/vendor/moq-playa) over WebTransport.
@@ -73,7 +77,7 @@ See [METRICS.md](./METRICS.md) for field-level detail. High-level stages:
 | MoQ publisher wiring | [`src/moq_publish.py`](../src/moq_publish.py) |
 | Metric CSV/summary | [`src/metrics.py`](../src/metrics.py), [`docs/METRICS.md`](./METRICS.md) |
 | Web API | [`web/api/main.py`](../web/api/main.py), [`web/api/job_manager.py`](../web/api/job_manager.py) |
-| Live webcam bridge | [`web/api/live_webcam.py`](../web/api/live_webcam.py) |
+| Local publisher agent hub | [`web/api/publisher_hub.py`](../web/api/publisher_hub.py) |
 | Frontend | [`web/frontend/src/App.tsx`](../web/frontend/src/App.tsx) |
 | Players | [`web/frontend/src/players/`](../web/frontend/src/players/) |
 | Ingest agent | [`ingest_agent/`](../ingest_agent/) |

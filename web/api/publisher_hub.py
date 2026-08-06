@@ -72,6 +72,7 @@ class PublisherHub:
                     "ready": bool((agent.capabilities or {}).get("ready")),
                     "platform": (agent.capabilities or {}).get("platform"),
                     "deps": (agent.capabilities or {}).get("deps") or [],
+                    "webcam_devices": (agent.capabilities or {}).get("webcam_devices") or [],
                     "connected_at": agent.connected_at,
                     "active_jobs": len(agent.pending),
                 }

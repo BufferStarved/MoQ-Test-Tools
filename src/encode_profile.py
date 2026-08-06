@@ -294,7 +294,7 @@ def build_video_encode_args(
     # Scale + PTS-anchored UTC burn-in — do not insert an fps= filter here.
     # Stacking fps=30 with -re pacing + openmoq --paced produced "half-speed"
     # looking playback even when HTMLVideoElement.currentTime advanced at 1×.
-    # Webcam/UDP VFR is normalized in the live bridge (web/api/live_webcam.py).
+    # Device webcam VFR is normalized here via -fps_mode cfr below.
     args: List[str] = [
         "-vf",
         f"scale=-2:{ladder.height},{burnin}",

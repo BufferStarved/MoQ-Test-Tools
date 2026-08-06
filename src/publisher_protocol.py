@@ -23,6 +23,8 @@ def destination_to_dict(destination: DestinationProfile) -> Dict[str, Any]:
         "label": destination.label,
         "preset_id": destination.preset_id,
         "ingest_provider": destination.ingest_provider,
+        "cloud_provider": destination.cloud_provider,
+        "cloud_region": destination.cloud_region,
         "moq_target": None,
     }
     if destination.moq_target is not None:
@@ -48,6 +50,8 @@ def destination_from_dict(data: Dict[str, Any]) -> DestinationProfile:
         label=str(data.get("label") or ""),
         preset_id=str(data.get("preset_id") or ""),
         ingest_provider=str(data.get("ingest_provider") or ""),
+        cloud_provider=str(data.get("cloud_provider") or ""),
+        cloud_region=str(data.get("cloud_region") or ""),
         moq_target=moq_target,
     )
 

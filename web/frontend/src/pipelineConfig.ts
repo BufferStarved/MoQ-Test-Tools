@@ -139,13 +139,13 @@ function ingestRows(stream: StreamConfigInput): ConfigDetailRow[] {
         ? `Stream id: ${stream.zixiStreamId}`
         : "SRT/RTMP input → Fast HLS / MPEG-TS origin",
     });
-  } else if (ingest === "gcp_mediamtx") {
+  } else if (ingest === "gcp_mediamtx" || ingest.endsWith("_mediamtx")) {
     rows.push({
       label: "Ingest role",
       value: "MediaMTX",
       note: "SRT/RTMP/WHIP → LL-HLS / LL-DASH / WHEP",
     });
-  } else if (ingest === "gcp_moq_relay") {
+  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
     rows.push({
       label: "Ingest role",
       value: "OpenMOQ relay",
@@ -188,7 +188,7 @@ function packagerRows(
         note: "Grows with latency budget up to 6s",
       });
     }
-  } else if (ingest === "gcp_mediamtx") {
+  } else if (ingest === "gcp_mediamtx" || ingest.endsWith("_mediamtx")) {
     if (mode === "ll-dash" || mode === "dash") {
       rows.push({
         label: "Packager",
@@ -208,7 +208,7 @@ function packagerRows(
         note: "Part duration follows MediaMTX low-latency HLS settings",
       });
     }
-  } else if (ingest === "gcp_moq_relay") {
+  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
     rows.push({
       label: "Packager",
       value: "MoQ / CMAF objects",

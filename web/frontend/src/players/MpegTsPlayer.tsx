@@ -5,6 +5,7 @@ import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
+import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MpegTsPlayerProps {
   url: string;
@@ -19,6 +20,8 @@ interface MpegTsPlayerProps {
   encoderLagMs?: number;
   /** Skip the pre-connect TS byte probe when preview_ready already validated HTTP-TS. */
   skipConnectProbe?: boolean;
+  jobStatus?: string;
+  benchmarkLoading?: boolean;
 }
 
 /** Max automatic reconnects after the Zixi HTTP-TS session ends on republish. */
@@ -38,10 +41,14 @@ export default function MpegTsPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   skipConnectProbe = false,
+  jobStatus,
+  benchmarkLoading = false,
 }: MpegTsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading MPEG-TS player...");
+  const [diagLines, setDiagLines] = useState<string[]>([]);
+  const lastErrorRef = useRef<string | null>(null);
   const sessionRef = useRef({
     maxVideoTime: 0,
     videoTimeOrigin: null as number | null,
@@ -150,6 +157,15 @@ export default function MpegTsPlayer({
       errorCount: 0,
     };
     rebufferRef.current = new RebufferTracker();
+    setDiagLines([]);
+    lastErrorRef.current = null;
+
+    function pushDiag(line: string) {
+      if (!destroyed) {
+        setDiagLines((current) => [...current.slice(-12), line]);
+      }
+    }
+    pushDiag(`url=${url}`);
 
     const clearReconnect = () => {
       if (reconnectTimer != null) {
@@ -176,8 +192,11 @@ export default function MpegTsPlayer({
       if (destroyed) {
         return;
       }
+      pushDiag(`reconnect_reason=${reason}`);
       if (reconnects >= MAX_RECONNECTS) {
-        setError(`MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`);
+        const message = `MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`;
+        lastErrorRef.current = message;
+        setError(message);
         setStatus("Stopped");
         return;
       }
@@ -203,6 +222,9 @@ export default function MpegTsPlayer({
             1,
             Math.round(Date.now() - sessionRef.current.liveStartedAtMs),
           );
+          pushDiag(
+            `first_frame time=${relative.toFixed(2)} ttff=${sessionRef.current.ttffMs}ms size=${video.videoWidth}x${video.videoHeight}`,
+          );
         }
       }
     };
@@ -224,7 +246,10 @@ export default function MpegTsPlayer({
       try {
         mpegtsMod = mpegtsMod ?? (await import("mpegts.js"));
       } catch {
-        setError("Failed to load mpegts.js");
+        const message = "Failed to load mpegts.js";
+        lastErrorRef.current = message;
+        pushDiag(`fatal=${message}`);
+        setError(message);
         return;
       }
       if (destroyed) {
@@ -232,7 +257,10 @@ export default function MpegTsPlayer({
       }
       const mpegts = mpegtsMod.default;
       if (!mpegts.isSupported()) {
-        setError("MPEG-TS MSE playback is not supported in this browser.");
+        const message = "MPEG-TS MSE playback is not supported in this browser.";
+        lastErrorRef.current = message;
+        pushDiag(`fatal=${message}`);
+        setError(message);
         return;
       }
 
@@ -242,15 +270,22 @@ export default function MpegTsPlayer({
       // with "error -1". Require real TS sync bytes before attaching.
       const proxied = proxiedPlaybackUrl(url);
       // Backend preview_ready already validated sync bytes — skip duplicate probe.
-      if (!skipConnectProbe) {
+      if (skipConnectProbe) {
+        pushDiag("connect_probe=skipped (preview_ready already confirmed)");
+      } else {
+        pushDiag(`connect_probe=start proxied=${proxied}`);
         const probe = await fetch(proxied, {
           cache: "no-store",
           signal: AbortSignal.timeout(4000),
-        }).catch(() => null);
+        }).catch((err: unknown) => {
+          pushDiag(`connect_probe_fetch_error=${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        });
         if (destroyed) {
           return;
         }
         if (!probe || !probe.ok || !probe.body) {
+          pushDiag(`connect_probe=fail http=${probe ? probe.status : "n/a"}`);
           scheduleReconnect(
             probe ? `HTTP ${probe.status}` : "manifest unreachable",
           );
@@ -276,6 +311,7 @@ export default function MpegTsPlayer({
         if (destroyed) {
           return;
         }
+        pushDiag(`connect_probe=done http=${probe.status} bytes=${bytes} sync=${sync}`);
         if (bytes < 188 || !sync) {
           scheduleReconnect(
             bytes === 0
@@ -294,7 +330,14 @@ export default function MpegTsPlayer({
           url: proxied,
         },
         {
-          enableWorker: true,
+          // The IO/network loader runs *inside* the worker when enabled, in a
+          // separate realm with its own fetch(). That loader was throwing an
+          // immediate NetworkError(-1) against our /api/playback/fetch proxy
+          // even while a plain main-thread fetch() to the same URL succeeded —
+          // main-thread network loading sidesteps whatever the worker realm
+          // was tripping on (relative URL resolution against the worker's
+          // blob: location, CSP, or an internal abort race).
+          enableWorker: false,
           liveBufferLatencyChasing: true,
           enableStashBuffer: false,
           autoCleanupSourceBuffer: true,
@@ -303,15 +346,23 @@ export default function MpegTsPlayer({
       player = instance;
       instance.attachMediaElement(video);
       instance.load();
-      void instance.play().catch(() => {
-        /* autoplay may be blocked; controls remain */
+      pushDiag("mpegtsjs=attached load() called");
+      void instance.play().catch((err: unknown) => {
+        // autoplay may be blocked; controls remain
+        pushDiag(`play_rejected=${err instanceof Error ? err.message : String(err)}`);
       });
       setStatus("Playing (HTTP-TS)");
 
-      instance.on(mpegts.Events.ERROR, (_type: string, _detail: string, info: { code?: number }) => {
+      instance.on(mpegts.Events.MEDIA_INFO, (info: { videoCodec?: string; audioCodec?: string }) => {
+        if (!destroyed) {
+          pushDiag(`media_info video=${info?.videoCodec ?? "?"} audio=${info?.audioCodec ?? "?"}`);
+        }
+      });
+      instance.on(mpegts.Events.ERROR, (type: string, detail: string, info: { code?: number }) => {
         if (destroyed) {
           return;
         }
+        pushDiag(`mpegtsjs_error type=${type} detail=${detail} code=${info?.code ?? "n/a"}`);
         destroyPlayer();
         scheduleReconnect(info?.code != null ? `error ${info.code}` : "stream error");
       });
@@ -320,6 +371,7 @@ export default function MpegTsPlayer({
           return;
         }
         // Live HTTP-TS ends cleanly when the publisher disconnects — re-pull.
+        pushDiag("loading_complete (publisher session ended)");
         destroyPlayer();
         scheduleReconnect("publisher session ended");
       });
@@ -354,6 +406,16 @@ export default function MpegTsPlayer({
       </div>
       {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
+      <PlayerDiagnostics
+        engine="mpegts"
+        playbackGate={playbackGate}
+        jobStatus={jobStatus}
+        benchmarkLoading={benchmarkLoading}
+        status={status}
+        error={error ?? lastErrorRef.current}
+        lines={diagLines}
+        manifestUrl={url}
+      />
     </div>
   );
 }

@@ -5,7 +5,11 @@ Covers:
   - API smoke
   - Player↔host compatibility expectations (unit-style)
   - VOD (dummy.mp4) three-leg fair race + Chrome playback + metric accuracy
-  - Webcam/live path (ffmpeg WebM → live session WS → three uploads)
+
+Webcam is now local-machine-ffmpeg only (via the local publisher agent opening
+a real camera device on the tester's own machine), so it can't be exercised by
+this headless prod harness — the browser-bridge webcam path this used to test
+has been removed.
 
 Usage:
   BASE_URL=https://moq.sean-mccarthy.net DURATION=24 python3 scripts/prod_qa_auto_players.py
@@ -15,11 +19,9 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,14 +29,13 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("BASE_URL", "https://moq.sean-mccarthy.net").rstrip("/")
 DURATION = int(os.environ.get("DURATION", "24"))
 MEDIA = Path(os.environ.get("MEDIA", str(ROOT / "dummy.mp4")))
 SKIP_CHROME = os.environ.get("SKIP_CHROME", "").strip().lower() in {"1", "true", "yes"}
-SKIP_WEBCAM = os.environ.get("SKIP_WEBCAM", "").strip().lower() in {"1", "true", "yes"}
 CHROME_BIN = os.environ.get(
     "CHROME_BIN",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -515,193 +516,13 @@ def run_vod(report: SuiteReport) -> None:
         report.add("results_archive_lists_comparison", False, str(exc))
 
 
-def feed_webcam_ws(ws_url: str, seconds: int = 28) -> Tuple[bool, str]:
-    """Generate a synthetic webcam WebM and stream it to the live session WS."""
-    try:
-        import websocket  # type: ignore
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "websocket-client"])
-        import websocket  # type: ignore
-
-    ffmpeg = shutil.which("ffmpeg") or "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
-    if not Path(ffmpeg).exists() and not shutil.which("ffmpeg"):
-        return False, "ffmpeg_missing"
-    ffmpeg = shutil.which("ffmpeg") or ffmpeg
-
-    tmp = Path(tempfile.mkdtemp()) / "webcam-feed.webm"
-    # Continuous WebM for the live bridge (MediaRecorder-shaped).
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc=size=1280x720:rate=30",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=1000:sample_rate=48000",
-        "-t",
-        str(max(10, seconds)),
-        "-c:v",
-        "libvpx",
-        "-b:v",
-        "1M",
-        "-c:a",
-        "libopus",
-        "-f",
-        "webm",
-        str(tmp),
-    ]
-    try:
-        subprocess.check_call(cmd, timeout=seconds + 30)
-    except Exception as exc:
-        tmp.unlink(missing_ok=True)
-        return False, f"ffmpeg_webm_failed:{exc}"
-
-    errors: List[str] = []
-    ready = threading.Event()
-
-    def on_message(_ws, message):
-        try:
-            if isinstance(message, bytes):
-                return
-            payload = json.loads(message)
-            if payload.get("type") == "ready":
-                ready.set()
-            if payload.get("type") == "error":
-                errors.append(payload.get("message") or "ws_error")
-        except Exception:
-            pass
-
-    ws = websocket.WebSocketApp(ws_url, on_message=on_message)
-    thread = threading.Thread(target=ws.run_forever, kwargs={"ping_interval": 20}, daemon=True)
-    thread.start()
-    time.sleep(1.0)
-    if not ws.sock or not ws.sock.connected:
-        tmp.unlink(missing_ok=True)
-        return False, "ws_connect_failed"
-
-    # Stream file bytes in chunks (simulates MediaRecorder blobs).
-    raw = tmp.read_bytes()
-    if not raw:
-        ws.close()
-        tmp.unlink(missing_ok=True)
-        return False, "empty_webm"
-    chunk = 32_768
-    started = time.time()
-    offset = 0
-    sent = 0
-    while time.time() - started < seconds and not errors:
-        end = min(offset + chunk, len(raw))
-        try:
-            ws.send(raw[offset:end], opcode=websocket.ABNF.OPCODE_BINARY)
-            sent += end - offset
-        except Exception as exc:
-            errors.append(f"send:{exc}")
-            break
-        offset = end if end < len(raw) else 0
-        # Pace roughly realtime for a ~1Mbps encode.
-        time.sleep(0.03)
-    try:
-        ws.send("end")
-    except Exception:
-        pass
-    time.sleep(0.5)
-    ws.close()
-    try:
-        tmp.unlink(missing_ok=True)
-        tmp.parent.rmdir()
-    except Exception:
-        pass
-    if errors:
-        return False, ";".join(errors[:3])
-    return True, f"fed_bytes={sent} file_bytes={len(raw)} ready={ready.is_set()}"
-
-
-def run_webcam(report: SuiteReport) -> None:
-    print("\n== WEBCAM / LIVE PATH ==")
-    if SKIP_WEBCAM:
-        report.add("webcam_suite", True, "skipped")
-        return
-
-    session = api(
-        "POST",
-        "/api/live/sessions",
-        data={"stream_count": 3, "duration_sec": max(25, DURATION + 5)},
-    )
-    session_id = session["session_id"]
-    media_paths = session["media_paths"]
-    ws_path = session["ws_path"]
-    report.add("webcam_session_created", len(media_paths) == 3, f"id={session_id} paths={media_paths}")
-
-    # Prod WS is wss via the site host
-    if ws_path.startswith("/"):
-        ws_url = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + ws_path
-    else:
-        ws_url = ws_path
-
-    feed_thread_result: Dict[str, Any] = {}
-
-    def _feed():
-        ok, detail = feed_webcam_ws(ws_url, seconds=max(26, DURATION + 4))
-        feed_thread_result["ok"] = ok
-        feed_thread_result["detail"] = detail
-
-    feeder = threading.Thread(target=_feed, daemon=True)
-    feeder.start()
-    time.sleep(3)
-
-    comparison_id = str(uuid.uuid4())
-    jobs = []
-    for idx, leg in enumerate(AUTO_LEGS):
-        job = start_job(
-            media_path=media_paths[idx],
-            preset_id=leg["preset_id"],
-            comparison_id=comparison_id,
-            stream_index=idx,
-            stream_label=f"Webcam {leg['label']}",
-            duration_sec=DURATION,
-        )
-        jobs.append((leg, job["id"]))
-        print(f"  webcam started {leg['id']} job={job['id']}")
-
-    feeder.join(timeout=DURATION + 40)
-    report.add(
-        "webcam_ws_feed",
-        bool(feed_thread_result.get("ok")),
-        str(feed_thread_result.get("detail")),
-    )
-
-    for leg, jid in jobs:
-        final = wait_complete(jid, timeout=DURATION + 60)
-        samples = final.get("samples") or []
-        ok_metrics, metrics_detail = metric_accuracy(samples, leg)
-        # Live webcam can be flakier on bitrate early; require completed + some samples.
-        completed = final.get("status") == "completed"
-        report.add(
-            f"webcam_{leg['id']}_completed",
-            completed,
-            f"status={final.get('status')} err={final.get('error')} samples={len(samples)}",
-        )
-        report.add(
-            f"webcam_{leg['id']}_metrics",
-            ok_metrics or (completed and len(samples) >= 3 and max(float(s.get('encoded_bitrate_kbps') or 0) for s in samples) > 200),
-            metrics_detail,
-        )
-
-
 def main() -> int:
     print(f"BASE_URL={BASE_URL}")
-    print(f"DURATION={DURATION} MEDIA={MEDIA} SKIP_CHROME={SKIP_CHROME} SKIP_WEBCAM={SKIP_WEBCAM}")
+    print(f"DURATION={DURATION} MEDIA={MEDIA} SKIP_CHROME={SKIP_CHROME}")
     report = SuiteReport()
     try:
         smoke(report)
         run_vod(report)
-        run_webcam(report)
     except Exception as exc:
         report.add("suite_exception", False, str(exc))
         raise

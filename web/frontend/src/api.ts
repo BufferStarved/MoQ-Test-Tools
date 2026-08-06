@@ -36,12 +36,18 @@ export function checkHealth(): Promise<{ status: string }> {
   return request("/health");
 }
 
+export interface WebcamDeviceInfo {
+  index: number;
+  name: string;
+}
+
 export interface LocalPublisherAgentInfo {
   agent_id: string;
   hostname: string;
   ready?: boolean;
   platform?: string;
   active_jobs?: number;
+  webcam_devices?: WebcamDeviceInfo[];
 }
 
 export interface FeatureFlags {
@@ -131,30 +137,6 @@ export function createUpload(payload: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-}
-
-export function createLiveSession(payload: {
-  stream_count: number;
-  duration_sec?: number;
-}): Promise<{
-  session_id: string;
-  duration_sec: number;
-  media_paths: string[];
-  ws_path: string;
-}> {
-  return request("/live/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-export function fetchLiveSessionStatus(sessionId: string): Promise<{
-  session_id: string;
-  bridge_lag_ms: number;
-  failed: string | null;
-}> {
-  return request(`/live/sessions/${sessionId}`);
 }
 
 export interface PlaybackMetricsSnapshot {

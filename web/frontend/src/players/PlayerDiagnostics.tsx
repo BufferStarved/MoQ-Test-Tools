@@ -3,7 +3,7 @@ import type { PlaybackGate } from "../playbackGate";
 import { fetchPlaybackProbe, fetchZixiSrtDebug } from "../api";
 
 export interface PlayerDiagnosticsProps {
-  engine: "hls" | "moq";
+  engine: "hls" | "moq" | "mpegts";
   playbackGate: PlaybackGate;
   jobStatus?: string;
   benchmarkLoading?: boolean;
@@ -191,12 +191,13 @@ export function PlayerDiagnostics({
   }
 
   const healthTone = error ? "bad" : playbackGate === "live" ? "ok" : "idle";
+  const engineLabel = engine === "mpegts" ? "MPEG-TS" : engine.toUpperCase();
 
   return (
     <details className="player-diagnostics">
       <summary>
         <span className={`diagnostics-health-dot tone-${healthTone}`} aria-hidden="true" />
-        Playback diagnostics ({engine.toUpperCase()})
+        Playback diagnostics ({engineLabel})
         <span className="diagnostics-summary-status">{error ? "issue detected" : status}</span>
       </summary>
       <ul>
