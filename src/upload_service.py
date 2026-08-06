@@ -195,6 +195,18 @@ class UploadJob:
         if not self.ffmpeg_cmd:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
 
+    def refresh_ffmpeg_cmd(self) -> None:
+        """Re-derive ``ffmpeg_cmd`` from the current ``media_path``.
+
+        ``__post_init__`` bakes the command at construction time. Callers
+        that rewrite ``media_path`` afterwards (the publisher agent swaps
+        ``device:webcam`` for a brokered loopback ``udp://`` URL) must call
+        this, or pipelines that reuse the frozen command (RTMP/WHIP direct,
+        SRT direct) silently keep the original device-capture input and open
+        the camera directly — the 2026-08-06 webcam-comparison incident.
+        """
+        self.ffmpeg_cmd = self._build_ffmpeg_cmd()
+
     def _video_args(self) -> List[str]:
         # MediaMTX is configured with hlsSegmentDuration=1s, but LL-HLS can
         # only cut segments on IDRs — a 2s GOP silently doubles the segment
