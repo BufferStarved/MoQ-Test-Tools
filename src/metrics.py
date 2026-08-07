@@ -178,6 +178,11 @@ class MetricsCollector:
         self._peak_bandwidth_sent_mbps = 0.0
         self._peak_bandwidth_recv_mbps = 0.0
         self._run_started_at: Optional[float] = None
+        self._last_sample_at: Optional[float] = None
+        # Fix 9: psutil cpu_percent(interval=None) measures since the *previous*
+        # call on the same Process object; a fresh Process per sample always
+        # returned 0.0. Cache handles per pid for the collector's lifetime.
+        self._procs: Dict[int, psutil.Process] = {}
         self._init_csv()
 
     def _init_csv(self) -> None:
@@ -248,6 +253,7 @@ class MetricsCollector:
         net_recv_mbps: float = 0.0,
         net_loss_pct: float = 0.0,
         net_retrans_pct: float = 0.0,
+        total_bytes_sent: Optional[int] = None,
     ) -> float:
         fps_stability = 0.0
         if fps > 0:
@@ -260,9 +266,19 @@ class MetricsCollector:
             mem_total = 0.0
             if pid > 0:
                 for proc_pid in pids:
-                    process = psutil.Process(proc_pid)
-                    cpu_total += process.cpu_percent(interval=None)
-                    mem_total += process.memory_info().rss / (1024 * 1024)
+                    try:
+                        process = self._procs.get(proc_pid)
+                        if process is None:
+                            process = psutil.Process(proc_pid)
+                            self._procs[proc_pid] = process
+                            # Prime the CPU window; the first call always reads 0.
+                            process.cpu_percent(interval=None)
+                        cpu_total += process.cpu_percent(interval=None)
+                        mem_total += process.memory_info().rss / (1024 * 1024)
+                    except psutil.Error:
+                        # Dead/replaced pid: drop the stale handle, keep the row.
+                        self._procs.pop(proc_pid, None)
+                        continue
 
             send_mbps = (
                 encoder_send_rate_mbps
@@ -270,15 +286,27 @@ class MetricsCollector:
                 else (encoded_bitrate_kbps / 1000.0)
             )
             recv_mbps = transport_recv_rate_mbps
-            self._total_bytes_sent += int(send_mbps * 1_000_000 / 8)
-            self._total_bytes_received += int(recv_mbps * 1_000_000 / 8)
-            self._peak_bandwidth_sent_mbps = max(self._peak_bandwidth_sent_mbps, send_mbps)
-            self._peak_bandwidth_recv_mbps = max(self._peak_bandwidth_recv_mbps, recv_mbps)
 
             now = time.time()
             if self._run_started_at is None:
                 self._run_started_at = now
             wall_elapsed = max(0.0, now - self._run_started_at)
+
+            # Throughput: prefer the encoder's real cumulative byte counter
+            # (ffmpeg -progress total_size). Only fall back to integrating the
+            # rate over the *actual* wall delta between samples — the old
+            # rate×1s assumption undercounted whenever the loop skipped a tick.
+            if total_bytes_sent is not None and total_bytes_sent > 0:
+                self._total_bytes_sent = max(self._total_bytes_sent, int(total_bytes_sent))
+            elif self._last_sample_at is not None:
+                delta_sec = max(0.0, now - self._last_sample_at)
+                self._total_bytes_sent += int(send_mbps * 1_000_000 / 8 * delta_sec)
+            if self._last_sample_at is not None:
+                delta_sec = max(0.0, now - self._last_sample_at)
+                self._total_bytes_received += int(recv_mbps * 1_000_000 / 8 * delta_sec)
+            self._last_sample_at = now
+            self._peak_bandwidth_sent_mbps = max(self._peak_bandwidth_sent_mbps, send_mbps)
+            self._peak_bandwidth_recv_mbps = max(self._peak_bandwidth_recv_mbps, recv_mbps)
             resolved_encode_lag = (
                 encode_lag_ms
                 if encode_lag_ms > 0
