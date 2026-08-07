@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from gcp_host_metrics import GcpHostMetricsPoller
 from ingest_agent_client import IngestAgentClient, resolve_ingest_agent
-from system_metrics import read_client_host_metrics
+from system_metrics import HostCpuTracker, read_client_host_metrics
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
@@ -50,6 +50,12 @@ class IngestHostMetricsPoller:
             self._gcp.enabled = False
             self.enabled = True
             self._prefer_gcp = False
+            # Own CPU baseline: the sample loop also calls the module-level
+            # psutil.cpu_percent(interval=None) for *client* host metrics in
+            # the same thread, and psutil shares one cached window per thread.
+            # Without a private tracker this poll always measured the ~0 ms
+            # since that client call and reported server CPU as a flat 0.0.
+            self._cpu_tracker = HostCpuTracker()
             return
 
         self._config = resolve_ingest_agent(endpoint_url, agent_url=agent_url)
@@ -63,7 +69,7 @@ class IngestHostMetricsPoller:
 
     def poll(self) -> IngestHostMetricsSnapshot:
         if self._use_local:
-            local = read_client_host_metrics()
+            local = read_client_host_metrics(cpu_tracker=self._cpu_tracker)
             return IngestHostMetricsSnapshot(
                 cpu_percent=local.cpu_percent,
                 memory_percent=local.memory_percent,

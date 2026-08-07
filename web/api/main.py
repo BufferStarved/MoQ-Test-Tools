@@ -1339,11 +1339,27 @@ def result_detail(filename: str):
     if ".." in filename or "/" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
-    csv_path = ROOT_DIR / "results" / filename
-    if not csv_path.exists():
+    result_path = ROOT_DIR / "results" / filename
+    if not result_path.exists():
         raise HTTPException(status_code=404, detail="Result not found")
 
-    summary = read_result_summary(str(csv_path))
+    # .summary.json files are already the computed summary. Running them
+    # through the CSV parser returned nonsense (each raw JSON line became a
+    # "row", every average read 0). Return the parsed JSON directly instead.
+    if filename.endswith(".json"):
+        try:
+            with open(result_path, mode="r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Result JSON could not be read: {exc}",
+            )
+        if not isinstance(payload, dict):
+            return {"filename": filename, "data": payload}
+        return {"filename": filename, **payload}
+
+    summary = read_result_summary(str(result_path))
     return {"filename": filename, **summary}
 
 
