@@ -671,7 +671,21 @@ export default function HlsPlayer({
       // into ~10s glass-to-glass. LL-HLS defaults sync to ~3 part durations
       // and engage catch-up rate automatically.
       const llHlsTuning = {
-        maxLiveSyncPlaybackRate: 1.5,
+        // MediaMTX advertises 200ms parts, so the LL-HLS default latency
+        // target (PART-HOLD-BACK ≈ 3 parts) is only ~0.6s. Through the
+        // /api/playback/fetch proxy that cushion drains on routine jitter and
+        // playback micro-stalls (SRT leg stutter, webcam run 2026-08-06).
+        // A 1.2s target keeps part-level loading + catch-up pressure but
+        // holds a real buffer. Duration (seconds) — NOT liveSyncDurationCount,
+        // which is what disabled part sync in the 2026-07-21 regression.
+        liveSyncDuration: 1.2,
+        // 1.5× chasing visibly warbled: rate ramps toward the cap whenever
+        // latency drifts >50ms past the tight target, then snaps back to 1.0.
+        // 1.1× is imperceptible and still recovers ~0.5s of drift per ~5s.
+        maxLiveSyncPlaybackRate: 1.1,
+        // MediaMTX fMP4 part boundaries can leave sub-500ms A/V gaps; skip
+        // them via the gap controller instead of stalling (default is 0.1s).
+        maxBufferHole: 0.5,
         maxBufferLength: 20,
         maxMaxBufferLength: 40,
       };
@@ -713,7 +727,7 @@ export default function HlsPlayer({
       });
       pushDiag(
         lowLatencyMode
-          ? `hls_live_sync=ll-defaults targetduration=${targetDuration}s depth=${depth}`
+          ? `hls_live_sync=ll target=1.2s max_rate=1.1 targetduration=${targetDuration}s depth=${depth}`
           : `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
       );
       hlsInstance = hls;
@@ -926,6 +940,13 @@ export default function HlsPlayer({
           if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
             sessionRef.current.sawBufferStall = true;
             sessionRef.current.hlsBufferStalls += 1;
+            // Routine stalls are resolved by hls.js's own gap controller
+            // (nudge/seek). recoverMediaError() here detaches and reattaches
+            // the media element — a visible hitch that turned every buffer
+            // dip into a stutter on the tight LL-HLS window. Real decoder
+            // wedges (data buffered, no frames) are escalated by the
+            // stuck-playhead watchdog above instead.
+            return;
           }
           // MediaMTX LL-HLS fills its early live window with #EXT-X-GAP
           // filler segments — buffering across them can retrigger
