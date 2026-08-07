@@ -435,6 +435,14 @@ class MetricsCollector:
             "endpoint": self.endpoint_url,
             "samples": len(self._rows),
             "averages": averages,
+            # Honesty note: cumulative-counter entries in `averages` (pkt_*,
+            # cmaf_*_count, cmaf_tfdt_gap_ms, moqx_*, playback counters/
+            # rebuffer) are run TOTALS taken from the last sample, not means.
+            "averages_note": (
+                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, playback "
+                "counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
+                "totals from the final sample, not per-sample averages."
+            ),
             "srt": srt_summary.__dict__ if srt_summary else {},
             "throughput": {
                 "total_bytes_sent": self._total_bytes_sent,
@@ -486,7 +494,6 @@ class MetricsCollector:
             "playback_video_time_sec",
             "playback_buffer_sec",
             "e2e_latency_ms",
-            "cmaf_tfdt_gap_ms",
             "psnr_db",
             "ssim",
         ]
@@ -528,9 +535,12 @@ class MetricsCollector:
                 "playback_error_count",
             ):
                 averages[counter_key] = int(float(self._rows[-1].get(counter_key, 0) or 0))
-            # Cumulative seconds (not a plain count) — keep sub-second precision.
+            # Cumulative values (not plain counts) — keep sub-second precision.
             averages["playback_rebuffer_sec"] = round(
                 float(self._rows[-1].get("playback_rebuffer_sec", 0) or 0), 3
+            )
+            averages["cmaf_tfdt_gap_ms"] = round(
+                float(self._rows[-1].get("cmaf_tfdt_gap_ms", 0) or 0), 3
             )
 
         return averages

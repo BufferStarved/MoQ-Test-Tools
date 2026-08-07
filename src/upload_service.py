@@ -594,6 +594,7 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
+            publisher_host=job.publisher_host,
         )
         # RTMP has no libsrt RTT; prefer Zixi/MediaMTX receiver stats when available,
         # otherwise TCP-connect probe to the RTMP host:port as net_rtt / jitter.
@@ -610,7 +611,18 @@ class UploadService:
             path_rtt_probe = PathRttProbe(
                 job.destination.url,
                 port=whip_parsed.port or 8889,
-        )
+            )
+        elif job.destination.protocol == "srt":
+            # Direct ffmpeg→SRT exposes no libsrt stats, and off-VM publishes
+            # (publisher_host=local) can't reach the MediaMTX loopback metrics
+            # API either, leaving the SRT leg with ZERO transport telemetry.
+            # SRT itself is UDP, so probe TCP-connect RTT to the same host's
+            # HTTPS port as a path-RTT stand-in (Zixi receiver stats, when
+            # present, still take precedence in the sample merge below).
+            path_rtt_probe = PathRttProbe(
+                job._resolved_srt_destination_url(),
+                port=443,
+            )
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
         sample_tick = 1
@@ -1163,6 +1175,7 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
+            publisher_host=job.publisher_host,
         )
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
@@ -1596,6 +1609,7 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider or "gcp_moq_relay",
+            publisher_host=job.publisher_host,
         )
         moqx_poller = MoqxStatsPoller(job.destination.url)
         qlog_tailer = PicoquicQlogTailer(qlog_dir) if qlog_dir else None
@@ -1747,7 +1761,10 @@ class UploadService:
                     ),
                     moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
                     moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,
-                    quic_rtt_ms=net_rtt,
+                    # Real QUIC smoothed RTT only (moq5 qlog). The TCP-probe
+                    # fallback is NOT QUIC — it stays in net_rtt_ms where it is
+                    # labeled as a path probe, instead of masquerading here.
+                    quic_rtt_ms=quic_rtt,
                     quic_cwnd_bytes=quic_cwnd,
                     quic_packets_lost=quic_packets_lost,
                     **_sample_cloud_fields(job.destination),
@@ -1952,6 +1969,23 @@ class UploadService:
                 "stream_index": job.stream_index,
                 "stream_label": job.stream_label,
                 **encode_profile_summary(job.encode_ladder, job.target_latency_ms),
+                # encode_profile_summary reports the profile's uncapped SRT
+                # latency; record what the caller actually used (MediaMTX caps
+                # the caller latency at MEDIAMTX_SRT_MAX_CALLER_LATENCY_MS).
+                **(
+                    {
+                        "srt_latency_us": effective_srt_caller_latency_ms(
+                            job.target_latency_ms,
+                            mediamtx=self._is_mediamtx_destination(job),
+                        )
+                        * 1000,
+                        "srt_latency_us_profile": encode_profile_summary(
+                            job.encode_ladder, job.target_latency_ms
+                        )["srt_latency_us"],
+                    }
+                    if job.destination.protocol == "srt"
+                    else {}
+                ),
                 "vmaf_available": vmaf_score is not None,
                 "vmaf_computed_on": "local" if vmaf_score is not None else "",
                 "vmaf_pending_on_ingest": job.compute_vmaf_on_ingest,

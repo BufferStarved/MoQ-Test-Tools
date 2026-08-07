@@ -33,10 +33,16 @@ class IngestHostMetricsPoller:
         *,
         agent_url: str = "",
         ingest_provider: str = "",
+        publisher_host: str = "cloud",
     ):
         self._ingest_provider = (ingest_provider or "").strip().lower()
-        # MediaMTX runs on the same VM as the bench API — local metrics only.
-        self._use_local = self._ingest_provider == "gcp_mediamtx"
+        # MediaMTX runs on the same VM as the bench API, so cloud-encoded jobs
+        # can read the "server" host locally. That shortcut is WRONG when this
+        # code runs on the local publisher agent (a laptop): psutil there
+        # reported the laptop as the SRT server. Only take the local path when
+        # we are actually on the API/ingest host.
+        publisher = (publisher_host or "cloud").strip().lower()
+        self._use_local = self._ingest_provider == "gcp_mediamtx" and publisher != "local"
         if self._use_local:
             self._config = None
             self._client = None
