@@ -801,6 +801,13 @@ async def upload_events(job_id: str):
                 "encoder_psnr_db": current.encoder_psnr_db,
                 "encoder_ssim": current.encoder_ssim,
                 "encoder_vmaf_error": current.encoder_vmaf_error,
+                # Latency anchors are only known after the run starts (the
+                # first live sample sets first_sample_at_epoch), but the UI
+                # snapshots the job right at creation — without these in the
+                # status stream the browser never learns the anchor and every
+                # wall−playhead e2e estimate (RTMP HTTP-TS) stays 0.
+                "started_at_epoch": current.started_at_epoch,
+                "first_sample_at_epoch": getattr(current, "first_sample_at_epoch", None),
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
 

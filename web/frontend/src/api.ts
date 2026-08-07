@@ -315,6 +315,8 @@ export function subscribeToUpload(
     encoder_psnr_db?: number | null;
     encoder_ssim?: number | null;
     encoder_vmaf_error?: string | null;
+    started_at_epoch?: number | null;
+    first_sample_at_epoch?: number | null;
   }) => void,
 ): () => void {
   const source = new EventSource(`${API_BASE}/uploads/${jobId}/events`);

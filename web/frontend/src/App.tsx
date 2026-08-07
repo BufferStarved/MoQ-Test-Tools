@@ -800,6 +800,13 @@ function App() {
               encoder_psnr_db: status.encoder_psnr_db ?? leg.job.encoder_psnr_db,
               encoder_ssim: status.encoder_ssim ?? leg.job.encoder_ssim,
               encoder_vmaf_error: status.encoder_vmaf_error ?? leg.job.encoder_vmaf_error,
+              // The one-shot GET in subscribeLeg fires before the encoder's
+              // first live sample, so these anchors are null there — without
+              // refreshing them here deriveEncodeAnchorEpoch() stays null for
+              // the whole run and RTMP HTTP-TS e2e_latency_ms is always 0.
+              started_at_epoch: status.started_at_epoch ?? leg.job.started_at_epoch,
+              first_sample_at_epoch:
+                status.first_sample_at_epoch ?? leg.job.first_sample_at_epoch,
             };
             return {
               ...leg,

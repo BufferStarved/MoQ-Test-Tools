@@ -60,6 +60,16 @@ const SUBSCRIBE_RETRY_MS = 5_000;
 const MAX_CONNECT_ATTEMPTS = 4;
 const MOQ_ALL_TRACKS_REFUSED = 4867;
 const LIVE_EDGE_TRIM_MS = 2_000;
+// Mid-play recovery: a session that dies after first frame used to be
+// silently swallowed (the error handler returned on firstFrame), leaving a
+// frozen video for the rest of the run while the page kept posting the same
+// stale playback snapshot (observed live: job a067f876 froze at vt=0.96s at
+// t≈6s and never recovered, publisher healthy the whole 60s).
+const MAX_SESSION_RESTARTS = 3;
+const SESSION_RESTART_DELAY_MS = 2_000;
+// Playhead frozen this long while the encode is live => the session is dead
+// even if playa never surfaced an error; tear down and resubscribe.
+const STALL_RESTART_MS = 8_000;
 
 export default function MoqPlayer({
   relayUrl,
@@ -402,6 +412,53 @@ export default function MoqPlayer({
       setIsReady(false);
 
       let retrying = false;
+      let sessionRestarts = 0;
+      let currentAttempt = 1;
+      let sharedCertHash: ArrayBuffer | undefined;
+
+      /**
+       * Tear down a dead mid-play session and resubscribe. The publisher and
+       * relay routinely outlive a browser-side session death (WebTransport
+       * drop, MSE teardown), so reconnecting resumes playback at the next
+       * group instead of freezing the player for the rest of the run.
+       */
+      function scheduleSessionRestart(reason: string) {
+        if (destroyed || retrying) {
+          return;
+        }
+        retrying = true;
+        sessionRestarts += 1;
+        pushDiag(`session_restart=${sessionRestarts}/${MAX_SESSION_RESTARTS} reason=${reason}`, true);
+        if (connectTimeout) {
+          window.clearTimeout(connectTimeout);
+        }
+        playerRef.current?.destroy();
+        playerRef.current = null;
+        setIsReady(false);
+        setIsPlaying(false);
+        setStatus("Reconnecting...");
+        void (async () => {
+          await sleep(SESSION_RESTART_DELAY_MS);
+          retrying = false;
+          if (destroyed) {
+            return;
+          }
+          try {
+            await connectAndLoad(currentAttempt + 1, sharedCertHash);
+          } catch (err) {
+            playerRef.current?.destroy();
+            playerRef.current = null;
+            setIsReady(false);
+            if (!destroyed) {
+              fail(
+                err instanceof Error
+                  ? err.message
+                  : "MoQ reconnect failed after a mid-play session error.",
+              );
+            }
+          }
+        })();
+      }
 
       async function connectAndLoad(
         attempt: number,
@@ -410,6 +467,7 @@ export default function MoqPlayer({
         if (destroyed) {
           return;
         }
+        currentAttempt = attempt;
 
         if (!Player.isSupported()) {
           const support = Player.checkSupport();
@@ -572,7 +630,26 @@ export default function MoqPlayer({
           }
           const detail = `[${severity}/${code}] ${playerError || "MoQ playback event."}`;
           pushDiag(detail);
-          if (severity === "recoverable" || sessionRef.current.firstFrame) {
+          if (severity === "recoverable") {
+            return;
+          }
+          if (sessionRef.current.firstFrame) {
+            // Fatal after frames rendered. Returning here (the old behavior)
+            // swallowed the error and left a dead session frozen on screen —
+            // reconnect while the encode is still live, and only surface a
+            // failure once the restart budget is spent.
+            if (sessionRestarts < MAX_SESSION_RESTARTS) {
+              if (playerRef.current !== player) {
+                player.destroy();
+              }
+              scheduleSessionRestart(`fatal_${code}`);
+            } else {
+              player.destroy();
+              if (playerRef.current === player) {
+                playerRef.current = null;
+              }
+              fail(detail);
+            }
             return;
           }
           if (
@@ -674,6 +751,7 @@ export default function MoqPlayer({
         if (destroyed) {
           return;
         }
+        sharedCertHash = certHash;
         pushDiag(certHash ? "tls_pin=ok" : "tls_pin=skipped", true);
 
         await connectAndLoad(1, certHash);
@@ -689,8 +767,32 @@ export default function MoqPlayer({
         // still ignoring normal per-GOP buffer bursts.
         const holdBehindSec = Math.max(0.4, (targetLatencyMs || 800) / 1000);
         const seekThresholdSec = Math.max(holdBehindSec * 2, holdBehindSec + 1);
+        // Frozen-playhead watchdog state (see STALL_RESTART_MS).
+        let watchdogVt = -1;
+        let watchdogAtMs = Date.now();
+        let watchdogGaveUp = false;
         liveEdgeTimer = window.setInterval(() => {
           if (destroyed || !sessionRef.current.firstFrame) {
+            return;
+          }
+          if (retrying || video.paused) {
+            // Reconnect in flight / user pause: don't count frozen time.
+            watchdogVt = -1;
+            watchdogAtMs = Date.now();
+          } else if (video.currentTime > watchdogVt + 0.2) {
+            watchdogVt = video.currentTime;
+            watchdogAtMs = Date.now();
+          } else if (Date.now() - watchdogAtMs > STALL_RESTART_MS) {
+            if (sessionRestarts < MAX_SESSION_RESTARTS) {
+              watchdogVt = -1;
+              watchdogAtMs = Date.now();
+              scheduleSessionRestart(`playhead_frozen_${video.currentTime.toFixed(2)}s`);
+            } else if (!watchdogGaveUp) {
+              watchdogGaveUp = true;
+              fail(
+                `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
+              );
+            }
             return;
           }
           const ahead = bufferedAheadSec(video);
