@@ -101,6 +101,13 @@ def parse_out_time_seconds(out_time: str) -> float:
 
 
 def compute_encode_lag_ms(wall_elapsed_sec: float, out_time: str) -> float:
+    """Raw (wall − out_time) in ms.
+
+    WARNING: this includes the constant startup offset (process spawn, device/
+    broker warmup, first-frame delay), which is NOT sustained encoder lag.
+    Sample loops should use :class:`EncodeLagTracker`, which baseline-subtracts
+    that offset; this raw form is kept for callers that want the absolute gap.
+    """
     media_sec = parse_out_time_seconds(out_time)
     if media_sec <= 0 or wall_elapsed_sec <= 0:
         return 0.0
@@ -108,6 +115,33 @@ def compute_encode_lag_ms(wall_elapsed_sec: float, out_time: str) -> float:
     if lag_ms < 0 or lag_ms > 120_000:
         return 0.0
     return round(lag_ms, 1)
+
+
+class EncodeLagTracker:
+    """Sustained encoder lag = *growth* of (wall − out_time) past its baseline.
+
+    The raw difference (wall elapsed − media out_time) contains a constant
+    startup offset — process spawn, webcam-broker warmup, first-frame latency —
+    that a per-second sample loop would re-report forever (~1.2–2.4s on the
+    SRT LL-HLS and MoQ webcam paths). That dead time is not encoder lag: the
+    encoder is keeping up fine, it just started late. Anchoring at the first
+    sample with a positive out_time makes the metric answer the question it is
+    charted as: "is the encoder falling further behind realtime?"
+    """
+
+    def __init__(self) -> None:
+        self._baseline_ms: Optional[float] = None
+
+    def sample(self, wall_elapsed_sec: float, out_time: str) -> float:
+        media_sec = parse_out_time_seconds(out_time)
+        if media_sec <= 0 or wall_elapsed_sec <= 0:
+            return 0.0
+        raw_ms = (wall_elapsed_sec - media_sec) * 1000.0
+        if raw_ms < 0 or raw_ms > 120_000:
+            return 0.0
+        if self._baseline_ms is None:
+            self._baseline_ms = raw_ms
+        return round(max(0.0, raw_ms - self._baseline_ms), 1)
 
 
 class MetricsCollector:
@@ -135,12 +169,20 @@ class MetricsCollector:
             f"upload_{timestamp}{suffix}.summary.json",
         )
         self._fps_window = RollingWindow(size=30)
+        # Fallback encode-lag tracker for callers that don't pass encode_lag_ms
+        # explicitly — baseline-subtracted, same semantics as the sample loops.
+        self._encode_lag_tracker = EncodeLagTracker()
         self._rows: List[dict] = []
         self._total_bytes_sent = 0
         self._total_bytes_received = 0
         self._peak_bandwidth_sent_mbps = 0.0
         self._peak_bandwidth_recv_mbps = 0.0
         self._run_started_at: Optional[float] = None
+        self._last_sample_at: Optional[float] = None
+        # Fix 9: psutil cpu_percent(interval=None) measures since the *previous*
+        # call on the same Process object; a fresh Process per sample always
+        # returned 0.0. Cache handles per pid for the collector's lifetime.
+        self._procs: Dict[int, psutil.Process] = {}
         self._init_csv()
 
     def _init_csv(self) -> None:
@@ -211,6 +253,7 @@ class MetricsCollector:
         net_recv_mbps: float = 0.0,
         net_loss_pct: float = 0.0,
         net_retrans_pct: float = 0.0,
+        total_bytes_sent: Optional[int] = None,
     ) -> float:
         fps_stability = 0.0
         if fps > 0:
@@ -223,9 +266,19 @@ class MetricsCollector:
             mem_total = 0.0
             if pid > 0:
                 for proc_pid in pids:
-                    process = psutil.Process(proc_pid)
-                    cpu_total += process.cpu_percent(interval=None)
-                    mem_total += process.memory_info().rss / (1024 * 1024)
+                    try:
+                        process = self._procs.get(proc_pid)
+                        if process is None:
+                            process = psutil.Process(proc_pid)
+                            self._procs[proc_pid] = process
+                            # Prime the CPU window; the first call always reads 0.
+                            process.cpu_percent(interval=None)
+                        cpu_total += process.cpu_percent(interval=None)
+                        mem_total += process.memory_info().rss / (1024 * 1024)
+                    except psutil.Error:
+                        # Dead/replaced pid: drop the stale handle, keep the row.
+                        self._procs.pop(proc_pid, None)
+                        continue
 
             send_mbps = (
                 encoder_send_rate_mbps
@@ -233,19 +286,31 @@ class MetricsCollector:
                 else (encoded_bitrate_kbps / 1000.0)
             )
             recv_mbps = transport_recv_rate_mbps
-            self._total_bytes_sent += int(send_mbps * 1_000_000 / 8)
-            self._total_bytes_received += int(recv_mbps * 1_000_000 / 8)
-            self._peak_bandwidth_sent_mbps = max(self._peak_bandwidth_sent_mbps, send_mbps)
-            self._peak_bandwidth_recv_mbps = max(self._peak_bandwidth_recv_mbps, recv_mbps)
 
             now = time.time()
             if self._run_started_at is None:
                 self._run_started_at = now
             wall_elapsed = max(0.0, now - self._run_started_at)
+
+            # Throughput: prefer the encoder's real cumulative byte counter
+            # (ffmpeg -progress total_size). Only fall back to integrating the
+            # rate over the *actual* wall delta between samples — the old
+            # rate×1s assumption undercounted whenever the loop skipped a tick.
+            if total_bytes_sent is not None and total_bytes_sent > 0:
+                self._total_bytes_sent = max(self._total_bytes_sent, int(total_bytes_sent))
+            elif self._last_sample_at is not None:
+                delta_sec = max(0.0, now - self._last_sample_at)
+                self._total_bytes_sent += int(send_mbps * 1_000_000 / 8 * delta_sec)
+            if self._last_sample_at is not None:
+                delta_sec = max(0.0, now - self._last_sample_at)
+                self._total_bytes_received += int(recv_mbps * 1_000_000 / 8 * delta_sec)
+            self._last_sample_at = now
+            self._peak_bandwidth_sent_mbps = max(self._peak_bandwidth_sent_mbps, send_mbps)
+            self._peak_bandwidth_recv_mbps = max(self._peak_bandwidth_recv_mbps, recv_mbps)
             resolved_encode_lag = (
                 encode_lag_ms
                 if encode_lag_ms > 0
-                else compute_encode_lag_ms(wall_elapsed, out_time)
+                else self._encode_lag_tracker.sample(wall_elapsed, out_time)
             )
             resolved_net_rtt = net_rtt_ms or transport_rtt_ms or quic_rtt_ms
             resolved_net_jitter = net_jitter_ms or transport_rtt_jitter_ms
@@ -370,6 +435,14 @@ class MetricsCollector:
             "endpoint": self.endpoint_url,
             "samples": len(self._rows),
             "averages": averages,
+            # Honesty note: cumulative-counter entries in `averages` (pkt_*,
+            # cmaf_*_count, cmaf_tfdt_gap_ms, moqx_*, playback counters/
+            # rebuffer) are run TOTALS taken from the last sample, not means.
+            "averages_note": (
+                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, playback "
+                "counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
+                "totals from the final sample, not per-sample averages."
+            ),
             "srt": srt_summary.__dict__ if srt_summary else {},
             "throughput": {
                 "total_bytes_sent": self._total_bytes_sent,
@@ -421,7 +494,6 @@ class MetricsCollector:
             "playback_video_time_sec",
             "playback_buffer_sec",
             "e2e_latency_ms",
-            "cmaf_tfdt_gap_ms",
             "psnr_db",
             "ssim",
         ]
@@ -463,9 +535,12 @@ class MetricsCollector:
                 "playback_error_count",
             ):
                 averages[counter_key] = int(float(self._rows[-1].get(counter_key, 0) or 0))
-            # Cumulative seconds (not a plain count) — keep sub-second precision.
+            # Cumulative values (not plain counts) — keep sub-second precision.
             averages["playback_rebuffer_sec"] = round(
                 float(self._rows[-1].get("playback_rebuffer_sec", 0) or 0), 3
+            )
+            averages["cmaf_tfdt_gap_ms"] = round(
+                float(self._rows[-1].get("cmaf_tfdt_gap_ms", 0) or 0), 3
             )
 
         return averages

@@ -7,7 +7,7 @@ import threading
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import psutil
@@ -26,7 +26,7 @@ from encode_profile import (
 )
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
-from metrics import MetricsCollector, compute_encode_lag_ms
+from metrics import EncodeLagTracker, MetricsCollector
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
@@ -453,6 +453,31 @@ def _pick_udp_port() -> int:
         return sock.getsockname()[1]
 
 
+def sleep_until_next_tick(
+    start_time: float,
+    tick: int,
+    *,
+    now: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Sleep until ``start_time + tick`` seconds; return the next tick index.
+
+    The sample loops used ``work + sleep(1)``, so ~0.2–0.3s of per-iteration
+    probe work drifted the schedule and skipped one integer elapsed-second
+    every ~5 iterations (RTMP recorded 24/30 samples, MoQ 25/30). Anchoring
+    each iteration to ``start_time + n×1s`` samples every integer second. If
+    an iteration overruns its slot, the missed seconds are skipped (never
+    burst-sampled) and scheduling stays aligned to the original epoch.
+    """
+    deadline = start_time + tick
+    remaining = deadline - now()
+    if remaining > 0:
+        sleep(remaining)
+        return tick + 1
+    # Overran the slot: jump to the next whole-second tick still ahead.
+    return max(tick + 1, int(now() - start_time) + 1)
+
+
 class UploadService:
     # Zixi's SRT push input is a single shared listener (one port per input
     # object; see zixi_input_reset.py). Per-job stream IDs stop two runs from
@@ -460,6 +485,11 @@ class UploadService:
     # at once, so overlapping SRT jobs are serialized here instead of racing
     # add_stream/remove_stream calls against each other.
     _zixi_srt_ingest_lock = threading.Lock()
+
+    def __init__(self) -> None:
+        # psutil Process handles must persist across samples for cpu_percent
+        # to measure anything (see _process_usage).
+        self._proc_usage_cache: Dict[int, psutil.Process] = {}
 
     def run(
         self,
@@ -564,6 +594,7 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
+            publisher_host=job.publisher_host,
         )
         # RTMP has no libsrt RTT; prefer Zixi/MediaMTX receiver stats when available,
         # otherwise TCP-connect probe to the RTMP host:port as net_rtt / jitter.
@@ -580,8 +611,21 @@ class UploadService:
             path_rtt_probe = PathRttProbe(
                 job.destination.url,
                 port=whip_parsed.port or 8889,
-        )
+            )
+        elif job.destination.protocol == "srt":
+            # Direct ffmpeg→SRT exposes no libsrt stats, and off-VM publishes
+            # (publisher_host=local) can't reach the MediaMTX loopback metrics
+            # API either, leaving the SRT leg with ZERO transport telemetry.
+            # SRT itself is UDP, so probe TCP-connect RTT to the same host's
+            # HTTPS port as a path-RTT stand-in (Zixi receiver stats, when
+            # present, still take precedence in the sample merge below).
+            path_rtt_probe = PathRttProbe(
+                job._resolved_srt_destination_url(),
+                port=443,
+            )
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
+        sample_tick = 1
         # Zixi tears down and recreates its RTMP push input between runs; a
         # push that lands during that window is rejected with an instant I/O
         # error (ffmpeg exit 251 within seconds — reproduced during gauntlet
@@ -626,6 +670,8 @@ class UploadService:
                         )
                         progress_reader = FfmpegProgressReader(process.stdout)
                         start_time = time.time()
+                        encode_lag_tracker = EncodeLagTracker()
+                        sample_tick = 1
                         continue
                     return UploadResult(
                         success=False,
@@ -642,7 +688,7 @@ class UploadService:
                 cpu, mem = self._process_usage([process.pid])
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
                 merged = self._merge_mediamtx_transport(
                     mtx=mtx_stats,
                     net_rtt_ms=zixi_stats.rtt_ms or (path_rtt.rtt_ms if path_rtt else 0.0),
@@ -692,6 +738,7 @@ class UploadService:
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
+                    total_bytes_sent=status.total_bytes or None,
                     transport_rtt_ms=sample.transport_rtt_ms,
                     transport_rtt_jitter_ms=sample.transport_rtt_jitter_ms,
                     pkt_rcv_drop=sample.pkt_rcv_drop,
@@ -717,7 +764,7 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                time.sleep(1)
+                sample_tick = sleep_until_next_tick(start_time, sample_tick)
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -1128,8 +1175,11 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider,
+            publisher_host=job.publisher_host,
         )
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
+        sample_tick = 1
         manifest_url = self._managed_hls_manifest_url(job)
         preview_ready = False
         bad_since: Optional[float] = None
@@ -1287,7 +1337,7 @@ class UploadService:
                 send_mbps = srt_stats.mbps_send_rate or (status.bitrate_kbps / 1000.0)
                 # ffmpeg -progress often reports bitrate=N/A for mpegts/UDP tee; use libsrt send rate.
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
                 # Publisher libsrt first; MediaMTX fills receiver RTT/loss/recv rate (and Zixi if any).
                 merged = self._merge_mediamtx_transport(
                     mtx=mtx_stats,
@@ -1345,6 +1395,7 @@ class UploadService:
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
+                    total_bytes_sent=status.total_bytes or None,
                     extra_pids=[srt_proc.pid] if srt_proc else None,
                     transport_rtt_ms=transport_rtt_ms,
                     transport_rtt_jitter_ms=transport_rtt_jitter_ms,
@@ -1372,7 +1423,7 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                time.sleep(1)
+                sample_tick = sleep_until_next_tick(start_time, sample_tick)
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -1558,12 +1609,15 @@ class UploadService:
             job.destination.url,
             agent_url=job.ingest_agent_url,
             ingest_provider=job.destination.ingest_provider or "gcp_moq_relay",
+            publisher_host=job.publisher_host,
         )
         moqx_poller = MoqxStatsPoller(job.destination.url)
         qlog_tailer = PicoquicQlogTailer(qlog_dir) if qlog_dir else None
         # openmoq has no qlog; probe relay admin TCP for path RTT/jitter equivalent.
         path_rtt_probe = PathRttProbe(job.destination.url)
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
+        sample_tick = 1
         prev_moqx_loss = 0
         prev_moqx_retrans = 0
         prev_moqx_sent = 0
@@ -1647,7 +1701,7 @@ class UploadService:
                 cpu, mem = self._process_usage(pids)
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
 
                 # Prefer native QUIC smoothed RTT (moq5 qlog); else path TCP probe.
                 quic_rtt = quic_stats.rtt_ms if quic_stats and quic_stats.rtt_ms > 0 else 0.0
@@ -1707,7 +1761,10 @@ class UploadService:
                     ),
                     moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
                     moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,
-                    quic_rtt_ms=net_rtt,
+                    # Real QUIC smoothed RTT only (moq5 qlog). The TCP-probe
+                    # fallback is NOT QUIC — it stays in net_rtt_ms where it is
+                    # labeled as a path probe, instead of masquerading here.
+                    quic_rtt_ms=quic_rtt,
                     quic_cwnd_bytes=quic_cwnd,
                     quic_packets_lost=quic_packets_lost,
                     **_sample_cloud_fields(job.destination),
@@ -1718,6 +1775,7 @@ class UploadService:
                     fps=status.fps,
                     speed=status.speed,
                     out_time=status.out_time,
+                    total_bytes_sent=status.total_bytes or None,
                     extra_pids=[publisher_proc.pid] if publisher_proc else None,
                     transport_rtt_ms=net_rtt,
                     transport_rtt_jitter_ms=net_jitter,
@@ -1745,7 +1803,7 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                time.sleep(1)
+                sample_tick = sleep_until_next_tick(start_time, sample_tick)
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -1911,6 +1969,23 @@ class UploadService:
                 "stream_index": job.stream_index,
                 "stream_label": job.stream_label,
                 **encode_profile_summary(job.encode_ladder, job.target_latency_ms),
+                # encode_profile_summary reports the profile's uncapped SRT
+                # latency; record what the caller actually used (MediaMTX caps
+                # the caller latency at MEDIAMTX_SRT_MAX_CALLER_LATENCY_MS).
+                **(
+                    {
+                        "srt_latency_us": effective_srt_caller_latency_ms(
+                            job.target_latency_ms,
+                            mediamtx=self._is_mediamtx_destination(job),
+                        )
+                        * 1000,
+                        "srt_latency_us_profile": encode_profile_summary(
+                            job.encode_ladder, job.target_latency_ms
+                        )["srt_latency_us"],
+                    }
+                    if job.destination.protocol == "srt"
+                    else {}
+                ),
                 "vmaf_available": vmaf_score is not None,
                 "vmaf_computed_on": "local" if vmaf_score is not None else "",
                 "vmaf_pending_on_ingest": job.compute_vmaf_on_ingest,
@@ -1997,7 +2072,16 @@ class UploadService:
         mem_total = 0.0
         for pid in pids:
             try:
-                proc = psutil.Process(pid)
+                # cpu_percent(interval=None) measures CPU since the previous
+                # call on the SAME Process object — a fresh handle per sample
+                # always returned 0.0. Cache handles per pid; psutil identity
+                # checks (create_time) make stale reused-pid handles raise,
+                # which evicts them below.
+                proc = self._proc_usage_cache.get(pid)
+                if proc is None:
+                    proc = psutil.Process(pid)
+                    self._proc_usage_cache[pid] = proc
+                    proc.cpu_percent(interval=None)  # prime the CPU window
                 cpu_total += proc.cpu_percent(interval=None)
                 mem_total += proc.memory_info().rss / (1024 * 1024)
             except Exception:
@@ -2005,16 +2089,23 @@ class UploadService:
                 # make psutil's underlying syscalls (e.g. sysctlbyname on macOS) raise
                 # PermissionError/SystemError instead of a psutil.Error subclass. Never
                 # let sampling failures kill the benchmark job thread.
+                self._proc_usage_cache.pop(pid, None)
                 continue
         return cpu_total, mem_total
 
     def _terminate_process(self, process: Optional[subprocess.Popen]) -> None:
+        # NOTE: this body was previously (mis-)indented under the None guard,
+        # so no benchmark subprocess was ever terminated — encoders kept
+        # running past job end (verified live: encoder ran 5s+ after the job).
         if process is None:
             return
-            if process.poll() is None:
-                process.terminate()
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
                 process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                logger.warning("Process %s did not exit after kill", process.pid)

@@ -137,15 +137,20 @@ export default function MoqPlayer({
   }, [jobId]);
 
   /**
-   * Glass-to-glass estimate (ms). Prefer CaptureTimestamp when playa reports
-   * it. Otherwise buffer lead + encode/bridge lag — never wall−MSE-currentTime
-   * (join-zeroed; freezes at join delay and disagrees with ENC burn-in).
+   * Latency proxy (ms). Prefer CaptureTimestamp when playa reports it.
+   * Otherwise this is a BUFFER-LEAD PROXY (buffered media ahead of the
+   * playhead + a small decode/render pad + bridge lag), not a measured
+   * glass-to-glass figure — never wall−MSE-currentTime (join-zeroed; freezes
+   * at join delay and disagrees with ENC burn-in). encode_lag_ms is
+   * deliberately NOT added: it is a baseline-subtracted "encoder falling
+   * behind" gauge, and the old raw form summed ~1.2-2.4s of one-time startup
+   * offset into every sample.
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
-    const { bridgeMs, encoderMs } = lagRef.current;
+    const { bridgeMs } = lagRef.current;
     if (session.playerLatencyMs > 0) {
-      const total = session.playerLatencyMs + encoderMs + bridgeMs;
+      const total = session.playerLatencyMs + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }
     if (!session.firstFrame) {
@@ -155,7 +160,7 @@ export default function MoqPlayer({
     if (bufferMs <= 0) {
       return undefined;
     }
-    const total = bufferMs + 250 + encoderMs + bridgeMs;
+    const total = bufferMs + 250 + bridgeMs;
     return total > 0 && total < 120_000 ? Math.round(total) : undefined;
   }
 
@@ -677,14 +682,19 @@ export default function MoqPlayer({
         }
         video.addEventListener("timeupdate", onTimeUpdate);
         // Keep playhead near live only when the buffer clearly balloons.
-        // Aggressive seeks on a healthy ~0.5s buffer felt like stutter/slow-mo.
+        // Aggressive seeks on a healthy ~0.5s buffer felt like stutter/slow-mo,
+        // but the old 4x threshold let a 4s target drift to ~16s behind live
+        // before ever seeking (observed printing ~14s "latency"). 2x the hold
+        // (min +1s hysteresis) keeps the viewer near the latency target while
+        // still ignoring normal per-GOP buffer bursts.
         const holdBehindSec = Math.max(0.4, (targetLatencyMs || 800) / 1000);
+        const seekThresholdSec = Math.max(holdBehindSec * 2, holdBehindSec + 1);
         liveEdgeTimer = window.setInterval(() => {
           if (destroyed || !sessionRef.current.firstFrame) {
             return;
           }
           const ahead = bufferedAheadSec(video);
-          if (ahead < holdBehindSec * 4) {
+          if (ahead < seekThresholdSec) {
             return;
           }
           if (seekNearLiveEdge(video, holdBehindSec)) {

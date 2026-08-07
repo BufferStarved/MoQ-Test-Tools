@@ -70,12 +70,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   encode_lag_ms: {
     label: "Encode lag",
     description:
-      "Wall-clock time minus ffmpeg media out_time while publishing. Large values mean the encoder is falling behind realtime.",
+      "Growth of (wall-clock − ffmpeg media out_time) past its startup baseline. The constant startup offset (process spawn, webcam warmup) is subtracted at the first encoded sample, so this reads ~0 for an encoder keeping up with realtime and only rises when the encoder falls further behind. Not a latency component — do not add it to e2e estimates.",
   },
   e2e_latency_ms: {
     label: "E2E latency (estimated)",
     description:
-      "Estimated glass-to-glass latency, capture-anchored per player. Zixi HTTP-TS / Fast HLS: wall clock since encode start − media playhead (+ webcam bridge lag). MediaMTX LL-HLS: hls.js PDT latency + encode lag + bridge. MoQ: CaptureTimestamp when present, else wall − MoQ media timeline (+ bridge). Distinct from TTFF.",
+      "Estimated glass-to-glass latency; each protocol uses a different formula/anchor, so values are NOT directly comparable across protocols. Zixi HTTP-TS / Fast HLS: wall clock since first encoded frame − media playhead (+ webcam bridge lag). MediaMTX LL-HLS: hls.js PDT latency + bridge. MoQ: CaptureTimestamp when present, otherwise a buffer-lead proxy (buffered seconds ahead + decode pad + bridge), not a measured end-to-end figure. Distinct from TTFF.",
   },
   playback_error_count: {
     label: "Player errors",
@@ -116,11 +116,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   cmaf_tfdt_gap_count: {
     label: "CMAF decode-time gaps",
     description:
-      "Media Health (MoQ/CMAF): count of tfdt baseMediaDecodeTime jumps larger than the prior fragment duration (+ slack).",
+      "Media Health (MoQ/CMAF): count of tfdt baseMediaDecodeTime jumps larger than the prior fragment duration (+ slack), tracked per track_ID with that track's own timescale (interleaved audio/video are independent timelines).",
   },
   cmaf_tfdt_gap_ms: {
     label: "CMAF decode-time gap",
-    description: "Media Health (MoQ/CMAF): total decode-time discontinuity duration in milliseconds.",
+    description:
+      "Media Health (MoQ/CMAF): total (cumulative, not average) decode-time discontinuity duration in milliseconds across all tracks.",
   },
   cmaf_tfdt_overlap_count: {
     label: "CMAF timeline overlaps",
@@ -137,7 +138,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   encoder_send_rate_mbps: {
     label: "Encoder send rate",
     description:
-      "Outbound rate in Mbps. Defaults to encoded_bitrate_kbps / 1000 when no transport-level send measurement exists; srt-live-transmit supplies a measured value when enabled.",
+      "Outbound rate in Mbps. CAUTION: on most paths (direct ffmpeg RTMP/SRT, MoQ) no transport-level send measurement exists and this is simply a copy of encoded_bitrate_kbps / 1000 — not an independent network measurement. Only srt-live-transmit (when enabled) supplies a measured libsrt send rate.",
   },
   transport_recv_rate_mbps: {
     label: "Transport receive rate",
@@ -186,7 +187,8 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   total_bytes_sent: {
     label: "Total bytes sent",
-    description: "Estimated total payload bytes sent by the publisher during the benchmark window.",
+    description:
+      "Total payload bytes sent by the publisher during the benchmark window — the encoder's real cumulative muxed output (ffmpeg total_size) when available, otherwise the send rate integrated over actual sample intervals.",
   },
   total_bytes_received: {
     label: "Total bytes received",
@@ -245,7 +247,8 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   quic_rtt_ms: {
     label: "QUIC RTT",
-    description: "Smoothed round-trip time from the moq5 publisher picoquic qlog (recovery/metrics_updated), in milliseconds.",
+    description:
+      "Smoothed round-trip time from the moq5 publisher picoquic qlog (recovery/metrics_updated), in milliseconds. Reads 0 with the openmoq publisher (no qlog): the TCP-connect path probe used as a stand-in is reported under net_rtt_ms, not here — it is not a QUIC measurement.",
   },
   quic_cwnd_bytes: {
     label: "QUIC congestion window",

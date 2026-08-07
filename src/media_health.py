@@ -128,6 +128,8 @@ def patch_summary_with_media_health(
         media_health["error"] = report.error
 
     payload.setdefault("quality", {})["media_health"] = media_health
+    # These are run TOTALS (consistent with MetricsCollector's counter
+    # semantics in `averages` — see the summary's `averages_note`), not means.
     averages = payload.setdefault("averages", {})
     averages["cmaf_fragment_count"] = report.fragment_count
     averages["cmaf_seq_gap_count"] = report.seq_gap_count

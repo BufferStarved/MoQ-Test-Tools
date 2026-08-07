@@ -400,19 +400,23 @@ export default function HlsPlayer({
   /**
    * Capture-anchored glass-to-glass estimate (ms). All protocols share the
    * same anchor: the capture instant of the displayed frame.
-   *  - LL-HLS (MediaMTX): PDT latency covers packager->glass; add this leg's
-   *    encoder lag and the browser->bridge chain.
+   *  - LL-HLS (MediaMTX): PDT latency covers packager->glass; add the
+   *    browser->bridge chain.
    *  - Zixi Fast HLS: the timeline is encode-anchored, so wall - position
    *    covers encoder->glass; add only the bridge chain.
+   * encode_lag_ms is deliberately NOT added: it is a baseline-subtracted
+   * "encoder falling behind" gauge, not a latency component — the old code
+   * summed the raw startup offset (~1.2-2.4s of one-time warmup) into every
+   * per-second e2e sample.
    * Validated against a burnt-in wall-clock timer (2026-07-21/22) after each
    * estimate individually read 2.5-4s low/high with mismatched anchors.
    */
   function captureAnchoredE2eMs(): number | undefined {
-    const { bridgeMs, encoderMs, epoch, lowLatency } = lagRef.current;
+    const { bridgeMs, epoch, lowLatency } = lagRef.current;
     const session = sessionRef.current;
     if (lowLatency) {
       if (session.playerLatencyMs > 0) {
-        const total = session.playerLatencyMs + encoderMs + bridgeMs;
+        const total = session.playerLatencyMs + bridgeMs;
         return total > 0 && total < 120_000 ? Math.round(total) : undefined;
       }
       return undefined;

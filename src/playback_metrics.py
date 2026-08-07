@@ -96,12 +96,19 @@ def merge_playback_into_csv(
 
     last_values = dict(PLAYBACK_DEFAULTS)
     updated: List[dict] = []
+    # Merge nearest-at-or-before: playback ticks and CSV rows rarely share the
+    # exact integer second (different loop phases), and requiring equality
+    # left every playback_*/e2e column at 0. Forward-fill the latest playback
+    # sample at-or-before each row's elapsed time instead.
+    sorted_secs = sorted(by_sec)
+    cursor = 0
     for index, row in enumerate(rows):
         elapsed = _row_elapsed_sec(rows, index)
-        if elapsed in by_sec:
+        while cursor < len(sorted_secs) and sorted_secs[cursor] <= elapsed:
             for name in PLAYBACK_FIELD_NAMES:
-                value = by_sec[elapsed].get(name, last_values[name])
+                value = by_sec[sorted_secs[cursor]].get(name, last_values[name])
                 last_values[name] = str(value)
+            cursor += 1
         merged = dict(row)
         merged.update(last_values)
         updated.append(merged)

@@ -4,9 +4,25 @@ import shutil
 import threading
 import time
 from dataclasses import dataclass
-from typing import IO, Optional
+from typing import IO, Callable, Optional
 
 logger = logging.getLogger("MoQ-SRT-Bench")
+
+
+def _parse_out_time_sec(out_time: str) -> float:
+    value = (out_time or "").strip()
+    if not value or value == "N/A":
+        return 0.0
+    parts = value.split(":")
+    if len(parts) != 3:
+        return 0.0
+    try:
+        return max(
+            0.0,
+            float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2]),
+        )
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -17,6 +33,8 @@ class UploadStatus:
     out_time: str = "00:00:00.000000"
     speed: float = 0.0
     progress: str = "unknown"
+    # Cumulative muxed output bytes (ffmpeg -progress total_size).
+    total_bytes: int = 0
 
     def display_line(self, elapsed_sec: int, cpu_percent: float, memory_mb: float) -> str:
         return (
@@ -50,43 +68,96 @@ class UploadStatus:
         return self.display_line(elapsed_sec, cpu_percent, memory_mb) + network + stability
 
 
-class FfmpegProgressReader:
-    """Reads ffmpeg -progress output and tracks encode/upload status."""
+class ProgressDeltaTracker:
+    """Parses ffmpeg -progress lines and reports *instantaneous* rates.
 
-    def __init__(self, pipe: IO[bytes]):
-        self._pipe = pipe
+    ffmpeg's own fps/bitrate/speed values in -progress output are cumulative
+    run averages (frame/elapsed, total_size/out_time). Charted per second they
+    fabricate trends — a rock-steady 30fps webcam encode drew as a 15→29
+    "ramp" because early startup seconds dragged the average. This tracker
+    recomputes fps/bitrate/speed from the deltas between consecutive progress
+    blocks (Δframes, Δbytes, Δout_time over Δwall) and only falls back to
+    ffmpeg's cumulative numbers before the first delta is available.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
         self._status = UploadStatus()
         self._lock = threading.Lock()
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._thread.start()
+        # Raw cumulative values from the current/last progress block.
+        self._raw_frame: Optional[int] = None
+        self._raw_total_size: Optional[int] = None
+        self._raw_out_time_sec: float = 0.0
+        # Previous block snapshot for delta computation.
+        self._prev_wall: Optional[float] = None
+        self._prev_frame: Optional[int] = None
+        self._prev_total_size: Optional[int] = None
+        self._prev_out_time_sec: Optional[float] = None
 
-    def _apply_line(self, line: str) -> None:
+    def apply_line(self, line: str) -> None:
         if "=" not in line:
             return
 
         key, value = line.split("=", 1)
         with self._lock:
-            if key == "frame":
-                self._status.frame = int(float(value))
-            elif key == "fps":
-                self._status.fps = float(value)
-            elif key == "bitrate" and "N/A" not in value:
-                self._status.bitrate_kbps = float(value.replace("kbits/s", "").strip())
-            elif key == "out_time":
-                self._status.out_time = value
-            elif key == "speed" and "N/A" not in value:
-                self._status.speed = float(value.replace("x", "").strip())
-            elif key == "progress":
-                self._status.progress = value
+            try:
+                if key == "frame":
+                    self._raw_frame = int(float(value))
+                    self._status.frame = self._raw_frame
+                elif key == "fps" and "N/A" not in value:
+                    # Cumulative average — placeholder until deltas exist.
+                    if self._prev_wall is None:
+                        self._status.fps = float(value)
+                elif key == "bitrate" and "N/A" not in value:
+                    if self._prev_wall is None:
+                        self._status.bitrate_kbps = float(
+                            value.replace("kbits/s", "").strip()
+                        )
+                elif key == "total_size" and "N/A" not in value:
+                    self._raw_total_size = int(float(value))
+                    self._status.total_bytes = self._raw_total_size
+                elif key == "out_time":
+                    self._status.out_time = value
+                    self._raw_out_time_sec = _parse_out_time_sec(value)
+                elif key == "speed" and "N/A" not in value:
+                    if self._prev_wall is None:
+                        self._status.speed = float(value.replace("x", "").strip())
+                elif key == "progress":
+                    self._status.progress = value
+                    self._finish_block()
+            except (TypeError, ValueError):
+                return
 
-    def _read_loop(self) -> None:
-        try:
-            for raw_line in iter(self._pipe.readline, b""):
-                self._apply_line(raw_line.decode("utf-8", errors="replace").strip())
-        except Exception as exc:
-            logger.warning("Progress reader stopped: %s", exc)
-        finally:
-            self._pipe.close()
+    # File readers can parse several buffered blocks in one poll (startup
+    # catch-up); computing a rate over a near-zero wall window would fabricate
+    # huge spikes. Blocks closer together than this fold into the next window.
+    MIN_DELTA_WINDOW_SEC = 0.2
+
+    def _finish_block(self) -> None:
+        """A `progress=` line closes a block — compute deltas vs the previous."""
+        now = self._clock()
+        if self._prev_wall is not None:
+            d_wall = now - self._prev_wall
+            if d_wall < self.MIN_DELTA_WINDOW_SEC:
+                return
+            if self._raw_frame is not None and self._prev_frame is not None:
+                self._status.fps = max(0.0, (self._raw_frame - self._prev_frame) / d_wall)
+            if self._prev_out_time_sec is not None:
+                d_out = self._raw_out_time_sec - self._prev_out_time_sec
+                self._status.speed = max(0.0, d_out / d_wall)
+                if (
+                    self._raw_total_size is not None
+                    and self._prev_total_size is not None
+                ):
+                    d_bytes = max(0, self._raw_total_size - self._prev_total_size)
+                    # Encoded media bitrate: bytes per *media* second when the
+                    # timeline advanced, else per wall second.
+                    denom = d_out if d_out > 0 else d_wall
+                    self._status.bitrate_kbps = (d_bytes * 8.0 / denom) / 1000.0
+        self._prev_wall = now
+        self._prev_frame = self._raw_frame
+        self._prev_total_size = self._raw_total_size
+        self._prev_out_time_sec = self._raw_out_time_sec
 
     def get_status(self) -> UploadStatus:
         with self._lock:
@@ -97,37 +168,40 @@ class FfmpegProgressReader:
                 out_time=self._status.out_time,
                 speed=self._status.speed,
                 progress=self._status.progress,
+                total_bytes=self._status.total_bytes,
             )
 
 
-class FfmpegProgressFileReader:
-    """Reads ffmpeg -progress output written to a file."""
+class FfmpegProgressReader:
+    """Reads ffmpeg -progress output from a pipe (instantaneous rates)."""
 
-    def __init__(self, progress_path: str):
-        self._progress_path = progress_path
-        self._status = UploadStatus()
-        self._lock = threading.Lock()
+    def __init__(self, pipe: IO[bytes]):
+        self._pipe = pipe
+        self._tracker = ProgressDeltaTracker()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
 
-    def _apply_line(self, line: str) -> None:
-        if "=" not in line:
-            return
+    def _read_loop(self) -> None:
+        try:
+            for raw_line in iter(self._pipe.readline, b""):
+                self._tracker.apply_line(raw_line.decode("utf-8", errors="replace").strip())
+        except Exception as exc:
+            logger.warning("Progress reader stopped: %s", exc)
+        finally:
+            self._pipe.close()
 
-        key, value = line.split("=", 1)
-        with self._lock:
-            if key == "frame":
-                self._status.frame = int(float(value))
-            elif key == "fps":
-                self._status.fps = float(value)
-            elif key == "bitrate" and "N/A" not in value:
-                self._status.bitrate_kbps = float(value.replace("kbits/s", "").strip())
-            elif key == "out_time":
-                self._status.out_time = value
-            elif key == "speed" and "N/A" not in value:
-                self._status.speed = float(value.replace("x", "").strip())
-            elif key == "progress":
-                self._status.progress = value
+    def get_status(self) -> UploadStatus:
+        return self._tracker.get_status()
+
+
+class FfmpegProgressFileReader:
+    """Reads ffmpeg -progress output written to a file (instantaneous rates)."""
+
+    def __init__(self, progress_path: str):
+        self._progress_path = progress_path
+        self._tracker = ProgressDeltaTracker()
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
 
     def _read_loop(self) -> None:
         position = 0
@@ -140,7 +214,7 @@ class FfmpegProgressFileReader:
                 with open(self._progress_path, mode="r") as file:
                     file.seek(position)
                     for raw_line in file:
-                        self._apply_line(raw_line.strip())
+                        self._tracker.apply_line(raw_line.strip())
                     position = file.tell()
             except OSError as exc:
                 logger.warning("Progress file reader stopped: %s", exc)
@@ -149,15 +223,7 @@ class FfmpegProgressFileReader:
             time.sleep(0.2)
 
     def get_status(self) -> UploadStatus:
-        with self._lock:
-            return UploadStatus(
-                frame=self._status.frame,
-                fps=self._status.fps,
-                bitrate_kbps=self._status.bitrate_kbps,
-                out_time=self._status.out_time,
-                speed=self._status.speed,
-                progress=self._status.progress,
-            )
+        return self._tracker.get_status()
 
 
 def find_srt_live_transmit() -> Optional[str]:

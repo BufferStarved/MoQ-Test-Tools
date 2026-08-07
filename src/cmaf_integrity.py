@@ -28,6 +28,10 @@ class CmafFragmentEvent:
     timescale: int
     duration_ticks: int
     media_time_sec: float
+    # tfhd track_ID of the traf this event describes. Interleaved audio/video
+    # moofs are separate timelines with separate timescales — continuity is
+    # only meaningful per track.
+    track_id: Optional[int] = None
     seq_gap: bool = False
     tfdt_gap: bool = False
     tfdt_gap_ms: float = 0.0
@@ -120,25 +124,56 @@ def _iter_boxes(data: bytes, start: int, end: int):
         offset = next_offset
 
 
-def _find_timescale(data: bytes) -> int:
-    """Best-effort mdhd timescale from moov (defaults to 90000)."""
+def _parse_mdhd_timescale(data: bytes, start: int, end: int) -> Optional[int]:
+    if end - start < 20:
+        return None
+    version = data[start]
+    if version == 1 and end - start >= 32:
+        return int(struct.unpack_from(">I", data, start + 20)[0]) or None
+    if version == 0 and end - start >= 20:
+        return int(struct.unpack_from(">I", data, start + 12)[0]) or None
+    return None
+
+
+def _parse_tkhd_track_id(data: bytes, start: int, end: int) -> Optional[int]:
+    if end - start < 16:
+        return None
+    version = data[start]
+    # version+flags(4) then creation/modification (8+8 for v1, 4+4 for v0).
+    offset = start + (4 + 16 if version == 1 else 4 + 8)
+    if offset + 4 > end:
+        return None
+    return int(struct.unpack_from(">I", data, offset)[0])
+
+
+def _find_track_timescales(data: bytes) -> Dict[int, int]:
+    """Map moov track_ID → mdhd timescale (audio and video differ, e.g. 48000
+    vs 90000/12800 — mixing them fabricates massive tfdt 'gaps')."""
+    timescales: Dict[int, int] = {}
     for type_bytes, start, end in _iter_boxes(data, 0, len(data)):
         if type_bytes != b"moov":
             continue
         for t2, s2, e2 in _iter_boxes(data, start, end):
             if t2 != b"trak":
                 continue
+            track_id: Optional[int] = None
+            timescale: Optional[int] = None
             for t3, s3, e3 in _iter_boxes(data, s2, e2):
-                if t3 != b"mdia":
-                    continue
-                for t4, s4, e4 in _iter_boxes(data, s3, e3):
-                    if t4 != b"mdhd" or e4 - s4 < 20:
-                        continue
-                    version = data[s4]
-                    if version == 1 and e4 - s4 >= 32:
-                        return int(struct.unpack_from(">I", data, s4 + 20)[0]) or 90000
-                    if version == 0 and e4 - s4 >= 20:
-                        return int(struct.unpack_from(">I", data, s4 + 12)[0]) or 90000
+                if t3 == b"tkhd":
+                    track_id = _parse_tkhd_track_id(data, s3, e3)
+                elif t3 == b"mdia":
+                    for t4, s4, e4 in _iter_boxes(data, s3, e3):
+                        if t4 == b"mdhd":
+                            timescale = _parse_mdhd_timescale(data, s4, e4)
+            if track_id is not None and timescale:
+                timescales[track_id] = timescale
+    return timescales
+
+
+def _find_timescale(data: bytes) -> int:
+    """Best-effort single mdhd timescale from moov (defaults to 90000)."""
+    for timescale in _find_track_timescales(data).values():
+        return timescale
     return 90000
 
 
@@ -205,22 +240,76 @@ def _parse_trun_duration(data: bytes, start: int, end: int) -> int:
     return total
 
 
+def _parse_tfhd(data: bytes, start: int, end: int) -> Tuple[Optional[int], int]:
+    """Return (track_ID, default_sample_duration or 0)."""
+    if end - start < 8:
+        return None, 0
+    version_flags = struct.unpack_from(">I", data, start)[0]
+    flags = version_flags & 0xFFFFFF
+    track_id = int(struct.unpack_from(">I", data, start + 4)[0])
+    cursor = start + 8
+    if flags & 0x000001:  # base_data_offset
+        cursor += 8
+    if flags & 0x000002:  # sample_description_index
+        cursor += 4
+    default_duration = 0
+    if flags & 0x000008:  # default_sample_duration
+        if cursor + 4 <= end:
+            default_duration = int(struct.unpack_from(">I", data, cursor)[0])
+    return track_id, default_duration
+
+
+def _parse_trun_sample_count(data: bytes, start: int, end: int) -> int:
+    if end - start < 8:
+        return 0
+    return int(struct.unpack_from(">I", data, start + 4)[0])
+
+
+@dataclass
+class TrafInfo:
+    track_id: Optional[int]
+    decode_time: Optional[int]
+    duration_ticks: int
+
+
 def _parse_moof(
     data: bytes, start: int, end: int
-) -> Tuple[Optional[int], Optional[int], int]:
+) -> Tuple[Optional[int], List[TrafInfo]]:
+    """Return (mfhd sequence, one TrafInfo per traf).
+
+    A CMAF moof carries one traf per track; interleaved audio/video streams
+    must be checked as independent timelines (one tfdt clock per track).
+    """
     sequence: Optional[int] = None
-    decode_time: Optional[int] = None
-    duration_ticks = 0
+    trafs: List[TrafInfo] = []
     for type_bytes, b_start, b_end in _iter_boxes(data, start, end):
         if type_bytes == b"mfhd":
             sequence = _parse_mfhd_sequence(data, b_start, b_end)
         elif type_bytes == b"traf":
+            track_id: Optional[int] = None
+            default_duration = 0
+            decode_time: Optional[int] = None
+            duration_ticks = 0
+            sample_count = 0
             for t2, s2, e2 in _iter_boxes(data, b_start, b_end):
-                if t2 == b"tfdt" and decode_time is None:
+                if t2 == b"tfhd":
+                    track_id, default_duration = _parse_tfhd(data, s2, e2)
+                elif t2 == b"tfdt" and decode_time is None:
                     decode_time = _parse_tfdt(data, s2, e2)
                 elif t2 == b"trun":
                     duration_ticks += _parse_trun_duration(data, s2, e2)
-    return sequence, decode_time, duration_ticks
+                    sample_count += _parse_trun_sample_count(data, s2, e2)
+            if duration_ticks <= 0 and default_duration > 0 and sample_count > 0:
+                # trun omitted per-sample durations; use the tfhd default.
+                duration_ticks = default_duration * sample_count
+            trafs.append(
+                TrafInfo(
+                    track_id=track_id,
+                    decode_time=decode_time,
+                    duration_ticks=duration_ticks,
+                )
+            )
+    return sequence, trafs
 
 
 def analyze_cmaf_file(path: str) -> CmafIntegrityReport:
@@ -238,12 +327,17 @@ def analyze_cmaf_file(path: str) -> CmafIntegrityReport:
         report.parse_errors = 1
         return report
 
-    timescale = _find_timescale(data)
-    report.timescale = timescale
+    track_timescales = _find_track_timescales(data)
+    default_timescale = next(iter(track_timescales.values()), 90000)
+    report.timescale = default_timescale
 
     prev_seq: Optional[int] = None
-    prev_decode: Optional[int] = None
-    prev_duration = 0
+    # Continuity state PER tfhd.track_ID — interleaved audio/video moofs are
+    # independent timelines with independent timescales. Treating them as one
+    # sequence flagged nearly every fragment of a perfect stream as a "gap"
+    # (reported 1,091,846ms of discontinuity on a clean run).
+    prev_decode: Dict[int, int] = {}
+    prev_duration: Dict[int, int] = {}
     index = 0
     offset = 0
     while offset + 8 <= len(data):
@@ -253,42 +347,58 @@ def analyze_cmaf_file(path: str) -> CmafIntegrityReport:
             break
         payload_start, type_bytes, payload_end, next_offset = header
         if type_bytes == b"moof":
-            sequence, decode_time, duration_ticks = _parse_moof(data, payload_start, payload_end)
-            if sequence is None and decode_time is None:
+            sequence, trafs = _parse_moof(data, payload_start, payload_end)
+            if sequence is None and not any(t.decode_time is not None for t in trafs):
                 report.parse_errors += 1
-            media_time_sec = (decode_time / timescale) if decode_time is not None else float(index)
-            event = CmafFragmentEvent(
-                index=index,
-                sequence_number=sequence,
-                base_media_decode_time=decode_time,
-                timescale=timescale,
-                duration_ticks=duration_ticks,
-                media_time_sec=media_time_sec,
-            )
-            if prev_seq is not None and sequence is not None:
-                if sequence != prev_seq + 1:
-                    event.seq_gap = True
-                    report.seq_gap_count += 1
-            if prev_decode is not None and decode_time is not None:
-                expected = prev_decode + prev_duration
-                delta_ticks = decode_time - expected
-                delta_ms = (delta_ticks / timescale) * 1000.0
-                if delta_ticks < 0:
-                    event.tfdt_overlap = True
-                    report.tfdt_overlap_count += 1
-                elif delta_ms > _TFDT_GAP_SLACK_MS:
-                    event.tfdt_gap = True
-                    event.tfdt_gap_ms = delta_ms
-                    report.tfdt_gap_count += 1
-                    report.tfdt_gap_ms_total += delta_ms
-            report.events.append(event)
-            report.fragment_count += 1
+
+            seq_gap = False
+            if prev_seq is not None and sequence is not None and sequence != prev_seq + 1:
+                seq_gap = True
+                report.seq_gap_count += 1
             if sequence is not None:
                 prev_seq = sequence
-            if decode_time is not None:
-                prev_decode = decode_time
-            # Prefer measured duration; fall back to next-delta later via slack only.
-            prev_duration = duration_ticks if duration_ticks > 0 else prev_duration
+
+            for traf_pos, traf in enumerate(trafs):
+                track_key = traf.track_id if traf.track_id is not None else -1
+                timescale = track_timescales.get(track_key, default_timescale) or 90000
+                decode_time = traf.decode_time
+                media_time_sec = (
+                    (decode_time / timescale) if decode_time is not None else float(index)
+                )
+                event = CmafFragmentEvent(
+                    index=index,
+                    sequence_number=sequence,
+                    base_media_decode_time=decode_time,
+                    timescale=timescale,
+                    duration_ticks=traf.duration_ticks,
+                    media_time_sec=media_time_sec,
+                    track_id=traf.track_id,
+                    # Attribute the moof-level sequence gap to one event only.
+                    seq_gap=seq_gap and traf_pos == 0,
+                )
+                if track_key in prev_decode and decode_time is not None:
+                    known_duration = prev_duration.get(track_key, 0)
+                    if known_duration > 0:
+                        expected = prev_decode[track_key] + known_duration
+                        delta_ticks = decode_time - expected
+                        delta_ms = (delta_ticks / timescale) * 1000.0
+                        # Symmetric slack: sub-slack negative deltas are normal
+                        # duration rounding (e.g. AAC 1024-sample frames vs a
+                        # 1s cadence), not timeline rewinds.
+                        if delta_ms < -_TFDT_GAP_SLACK_MS:
+                            event.tfdt_overlap = True
+                            report.tfdt_overlap_count += 1
+                        elif delta_ms > _TFDT_GAP_SLACK_MS:
+                            event.tfdt_gap = True
+                            event.tfdt_gap_ms = delta_ms
+                            report.tfdt_gap_count += 1
+                            report.tfdt_gap_ms_total += delta_ms
+                if decode_time is not None:
+                    prev_decode[track_key] = decode_time
+                if traf.duration_ticks > 0:
+                    prev_duration[track_key] = traf.duration_ticks
+                report.events.append(event)
+            report.fragment_count += 1
             index += 1
         offset = next_offset
 

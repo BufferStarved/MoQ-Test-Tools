@@ -72,6 +72,11 @@ export function usePlaybackMetricsReporter(options: {
         (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);
       const payload = {
         elapsed_sec,
+        // Wall-clock stamp so the server can rebase onto the pipeline's
+        // elapsed base — the browser's start anchor and the encoder's sample
+        // loop have different zero points (~6s apart on webcam jobs), which
+        // used to make every persisted playback merge miss.
+        at_epoch: Date.now() / 1000,
         engine,
         ...snapshot,
         playback_error_count,
