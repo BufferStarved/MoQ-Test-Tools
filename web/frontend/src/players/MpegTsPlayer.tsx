@@ -229,8 +229,10 @@ export default function MpegTsPlayer({
       }
     };
 
-    const onWaiting = () => rebufferRef.current.onWaiting();
-    const onPlaying = () => rebufferRef.current.onPlaying();
+    // RebufferTracker's API is beginWait/endWait — the old onWaiting/onPlaying
+    // calls threw TypeErrors on every stall, so rebuffer time was never counted.
+    const onWaiting = () => rebufferRef.current.beginWait(sessionRef.current.ttffMs > 0);
+    const onPlaying = () => rebufferRef.current.endWait();
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("playing", onPlaying);
