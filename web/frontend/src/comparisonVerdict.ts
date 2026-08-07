@@ -136,16 +136,34 @@ export function buildComparisonVerdict(
     }
   }
 
-  const e2e = pickLowest(streams, (r) => r.averages.e2e_latency_ms);
-  if (e2e) {
-    const name = streamName(streams[e2e.index], e2e.index, labels);
+  // E2E latency estimates use protocol-specific formulas with different
+  // anchors/biases (Zixi wall−playhead, LL-HLS PDT, MoQ buffer-lead proxy).
+  // Crowning a cross-protocol winner on those numbers is misleading — only
+  // rank when every stream with an estimate shares one protocol; otherwise
+  // surface an explicit "not comparable" note until anchors are unified.
+  const e2eProtocols = new Set(
+    streams
+      .filter((r) => finitePositive(r.averages.e2e_latency_ms))
+      .map((r) => r.protocol),
+  );
+  if (e2eProtocols.size > 1) {
     highlights.push({
-      label: "Lowest E2E",
-      winner: name,
-      value: formatMs(e2e.value),
-      protocol: streams[e2e.index].protocol,
+      label: "E2E latency",
+      winner: "Not comparable",
+      value: "estimates use different anchors per protocol",
     });
-    parts.push(`${name} lowest E2E (${formatMs(e2e.value)})`);
+  } else {
+    const e2e = pickLowest(streams, (r) => r.averages.e2e_latency_ms);
+    if (e2e) {
+      const name = streamName(streams[e2e.index], e2e.index, labels);
+      highlights.push({
+        label: "Lowest E2E",
+        winner: name,
+        value: formatMs(e2e.value),
+        protocol: streams[e2e.index].protocol,
+      });
+      parts.push(`${name} lowest E2E (${formatMs(e2e.value)})`);
+    }
   }
 
   const vmaf = pickHighest(

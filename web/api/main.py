@@ -146,6 +146,11 @@ def probe_media_duration_sec(media_path: str) -> int:
 
 class PlaybackSampleRequest(BaseModel):
     elapsed_sec: int = Field(ge=0)
+    # Browser wall-clock (unix seconds) when the sample was taken. Lets the
+    # server rebase elapsed_sec onto the pipeline sample base (see
+    # JobManager.record_playback_sample) instead of trusting the browser's
+    # start anchor, which uses a different zero point.
+    at_epoch: float = 0.0
     engine: str = ""
     playback_stats_events: int = 0
     playback_stall_count: int = 0

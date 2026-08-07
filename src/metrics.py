@@ -101,6 +101,13 @@ def parse_out_time_seconds(out_time: str) -> float:
 
 
 def compute_encode_lag_ms(wall_elapsed_sec: float, out_time: str) -> float:
+    """Raw (wall − out_time) in ms.
+
+    WARNING: this includes the constant startup offset (process spawn, device/
+    broker warmup, first-frame delay), which is NOT sustained encoder lag.
+    Sample loops should use :class:`EncodeLagTracker`, which baseline-subtracts
+    that offset; this raw form is kept for callers that want the absolute gap.
+    """
     media_sec = parse_out_time_seconds(out_time)
     if media_sec <= 0 or wall_elapsed_sec <= 0:
         return 0.0
@@ -108,6 +115,33 @@ def compute_encode_lag_ms(wall_elapsed_sec: float, out_time: str) -> float:
     if lag_ms < 0 or lag_ms > 120_000:
         return 0.0
     return round(lag_ms, 1)
+
+
+class EncodeLagTracker:
+    """Sustained encoder lag = *growth* of (wall − out_time) past its baseline.
+
+    The raw difference (wall elapsed − media out_time) contains a constant
+    startup offset — process spawn, webcam-broker warmup, first-frame latency —
+    that a per-second sample loop would re-report forever (~1.2–2.4s on the
+    SRT LL-HLS and MoQ webcam paths). That dead time is not encoder lag: the
+    encoder is keeping up fine, it just started late. Anchoring at the first
+    sample with a positive out_time makes the metric answer the question it is
+    charted as: "is the encoder falling further behind realtime?"
+    """
+
+    def __init__(self) -> None:
+        self._baseline_ms: Optional[float] = None
+
+    def sample(self, wall_elapsed_sec: float, out_time: str) -> float:
+        media_sec = parse_out_time_seconds(out_time)
+        if media_sec <= 0 or wall_elapsed_sec <= 0:
+            return 0.0
+        raw_ms = (wall_elapsed_sec - media_sec) * 1000.0
+        if raw_ms < 0 or raw_ms > 120_000:
+            return 0.0
+        if self._baseline_ms is None:
+            self._baseline_ms = raw_ms
+        return round(max(0.0, raw_ms - self._baseline_ms), 1)
 
 
 class MetricsCollector:
@@ -135,6 +169,9 @@ class MetricsCollector:
             f"upload_{timestamp}{suffix}.summary.json",
         )
         self._fps_window = RollingWindow(size=30)
+        # Fallback encode-lag tracker for callers that don't pass encode_lag_ms
+        # explicitly — baseline-subtracted, same semantics as the sample loops.
+        self._encode_lag_tracker = EncodeLagTracker()
         self._rows: List[dict] = []
         self._total_bytes_sent = 0
         self._total_bytes_received = 0
@@ -245,7 +282,7 @@ class MetricsCollector:
             resolved_encode_lag = (
                 encode_lag_ms
                 if encode_lag_ms > 0
-                else compute_encode_lag_ms(wall_elapsed, out_time)
+                else self._encode_lag_tracker.sample(wall_elapsed, out_time)
             )
             resolved_net_rtt = net_rtt_ms or transport_rtt_ms or quic_rtt_ms
             resolved_net_jitter = net_jitter_ms or transport_rtt_jitter_ms

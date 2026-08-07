@@ -176,6 +176,67 @@ export function metricUnavailableMessage(metricKey: string, protocol: ProtocolId
   return `Not available with protocol ${proto} (supported: ${others})`;
 }
 
+/** Parse ffmpeg out_time ("HH:MM:SS.micro") to seconds; 0 when unparseable. */
+export function parseOutTimeSec(outTime?: string | null): number {
+  const value = (outTime ?? "").trim();
+  if (!value || value === "N/A") {
+    return 0;
+  }
+  const parts = value.split(":");
+  if (parts.length !== 3) {
+    return 0;
+  }
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  const seconds = Number(parts[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) {
+    return 0;
+  }
+  return Math.max(0, hours * 3600 + minutes * 60 + seconds);
+}
+
+/**
+ * Wall-clock epoch (seconds) when the encoder's media clock (`out_time`)
+ * started advancing — the correct anchor for wall−playhead latency.
+ *
+ * Neither job epoch is right on its own: `started_at_epoch` is job-thread
+ * creation and includes the full protocol setup + webcam-broker warmup (~6s),
+ * and `first_sample_at_epoch` fires on the first sample with bitrate/fps > 0,
+ * which can still precede the first encoded frame. Instead, at the first
+ * sample whose out_time is positive, (sample wall time − out_time) is the
+ * instant media time began — out_time advances at realtime for a live encode.
+ * Sample wall times are reconstructed from first_sample_at_epoch plus the
+ * elapsed_sec delta. Returns null (callers must treat latency as unknown)
+ * rather than ever falling back to started_at_epoch.
+ */
+export function deriveEncodeAnchorEpoch(
+  job: { first_sample_at_epoch?: number | null } | null | undefined,
+  samples:
+    | Array<{
+        elapsed_sec: number;
+        out_time?: string;
+        encoded_bitrate_kbps?: number;
+        fps?: number;
+      }>
+    | null
+    | undefined,
+): number | null {
+  const firstSampleEpoch = job?.first_sample_at_epoch;
+  if (!firstSampleEpoch || firstSampleEpoch <= 0 || !samples || samples.length === 0) {
+    return null;
+  }
+  // The sample that set first_sample_at_epoch: first with real encode data.
+  const firstLive = samples.find(
+    (sample) => (sample.encoded_bitrate_kbps ?? 0) > 0 || (sample.fps ?? 0) > 0,
+  );
+  const firstOut = samples.find((sample) => parseOutTimeSec(sample.out_time) > 0);
+  if (!firstLive || !firstOut) {
+    return null;
+  }
+  const wallOfFirstOut = firstSampleEpoch + (firstOut.elapsed_sec - firstLive.elapsed_sec);
+  return wallOfFirstOut - parseOutTimeSec(firstOut.out_time);
+}
+
 /**
  * Estimated glass-to-glass latency for a realtime encode:
  * (wall clock since encode start) − (media time shown in the player).

@@ -161,7 +161,7 @@ export interface PlaybackMetricsSnapshot {
 
 export function postPlaybackSample(
   jobId: string,
-  sample: PlaybackMetricsSnapshot & { elapsed_sec: number; engine: string },
+  sample: PlaybackMetricsSnapshot & { elapsed_sec: number; engine: string; at_epoch?: number },
 ): Promise<{ ok: boolean }> {
   return request(`/uploads/${jobId}/playback-sample`, {
     method: "POST",

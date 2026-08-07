@@ -26,7 +26,7 @@ from encode_profile import (
 )
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
-from metrics import MetricsCollector, compute_encode_lag_ms
+from metrics import EncodeLagTracker, MetricsCollector
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
@@ -582,6 +582,7 @@ class UploadService:
                 port=whip_parsed.port or 8889,
         )
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
         # Zixi tears down and recreates its RTMP push input between runs; a
         # push that lands during that window is rejected with an instant I/O
         # error (ffmpeg exit 251 within seconds — reproduced during gauntlet
@@ -626,6 +627,7 @@ class UploadService:
                         )
                         progress_reader = FfmpegProgressReader(process.stdout)
                         start_time = time.time()
+                        encode_lag_tracker = EncodeLagTracker()
                         continue
                     return UploadResult(
                         success=False,
@@ -642,7 +644,7 @@ class UploadService:
                 cpu, mem = self._process_usage([process.pid])
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
                 merged = self._merge_mediamtx_transport(
                     mtx=mtx_stats,
                     net_rtt_ms=zixi_stats.rtt_ms or (path_rtt.rtt_ms if path_rtt else 0.0),
@@ -1130,6 +1132,7 @@ class UploadService:
             ingest_provider=job.destination.ingest_provider,
         )
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
         manifest_url = self._managed_hls_manifest_url(job)
         preview_ready = False
         bad_since: Optional[float] = None
@@ -1287,7 +1290,7 @@ class UploadService:
                 send_mbps = srt_stats.mbps_send_rate or (status.bitrate_kbps / 1000.0)
                 # ffmpeg -progress often reports bitrate=N/A for mpegts/UDP tee; use libsrt send rate.
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
                 # Publisher libsrt first; MediaMTX fills receiver RTT/loss/recv rate (and Zixi if any).
                 merged = self._merge_mediamtx_transport(
                     mtx=mtx_stats,
@@ -1564,6 +1567,7 @@ class UploadService:
         # openmoq has no qlog; probe relay admin TCP for path RTT/jitter equivalent.
         path_rtt_probe = PathRttProbe(job.destination.url)
         start_time = time.time()
+        encode_lag_tracker = EncodeLagTracker()
         prev_moqx_loss = 0
         prev_moqx_retrans = 0
         prev_moqx_sent = 0
@@ -1647,7 +1651,7 @@ class UploadService:
                 cpu, mem = self._process_usage(pids)
                 send_mbps = status.bitrate_kbps / 1000.0
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
-                encode_lag_ms = compute_encode_lag_ms(float(elapsed), status.out_time)
+                encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
 
                 # Prefer native QUIC smoothed RTT (moq5 qlog); else path TCP probe.
                 quic_rtt = quic_stats.rtt_ms if quic_stats and quic_stats.rtt_ms > 0 else 0.0

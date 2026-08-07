@@ -26,6 +26,7 @@ import { StreamPlayer } from "./StreamPlayer";
 import { moqDefaultsFromPublishUrl } from "./playbackUrls";
 import { playbackGateForJob } from "./playbackGate";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
+import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { buildComparisonVerdict } from "./comparisonVerdict";
 import { protocolColor, protocolLabel } from "./protocolTheme";
 import { TopSummaryStrip } from "./TopSummaryStrip";
@@ -1279,9 +1280,14 @@ function App() {
                         encodeLadder={leg?.job.encode_ladder ?? encodeLadder}
                         playbackGate={playbackGateForJob(leg?.job, loading)}
                         jobId={leg?.job.id}
-                        encodeStartedAtEpoch={
-                          leg?.job.first_sample_at_epoch ?? leg?.job.started_at_epoch
-                        }
+                        // Anchor = wall time when out_time first advanced,
+                        // derived from samples. Never started_at_epoch: that
+                        // predates protocol setup + webcam-broker warmup (~6s)
+                        // and inflated every wall−playhead latency estimate.
+                        encodeStartedAtEpoch={deriveEncodeAnchorEpoch(
+                          leg?.job,
+                          leg?.samples,
+                        )}
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;

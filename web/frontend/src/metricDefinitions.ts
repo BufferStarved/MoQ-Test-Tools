@@ -70,12 +70,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   encode_lag_ms: {
     label: "Encode lag",
     description:
-      "Wall-clock time minus ffmpeg media out_time while publishing. Large values mean the encoder is falling behind realtime.",
+      "Growth of (wall-clock − ffmpeg media out_time) past its startup baseline. The constant startup offset (process spawn, webcam warmup) is subtracted at the first encoded sample, so this reads ~0 for an encoder keeping up with realtime and only rises when the encoder falls further behind. Not a latency component — do not add it to e2e estimates.",
   },
   e2e_latency_ms: {
     label: "E2E latency (estimated)",
     description:
-      "Estimated glass-to-glass latency, capture-anchored per player. Zixi HTTP-TS / Fast HLS: wall clock since encode start − media playhead (+ webcam bridge lag). MediaMTX LL-HLS: hls.js PDT latency + encode lag + bridge. MoQ: CaptureTimestamp when present, else wall − MoQ media timeline (+ bridge). Distinct from TTFF.",
+      "Estimated glass-to-glass latency; each protocol uses a different formula/anchor, so values are NOT directly comparable across protocols. Zixi HTTP-TS / Fast HLS: wall clock since first encoded frame − media playhead (+ webcam bridge lag). MediaMTX LL-HLS: hls.js PDT latency + bridge. MoQ: CaptureTimestamp when present, otherwise a buffer-lead proxy (buffered seconds ahead + decode pad + bridge), not a measured end-to-end figure. Distinct from TTFF.",
   },
   playback_error_count: {
     label: "Player errors",

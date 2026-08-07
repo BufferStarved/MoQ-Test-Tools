@@ -111,6 +111,15 @@ class UploadJobRecord:
     encoder_ssim: Optional[float] = None
     encoder_vmaf_error: Optional[str] = None
     started_at_epoch: Optional[float] = None
+    # Wall-clock estimate of the encode pipeline's sample-loop start (t=0 of
+    # upload-sample `elapsed_sec`), derived on the first sample's arrival as
+    # (arrival wall time − sample.elapsed_sec). Upload samples count elapsed
+    # from pipeline start, while the browser's playback samples were counted
+    # from started_at_epoch/first_sample_at_epoch — a ~6s base mismatch on
+    # webcam jobs that made every exact-elapsed merge miss (persisted
+    # playback_*/e2e_latency_ms were all 0). Playback samples are rebased onto
+    # this epoch via their `at_epoch` wall stamp.
+    pipeline_start_epoch: Optional[float] = None
     # Wall-clock time of the first sample carrying real encode data (bitrate
     # or fps > 0), as opposed to `started_at_epoch` (job thread creation).
     # Protocol setup cost before frames flow — endpoint probes, Zixi SRT
@@ -319,6 +328,8 @@ class JobManager:
             with self._lock:
                 record = self._jobs.get(job_id)
                 if record:
+                    if record.pipeline_start_epoch is None:
+                        record.pipeline_start_epoch = time.time() - sample.elapsed_sec
                     if record.first_sample_at_epoch is None and (
                         sample.encoded_bitrate_kbps > 0 or sample.fps > 0
                     ):
@@ -574,6 +585,10 @@ class JobManager:
             return False
         if elapsed_sec < 0:
             return False
+        try:
+            at_epoch = float(sample.get("at_epoch", 0) or 0)
+        except (TypeError, ValueError):
+            at_epoch = 0.0
 
         engine = str(sample.get("engine", "") or "").strip().lower()
         payload = {"elapsed_sec": elapsed_sec}
@@ -587,13 +602,26 @@ class JobManager:
             record = self._jobs.get(job_id)
             if not record:
                 return False
+            # Rebase browser-side elapsed onto the pipeline's elapsed base so
+            # this merges with upload samples (see pipeline_start_epoch).
+            if at_epoch > 0 and record.pipeline_start_epoch is not None:
+                rebased = int(at_epoch - record.pipeline_start_epoch)
+                if rebased >= 0:
+                    payload["elapsed_sec"] = rebased
+                    elapsed_sec = rebased
             record.playback_samples.append(payload)
             if engine:
                 record.playback_engine = engine
+            # Playback ticks rarely land on the exact same integer second as an
+            # upload sample — attach to the latest sample at-or-before instead.
+            target = None
             for live_sample in record.samples:
-                if live_sample.get("elapsed_sec") == elapsed_sec:
-                    for name in PLAYBACK_FIELD_NAMES:
-                        live_sample[name] = payload[name]
+                live_elapsed = live_sample.get("elapsed_sec")
+                if isinstance(live_elapsed, (int, float)) and live_elapsed <= elapsed_sec:
+                    target = live_sample
+            if target is not None:
+                for name in PLAYBACK_FIELD_NAMES:
+                    target[name] = payload[name]
         return True
 
     @staticmethod
@@ -601,10 +629,15 @@ class JobManager:
         if not playback_samples:
             return
         elapsed = payload.get("elapsed_sec")
-        matched = next(
-            (sample for sample in reversed(playback_samples) if sample.get("elapsed_sec") == elapsed),
-            None,
-        )
+        # Nearest at-or-before (both series now share the pipeline elapsed
+        # base); exact-equality matching missed nearly every second.
+        matched = None
+        if isinstance(elapsed, (int, float)):
+            for sample in reversed(playback_samples):
+                sample_elapsed = sample.get("elapsed_sec")
+                if isinstance(sample_elapsed, (int, float)) and sample_elapsed <= elapsed:
+                    matched = sample
+                    break
         if matched is None:
             matched = playback_samples[-1]
         for name in PLAYBACK_FIELD_NAMES:
