@@ -367,7 +367,10 @@ def is_live_media_source(media_path: str) -> bool:
 
 
 def build_device_webcam_input_args(
-    *, duration_sec: Optional[int] = None, device_index: Optional[int] = None
+    *,
+    duration_sec: Optional[int] = None,
+    device_index: Optional[int] = None,
+    video_size: Optional[str] = None,
 ) -> List[str]:
     """ffmpeg input args for the laptop camera (local publisher agent).
 
@@ -375,6 +378,16 @@ def build_device_webcam_input_args(
     Linux: V4L2 ``/dev/video0`` + silent audio (anullsrc) unless Pulse is present.
     ``device_index`` (from the UI camera picker) overrides the video device;
     env vars keep working as the default when no index is given.
+
+    ``video_size`` (macOS only) requests an explicit AVFoundation capture
+    format instead of the device default. Some MacBook cameras default to a
+    *portrait* native mode (e.g. 1080x1920) when no size is requested —
+    confirmed 2026-08-06 on a MacBook Pro "MacBook Pro Camera" — producing
+    portrait video with no rotation applied. Optional (not forced
+    unconditionally here) because forcing one fixed size unconditionally has
+    previously failed on some Macs/cameras that don't support it; callers
+    that want the landscape default should pass a size and be ready to retry
+    without it if the capture fails to start (see webcam_broker.py).
     """
     import platform
     import shutil
@@ -393,12 +406,13 @@ def build_device_webcam_input_args(
         else:
             input_spec = default_spec
         # framerate before -i is required by avfoundation for stable CFR.
-        # Leave size to the device default — forcing 1280x720 fails on many Macs.
+        size_args = ["-video_size", video_size] if video_size else []
         return [
             "-f",
             "avfoundation",
             "-framerate",
             "30",
+            *size_args,
             *duration_args,
             "-i",
             input_spec,

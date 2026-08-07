@@ -195,6 +195,18 @@ class UploadJob:
         if not self.ffmpeg_cmd:
             self.ffmpeg_cmd = self._build_ffmpeg_cmd()
 
+    def refresh_ffmpeg_cmd(self) -> None:
+        """Re-derive ``ffmpeg_cmd`` from the current ``media_path``.
+
+        ``__post_init__`` bakes the command at construction time. Callers
+        that rewrite ``media_path`` afterwards (the publisher agent swaps
+        ``device:webcam`` for a brokered loopback ``udp://`` URL) must call
+        this, or pipelines that reuse the frozen command (RTMP/WHIP direct,
+        SRT direct) silently keep the original device-capture input and open
+        the camera directly — the 2026-08-06 webcam-comparison incident.
+        """
+        self.ffmpeg_cmd = self._build_ffmpeg_cmd()
+
     def _video_args(self) -> List[str]:
         # MediaMTX is configured with hlsSegmentDuration=1s, but LL-HLS can
         # only cut segments on IDRs — a 2s GOP silently doubles the segment
@@ -1458,15 +1470,17 @@ class UploadService:
             target.forward,
         )
         publisher_log_path = os.path.join(temp_dir, "publisher-stderr.log")
+        ffmpeg_log_path = os.path.join(temp_dir, "ffmpeg-stderr.log")
         print(
             f"MoQ publish via {publisher_backend}: namespace={target.namespace} "
-            f"log={publisher_log_path} cmd={' '.join(publisher_cmd)}",
+            f"log={publisher_log_path} ffmpeg_log={ffmpeg_log_path} cmd={' '.join(publisher_cmd)}",
             flush=True,
         )
 
         ffmpeg_proc: Optional[subprocess.Popen] = None
         publisher_proc: Optional[subprocess.Popen] = None
         drain_thread: Optional[threading.Thread] = None
+        ffmpeg_drain_thread: Optional[threading.Thread] = None
         fanout_thread: Optional[threading.Thread] = None
         tee_proc: Optional[subprocess.Popen] = None
 
@@ -1512,6 +1526,20 @@ class UploadService:
                     daemon=True,
                 )
                 drain_thread.start()
+            # Same risk applies to ffmpeg's own stderr: default -loglevel is
+            # verbose, and a live UDP source with wallclock PTS regeneration
+            # can log "Non-monotonic DTS"/timestamp-discontinuity warnings
+            # fast enough to fill the pipe before a single frame is muxed —
+            # blocking ffmpeg's own logging (and therefore encoding) with
+            # nothing to show for it (0-byte capture, 0-byte progress file).
+            # Drain to a file so this is diagnosable instead of silently lost.
+            if ffmpeg_proc.stderr is not None:
+                ffmpeg_drain_thread = threading.Thread(
+                    target=self._drain_stream_to_file,
+                    args=(ffmpeg_proc.stderr, ffmpeg_log_path),
+                    daemon=True,
+                )
+                ffmpeg_drain_thread.start()
         except FileNotFoundError:
             self._terminate_process(ffmpeg_proc)
             return UploadResult(success=False, error="ffmpeg not found in PATH")
@@ -1569,15 +1597,27 @@ class UploadService:
                     if ffmpeg_proc.returncode == 0:
                         logger.info("ffmpeg finished cleanly before duration; finalizing MoQ job")
                         break
+                    if ffmpeg_drain_thread is not None:
+                        ffmpeg_drain_thread.join(timeout=2)
                     return UploadResult(
                         success=False,
-                        error=self._ffmpeg_failure_message(ffmpeg_proc),
+                        error=self._ffmpeg_failure_message(ffmpeg_proc, ffmpeg_log_path),
                     )
                 if publisher_proc.poll() is not None:
                     if drain_thread is not None:
                         drain_thread.join(timeout=2)
                     detail = self._tail_file(publisher_log_path) or "unknown error"
                     code = publisher_proc.returncode
+                    # "stdin EOF before ftyp box" means the publisher never saw a
+                    # usable fMP4 header — ffmpeg upstream never muxed a frame.
+                    # Surface ffmpeg's own log so this isn't a dead end (see the
+                    # 2026-08-06 incident where this printed with no other clue).
+                    if "ftyp" in detail.lower() or "eof" in detail.lower():
+                        if ffmpeg_drain_thread is not None:
+                            ffmpeg_drain_thread.join(timeout=1)
+                        ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
+                        if ffmpeg_tail:
+                            detail += f"\nffmpeg log tail ({ffmpeg_log_path}):\n{ffmpeg_tail}"
                     if code not in (0, None):
                         return UploadResult(
                             success=False,
@@ -1730,9 +1770,14 @@ class UploadService:
                 fanout_thread.join(timeout=5)
             if drain_thread is not None:
                 drain_thread.join(timeout=2)
+            if ffmpeg_drain_thread is not None:
+                ffmpeg_drain_thread.join(timeout=2)
             tail = self._tail_file(publisher_log_path, max_lines=15)
             if tail:
                 print(f"MoQ publisher log tail ({publisher_log_path}):\n{tail}", flush=True)
+            ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
+            if ffmpeg_tail:
+                print(f"MoQ ffmpeg log tail ({ffmpeg_log_path}):\n{ffmpeg_tail}", flush=True)
 
         return self._finalize_result(
             job,
@@ -1918,10 +1963,15 @@ class UploadService:
             encoder_vmaf_error=encoder_vmaf_error,
         )
 
-    def _ffmpeg_failure_message(self, process: subprocess.Popen) -> str:
+    def _ffmpeg_failure_message(self, process: subprocess.Popen, log_path: str = "") -> str:
         stderr = ""
         if process.stderr:
+            # If a drain thread already owns this pipe (see _run_moq_pipeline),
+            # this read() races it and typically returns nothing — fall back
+            # to the file the drain thread is writing to.
             stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+        if not stderr and log_path:
+            stderr = self._tail_file(log_path, max_lines=40)
         detail = stderr.splitlines()[-1] if stderr else "unknown error"
         message = f"ffmpeg exited with code {process.returncode}: {detail}"
         if "Input/output error" in stderr and "rtmp://" in stderr.lower():

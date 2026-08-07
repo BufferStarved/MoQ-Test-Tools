@@ -192,6 +192,11 @@ class PublisherAgent:
                     duration_sec=job.duration_sec,
                     cancel_event=cancel_event,
                 )
+                # job.ffmpeg_cmd was frozen at construction with the original
+                # device:webcam input — without this refresh the RTMP/SRT
+                # direct pipelines ignore the rewritten media_path and open
+                # the camera anyway, defeating the broker entirely.
+                job.refresh_ffmpeg_cmd()
             else:
                 # Absolute uploads/ paths from the API, or repo-relative files.
                 media = Path(media_raw)
