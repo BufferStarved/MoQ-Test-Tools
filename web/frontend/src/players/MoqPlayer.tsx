@@ -13,6 +13,7 @@ import {
   getMoqPlaybackOutcome,
 } from "../moqPlaybackOutcome";
 import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playbackBuffer";
+import { clockSkewMs } from "../clockSkew";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -162,18 +163,38 @@ export default function MoqPlayer({
   }, [jobId]);
 
   /**
-   * Latency proxy (ms). Prefer CaptureTimestamp when playa reports it.
-   * Otherwise this is a BUFFER-LEAD PROXY (buffered media ahead of the
-   * playhead + a small decode/render pad + bridge lag), not a measured
-   * glass-to-glass figure — never wall−MSE-currentTime (join-zeroed; freezes
-   * at join delay and disagrees with ENC burn-in). encode_lag_ms is
-   * deliberately NOT added: it is a baseline-subtracted "encoder falling
-   * behind" gauge, and the old raw form summed ~1.2-2.4s of one-time startup
-   * offset into every sample.
+   * Capture-anchored glass-to-glass estimate (ms) — the same unified
+   * formula as the HLS/HTTP-TS players:
+   *
+   *   e2e = (server-clock now − encode anchor) − encoder-timeline playhead + bridge
+   *
+   * The MSE `<video>` clock re-zeros at join, so `video.currentTime` alone
+   * is useless here — but playa's assembler records the raw tfdt of the
+   * first appended segment (`joinMediaOffsetSec`), and `joinOffset +
+   * currentTime` IS the playhead on the encoder's timeline (tfdt starts ~0
+   * at encode start for a live encode). Wall time is skew-corrected to the
+   * API server's clock, which stamps the anchor epochs.
+   *
+   * Fallbacks, in order: playa's CaptureTimestamp latency when reported,
+   * then the old buffer-lead proxy (buffered media + decode/render pad).
+   * encode_lag_ms is deliberately NOT added: it is a baseline-subtracted
+   * "encoder falling behind" gauge, and the old raw form summed ~1.2-2.4s
+   * of one-time startup offset into every sample.
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
-    const { bridgeMs } = lagRef.current;
+    const { bridgeMs, epoch } = lagRef.current;
+    const video = videoRef.current;
+
+    const joinOffsetSec = playerRef.current?.joinMediaOffsetSec ?? null;
+    if (epoch > 0 && joinOffsetSec != null && video && video.currentTime > 0.05) {
+      const encoderPlayheadMs = (joinOffsetSec + video.currentTime) * 1000;
+      const total = Date.now() + clockSkewMs() - epoch * 1000 - encoderPlayheadMs + bridgeMs;
+      if (total > 0 && total < 120_000) {
+        return Math.round(total);
+      }
+    }
+
     if (session.playerLatencyMs > 0) {
       const total = session.playerLatencyMs + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
@@ -218,7 +239,6 @@ export default function MoqPlayer({
     engine: "moq",
     enabled: playbackGate === "live",
     startedAtEpoch: encodeStartedAtEpoch,
-    targetLatencyMs,
     getSnapshot: getPlaybackSnapshot,
     onSample: onPlaybackSample,
   });

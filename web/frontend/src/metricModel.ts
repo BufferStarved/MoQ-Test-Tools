@@ -237,82 +237,10 @@ export function deriveEncodeAnchorEpoch(
   return wallOfFirstOut - parseOutTimeSec(firstOut.out_time);
 }
 
-/**
- * Estimated glass-to-glass latency for a realtime encode:
- * (wall clock since encode start) − (media time shown in the player).
- *
- * `playbackVideoTimeSec` must be *session-relative* (seconds of media played
- * back in this run), not an absolute/container timestamp — callers rebase
- * raw `video.currentTime` before calling this (see HlsPlayer's
- * `sessionRelativeVideoTime` and MoqPlayer's join-relative MSE timeline).
- * Managed Zixi SRT applies a monotonic `-output_ts_offset` to
- * `video.currentTime` directly (see src/zixi_ts_offset.py); an un-rebased
- * absolute value there would corrupt this formula.
- *
- * This includes intentional live buffers (e.g. HLS liveSyncDurationCount ≈ 2
- * segments). Do not subtract them — the metric is meant to reflect what the
- * viewer experiences, not theoretical transport-only delay.
- * Requires roughly NTP-aligned clocks on browser and publisher host.
- *
- * Only valid when `playbackVideoTimeSec` is encode-anchored (Zixi HTTP-TS /
- * Fast HLS after optional ts_offset rebase). Do **not** use for MoQ MSE
- * timelines that re-zero at join — that freezes at join delay, not
- * glass-to-glass (see {@link estimateMoqE2eLatencyMs}).
- */
-export function estimateE2eLatencyMs(
-  encodeStartedAtEpoch: number | null | undefined,
-  playbackVideoTimeSec: number,
-): number | null {
-  if (!encodeStartedAtEpoch || encodeStartedAtEpoch <= 0) {
-    return null;
-  }
-  if (playbackVideoTimeSec <= 0) {
-    return null;
-  }
-  const wallElapsedMs = Date.now() - encodeStartedAtEpoch * 1000;
-  const mediaElapsedMs = playbackVideoTimeSec * 1000;
-  const latency = wallElapsedMs - mediaElapsedMs;
-  if (!Number.isFinite(latency) || latency < 0 || latency > 120_000) {
-    return null;
-  }
-  return Math.round(latency);
-}
-
-/**
- * MoQ glass-to-glass estimate.
- *
- * Prefer player-reported CaptureTimestamp latency when present (playa still
- * hardcodes `latencyMs: 0` today — MoqPlayer therefore stamps a buffer-based
- * `e2e_latency_ms` into the snapshot). Otherwise estimate from the live
- * buffer lead (+ a small decode/render pad).
- *
- * Do **not** use wall−vt on the MSE `<video>` clock. Playa's `timeupdate` with
- * an active video sink is `video.currentTime * 1000`, which re-zeros at join —
- * so wall−vt freezes at (join wall − encode start). That is join delay / a
- * TTFF cousin, not glass-to-glass, and disagreed with the burnt-in ENC clock.
- */
-export function estimateMoqE2eLatencyMs(options: {
-  encodeStartedAtEpoch?: number | null;
-  videoTimeSec: number;
-  bufferSec: number;
-  playerLatencyMs?: number;
-  targetLatencyMs?: number;
-}): number | null {
-  const playerLatency = options.playerLatencyMs ?? 0;
-  if (Number.isFinite(playerLatency) && playerLatency > 0 && playerLatency <= 120_000) {
-    return Math.round(playerLatency);
-  }
-
-  // CaptureTimestamp / player stamp unavailable — buffer lead is the best
-  // viewer-facing proxy once media is flowing. Options kept for call-site
-  // compatibility / future SEI.
-  void options.encodeStartedAtEpoch;
-  void options.videoTimeSec;
-  void options.targetLatencyMs;
-
-  const bufferMs = Math.max(0, options.bufferSec) * 1000;
-  if (bufferMs <= 0) {
-    return null;
-  }
-  return Math.round(bufferMs + 250);
-}
+// The per-protocol e2e latency estimators that used to live here
+// (estimateE2eLatencyMs, estimateMoqE2eLatencyMs) are gone: every player now
+// stamps the SAME capture-anchored, clock-skew-corrected formula into its
+// snapshot — (server-clock now − encode anchor) − encoder-timeline playhead
+// + bridge lag — inside its captureAnchoredE2eMs(). See clockSkew.ts and the
+// join-offset plumbing in vendor/moq-playa for the pieces that made a single
+// formula possible across HTTP-TS, LL-HLS, and MoQ MSE timelines.

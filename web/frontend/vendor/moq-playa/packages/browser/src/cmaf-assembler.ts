@@ -26,6 +26,7 @@ import {
   firstHevcVclNalType,
   isHevcCraNalType,
   isHevcRaslNalType,
+  readMdhdTimescale,
   readTrexDefaults,
   type TrexDefaults,
   type TrunSample,
@@ -104,6 +105,14 @@ export class CmafAssembler {
    */
   private videoTrex: TrexDefaults | null = null;
 
+  /**
+   * Media timescales (ticks/second) parsed from the init segments' mdhd.
+   * Convert epoch (raw first baseMediaDecodeTime) into seconds for the
+   * join-offset latency anchor.
+   */
+  private videoTimescale: number | null = null;
+  private audioTimescale: number | null = null;
+
   /** Enable diagnostic logging. */
   debug = false;
 
@@ -126,9 +135,13 @@ export class CmafAssembler {
    * not leak into rewrites of the new stream's fragments.
    */
   setInitSegment(mediaType: 'video' | 'audio', initBytes: Uint8Array): void {
-    if (mediaType !== 'video') return;
-    const trexMap = readTrexDefaults(initBytes);
-    this.videoTrex = trexMap.size > 0 ? trexMap.values().next().value! : null;
+    if (mediaType === 'video') {
+      this.videoTimescale = readMdhdTimescale(initBytes);
+      const trexMap = readTrexDefaults(initBytes);
+      this.videoTrex = trexMap.size > 0 ? trexMap.values().next().value! : null;
+    } else {
+      this.audioTimescale = readMdhdTimescale(initBytes);
+    }
   }
 
   /**
@@ -318,6 +331,26 @@ export class CmafAssembler {
   }
 
   /**
+   * Join offset on the publisher's media timeline, in seconds.
+   *
+   * The epoch is the raw tfdt baseMediaDecodeTime of the first segment this
+   * session appended (before zero-rebase for MSE) — i.e. how far into the
+   * encode this player joined. A live encode's tfdt starts near 0 at encode
+   * start, so `joinOffsetSec + video.currentTime` is the playhead position
+   * on the ENCODER's timeline, which is what a capture-anchored
+   * glass-to-glass latency needs (wall-since-encode − encoder playhead).
+   *
+   * Returns null until both the init segment (timescale) and the first
+   * media segment (epoch) have been seen.
+   */
+  getJoinOffsetSec(mediaType: 'video' | 'audio'): number | null {
+    const epoch = mediaType === 'video' ? this.videoEpoch : this.audioEpoch;
+    const timescale = mediaType === 'video' ? this.videoTimescale : this.audioTimescale;
+    if (epoch === null || !timescale) return null;
+    return Number(epoch) / timescale;
+  }
+
+  /**
    * Drop pending half-pairs (moof without mdat) for one media type.
    *
    * Used by the player's media-liveness restart: a delivery restart can
@@ -341,6 +374,8 @@ export class CmafAssembler {
     this.videoTrackName = null;
     this.audioTrackName = null;
     this.videoTrex = null;
+    this.videoTimescale = null;
+    this.audioTimescale = null;
   }
 
   /** Release all resources. */

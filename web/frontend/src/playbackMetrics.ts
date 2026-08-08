@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "./api";
-import { estimateE2eLatencyMs, estimateMoqE2eLatencyMs } from "./metricModel";
 
 const REPORT_INTERVAL_MS = 1000;
 
@@ -16,12 +15,10 @@ export function usePlaybackMetricsReporter(options: {
   engine: "moq" | "hls" | "mpegts";
   enabled: boolean;
   startedAtEpoch?: number | null;
-  /** MoQ catch-up / live-edge target — used when wall−vt is a join-delay artifact. */
-  targetLatencyMs?: number;
   getSnapshot: () => PlaybackMetricsSnapshot;
   onSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
 }): void {
-  const { jobId, engine, enabled, startedAtEpoch, targetLatencyMs, getSnapshot, onSample } = options;
+  const { jobId, engine, enabled, startedAtEpoch, getSnapshot, onSample } = options;
   const getSnapshotRef = useRef(getSnapshot);
   const onSampleRef = useRef(onSample);
 
@@ -46,27 +43,6 @@ export function usePlaybackMetricsReporter(options: {
       }
       const snapshot = getSnapshotRef.current();
       const elapsed_sec = elapsedSecFromStart(startedAtEpoch);
-      let e2e: number | null | undefined;
-      if (engine === "moq") {
-        e2e = estimateMoqE2eLatencyMs({
-          encodeStartedAtEpoch: startedAtEpoch,
-          videoTimeSec: snapshot.playback_video_time_sec,
-          bufferSec: snapshot.playback_buffer_sec,
-          playerLatencyMs: snapshot.e2e_latency_ms,
-          targetLatencyMs,
-        });
-      } else if (engine === "mpegts") {
-        // HTTP-TS (Zixi): player snapshot is already capture-anchored; fall
-        // back to wall−vt only when the player hasn't stamped e2e yet.
-        e2e =
-          snapshot.e2e_latency_ms ||
-          estimateE2eLatencyMs(startedAtEpoch, snapshot.playback_video_time_sec);
-      } else {
-        // HLS / LL-HLS: trust the player's capture-anchored estimate only.
-        // MediaMTX needs PDT (hls.latency); without it, wall−vt on a rebased
-        // join timeline invents junk samples that made SRT look wrongly low.
-        e2e = snapshot.e2e_latency_ms || undefined;
-      }
       const playback_error_count =
         snapshot.playback_error_count ??
         (snapshot.playback_hls_errors || 0) + (snapshot.playback_hls_fatal_errors || 0);
@@ -80,7 +56,12 @@ export function usePlaybackMetricsReporter(options: {
         engine,
         ...snapshot,
         playback_error_count,
-        e2e_latency_ms: e2e ?? snapshot.e2e_latency_ms ?? 0,
+        // Every player stamps the same capture-anchored, skew-corrected
+        // formula ((server-now − encode anchor) − encoder-timeline playhead
+        // + bridge; see each captureAnchoredE2eMs). Zero means "not
+        // measurable yet" — never substitute a different formula here,
+        // that's how the protocols drifted apart.
+        e2e_latency_ms: snapshot.e2e_latency_ms ?? 0,
       };
       onSampleRef.current?.(payload);
       void postPlaybackSample(jobId, payload).catch(() => {
@@ -94,5 +75,5 @@ export function usePlaybackMetricsReporter(options: {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [enabled, jobId, engine, startedAtEpoch, targetLatencyMs]);
+  }, [enabled, jobId, engine, startedAtEpoch]);
 }

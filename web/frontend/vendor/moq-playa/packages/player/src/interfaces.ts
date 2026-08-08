@@ -345,6 +345,16 @@ export interface CmafAssemblerLike {
   setInitSegment?(mediaType: 'video' | 'audio', initBytes: Uint8Array): void;
   getEpoch(mediaType: 'video' | 'audio'): bigint | null;
   /**
+   * Join offset on the publisher's media timeline in seconds — the raw
+   * (pre-rebase) tfdt of the first appended segment divided by the track's
+   * mdhd timescale. Used for capture-anchored latency: the MSE playhead plus
+   * this offset is the position on the encoder's timeline.
+   *
+   * Optional on the interface for back-compat; assemblers that don't parse
+   * the init timescale may omit it.
+   */
+  getJoinOffsetSec?(mediaType: 'video' | 'audio'): number | null;
+  /**
    * Drop pending half-pairs (moof without mdat) for one media type, leaving
    * epochs and the other media type untouched. Used by the media-liveness
    * restart so a stale moof can't pair against a post-restart mdat.

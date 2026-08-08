@@ -5,6 +5,7 @@ import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
+import { clockSkewMs } from "../clockSkew";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -416,13 +417,18 @@ export default function HlsPlayer({
     const session = sessionRef.current;
     if (lowLatency) {
       if (session.playerLatencyMs > 0) {
-        const total = session.playerLatencyMs + bridgeMs;
+        // hls.latency = browserNow − PDT; PDT is stamped by the (NTP-synced)
+        // packager VM, so express browser time on the server clock too.
+        const total = session.playerLatencyMs + clockSkewMs() + bridgeMs;
         return total > 0 && total < 120_000 ? Math.round(total) : undefined;
       }
       return undefined;
     }
     if (epoch > 0 && session.maxVideoTime > 0) {
-      const total = Date.now() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
+      // The anchor epoch is stamped with the API server's clock — correct
+      // Date.now() onto that clock before differencing.
+      const total =
+        Date.now() + clockSkewMs() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }
     return undefined;
