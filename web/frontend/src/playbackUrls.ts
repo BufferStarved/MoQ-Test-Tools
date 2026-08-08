@@ -132,10 +132,13 @@ export function defaultPlaybackModeForProtocol(
   if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
-  // Zixi Fast HLS packs 2s chunks + live sync → slow join. HTTP-TS via
-  // mpegts.js bypasses the packager for the confidence monitor.
+  // Zixi: default to Fast HLS via hls.js. Raw HTTP-TS via mpegts.js joins
+  // faster but proved fragile in live runs (2026-08-08 webcam comparison:
+  // the mpegts leg never rendered a frame while the same encode played fine
+  // over Fast HLS) — smooth, reliable playback wins the default; HTTP-TS
+  // stays selectable as the low-latency confidence monitor.
   if (isZixiManagedIngest(ingest)) {
-    return "mpegts";
+    return "hls";
   }
   if (protocol === "dash") {
     return "dash";

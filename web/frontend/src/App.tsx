@@ -114,7 +114,9 @@ function buildDefaultEndpoints(): EndpointConfig[] {
       endpointUrl: "",
       vmafAvailable: false,
       serverMetricsAvailable: false,
-      playbackMode: "mpegts",
+      // Fast HLS (hls.js) — matches defaultPlaybackModeForProtocol; raw
+      // HTTP-TS/mpegts.js stays selectable but is no longer the default.
+      playbackMode: "hls",
       playbackDvr: false,
     },
     {

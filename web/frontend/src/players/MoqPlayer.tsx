@@ -381,6 +381,11 @@ export default function MoqPlayer({
       }
     }
 
+    // Live-edge catch-up rate the watchdog wants applied (1.0 = realtime).
+    // Owned here so onTimeUpdate's rate-defense snaps to the *intended* rate
+    // instead of fighting the catch-up back to 1.0 every timeupdate.
+    let catchUpRate = 1;
+
     function noteFirstFrame(source: string) {
       if (destroyed || video.currentTime <= 0.25) {
         return;
@@ -408,10 +413,10 @@ export default function MoqPlayer({
       setError(null);
       setIsPlaying(true);
       setStatus("Playing");
-      // Defend against player/engine leaving a non-1.0 rate after false catch-up.
-      if (Math.abs(video.playbackRate - 1) > 0.01) {
+      // Defend against player/engine leaving an unexpected rate behind.
+      if (Math.abs(video.playbackRate - catchUpRate) > 0.01) {
         pushDiag(`playback_rate_reset from=${video.playbackRate}`);
-        video.playbackRate = 1;
+        video.playbackRate = catchUpRate;
       }
     }
 
@@ -419,8 +424,8 @@ export default function MoqPlayer({
       if (destroyed) {
         return;
       }
-      if (Math.abs(video.playbackRate - 1) > 0.01) {
-        video.playbackRate = 1;
+      if (Math.abs(video.playbackRate - catchUpRate) > 0.01) {
+        video.playbackRate = catchUpRate;
       }
       if (sessionRef.current.firstFrame) {
         return;
@@ -463,6 +468,9 @@ export default function MoqPlayer({
         }
         retrying = true;
         sessionRestarts += 1;
+        // Fresh subscription starts at the live edge — no leftover catch-up.
+        catchUpRate = 1;
+        video.playbackRate = 1;
         pushDiag(`session_restart=${sessionRestarts}/${MAX_SESSION_RESTARTS} reason=${reason}`, true);
         if (connectTimeout) {
           window.clearTimeout(connectTimeout);
@@ -794,14 +802,19 @@ export default function MoqPlayer({
           return;
         }
         video.addEventListener("timeupdate", onTimeUpdate);
-        // Keep playhead near live only when the buffer clearly balloons.
-        // Aggressive seeks on a healthy ~0.5s buffer felt like stutter/slow-mo,
-        // but the old 4x threshold let a 4s target drift to ~16s behind live
-        // before ever seeking (observed printing ~14s "latency"). 2x the hold
-        // (min +1s hysteresis) keeps the viewer near the latency target while
-        // still ignoring normal per-GOP buffer bursts.
+        // Live-edge policy (smoothness first):
+        //  1. GENTLE RATE CATCH-UP is the primary mechanism — when the buffer
+        //     lead creeps past the hold target, play slightly fast (1.08x /
+        //     1.12x, imperceptible) until back at the hold. The old
+        //     seek-only trim let a 4s target balloon to ~11s of buffer and
+        //     then jumped 6-7s at once (webcam run 2026-08-08), which read
+        //     as freezes + skips.
+        //  2. HARD SEEK stays only as a gross-drift backstop (relay burst
+        //     after a long stall) on the original 2s cadence.
         const holdBehindSec = Math.max(0.4, (targetLatencyMs || 800) / 1000);
         const seekThresholdSec = Math.max(holdBehindSec * 2, holdBehindSec + 1);
+        const rateOnSec = holdBehindSec + 0.75; // start chasing above this lead
+        const rateOffSec = holdBehindSec + 0.25; // stop chasing below this lead
         // Frozen-playhead watchdog state (see STALL_RESTART_MS).
         let watchdogVt = -1;
         let watchdogAtMs = Date.now();
@@ -850,12 +863,28 @@ export default function MoqPlayer({
             }
             return;
           }
-          // Live-edge trim stays on its original 2s cadence; seeking on every
+          // Rate-based catch-up runs on every 500ms tick — fine cadence keeps
+          // the rate transitions (and thus perceived motion) smooth.
+          const ahead = bufferedAheadSec(video);
+          const previousRate = catchUpRate;
+          if (ahead > rateOnSec) {
+            catchUpRate = ahead > rateOnSec + 2 ? 1.12 : 1.08;
+          } else if (ahead < rateOffSec) {
+            catchUpRate = 1;
+          }
+          if (catchUpRate !== previousRate) {
+            pushDiag(
+              `live_edge_rate=${catchUpRate.toFixed(2)} ahead=${ahead.toFixed(2)}s hold=${holdBehindSec.toFixed(2)}s`,
+            );
+          }
+          if (Math.abs(video.playbackRate - catchUpRate) > 0.01) {
+            video.playbackRate = catchUpRate;
+          }
+          // Hard seek stays on its original 2s cadence; seeking on every
           // 500ms watchdog tick would fight normal per-GOP buffer bursts.
           if (watchdogTick % liveEdgeTickDivider !== 0) {
             return;
           }
-          const ahead = bufferedAheadSec(video);
           if (ahead < seekThresholdSec) {
             return;
           }

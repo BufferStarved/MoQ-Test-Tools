@@ -9,6 +9,8 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+
+import httpx
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from typing import Optional
@@ -967,8 +969,31 @@ def _rewrite_mpd_manifest(manifest_url: str, content: bytes) -> bytes:
     return text.encode("utf-8")
 
 
+# Shared keep-alive client for the playback proxy. The old implementation
+# used sync urllib on FastAPI's threadpool: every LL-HLS *blocking* playlist
+# reload parked a thread for up to 5s, every raw HTTP-TS stream pinned one for
+# the whole session, and each request opened a fresh TCP connection. With a
+# 3-leg comparison playing (playlist long-polls + ~5 part fetches/sec + a
+# continuous TS stream) the pool jittered every player at once — the
+# browser-side symptom was stutter on all legs and wedged fragment loading.
+_playback_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_playback_client() -> httpx.AsyncClient:
+    global _playback_client
+    if _playback_client is None or _playback_client.is_closed:
+        _playback_client = httpx.AsyncClient(
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=40),
+            # read=20s is a per-chunk-read deadline on streamed bodies, so a
+            # live TS stream stays healthy as long as bytes keep flowing.
+            timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=10.0),
+        )
+    return _playback_client
+
+
 @app.get("/api/playback/fetch")
-def playback_fetch(url: str, request: Request):
+async def playback_fetch(url: str, request: Request):
     url = _unwrap_nested_playback_fetch_url(url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -1000,35 +1025,37 @@ def playback_fetch(url: str, request: Request):
     likely_mpd = path_lower.endswith(".mpd") or ".mpd" in path_lower
     likely_manifest = likely_m3u8 or likely_mpd
     # Zixi long-polls live playlists until the next segment (~chunk duration,
-    # min 2s). Keep this tight and well under hls.js's own manifestLoadingTimeOut
-    # (10s) so a slow poll surfaces as a fast retry, not a client-side fatal
-    # timeout race. On timeout return a real error so hls.js retries and keeps
-    # its previous playlist — do NOT return an empty #EXTM3U here, that
-    # replaces a valid live playlist and kills playback.
-    timeout = 5 if likely_manifest else 20
-    request = urllib.request.Request(safe_url, method="GET")
+    # min 2s), and MediaMTX holds LL-HLS blocking reloads until the requested
+    # part exists (~part duration). Keep the manifest deadline tight and well
+    # under hls.js's own manifestLoadingTimeOut (10s) so a slow poll surfaces
+    # as a fast retry, not a client-side fatal timeout race. On timeout return
+    # a real error so hls.js retries and keeps its previous playlist — do NOT
+    # return an empty #EXTM3U here, that replaces a valid live playlist and
+    # kills playback.
+    manifest_timeout = httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=10.0)
     no_store = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
     }
+    client = _get_playback_client()
+
     # Propagate upstream 404 so waitForManifest / hls.js can keep polling without
     # replacing a live playlist with an empty #EXTM3U stub (that causes fatal
     # levelParsingError with http=200 once the Zixi input is torn down).
-    try:
-        upstream = urllib.request.urlopen(request, timeout=timeout)
-    except urllib.error.HTTPError as exc:
-        raise HTTPException(status_code=exc.code, detail=f"Playback upstream error: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
-
-    media_type = upstream.headers.get("Content-Type", "application/octet-stream")
-    if likely_manifest or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower() or "dash+xml" in media_type.lower():
+    if likely_manifest:
         try:
-            content = upstream.read()
-        finally:
-            upstream.close()
+            upstream = await client.get(safe_url, timeout=manifest_timeout)
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
+        if upstream.status_code >= 400:
+            raise HTTPException(
+                status_code=upstream.status_code,
+                detail=f"Playback upstream error: HTTP {upstream.status_code}",
+            )
+        media_type = upstream.headers.get("Content-Type", "application/octet-stream")
+        content = upstream.content
         if likely_m3u8 or "mpegurl" in media_type.lower() or "m3u8" in media_type.lower():
             stripped = content.lstrip()
             if not stripped.startswith(b"#EXTM3U"):
@@ -1049,18 +1076,53 @@ def playback_fetch(url: str, request: Request):
             content = _rewrite_mpd_manifest(url, content)
             media_type = "application/dash+xml"
             return Response(content=content, media_type=media_type, headers=no_store)
+        return Response(content=content, media_type=media_type, headers=no_store)
 
-    def iter_chunks():
+    # Media (TS chunks, fMP4 parts, continuous HTTP-TS): stream — buffering the
+    # full body added multi-hundred-ms TTFF, and HTTP-TS bodies never end.
+    upstream_request = client.build_request("GET", safe_url)
+    try:
+        upstream = await client.send(upstream_request, stream=True)
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
+    if upstream.status_code >= 400:
+        await upstream.aclose()
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=f"Playback upstream error: HTTP {upstream.status_code}",
+        )
+    media_type = upstream.headers.get("Content-Type", "application/octet-stream")
+
+    # Parity with the old sync proxy: a playlist served from a URL that
+    # doesn't look like one (no "m3u8"/".mpd" in the path) is detected by
+    # response content-type and still gets its URLs rewritten.
+    lowered = media_type.lower()
+    if "mpegurl" in lowered or "m3u8" in lowered or "dash+xml" in lowered:
         try:
-            while True:
-                chunk = upstream.read(64 * 1024)
-                if not chunk:
-                    break
-                yield chunk
+            content = await upstream.aread()
         finally:
-            upstream.close()
+            await upstream.aclose()
+        if "dash+xml" in lowered and _is_mpd_manifest(url, media_type, content):
+            content = _rewrite_mpd_manifest(url, content)
+            return Response(content=content, media_type="application/dash+xml", headers=no_store)
+        if _is_m3u8_manifest(url, media_type, content):
+            content = _rewrite_m3u8_manifest(url, content)
+            media_type = "application/vnd.apple.mpegurl"
+        return Response(content=content, media_type=media_type, headers=no_store)
 
-    # Stream TS/DASH segments — buffering the full body added multi-hundred-ms TTFF.
+    async def iter_chunks():
+        try:
+            async for chunk in upstream.aiter_bytes(64 * 1024):
+                yield chunk
+        except httpx.HTTPError:
+            # Upstream died mid-stream (input torn down, read timeout). End the
+            # body; the player treats the short read as a reconnect signal.
+            pass
+        finally:
+            await upstream.aclose()
+
     return StreamingResponse(iter_chunks(), media_type=media_type, headers=no_store)
 
 

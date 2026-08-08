@@ -685,10 +685,12 @@ export default function HlsPlayer({
         // target (PART-HOLD-BACK ≈ 3 parts) is only ~0.6s. Through the
         // /api/playback/fetch proxy that cushion drains on routine jitter and
         // playback micro-stalls (SRT leg stutter, webcam run 2026-08-06).
-        // A 1.2s target keeps part-level loading + catch-up pressure but
-        // holds a real buffer. Duration (seconds) — NOT liveSyncDurationCount,
+        // 1.2s still stalled repeatedly on real webcam runs (2026-08-08:
+        // 16.6s total rebuffer + a wedge) — 3s trades ~2s of latency (still
+        // inside the 4s default target) for a cushion that absorbs proxy +
+        // SRT-path jitter. Duration (seconds) — NOT liveSyncDurationCount,
         // which is what disabled part sync in the 2026-07-21 regression.
-        liveSyncDuration: 1.2,
+        liveSyncDuration: 3.0,
         // 1.5× chasing visibly warbled: rate ramps toward the cap whenever
         // latency drifts >50ms past the tight target, then snaps back to 1.0.
         // 1.1× is imperceptible and still recovers ~0.5s of drift per ~5s.
@@ -708,7 +710,9 @@ export default function HlsPlayer({
           ? Math.max(syncCount + 2, 3)
           : Math.max(syncCount + 3, syncCount * 2),
         // Speed-up catch-up on a shallow window just empties the only segment.
-        maxLiveSyncPlaybackRate: shallow ? 1.0 : 1.5,
+        // 1.5× read as visible warble on deep windows too — 1.1× recovers
+        // drift without perceptible speed changes (smoothness > latency).
+        maxLiveSyncPlaybackRate: shallow ? 1.0 : 1.1,
         // Hold enough media for 2-segment operation; more when shallow.
         maxBufferLength: shallow ? 30 : Math.max(20, syncSec * 3),
         maxMaxBufferLength: shallow ? 60 : 40,
@@ -737,7 +741,7 @@ export default function HlsPlayer({
       };
       pushDiag(
         lowLatencyMode
-          ? `hls_live_sync=ll target=1.2s max_rate=1.1 targetduration=${targetDuration}s depth=${depth}`
+          ? `hls_live_sync=ll target=3.0s max_rate=1.1 targetduration=${targetDuration}s depth=${depth}`
           : `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
       );
 
@@ -747,12 +751,20 @@ export default function HlsPlayer({
       // recoverMediaError) can't unwedge the pipeline, rebuild the whole Hls
       // instance from scratch. Bounded so a genuinely dead upstream can't
       // loop restarts forever — after the budget we surface a hard failure
-      // instead of sitting silently wedged.
-      const MAX_HLS_RESTARTS = 2;
+      // instead of sitting silently wedged. The budget REPLENISHES after
+      // sustained healthy playback (see the stuck watchdog): on a 300s run,
+      // early-join hiccups used to eat the whole budget and leave the tail
+      // frozen with no recovery allowed (webcam run 2026-08-08: SRT playhead
+      // pinned for the final 30s with ~2s still buffered).
+      const MAX_HLS_RESTARTS = 3;
       let hlsRestarts = 0;
       const RECOVER_MEDIA_ERROR_COOLDOWN_MS = 2000;
       const MAX_MEDIA_ERROR_RECOVERIES = 3;
       let mediaErrorRecoveries = 0;
+      // Continuous forward playback (ms) that proves the pipeline healthy
+      // again and resets the recovery budgets.
+      const RECOVERY_BUDGET_RESET_AFTER_MS = 30_000;
+      let healthySinceMs = 0;
 
       function restartHls(reason: string): boolean {
         if (destroyed) {
@@ -1061,8 +1073,22 @@ export default function HlsPlayer({
           stuckSinceMs = 0;
           rescuesAtSamePosition = 0;
           noEscapeStrikes = 0;
+          // Sustained progress re-arms the full-restart / media-error budgets
+          // so early-run hiccups don't leave a long benchmark unrecoverable.
+          healthySinceMs += STUCK_WATCHDOG_POLL_MS;
+          if (
+            healthySinceMs >= RECOVERY_BUDGET_RESET_AFTER_MS &&
+            (hlsRestarts > 0 || mediaErrorRecoveries > 0)
+          ) {
+            pushDiag(
+              `recovery_budget_reset after=${Math.round(healthySinceMs / 1000)}s healthy (restarts=${hlsRestarts} recoveries=${mediaErrorRecoveries})`,
+            );
+            hlsRestarts = 0;
+            mediaErrorRecoveries = 0;
+          }
           return;
         }
+        healthySinceMs = 0;
         stuckSinceMs += STUCK_WATCHDOG_POLL_MS;
         if (stuckSinceMs < STUCK_PLAYHEAD_RESCUE_MS) {
           return;
