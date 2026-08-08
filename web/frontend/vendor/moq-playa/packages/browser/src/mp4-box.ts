@@ -611,6 +611,54 @@ export function readSegmentTimeRanges(
  *
  * @returns Map keyed by track_id. Empty if no mvex present.
  */
+/**
+ * Read the media timescale from the first `mdhd` box of an init segment
+ * (moov → trak → mdia → mdhd).
+ *
+ * Single-track init segments are the CMAF norm, so the first mdhd is the
+ * track's timescale. Needed to convert raw tfdt baseMediaDecodeTime values
+ * (timescale ticks) into seconds — e.g. for the join-offset latency anchor.
+ *
+ * mdhd body layout (after the 8-byte box header):
+ *   version(1) + flags(3), then
+ *   v0: creation(4) + modification(4) + timescale(4) + duration(4)
+ *   v1: creation(8) + modification(8) + timescale(4) + duration(8)
+ *
+ * @returns Timescale in ticks/second, or null when no mdhd is found.
+ */
+export function readMdhdTimescale(initSegment: Uint8Array): number | null {
+  const walk = (start: number, end: number, wanted: string): number => {
+    let pos = start;
+    while (pos + 8 <= end) {
+      const size = boxSize(initSegment, pos);
+      if (size < 8) return -1;
+      if (boxType(initSegment, pos) === wanted) return pos;
+      pos += size;
+    }
+    return -1;
+  };
+
+  const moov = walk(0, initSegment.byteLength, 'moov');
+  if (moov < 0) return null;
+  const moovEnd = moov + boxSize(initSegment, moov);
+  const trak = walk(moov + 8, moovEnd, 'trak');
+  if (trak < 0) return null;
+  const trakEnd = trak + boxSize(initSegment, trak);
+  const mdia = walk(trak + 8, trakEnd, 'mdia');
+  if (mdia < 0) return null;
+  const mdiaEnd = mdia + boxSize(initSegment, mdia);
+  const mdhd = walk(mdia + 8, mdiaEnd, 'mdhd');
+  if (mdhd < 0) return null;
+
+  const size = boxSize(initSegment, mdhd);
+  const view = new DataView(initSegment.buffer, initSegment.byteOffset + mdhd, size);
+  const version = view.getUint8(8);
+  const timescaleOffset = version === 1 ? 28 : 20;
+  if (timescaleOffset + 4 > size) return null;
+  const timescale = view.getUint32(timescaleOffset);
+  return timescale > 0 ? timescale : null;
+}
+
 export function readTrexDefaults(initSegment: Uint8Array): Map<number, TrexDefaults> {
   const result = new Map<number, TrexDefaults>();
 

@@ -270,6 +270,17 @@ export class Player {
   /** Current audio track index. */
   get currentAudioTrack(): number { return this._currentAudioTrack; }
 
+  /**
+   * Join offset on the publisher's media timeline in seconds (CMAF/MSE
+   * path), or null before the first video segment / on the WebCodecs path.
+   * `joinMediaOffsetSec + video.currentTime` is the playhead position on
+   * the encoder's timeline — the anchor a capture-referenced end-to-end
+   * latency estimate needs (MSE re-zeros currentTime at join).
+   */
+  get joinMediaOffsetSec(): number | null {
+    return this.engine.joinMediaOffsetSec;
+  }
+
   /** Simplified stats for UI display. */
   get stats(): PlayerStats {
     const s = this.engine.stats;

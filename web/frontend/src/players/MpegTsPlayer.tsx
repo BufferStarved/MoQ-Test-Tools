@@ -3,6 +3,7 @@ import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
+import { clockSkewMs } from "../clockSkew";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
@@ -89,7 +90,9 @@ export default function MpegTsPlayer({
     const { bridgeMs, epoch } = lagRef.current;
     const session = sessionRef.current;
     if (epoch > 0 && session.maxVideoTime > 0) {
-      const total = Date.now() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
+      // Anchor epoch is server-clock; skew-correct Date.now() to match.
+      const total =
+        Date.now() + clockSkewMs() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }
     return undefined;

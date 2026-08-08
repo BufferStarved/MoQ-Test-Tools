@@ -773,6 +773,62 @@ describe('CmafAssembler — HEVC CRA-with-RASL strip', () => {
   });
 });
 
+describe('CmafAssembler join offset (getJoinOffsetSec)', () => {
+  /** Minimal init: moov→trak→mdia→mdhd with the given timescale. */
+  function buildInitWithTimescale(timescale: number, mdhdVersion: 0 | 1 = 0): Uint8Array {
+    let mdhdBody: Uint8Array;
+    if (mdhdVersion === 0) {
+      // version(1)+flags(3)+creation(4)+modification(4)+timescale(4)+duration(4)
+      mdhdBody = new Uint8Array(24);
+      writeU32(mdhdBody, 12, timescale);
+    } else {
+      // version(1)+flags(3)+creation(8)+modification(8)+timescale(4)+duration(8)
+      mdhdBody = new Uint8Array(32);
+      mdhdBody[0] = 1;
+      writeU32(mdhdBody, 20, timescale);
+    }
+    const mdhd = buildBox('mdhd', mdhdBody);
+    const mdia = buildBox('mdia', mdhd);
+    const trak = buildBox('trak', mdia);
+    return buildBox('moov', trak);
+  }
+
+  it('returns raw first bmd / mdhd timescale after init + first segment', () => {
+    const assembler = new CmafAssembler({ onSegment: vi.fn() });
+    assembler.setInitSegment('video', buildInitWithTimescale(90000));
+    expect(assembler.getJoinOffsetSec('video')).toBeNull(); // no media yet
+
+    // Joined 2s into the encode: bmd = 180000 @ 90kHz.
+    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
+    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
+
+    // Later segments must not move the join offset.
+    assembler.push('video', 'v0', 1n, concat(buildMoof(270000), buildMdat(new Uint8Array(4))));
+    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
+  });
+
+  it('reads a version-1 mdhd timescale', () => {
+    const assembler = new CmafAssembler({ onSegment: vi.fn() });
+    assembler.setInitSegment('video', buildInitWithTimescale(48000, 1));
+    assembler.push('video', 'v0', 0n, concat(buildMoof(96000), buildMdat(new Uint8Array(4))));
+    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
+  });
+
+  it('returns null without an init segment (no timescale)', () => {
+    const assembler = new CmafAssembler({ onSegment: vi.fn() });
+    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
+    expect(assembler.getJoinOffsetSec('video')).toBeNull();
+  });
+
+  it('reset() clears both epoch and timescale', () => {
+    const assembler = new CmafAssembler({ onSegment: vi.fn() });
+    assembler.setInitSegment('video', buildInitWithTimescale(90000));
+    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
+    assembler.reset();
+    expect(assembler.getJoinOffsetSec('video')).toBeNull();
+  });
+});
+
 describe('CmafAssembler non-media payload diagnostics', () => {
   it('warns ONCE per track when dropping a payload with no moof/mdat (e.g. in-band init)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

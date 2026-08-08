@@ -27,6 +27,7 @@ import { moqDefaultsFromPublishUrl } from "./playbackUrls";
 import { playbackGateForJob } from "./playbackGate";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
+import { startClockSkewProbe } from "./clockSkew";
 import { buildComparisonVerdict } from "./comparisonVerdict";
 import { protocolColor, protocolLabel } from "./protocolTheme";
 import { TopSummaryStrip } from "./TopSummaryStrip";
@@ -364,6 +365,8 @@ function App() {
 
   useEffect(() => {
     void loadBootstrapData();
+    // Latency anchors are server-clock epochs; align Date.now() to them.
+    startClockSkewProbe();
   }, [loadBootstrapData]);
 
   // Poll agent connection whenever the API is up (local publish may be enabled).

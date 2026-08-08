@@ -744,6 +744,22 @@ export class MoqtPlayer {
   }
 
   /**
+   * Join offset on the publisher's media timeline in seconds (CMAF path).
+   *
+   * The raw tfdt of the first appended video segment (before zero-rebase
+   * for MSE) divided by the track's mdhd timescale — how far into the
+   * encode this session joined. `joinMediaOffsetSec + video.currentTime`
+   * is the playhead position on the ENCODER's timeline, enabling a
+   * capture-anchored glass-to-glass latency estimate.
+   *
+   * `null` before the first video segment, on the WebCodecs/LOC path, or
+   * when the assembler implementation doesn't expose it.
+   */
+  get joinMediaOffsetSec(): number | null {
+    return this.cmafAssembler?.getJoinOffsetSec?.('video') ?? null;
+  }
+
+  /**
    * Known duration of the content in milliseconds.
    *
    * Returns `trackDuration` from the catalog for VOD content (§5.1.37),

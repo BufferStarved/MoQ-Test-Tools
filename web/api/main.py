@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -210,6 +211,18 @@ def job_to_dict(job) -> dict:
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/time")
+def server_time():
+    """Server wall clock for the browser's clock-skew probe.
+
+    Job epochs (started_at_epoch, first_sample_at_epoch) are stamped with
+    THIS host's clock; the browser corrects Date.now() against it so
+    wall-minus-playhead latency estimates aren't polluted by client clock
+    drift (see web/frontend/src/clockSkew.ts).
+    """
+    return {"epoch": time.time()}
 
 
 @app.get("/api/features")
