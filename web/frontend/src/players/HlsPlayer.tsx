@@ -707,7 +707,7 @@ export default function HlsPlayer({
         maxBufferLength: shallow ? 30 : Math.max(20, syncSec * 3),
         maxMaxBufferLength: shallow ? 60 : 40,
       };
-      const hls = new Hls({
+      const hlsConfig = {
         enableWorker: true,
         // MediaMTX Apple LL-HLS needs lowLatencyMode; Zixi Fast HLS does not.
         lowLatencyMode,
@@ -723,76 +723,307 @@ export default function HlsPlayer({
         levelLoadingRetryDelay: 300,
         fragLoadingTimeOut: 15000,
         fragLoadingMaxRetry: 4,
-        xhrSetup(xhr, requestUrl) {
+        xhrSetup(xhr: XMLHttpRequest, requestUrl: string) {
           const resolved = resolvePlaybackXhrUrl(requestUrl);
           lastRequestUrl = resolved;
           xhr.open("GET", resolved);
         },
-      });
+      };
       pushDiag(
         lowLatencyMode
           ? `hls_live_sync=ll target=1.2s max_rate=1.1 targetduration=${targetDuration}s depth=${depth}`
           : `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
       );
-      hlsInstance = hls;
-      hls.loadSource(manifestUrl);
-      hls.attachMedia(video);
 
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      let hls: InstanceType<typeof Hls>;
+
+      // Full-teardown escape hatch: when gentler recovery (seek, startLoad,
+      // recoverMediaError) can't unwedge the pipeline, rebuild the whole Hls
+      // instance from scratch. Bounded so a genuinely dead upstream can't
+      // loop restarts forever — after the budget we surface a hard failure
+      // instead of sitting silently wedged.
+      const MAX_HLS_RESTARTS = 2;
+      let hlsRestarts = 0;
+      const RECOVER_MEDIA_ERROR_COOLDOWN_MS = 2000;
+      const MAX_MEDIA_ERROR_RECOVERIES = 3;
+      let mediaErrorRecoveries = 0;
+
+      function restartHls(reason: string): boolean {
         if (destroyed) {
-          return;
+          return false;
         }
-        sessionRef.current.manifestParsed = true;
-        pushDiag("hls_manifest_parsed=ok");
-        setStatus("Playing");
+        if (hlsRestarts >= MAX_HLS_RESTARTS) {
+          pushDiag(`hls_restart_budget_exhausted reason=${reason}`);
+          fail(
+            `HLS playback wedged and ${MAX_HLS_RESTARTS} full player restarts did not recover it (${reason}).`,
+          );
+          return false;
+        }
+        hlsRestarts += 1;
+        mediaErrorRecoveries = 0;
+        pushDiag(`hls_full_restart=${hlsRestarts}/${MAX_HLS_RESTARTS} reason=${reason}`);
+        try {
+          hls.destroy();
+        } catch {
+          /* ignore */
+        }
+        hls = createHls();
         attemptPlay();
-      });
+        return true;
+      }
 
-      // When Zixi finally rolls past a stale edge, jump to live instead of
-      // draining a multi-second backlog. On 1-deep playlists, jump less often —
-      // seeking to the only segment mid-decode causes visible stutters.
-      //
-      // Deliberately NO video.readyState guard here: a playhead starved
-      // inside a buffered-timeline hole reports readyState < 2, which is
-      // exactly the state this jump exists to escape. The old readyState<2
-      // guard disabled the rescue precisely when it was needed — confirmed
-      // live 2026-07-21: MediaMTX LL-HLS playback froze at t=0.70s for an
-      // entire run while 232 fragments appended fine past a hole.
-      hls.on(Hls.Events.LEVEL_UPDATED, () => {
+      /**
+       * recoverMediaError() must end with media attached and fragment loading
+       * running. Internally it detaches (stopLoad + fragment tracker cleared +
+       * buffers destroyed) then reattaches and calls startLoad(currentTime) —
+       * but a frozen currentTime can point outside the slid live window, in
+       * which case loading silently never resumes (webcam run e691e691:
+       * frag_loads froze at 125 for 14+s while the 4s stuck-playhead rescue
+       * found no buffered escape). Verify shortly after and force the loader
+       * back to the live edge if no fragment landed; escalate to a full
+       * restart if even that fails.
+       */
+      function scheduleRecoveryResumeCheck(instance: InstanceType<typeof Hls>) {
+        const fragLoadsAtRecover = sessionRef.current.fragmentLoads;
+        window.setTimeout(() => {
+          if (destroyed || hls !== instance) {
+            return;
+          }
+          if (!instance.media) {
+            pushDiag("recover_resume=media_still_detached reattach");
+            try {
+              instance.attachMedia(video);
+              instance.startLoad(-1);
+            } catch {
+              restartHls("reattach_failed");
+              return;
+            }
+            attemptPlay();
+            return;
+          }
+          if (sessionRef.current.fragmentLoads === fragLoadsAtRecover) {
+            pushDiag("recover_resume=frag_loading_stalled start_load_live_edge");
+            try {
+              instance.startLoad(-1);
+            } catch {
+              restartHls("start_load_failed");
+              return;
+            }
+            attemptPlay();
+          }
+        }, 2500);
+      }
+
+      /** The only sanctioned path to recoverMediaError(): cooldown-limited,
+       *  always paired with a resume check, escalating to a full restart once
+       *  repeated recoveries stop helping. */
+      function recoverMediaErrorChecked(reason: string): boolean {
         if (destroyed) {
-          return;
+          return false;
         }
-        const liveSync = hls.liveSyncPosition;
-        if (liveSync == null || !Number.isFinite(liveSync) || video.currentTime <= 0) {
-          return;
+        const now = Date.now();
+        if (now - lastRecoverMediaErrorAt < RECOVER_MEDIA_ERROR_COOLDOWN_MS) {
+          // A recovery (and its resume check) is already in flight.
+          return true;
         }
-        const behind = liveSync - video.currentTime;
-        const jumpThreshold = shallow ? LIVE_JUMP_BEHIND_SHALLOW_SEC : LIVE_JUMP_BEHIND_SEC;
-        if (behind >= jumpThreshold) {
-          // Clamp the jump into buffered media: a seek to an unbuffered
-          // liveSyncPosition never completes (video.seeking sticks) and
-          // freezes the playhead harder than the backlog it was escaping.
-          let jumpTo = -1;
-          for (let i = 0; i < video.buffered.length; i += 1) {
-            const end = video.buffered.end(i);
-            if (end > jumpTo) {
-              jumpTo = end;
+        if (mediaErrorRecoveries >= MAX_MEDIA_ERROR_RECOVERIES) {
+          return restartHls(`${reason}_recoveries_exhausted`);
+        }
+        mediaErrorRecoveries += 1;
+        lastRecoverMediaErrorAt = now;
+        pushDiag(
+          `media_error_recover=${mediaErrorRecoveries}/${MAX_MEDIA_ERROR_RECOVERIES} reason=${reason}`,
+        );
+        try {
+          hls.recoverMediaError();
+        } catch {
+          return restartHls(`${reason}_recover_threw`);
+        }
+        scheduleRecoveryResumeCheck(hls);
+        return true;
+      }
+
+      /** Builds a fully wired Hls instance. Everything the instance needs is
+       *  (re)bound here so a full restart never leaves a handler pointing at
+       *  a destroyed instance. */
+      function createHls(): InstanceType<typeof Hls> {
+        const instance = new Hls(hlsConfig);
+        hlsInstance = instance;
+        instance.loadSource(manifestUrl);
+        instance.attachMedia(video);
+
+        instance.on(Hls.Events.MANIFEST_PARSED, () => {
+          if (destroyed) {
+            return;
+          }
+          sessionRef.current.manifestParsed = true;
+          pushDiag("hls_manifest_parsed=ok");
+          setStatus("Playing");
+          attemptPlay();
+        });
+
+        // When Zixi finally rolls past a stale edge, jump to live instead of
+        // draining a multi-second backlog. On 1-deep playlists, jump less often —
+        // seeking to the only segment mid-decode causes visible stutters.
+        //
+        // Deliberately NO video.readyState guard here: a playhead starved
+        // inside a buffered-timeline hole reports readyState < 2, which is
+        // exactly the state this jump exists to escape. The old readyState<2
+        // guard disabled the rescue precisely when it was needed — confirmed
+        // live 2026-07-21: MediaMTX LL-HLS playback froze at t=0.70s for an
+        // entire run while 232 fragments appended fine past a hole.
+        instance.on(Hls.Events.LEVEL_UPDATED, () => {
+          if (destroyed) {
+            return;
+          }
+          const liveSync = instance.liveSyncPosition;
+          if (liveSync == null || !Number.isFinite(liveSync) || video.currentTime <= 0) {
+            return;
+          }
+          const behind = liveSync - video.currentTime;
+          const jumpThreshold = shallow ? LIVE_JUMP_BEHIND_SHALLOW_SEC : LIVE_JUMP_BEHIND_SEC;
+          if (behind >= jumpThreshold) {
+            // Clamp the jump into buffered media: a seek to an unbuffered
+            // liveSyncPosition never completes (video.seeking sticks) and
+            // freezes the playhead harder than the backlog it was escaping.
+            let jumpTo = -1;
+            for (let i = 0; i < video.buffered.length; i += 1) {
+              const end = video.buffered.end(i);
+              if (end > jumpTo) {
+                jumpTo = end;
+              }
+            }
+            jumpTo = jumpTo > 0 ? Math.min(liveSync, jumpTo - 0.5) : liveSync;
+            if (jumpTo > video.currentTime + 1) {
+              video.currentTime = jumpTo;
+              pushDiag(
+                `hls_live_jump behind=${behind.toFixed(2)}s to=${jumpTo.toFixed(2)} live_sync=${liveSync.toFixed(2)}`,
+              );
             }
           }
-          jumpTo = jumpTo > 0 ? Math.min(liveSync, jumpTo - 0.5) : liveSync;
-          if (jumpTo > video.currentTime + 1) {
-            video.currentTime = jumpTo;
-            pushDiag(
-              `hls_live_jump behind=${behind.toFixed(2)}s to=${jumpTo.toFixed(2)} live_sync=${liveSync.toFixed(2)}`,
+        });
+
+        instance.on(Hls.Events.FRAG_LOADED, () => {
+          sessionRef.current.fragmentLoads += 1;
+          sessionRef.current.uniqueFragUrls.add(lastRequestUrl);
+          const uniqueCount = sessionRef.current.uniqueFragUrls.size;
+          // Only treat as stale after several loads of the *same* URL; clear once
+          // the playlist advances (unique > 1). Early live HLS often repeats the
+          // first chunk once before rolling — that must not poison the end verdict.
+          const isStale =
+            uniqueCount === 1 && sessionRef.current.fragmentLoads >= STALE_FRAG_FAIL_AFTER;
+          sessionRef.current.sawStaleFrag = isStale;
+          const stale = isStale ? " stale=yes" : "";
+          pushDiag(
+            `frag_loaded=${sessionRef.current.fragmentLoads} unique=${uniqueCount}${stale} last=${lastRequestUrl}`,
+          );
+          if (isStale && !destroyed) {
+            fail(
+              "Zixi HLS is looping a single stale segment (playlist not advancing). " +
+                "The web host needs ZIXI_API_BASE/ZIXI_API_PASSWORD so each SRT push can reset the input.",
             );
+            instance.destroy();
           }
-        }
-      });
+        });
+
+        instance.on(Hls.Events.BUFFER_APPENDED, (_event, data) => {
+          if (destroyed) {
+            return;
+          }
+          if (data.type === "video") {
+            sessionRef.current.videoBuffers += 1;
+          } else if (data.type === "audio") {
+            sessionRef.current.audioBuffers += 1;
+          }
+          pushDiag(
+            `buffer_appended=${data.type} video=${sessionRef.current.videoBuffers} audio=${sessionRef.current.audioBuffers}`,
+          );
+        });
+
+        instance.on(Hls.Events.ERROR, (_event, data) => {
+          if (destroyed) {
+            return;
+          }
+          sessionRef.current.hlsErrors += 1;
+          if (data.fatal) {
+            sessionRef.current.hlsFatalErrors += 1;
+          }
+          pushDiag(
+            `hls_error fatal=${data.fatal ? "yes" : "no"} type=${data.type} details=${data.details} http=${data.response?.code ?? "-"}`,
+          );
+          if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
+            pushDiag(`frag_error url=${data.frag?.url ?? lastRequestUrl}`);
+          }
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !data.fatal) {
+            if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+              sessionRef.current.sawBufferStall = true;
+              sessionRef.current.hlsBufferStalls += 1;
+            }
+            // NON-FATAL media errors are the gap controller narrating its own
+            // (usually successful) self-healing — BUFFER_STALLED_ERROR,
+            // BUFFER_SEEK_OVER_HOLE, BUFFER_NUDGE_ON_STALL and friends. Never
+            // answer them with recoverMediaError(): that detach/reattach
+            // resumes loading at startLoad(currentTime), and a frozen
+            // currentTime outside the slid live window silently kills
+            // fragment loading for good (webcam run e691e691: the player
+            // "recovered" a routine nudge notification into a permanent
+            // wedge, frag_loads frozen at 125). Log-only; genuine wedges are
+            // caught by the stuck-playhead watchdog and the fatal path below.
+            return;
+          }
+          if (!data.fatal) {
+            return;
+          }
+
+          // End-of-stream: Zixi tears down the input; playlist refresh can 404 or
+          // return an unparseable body. If we already played video, treat as EOS.
+          const parseEos =
+            data.details === Hls.ErrorDetails.LEVEL_PARSING_ERROR ||
+            data.details === Hls.ErrorDetails.LEVEL_EMPTY_ERROR ||
+            data.response?.code === 404;
+          if (parseEos && hlsPlaybackOk(sessionRef.current)) {
+            pushDiag("eos_graceful=playlist_gone_after_playback_ok");
+            try {
+              instance.stopLoad();
+            } catch {
+              /* ignore */
+            }
+            setError(null);
+            lastErrorRef.current = null;
+            setStatus("Playback OK");
+            return;
+          }
+
+          // Fatal MEDIA_ERROR is the one case hls.js docs prescribe
+          // recoverMediaError() for. Bounded + verified: falls through to a
+          // hard failure only once recovery and restarts are exhausted.
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            if (recoverMediaErrorChecked("fatal_media_error")) {
+              return;
+            }
+          }
+
+          const detail =
+            data.response?.code === 404
+              ? "HLS segment or playlist not found. Is the stream still live on Zixi?"
+              : data.type === Hls.ErrorTypes.MEDIA_ERROR
+                ? "HLS decode failed. Segments may lack SPS/PPS at chunk boundaries."
+                : data.type === Hls.ErrorTypes.NETWORK_ERROR
+                  ? `HLS network error loading ${data.frag?.url ?? "playlist"}.`
+                  : `HLS playback failed (${data.details ?? data.type}).`;
+          fail(detail);
+        });
+
+        return instance;
+      }
+
+      hls = createHls();
 
       // Stuck-playhead watchdog: a discontinuity in the appended timeline (a
       // "hole" — e.g. MediaMTX LL-HLS gap filler, or a PTS jump after a
       // webcam-bridge restart) leaves currentTime frozen while fragments keep
-      // buffering *past* the hole.
+      // buffering *past* the hole. Lives OUTSIDE createHls so it survives
+      // full restarts; it always reads the current `hls` instance.
       //
       // Hard-won rules (each disabled a previous incarnation of this rescue):
       //  - Do NOT pause/skip the check while video.seeking or video.paused —
@@ -803,10 +1034,14 @@ export default function HlsPlayer({
       //    liveSyncPosition that isn't buffered just creates the pending-seek
       //    trap above all over again.
       //  - If two rescues at the same position change nothing, the decoder
-      //    itself is wedged (data present, no frames) — recoverMediaError.
+      //    itself is wedged (data present, no frames) — checked media-error
+      //    recovery, escalating to a bounded full restart.
+      //  - No buffered escape route means fragment loading itself died (the
+      //    e691e691 wedge): kick the loader to the live edge, then restart.
       let stuckSinceMs = 0;
       let lastWatchdogTime = -1;
       let rescuesAtSamePosition = 0;
+      let noEscapeStrikes = 0;
       stuckWatchdog = window.setInterval(() => {
         if (destroyed) {
           return;
@@ -819,6 +1054,7 @@ export default function HlsPlayer({
           lastWatchdogTime = now;
           stuckSinceMs = 0;
           rescuesAtSamePosition = 0;
+          noEscapeStrikes = 0;
           return;
         }
         stuckSinceMs += STUCK_WATCHDOG_POLL_MS;
@@ -846,7 +1082,26 @@ export default function HlsPlayer({
           }
         }
         if (bestEnd < 0) {
-          pushDiag(`stuck_no_buffered_escape at=${now.toFixed(2)} ranges=${video.buffered.length}`);
+          // Playhead frozen AND nothing buffered ahead: fragment loading is
+          // wedged, not just the decoder. First strike kicks the loader back
+          // to the live edge; a second strike (another 4s frozen) means the
+          // kick didn't take — rebuild the player.
+          noEscapeStrikes += 1;
+          pushDiag(
+            `stuck_no_buffered_escape at=${now.toFixed(2)} ranges=${video.buffered.length} strike=${noEscapeStrikes}`,
+          );
+          if (noEscapeStrikes === 1) {
+            try {
+              hls.startLoad(-1);
+            } catch {
+              restartHls("stuck_start_load_threw");
+              return;
+            }
+            attemptPlay();
+          } else {
+            noEscapeStrikes = 0;
+            restartHls("stuck_no_buffered_escape");
+          }
           return;
         }
         const liveSync = hls.liveSyncPosition;
@@ -863,16 +1118,13 @@ export default function HlsPlayer({
 
         if (target <= now + 0.2) {
           // Data exists right at the playhead but nothing renders — decoder
-          // wedge, not a hole. Give the media pipeline a kick.
+          // wedge, not a hole. Give the media pipeline a kick; the checked
+          // recovery verifies loading resumes and escalates on its own.
           rescuesAtSamePosition += 1;
           if (rescuesAtSamePosition >= 2) {
             rescuesAtSamePosition = 0;
             pushDiag(`stuck_decoder_recover at=${now.toFixed(2)}`);
-            try {
-              hls.recoverMediaError();
-            } catch {
-              /* ignore */
-            }
+            recoverMediaErrorChecked("stuck_decoder");
             attemptPlay();
           } else {
             pushDiag(`stuck_nudge at=${now.toFixed(2)}`);
@@ -888,117 +1140,6 @@ export default function HlsPlayer({
         video.currentTime = target;
         attemptPlay();
       }, STUCK_WATCHDOG_POLL_MS);
-
-      hls.on(Hls.Events.FRAG_LOADED, () => {
-        sessionRef.current.fragmentLoads += 1;
-        sessionRef.current.uniqueFragUrls.add(lastRequestUrl);
-        const uniqueCount = sessionRef.current.uniqueFragUrls.size;
-        // Only treat as stale after several loads of the *same* URL; clear once
-        // the playlist advances (unique > 1). Early live HLS often repeats the
-        // first chunk once before rolling — that must not poison the end verdict.
-        const isStale =
-          uniqueCount === 1 && sessionRef.current.fragmentLoads >= STALE_FRAG_FAIL_AFTER;
-        sessionRef.current.sawStaleFrag = isStale;
-        const stale = isStale ? " stale=yes" : "";
-        pushDiag(
-          `frag_loaded=${sessionRef.current.fragmentLoads} unique=${uniqueCount}${stale} last=${lastRequestUrl}`,
-        );
-        if (isStale && !destroyed) {
-          fail(
-            "Zixi HLS is looping a single stale segment (playlist not advancing). " +
-              "The web host needs ZIXI_API_BASE/ZIXI_API_PASSWORD so each SRT push can reset the input.",
-          );
-          hls.destroy();
-        }
-      });
-
-      hls.on(Hls.Events.BUFFER_APPENDED, (_event, data) => {
-        if (destroyed) {
-          return;
-        }
-        if (data.type === "video") {
-          sessionRef.current.videoBuffers += 1;
-        } else if (data.type === "audio") {
-          sessionRef.current.audioBuffers += 1;
-        }
-        pushDiag(
-          `buffer_appended=${data.type} video=${sessionRef.current.videoBuffers} audio=${sessionRef.current.audioBuffers}`,
-        );
-      });
-
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (destroyed) {
-          return;
-        }
-        sessionRef.current.hlsErrors += 1;
-        if (data.fatal) {
-          sessionRef.current.hlsFatalErrors += 1;
-        }
-        pushDiag(
-          `hls_error fatal=${data.fatal ? "yes" : "no"} type=${data.type} details=${data.details} http=${data.response?.code ?? "-"}`,
-        );
-        if (data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR) {
-          pushDiag(`frag_error url=${data.frag?.url ?? lastRequestUrl}`);
-        }
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !data.fatal) {
-          if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
-            sessionRef.current.sawBufferStall = true;
-            sessionRef.current.hlsBufferStalls += 1;
-            // Routine stalls are resolved by hls.js's own gap controller
-            // (nudge/seek). recoverMediaError() here detaches and reattaches
-            // the media element — a visible hitch that turned every buffer
-            // dip into a stutter on the tight LL-HLS window. Real decoder
-            // wedges (data buffered, no frames) are escalated by the
-            // stuck-playhead watchdog above instead.
-            return;
-          }
-          // MediaMTX LL-HLS fills its early live window with #EXT-X-GAP
-          // filler segments — buffering across them can retrigger
-          // BUFFER_STALLED_ERROR immediately after recovery, and with no
-          // cooldown that becomes a tight loop firing thousands of times a
-          // second (seen live: 75k+ "errors" in a 15s job) while playback
-          // was actually fine. recoverMediaError() itself needs time to take
-          // effect — retrying it faster than that just thrashes.
-          const now = Date.now();
-          if (now - lastRecoverMediaErrorAt >= 2000) {
-            lastRecoverMediaErrorAt = now;
-            pushDiag("media_error_recoverable=trying");
-            hls.recoverMediaError();
-          }
-        }
-        if (!data.fatal) {
-          return;
-        }
-
-        // End-of-stream: Zixi tears down the input; playlist refresh can 404 or
-        // return an unparseable body. If we already played video, treat as EOS.
-        const parseEos =
-          data.details === Hls.ErrorDetails.LEVEL_PARSING_ERROR ||
-          data.details === Hls.ErrorDetails.LEVEL_EMPTY_ERROR ||
-          data.response?.code === 404;
-        if (parseEos && hlsPlaybackOk(sessionRef.current)) {
-          pushDiag("eos_graceful=playlist_gone_after_playback_ok");
-          try {
-            hls.stopLoad();
-          } catch {
-            /* ignore */
-          }
-          setError(null);
-          lastErrorRef.current = null;
-          setStatus("Playback OK");
-          return;
-        }
-
-        const detail =
-          data.response?.code === 404
-            ? "HLS segment or playlist not found. Is the stream still live on Zixi?"
-            : data.type === Hls.ErrorTypes.MEDIA_ERROR
-              ? "HLS decode failed. Segments may lack SPS/PPS at chunk boundaries."
-              : data.type === Hls.ErrorTypes.NETWORK_ERROR
-                ? `HLS network error loading ${data.frag?.url ?? "playlist"}.`
-                : `HLS playback failed (${data.details ?? data.type}).`;
-        fail(detail);
-      });
 
       video.addEventListener("loadeddata", () => noteVideoProgress("loadeddata"));
       video.addEventListener("playing", () => {
