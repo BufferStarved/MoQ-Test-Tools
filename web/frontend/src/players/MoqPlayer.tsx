@@ -70,6 +70,21 @@ const SESSION_RESTART_DELAY_MS = 2_000;
 // Playhead frozen this long while the encode is live => the session is dead
 // even if playa never surfaced an error; tear down and resubscribe.
 const STALL_RESTART_MS = 8_000;
+// First-join starvation fast path: the moqx relay sometimes honors a
+// mid-stream NextGroupStart subscription for exactly ONE group and then never
+// attaches it to subsequent group announcements (observed live: webcam job
+// 7f116860 rendered ~0.85s at t≈6s, then silence while the publisher kept
+// sending all 32 groups; a plain resubscribe at group ~15 streamed fine).
+// Waiting for the 8s steady-state watchdog turned that into a ~12s freeze.
+// During the initial join window a playhead frozen ~2s (two 1s-GOP group
+// periods with nothing delivered) is already conclusive, so resubscribe
+// immediately. Steady-state keeps the more patient 8s threshold.
+const EARLY_JOIN_WINDOW_MS = 15_000;
+const EARLY_STALL_RESTART_MS = 1_750;
+const EARLY_RESTART_DELAY_MS = 250;
+// Watchdog needs sub-second ticks to catch early starvation promptly; the
+// live-edge trim keeps its original 2s cadence via a tick divider below.
+const WATCHDOG_TICK_MS = 500;
 
 export default function MoqPlayer({
   relayUrl,
@@ -422,7 +437,7 @@ export default function MoqPlayer({
        * drop, MSE teardown), so reconnecting resumes playback at the next
        * group instead of freezing the player for the rest of the run.
        */
-      function scheduleSessionRestart(reason: string) {
+      function scheduleSessionRestart(reason: string, delayMs = SESSION_RESTART_DELAY_MS) {
         if (destroyed || retrying) {
           return;
         }
@@ -438,7 +453,7 @@ export default function MoqPlayer({
         setIsPlaying(false);
         setStatus("Reconnecting...");
         void (async () => {
-          await sleep(SESSION_RESTART_DELAY_MS);
+          await sleep(delayMs);
           retrying = false;
           if (destroyed) {
             return;
@@ -771,10 +786,27 @@ export default function MoqPlayer({
         let watchdogVt = -1;
         let watchdogAtMs = Date.now();
         let watchdogGaveUp = false;
+        // Wall time the watchdog first saw rendered media this run. Anchors the
+        // EARLY_JOIN_WINDOW_MS fast-restart window (survives session restarts:
+        // the window is measured from the run's first media, not per session).
+        let firstMediaAtMs = 0;
+        let watchdogTick = 0;
+        const liveEdgeTickDivider = Math.max(1, Math.round(LIVE_EDGE_TRIM_MS / WATCHDOG_TICK_MS));
         liveEdgeTimer = window.setInterval(() => {
           if (destroyed || !sessionRef.current.firstFrame) {
             return;
           }
+          if (firstMediaAtMs === 0) {
+            firstMediaAtMs = Date.now();
+          }
+          watchdogTick += 1;
+          // First-join starvation fast path (see EARLY_STALL_RESTART_MS): a
+          // freshly-joined subscription that delivered one group then went
+          // silent is dead — resubscribing is the known-good recovery, so do
+          // it in ~2s instead of letting the 8s watchdog turn a startup
+          // hiccup into a ~12s freeze.
+          const earlyWindow = Date.now() - firstMediaAtMs < EARLY_JOIN_WINDOW_MS;
+          const stallLimitMs = earlyWindow ? EARLY_STALL_RESTART_MS : STALL_RESTART_MS;
           if (retrying || video.paused) {
             // Reconnect in flight / user pause: don't count frozen time.
             watchdogVt = -1;
@@ -782,17 +814,25 @@ export default function MoqPlayer({
           } else if (video.currentTime > watchdogVt + 0.2) {
             watchdogVt = video.currentTime;
             watchdogAtMs = Date.now();
-          } else if (Date.now() - watchdogAtMs > STALL_RESTART_MS) {
+          } else if (Date.now() - watchdogAtMs > stallLimitMs) {
             if (sessionRestarts < MAX_SESSION_RESTARTS) {
               watchdogVt = -1;
               watchdogAtMs = Date.now();
-              scheduleSessionRestart(`playhead_frozen_${video.currentTime.toFixed(2)}s`);
+              scheduleSessionRestart(
+                `playhead_frozen_${video.currentTime.toFixed(2)}s${earlyWindow ? "_early_join" : ""}`,
+                earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
+              );
             } else if (!watchdogGaveUp) {
               watchdogGaveUp = true;
               fail(
                 `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
               );
             }
+            return;
+          }
+          // Live-edge trim stays on its original 2s cadence; seeking on every
+          // 500ms watchdog tick would fight normal per-GOP buffer bursts.
+          if (watchdogTick % liveEdgeTickDivider !== 0) {
             return;
           }
           const ahead = bufferedAheadSec(video);
@@ -802,7 +842,7 @@ export default function MoqPlayer({
           if (seekNearLiveEdge(video, holdBehindSec)) {
             pushDiag(`live_edge_seek ahead=${ahead.toFixed(2)}s hold=${holdBehindSec.toFixed(2)}s`);
           }
-        }, LIVE_EDGE_TRIM_MS);
+        }, WATCHDOG_TICK_MS);
       } catch (err) {
         playerRef.current?.destroy();
         playerRef.current = null;
