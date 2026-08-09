@@ -6,6 +6,7 @@ import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
+import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -46,9 +47,16 @@ const STALE_FRAG_FAIL_AFTER = 8;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
-/** Playhead frozen this long while data keeps buffering => escape the hole. */
-const STUCK_PLAYHEAD_RESCUE_MS = 4000;
-const STUCK_WATCHDOG_POLL_MS = 1000;
+/**
+ * Playhead frozen this long while data keeps buffering => escape the hole.
+ * 2500ms (was 4000): the rescue ladder (nudge -> decoder recover -> full
+ * restart) needs up to three rounds, and at 4s per round a wedge cost a
+ * 12s visible freeze (webcam run 2026-08-08 23:45, SRT leg frozen 28-40s).
+ * 2.5s keeps it clear of routine sub-second rebuffers while cutting the
+ * worst-case ladder to ~7.5s.
+ */
+const STUCK_PLAYHEAD_RESCUE_MS = 2500;
+const STUCK_WATCHDOG_POLL_MS = 500;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -356,9 +364,15 @@ export default function HlsPlayer({
     ttffMs: 0,
     liveStartedAtMs: 0,
     bufferSec: 0,
-    // PDT-based latency from hls.js (now − playhead PROGRAM-DATE-TIME).
-    // MediaMTX LL-HLS carries PDT; Zixi Fast HLS does not (stays 0).
-    playerLatencyMs: 0,
+    // PROGRAM-DATE-TIME (epoch ms) of the current playhead, from
+    // hls.playingDate. MediaMTX LL-HLS carries PDT; Zixi Fast HLS does not
+    // (stays 0). Stored as the PDT itself — NOT a precomputed latency — so
+    // the e2e snapshot (now − PDT) keeps growing while the playhead is
+    // frozen. The old `hls.latency` snapshot only updated on timeupdate,
+    // which froze the reported latency at ~4.1s through a 12s stall
+    // (webcam run 2026-08-08 23:45, SRT leg) and made the stalled leg look
+    // faster than the healthy ones.
+    playheadPdtMs: 0,
   });
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
@@ -370,8 +384,8 @@ export default function HlsPlayer({
   // (minutes/hours into a shared stream id).
   //
   // MediaMTX LL-HLS timelines start at an arbitrary muxer base (~10s), so
-  // rebasing stays on there — its true latency comes from hls.js's
-  // PDT-based `hls.latency` instead (see playerLatencyMs).
+  // rebasing stays on there — its true latency comes from the playhead's
+  // PROGRAM-DATE-TIME instead (see playheadPdtMs).
   const OFFSET_REBASE_THRESHOLD_SEC = 120;
 
   function sessionRelativeVideoTime(video: HTMLVideoElement): number {
@@ -416,10 +430,12 @@ export default function HlsPlayer({
     const { bridgeMs, epoch, lowLatency } = lagRef.current;
     const session = sessionRef.current;
     if (lowLatency) {
-      if (session.playerLatencyMs > 0) {
-        // hls.latency = browserNow − PDT; PDT is stamped by the (NTP-synced)
-        // packager VM, so express browser time on the server clock too.
-        const total = session.playerLatencyMs + clockSkewMs() + bridgeMs;
+      if (session.playheadPdtMs > 0) {
+        // PDT is stamped by the (NTP-synced) packager VM; express browser
+        // time on the server clock before differencing. Computing the
+        // difference HERE (not at timeupdate) keeps the estimate honest
+        // while the playhead is stalled.
+        const total = Date.now() + clockSkewMs() - session.playheadPdtMs + bridgeMs;
         return total > 0 && total < 120_000 ? Math.round(total) : undefined;
       }
       return undefined;
@@ -552,14 +568,17 @@ export default function HlsPlayer({
       ttffMs: 0,
       liveStartedAtMs: Date.now(),
       bufferSec: 0,
-      playerLatencyMs: 0,
+      playheadPdtMs: 0,
     };
     setElapsedSec(0);
     rebufferRef.current.reset();
 
+    const diagReporter = createPlaybackDiagReporter(jobId, lowLatencyMode ? "ll-hls" : "hls");
+
     function pushDiag(line: string) {
       if (!destroyed) {
         setDiagLines((current) => [...current.slice(-12), line]);
+        diagReporter.push(line);
       }
     }
 
@@ -567,6 +586,7 @@ export default function HlsPlayer({
       lastErrorRef.current = message;
       setError(message);
       setStatus("Failed");
+      diagReporter.push(`FAIL ${message}`);
     }
 
     function noteVideoProgress(source: string) {
@@ -1189,11 +1209,15 @@ export default function HlsPlayer({
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
         setElapsedSec(sessionRef.current.maxVideoTime);
         sessionRef.current.bufferSec = bufferedAheadSec(video);
-        // PDT-based glass latency (finite only when the playlist carries
-        // PROGRAM-DATE-TIME, e.g. MediaMTX LL-HLS).
-        const pdtLatency = hls.latency;
-        if (Number.isFinite(pdtLatency) && pdtLatency > 0) {
-          sessionRef.current.playerLatencyMs = Math.round(pdtLatency * 1000);
+        // Playhead PDT (finite only when the playlist carries
+        // PROGRAM-DATE-TIME, e.g. MediaMTX LL-HLS). Store the PDT itself so
+        // the e2e snapshot stays stall-correct (see playheadPdtMs).
+        const playingDate = hls.playingDate;
+        if (playingDate) {
+          const pdtMs = playingDate.getTime();
+          if (Number.isFinite(pdtMs) && pdtMs > 0) {
+            sessionRef.current.playheadPdtMs = pdtMs;
+          }
         }
         if (sessionRef.current.ttffMs <= 0 && relTime > 0.25) {
           sessionRef.current.ttffMs = Math.max(
@@ -1222,6 +1246,7 @@ export default function HlsPlayer({
 
     return () => {
       destroyed = true;
+      diagReporter.stop();
       if (playRetryTimer != null) {
         window.clearTimeout(playRetryTimer);
         playRetryTimer = null;
