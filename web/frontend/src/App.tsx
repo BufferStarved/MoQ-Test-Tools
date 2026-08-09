@@ -24,7 +24,7 @@ import { SessionMetrics } from "./SessionMetrics";
 import { SessionHistory } from "./SessionHistory";
 import { StreamPlayer } from "./StreamPlayer";
 import { moqDefaultsFromPublishUrl } from "./playbackUrls";
-import { playbackGateForJob } from "./playbackGate";
+import { playbackGateForJob, type PlaybackGate } from "./playbackGate";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { startClockSkewProbe } from "./clockSkew";
@@ -99,7 +99,18 @@ interface ComparisonLegState {
   latestSample: UploadSample | null;
   ingestVmafRequested: boolean;
   encoderVmafRequested: boolean;
+  /** Wall time (ms) the job reached "completed" — drives the playback drain
+   * window so players finish showing their buffered tail instead of being
+   * torn down mid-motion (each leg's viewer is `latency` seconds behind the
+   * encoder when it stops; hard teardown truncated that much content, which
+   * read as "SRT/RTMP had issues at the end of the run"). */
+  completedAtMs?: number;
 }
+
+/** How long players keep running after their encode completes, playing out
+ * the buffered tail. Upstream teardown during the drain surfaces as playlist
+ * 404s which the players already treat as graceful end-of-stream. */
+const PLAYBACK_DRAIN_MS = 10_000;
 
 function createEndpointId(): string {
   return `ep-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -259,6 +270,26 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
+  // Bumped when a leg's playback drain window expires (see PLAYBACK_DRAIN_MS);
+  // the value is unused — the re-render re-evaluates drainedPlaybackGate.
+  const [, setDrainTick] = useState(0);
+
+  /** playbackGateForJob, but completed legs stay "live" for a short drain so
+   * the player can finish showing what's already buffered (each viewer is
+   * `latency` seconds behind the encoder — hard teardown at completion
+   * truncated exactly that much content from the end of every run). */
+  function drainedPlaybackGate(leg: ComparisonLegState | undefined): PlaybackGate {
+    const gate = playbackGateForJob(leg?.job, loading);
+    if (
+      gate === "ended" &&
+      leg?.job.status === "completed" &&
+      leg.completedAtMs != null &&
+      Date.now() - leg.completedAtMs < PLAYBACK_DRAIN_MS
+    ) {
+      return "live";
+    }
+    return gate;
+  }
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
 
@@ -812,11 +843,25 @@ function App() {
               started_at_epoch: status.started_at_epoch ?? leg.job.started_at_epoch,
               first_sample_at_epoch:
                 status.first_sample_at_epoch ?? leg.job.first_sample_at_epoch,
+              media_zero_epoch: status.media_zero_epoch ?? leg.job.media_zero_epoch,
+              packager_transit_ms:
+                status.packager_transit_ms ?? leg.job.packager_transit_ms,
             };
+            let completedAtMs = leg.completedAtMs;
+            if (completedAtMs == null && updatedJob.status === "completed") {
+              completedAtMs = Date.now();
+              // Re-render when the drain window expires so the gate actually
+              // flips to "ended" (no status event arrives at that moment).
+              window.setTimeout(
+                () => setDrainTick((tick) => tick + 1),
+                PLAYBACK_DRAIN_MS + 250,
+              );
+            }
             return {
               ...leg,
               job: updatedJob,
               latestSample: leg.latestSample,
+              completedAtMs,
             };
           });
           if (next.every((leg) => isEncodeFinished(leg.job))) {
@@ -1290,16 +1335,17 @@ function App() {
                         zixiStreamId={leg?.job.zixi_stream_id ?? undefined}
                         zixiPlaybackStreamId={leg?.job.zixi_playback_stream_id ?? undefined}
                         encodeLadder={leg?.job.encode_ladder ?? encodeLadder}
-                        playbackGate={playbackGateForJob(leg?.job, loading)}
+                        playbackGate={drainedPlaybackGate(leg)}
                         jobId={leg?.job.id}
-                        // Anchor = wall time when out_time first advanced,
-                        // derived from samples. Never started_at_epoch: that
-                        // predates protocol setup + webcam-broker warmup (~6s)
-                        // and inflated every wall−playhead latency estimate.
+                        // Anchor preference: media_zero_epoch (encoder spawn,
+                        // stamped server-side) > out_time-derived fallback.
+                        // Never started_at_epoch: that predates protocol setup
+                        // + webcam-broker warmup (~6s) and inflates latency.
                         encodeStartedAtEpoch={deriveEncodeAnchorEpoch(
                           leg?.job,
                           leg?.samples,
                         )}
+                        packagerTransitMs={leg?.job.packager_transit_ms ?? null}
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;

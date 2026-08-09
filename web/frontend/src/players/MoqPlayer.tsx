@@ -199,11 +199,24 @@ export default function MoqPlayer({
     const video = videoRef.current;
 
     const joinOffsetSec = playerRef.current?.joinMediaOffsetSec ?? null;
-    if (epoch > 0 && joinOffsetSec != null && video && video.currentTime > 0.05) {
-      const encoderPlayheadMs = (joinOffsetSec + video.currentTime) * 1000;
-      const total = Date.now() + clockSkewMs() - epoch * 1000 - encoderPlayheadMs + bridgeMs;
-      if (total > 0 && total < 120_000) {
-        return Math.round(total);
+    if (joinOffsetSec != null && video && video.currentTime > 0.05) {
+      // joinOffset + currentTime is the playhead on the encoder's media
+      // timeline (raw CMAF tfdt at join + MSE progress). Validated exact vs a
+      // burnt-in timer 2026-08-09 (56.81 computed vs 56.70 on the glass).
+      const mediaPosSec = joinOffsetSec + video.currentTime;
+      if (mediaPosSec > 1e6) {
+        // Live webcam legs mux with -use_wallclock_as_timestamps: tfdt IS the
+        // capture wall epoch (at the leg encoder's demux), so no anchor is
+        // needed at all — difference against the (skew-corrected) wall clock.
+        const total = Date.now() + clockSkewMs() - mediaPosSec * 1000 + bridgeMs;
+        if (total > 0 && total < 120_000) {
+          return Math.round(total);
+        }
+      } else if (epoch > 0) {
+        const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
+        if (total > 0 && total < 120_000) {
+          return Math.round(total);
+        }
       }
     }
 

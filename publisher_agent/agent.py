@@ -254,8 +254,42 @@ class PublisherAgent:
                 except Exception:  # noqa: BLE001
                     pass
 
+            def on_media_zero(epoch: float) -> None:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ws.send(
+                        json.dumps(
+                            {"type": "media_zero", "job_id": job_id, "media_zero_epoch": float(epoch)}
+                        )
+                    ),
+                    loop,
+                )
+                try:
+                    fut.result(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def on_packager_transit(transit_ms: float) -> None:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ws.send(
+                        json.dumps(
+                            {
+                                "type": "packager_transit",
+                                "job_id": job_id,
+                                "packager_transit_ms": float(transit_ms),
+                            }
+                        )
+                    ),
+                    loop,
+                )
+                try:
+                    fut.result(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+
             job.on_preview_ready = on_preview
             job.on_encoder_vmaf_status = on_encoder_vmaf
+            job.on_media_zero = on_media_zero
+            job.on_packager_transit = on_packager_transit
 
             logger.info(
                 "Starting job %s %s → %s",

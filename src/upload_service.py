@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -6,7 +7,10 @@ import tempfile
 import threading
 import time
 import logging
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -176,6 +180,19 @@ class UploadJob:
     cancel_event: Optional[threading.Event] = None
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
+    # Latency anchor: wall epoch stamped immediately before the leg encoder
+    # spawns. With -re (VOD) / live capture, media time m is read at
+    # media_zero_epoch + m, so glass-to-glass = display_wall − (anchor + m).
+    # first_sample_at_epoch (ffmpeg's first *progress report*) lags the true
+    # media zero by the encoder pipeline delay (~2s measured 2026-08-09) and
+    # must not be used as the anchor.
+    on_media_zero: Optional[Callable[[float], None]] = field(default=None, repr=False)
+    # LL-HLS PDT transit: (first PROGRAM-DATE-TIME − (media_zero + segment
+    # media time)) measured server-side; lets the player convert PDT-based
+    # latency into encoder-anchored latency.
+    on_packager_transit: Optional[Callable[[float], None]] = field(default=None, repr=False)
+    _media_zero_sent: bool = field(default=False, init=False, repr=False)
+    _media_zero_epoch: Optional[float] = field(default=None, init=False, repr=False)
     # JobManager sets this so the UI can show "computing" the moment the
     # encoder-side VMAF/PSNR/SSIM run actually starts, instead of only ever
     # seeing "waiting for encode" until the whole job (encode + VMAF) is done.
@@ -563,6 +580,7 @@ class UploadService:
             ).start()
 
         try:
+            self._stamp_media_zero(job)
             process = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,
@@ -663,6 +681,8 @@ class UploadService:
                             _EARLY_EXIT_MAX_RETRIES,
                         )
                         time.sleep(2.0)
+                        # Source restarts from media 0 — move the anchor too.
+                        self._stamp_media_zero(job, restamp=True)
                         process = subprocess.Popen(
                             ffmpeg_cmd,
                             stdout=subprocess.PIPE,
@@ -787,6 +807,35 @@ class UploadService:
             callback(ready)
         except Exception:
             logger.warning("on_preview_ready callback failed", exc_info=True)
+
+    def _stamp_media_zero(self, job: UploadJob, *, restamp: bool = False) -> None:
+        """Record the wall epoch of media time zero (leg encoder spawn).
+
+        Called immediately before the encoder process spawns. `restamp=True`
+        is for retry paths that restart the source from media 0 (RTMP
+        early-exit retry) — the anchor must move with the restart.
+        """
+        if job._media_zero_sent and not restamp:
+            return
+        job._media_zero_sent = True
+        stamp = time.time()
+        job._media_zero_epoch = stamp
+        callback = job.on_media_zero
+        if not callback:
+            return
+        try:
+            callback(stamp)
+        except Exception:
+            logger.warning("on_media_zero callback failed", exc_info=True)
+
+    def _notify_packager_transit(self, job: UploadJob, transit_ms: float) -> None:
+        callback = job.on_packager_transit
+        if not callback:
+            return
+        try:
+            callback(float(transit_ms))
+        except Exception:
+            logger.warning("on_packager_transit callback failed", exc_info=True)
 
     def _is_mediamtx_destination(self, job: UploadJob) -> bool:
         return _is_mediamtx_provider(job.destination.ingest_provider or "")
@@ -975,6 +1024,125 @@ class UploadService:
                 return
             stop_event.wait(0.5)
 
+    def _measure_llhls_packager_transit(
+        self,
+        job: UploadJob,
+        stop_event: threading.Event,
+    ) -> None:
+        """Measure encoder→packager transit for MediaMTX LL-HLS legs.
+
+        MediaMTX stamps EXT-X-PROGRAM-DATE-TIME with ITS wall clock at
+        packaging time. A frame at media time m was read by the encoder at
+        media_zero_epoch + m, so:
+
+            transit = PDT(m) − (media_zero_epoch + m)
+
+        which folds in SRT tsbpd delay + network + remux. The browser then
+        reports encoder-anchored latency as (now − playingDate) + transit.
+        Media position of the first PDT is derived from the playlist itself
+        (sequence numbers count from 0 for a fresh MediaMTX muxer session),
+        so this must poll EARLY, before the live window slides.
+        """
+        index_url = self._managed_hls_manifest_url(job)
+        if not index_url:
+            return
+        deadline = time.time() + 25.0
+        # The probe may launch just before the encoder spawn stamps the anchor.
+        while job._media_zero_epoch is None and time.time() < deadline:
+            if stop_event.wait(0.2):
+                return
+        variant_url: Optional[str] = None
+        pdt_re = re.compile(r"#EXT-X-PROGRAM-DATE-TIME:(\S+)")
+        while not stop_event.is_set() and time.time() < deadline:
+            try:
+                if variant_url is None:
+                    body = urllib.request.urlopen(index_url, timeout=2.0).read().decode(
+                        "utf-8", errors="replace"
+                    )
+                    for line in body.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "audio" not in line.lower():
+                            variant_url = urllib.parse.urljoin(index_url, line)
+                            break
+                    if variant_url is None:
+                        stop_event.wait(0.5)
+                        continue
+                body = urllib.request.urlopen(variant_url, timeout=2.0).read().decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:
+                stop_event.wait(0.5)
+                continue
+            media_sequence = 0
+            media_pos = 0.0
+            extinf_durations: List[float] = []
+            pdt_value: Optional[str] = None
+            pdt_media_pos: Optional[float] = None
+            for line in body.splitlines():
+                line = line.strip()
+                if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                    try:
+                        media_sequence = int(line.split(":", 1)[1])
+                    except ValueError:
+                        pass
+                elif line.startswith("#EXTINF:"):
+                    try:
+                        duration = float(line.split(":", 1)[1].rstrip(",").split(",")[0])
+                    except ValueError:
+                        continue
+                    extinf_durations.append(duration)
+                    media_pos += duration
+                else:
+                    match = pdt_re.match(line)
+                    if match and pdt_value is None:
+                        pdt_value = match.group(1)
+                        pdt_media_pos = media_pos
+            if pdt_value is None or pdt_media_pos is None:
+                stop_event.wait(0.5)
+                continue
+            if media_sequence > 2:
+                # Window already slid before we ever saw sequence≈0: the
+                # session start is no longer observable, so sequence-based
+                # media positions would be shifted. Skip rather than lie.
+                logger.warning(
+                    "LL-HLS transit probe joined late (media_sequence=%s); skipping",
+                    media_sequence,
+                )
+                return
+            anchor = job._media_zero_epoch
+            if anchor is None:
+                return
+            try:
+                pdt_epoch = datetime.fromisoformat(pdt_value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                logger.warning("Unparseable LL-HLS PDT %r", pdt_value)
+                return
+            # First-PDT media position must account for segments the window
+            # already dropped (sequence offset × observed segment duration).
+            avg_segment_sec = (
+                sum(extinf_durations) / len(extinf_durations) if extinf_durations else 1.0
+            )
+            transit_ms = (
+                pdt_epoch - (anchor + media_sequence * avg_segment_sec + pdt_media_pos)
+            ) * 1000.0
+            if -2000.0 < transit_ms < 30000.0:
+                logger.info(
+                    "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
+                    job.job_id,
+                    transit_ms,
+                    pdt_value,
+                    media_sequence,
+                    pdt_media_pos,
+                )
+                self._notify_packager_transit(job, transit_ms)
+            else:
+                logger.warning(
+                    "LL-HLS transit %.0fms out of range (pdt=%s) — not publishing",
+                    transit_ms,
+                    pdt_value,
+                )
+            return
+
     def _zixi_uses_error_concealment_playback(self, job: UploadJob) -> bool:
         """True when the browser pulls the EC derivative, not the raw SRT input."""
         playback_id = (job.zixi_playback_stream_id or "").strip()
@@ -1092,6 +1260,13 @@ class UploadService:
                 daemon=True,
                 name=f"hls-preview-{job.job_id[:8]}",
             ).start()
+            if self._is_mediamtx_destination(job):
+                threading.Thread(
+                    target=self._measure_llhls_packager_transit,
+                    args=(job, stop_preview),
+                    daemon=True,
+                    name=f"llhls-transit-{job.job_id[:8]}",
+                ).start()
             try:
                 return self._run_direct_ffmpeg(job, on_sample=on_sample)
             finally:
@@ -1137,11 +1312,19 @@ class UploadService:
             ).start()
 
         try:
+            self._stamp_media_zero(job)
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
+            if self._is_mediamtx_destination(job):
+                threading.Thread(
+                    target=self._measure_llhls_packager_transit,
+                    args=(job, stop_preview),
+                    daemon=True,
+                    name=f"llhls-transit-{job.job_id[:8]}",
+                ).start()
             time.sleep(0.5)
             srt_proc = subprocess.Popen(
                 srt_cmd,
@@ -1539,6 +1722,7 @@ class UploadService:
         job.encoder_capture_path = encoder_capture_path(temp_dir, "moq")
 
         try:
+            self._stamp_media_zero(job)
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
                 stdout=subprocess.PIPE,

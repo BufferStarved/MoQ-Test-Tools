@@ -41,6 +41,8 @@ class _PendingJob:
     result_queue: "queue.Queue[dict]" = field(default_factory=queue.Queue)
     preview_ready: Optional[bool] = None
     encoder_vmaf_status: Optional[str] = None
+    media_zero_epoch: Optional[float] = None
+    packager_transit_ms: Optional[float] = None
 
 
 @dataclass
@@ -146,6 +148,18 @@ class PublisherHub:
         if msg_type == "encoder_vmaf_status" and pending is not None:
             pending.encoder_vmaf_status = str(message.get("encoder_vmaf_status") or "")
             return
+        if msg_type == "media_zero" and pending is not None:
+            try:
+                pending.media_zero_epoch = float(message.get("media_zero_epoch"))
+            except (TypeError, ValueError):
+                pass
+            return
+        if msg_type == "packager_transit" and pending is not None:
+            try:
+                pending.packager_transit_ms = float(message.get("packager_transit_ms"))
+            except (TypeError, ValueError):
+                pass
+            return
         if msg_type == "job_done" and pending is not None:
             pending.result_queue.put(message.get("result") or {})
             pending.sample_queue.put(None)  # unblock sample waiter
@@ -164,6 +178,8 @@ class PublisherHub:
         on_sample: Optional[SampleCallback] = None,
         on_preview_ready: Optional[Callable[[bool], None]] = None,
         on_encoder_vmaf_status: Optional[Callable[[str], None]] = None,
+        on_media_zero: Optional[Callable[[float], None]] = None,
+        on_packager_transit: Optional[Callable[[float], None]] = None,
     ) -> UploadResult:
         if not local_publisher_enabled():
             return UploadResult(
@@ -225,6 +241,12 @@ class PublisherHub:
                 if pending.encoder_vmaf_status is not None and on_encoder_vmaf_status:
                     on_encoder_vmaf_status(pending.encoder_vmaf_status)
                     pending.encoder_vmaf_status = None
+                if pending.media_zero_epoch is not None and on_media_zero:
+                    on_media_zero(pending.media_zero_epoch)
+                    pending.media_zero_epoch = None
+                if pending.packager_transit_ms is not None and on_packager_transit:
+                    on_packager_transit(pending.packager_transit_ms)
+                    pending.packager_transit_ms = None
 
                 try:
                     item = pending.sample_queue.get(timeout=0.5)
