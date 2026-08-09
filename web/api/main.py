@@ -1027,6 +1027,15 @@ def _get_playback_client() -> httpx.AsyncClient:
     if _playback_client is None or _playback_client.is_closed:
         _playback_client = httpx.AsyncClient(
             follow_redirects=True,
+            # Zixi's "Internal Web Server" replies with Content-Encoding: zstd
+            # whenever *any* Accept-Encoding header is present — even if zstd
+            # wasn't offered. If the venv lacks the zstandard package, httpx
+            # returns the raw zstd bytes, which fail the #EXTM3U check and 502
+            # every playlist poll (RTMP leg stuck on "Waiting for live HLS
+            # manifest…", 2026-08-09). Manifests are tiny and TS/fMP4 media is
+            # already compressed, so force identity instead of relying on
+            # optional decompression codecs being installed.
+            headers={"Accept-Encoding": "identity"},
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=40),
             # read=20s is a per-chunk-read deadline on streamed bodies, so a
             # live TS stream stays healthy as long as bytes keep flowing.
