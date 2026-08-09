@@ -725,6 +725,8 @@ class JobManager:
                 encoder_vmaf_error=record.encoder_vmaf_error,
                 started_at_epoch=record.started_at_epoch,
                 first_sample_at_epoch=record.first_sample_at_epoch,
+                media_zero_epoch=record.media_zero_epoch,
+                packager_transit_ms=record.packager_transit_ms,
                 playback_samples=list(record.playback_samples),
                 playback_engine=record.playback_engine,
             )
@@ -764,6 +766,10 @@ class JobManager:
                     encoder_psnr_db=record.encoder_psnr_db,
                     encoder_ssim=record.encoder_ssim,
                     encoder_vmaf_error=record.encoder_vmaf_error,
+                    started_at_epoch=record.started_at_epoch,
+                    first_sample_at_epoch=record.first_sample_at_epoch,
+                    media_zero_epoch=record.media_zero_epoch,
+                    packager_transit_ms=record.packager_transit_ms,
                 )
                 for record in self._jobs.values()
             ]
