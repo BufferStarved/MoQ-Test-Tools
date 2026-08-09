@@ -78,10 +78,18 @@ export function bufferedEndSec(media: HTMLMediaElement | null | undefined): numb
 /**
  * Seek near the live edge, keeping `holdBehindSec` of buffer.
  * Returns true when a seek was issued.
+ *
+ * `minAheadSec` is the caller's trigger threshold — the seek fires once the
+ * buffer lead exceeds it (defaults to 2.5× hold). Callers with their own
+ * threshold MUST pass it here: MoqPlayer used to gate at hold×2 externally
+ * while this helper silently required hold×2.5, so between the two
+ * thresholds nothing ever seeked and a 4s target drifted to ~9.5s e2e
+ * (webcam run 2026-08-08 23:45).
  */
 export function seekNearLiveEdge(
   media: HTMLMediaElement | null | undefined,
   holdBehindSec: number,
+  minAheadSec?: number,
 ): boolean {
   if (!media || media.readyState < 2) {
     return false;
@@ -93,7 +101,8 @@ export function seekNearLiveEdge(
   const hold = Math.max(0.15, holdBehindSec);
   const ahead = end - media.currentTime;
   // Only jump when we're holding clearly more than the target live buffer.
-  if (ahead < hold * 2.5) {
+  const threshold = Math.max(hold + 0.5, minAheadSec ?? hold * 2.5);
+  if (ahead < threshold) {
     return false;
   }
   const target = Math.max(0, end - hold);

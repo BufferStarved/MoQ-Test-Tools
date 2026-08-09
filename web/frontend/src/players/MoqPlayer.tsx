@@ -14,6 +14,7 @@ import {
 } from "../moqPlaybackOutcome";
 import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
+import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -86,6 +87,17 @@ const EARLY_RESTART_DELAY_MS = 250;
 // Watchdog needs sub-second ticks to catch early starvation promptly; the
 // live-edge trim keeps its original 2s cadence via a tick divider below.
 const WATCHDOG_TICK_MS = 500;
+// Small-gap escape: CMAF fragment boundaries can leave sub-second MSE buffer
+// holes that freeze the playhead with media queued right behind them. Jump
+// them after ~1.5s instead of waiting for the stall watchdog (which burns a
+// full session restart on what is just a buffered hole).
+const GAP_JUMP_AFTER_MS = 1_500;
+const GAP_JUMP_MAX_HOLE_SEC = 1.5;
+// Live-edge catch-up rate cap. Proportional between 1.0 and this based on
+// how far past the hold target the buffer lead has drifted; 1.25 recovers a
+// 4s overshoot in ~16s, fast enough to matter within a benchmark run while
+// staying just below obvious motion speed-up.
+const MAX_CATCH_UP_RATE = 1.25;
 
 export default function MoqPlayer({
   relayUrl,
@@ -314,6 +326,8 @@ export default function MoqPlayer({
     };
     rebufferRef.current.reset();
 
+    const diagReporter = createPlaybackDiagReporter(jobId, "moq");
+
     function pushDiag(line: string, pin = false) {
       if (destroyed) {
         return;
@@ -326,6 +340,7 @@ export default function MoqPlayer({
         rollingDiagRef.current = [...rollingDiagRef.current.slice(-10), line];
       }
       setDiagLines([...pinnedDiagRef.current, ...rollingDiagRef.current].slice(-20));
+      diagReporter.push(line);
     }
 
     function fail(message: string) {
@@ -334,6 +349,7 @@ export default function MoqPlayer({
       setStatus("Failed");
       setIsReady(false);
       setIsPlaying(false);
+      diagReporter.push(`FAIL ${message}`);
     }
 
     function armFrameTimeout(label: string) {
@@ -847,28 +863,59 @@ export default function MoqPlayer({
           } else if (video.currentTime > watchdogVt + 0.2) {
             watchdogVt = video.currentTime;
             watchdogAtMs = Date.now();
-          } else if (Date.now() - watchdogAtMs > stallLimitMs) {
-            if (sessionRestarts < MAX_SESSION_RESTARTS) {
-              watchdogVt = -1;
-              watchdogAtMs = Date.now();
-              scheduleSessionRestart(
-                `playhead_frozen_${video.currentTime.toFixed(2)}s${earlyWindow ? "_early_join" : ""}`,
-                earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
-              );
-            } else if (!watchdogGaveUp) {
-              watchdogGaveUp = true;
-              fail(
-                `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
-              );
+          } else if (Date.now() - watchdogAtMs > GAP_JUMP_AFTER_MS) {
+            // Small-gap escape BEFORE any restart machinery: CMAF fragment
+            // boundaries can leave sub-second holes in the MSE buffer that
+            // freeze the playhead with plenty of media queued right behind
+            // them (webcam run 2026-08-08 23:45: two 2s freezes per leg with
+            // 4-8s buffered). Hop over the hole instead of waiting for the
+            // stall watchdog to burn a session restart.
+            let jumped = false;
+            for (let i = 0; i < video.buffered.length; i += 1) {
+              const start = video.buffered.start(i);
+              if (
+                start > video.currentTime + 0.01 &&
+                start - video.currentTime <= GAP_JUMP_MAX_HOLE_SEC &&
+                video.buffered.end(i) > start + 0.25
+              ) {
+                pushDiag(
+                  `gap_jump from=${video.currentTime.toFixed(2)} to=${start.toFixed(2)} hole=${(start - video.currentTime).toFixed(2)}s`,
+                );
+                video.currentTime = start + 0.05;
+                watchdogVt = -1;
+                watchdogAtMs = Date.now();
+                jumped = true;
+                break;
+              }
             }
-            return;
+            if (!jumped && Date.now() - watchdogAtMs > stallLimitMs) {
+              if (sessionRestarts < MAX_SESSION_RESTARTS) {
+                watchdogVt = -1;
+                watchdogAtMs = Date.now();
+                scheduleSessionRestart(
+                  `playhead_frozen_${video.currentTime.toFixed(2)}s${earlyWindow ? "_early_join" : ""}`,
+                  earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
+                );
+              } else if (!watchdogGaveUp) {
+                watchdogGaveUp = true;
+                fail(
+                  `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
+                );
+              }
+              return;
+            }
           }
           // Rate-based catch-up runs on every 500ms tick — fine cadence keeps
-          // the rate transitions (and thus perceived motion) smooth.
+          // the rate transitions (and thus perceived motion) smooth. The rate
+          // scales with overshoot: fixed 1.08/1.12 steps could not outrun the
+          // drift a couple of stall-freezes leave behind (webcam run
+          // 2026-08-08 23:45: e2e climbed 2.4s -> 9.5s over ~50s).
           const ahead = bufferedAheadSec(video);
           const previousRate = catchUpRate;
           if (ahead > rateOnSec) {
-            catchUpRate = ahead > rateOnSec + 2 ? 1.12 : 1.08;
+            const overshoot = Math.min(1, (ahead - rateOnSec) / (seekThresholdSec - rateOnSec));
+            const raw = 1 + (MAX_CATCH_UP_RATE - 1) * Math.max(overshoot, 0.3);
+            catchUpRate = Math.round(raw * 20) / 20; // quantize to 0.05 steps
           } else if (ahead < rateOffSec) {
             catchUpRate = 1;
           }
@@ -888,7 +935,10 @@ export default function MoqPlayer({
           if (ahead < seekThresholdSec) {
             return;
           }
-          if (seekNearLiveEdge(video, holdBehindSec)) {
+          // Pass our threshold explicitly — the helper's internal default
+          // (hold x 2.5) was stricter than this gate, so buffer leads between
+          // the two thresholds never seeked and latency ratcheted upward.
+          if (seekNearLiveEdge(video, holdBehindSec, seekThresholdSec)) {
             pushDiag(`live_edge_seek ahead=${ahead.toFixed(2)}s hold=${holdBehindSec.toFixed(2)}s`);
           }
         }, WATCHDOG_TICK_MS);
@@ -912,6 +962,7 @@ export default function MoqPlayer({
       // eslint-disable-next-line no-console
       console.log(`[MoqPlayer] live-effect cleanup #${mountNumber}`);
       destroyed = true;
+      diagReporter.stop();
       video.removeEventListener("timeupdate", onTimeUpdate);
       if (connectTimeout) {
         window.clearTimeout(connectTimeout);

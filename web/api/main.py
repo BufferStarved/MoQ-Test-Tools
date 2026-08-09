@@ -9,6 +9,7 @@ import time
 import uuid
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 import httpx
 from pathlib import Path
@@ -772,6 +773,44 @@ def post_playback_sample(job_id: str, request: PlaybackSampleRequest):
     if not accepted:
         raise HTTPException(status_code=400, detail="Invalid playback sample")
     return {"ok": True}
+
+
+class PlaybackDiagRequest(BaseModel):
+    engine: str = ""
+    lines: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/uploads/{job_id}/playback-diag")
+def post_playback_diag(job_id: str, request: PlaybackDiagRequest):
+    """Persist browser player diagnostics (pushDiag lines) per job.
+
+    Playback misbehavior (stalls, rescues, restarts) previously lived only in
+    the player card's diagnostics panel and died with the tab — every field
+    report required asking the tester to copy console output. Appending them
+    server-side makes any run fully post-mortemable from the API alone.
+    """
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    lines = [str(line)[:500] for line in request.lines[:200]]
+    if not lines:
+        return {"ok": True, "written": 0}
+    diag_dir = ROOT_DIR / "results" / "playback-diag"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    path = diag_dir / f"{job_id}.log"
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    with path.open("a", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(f"{stamp} [{request.engine}] {line}\n")
+    return {"ok": True, "written": len(lines)}
+
+
+@app.get("/api/uploads/{job_id}/playback-diag")
+def get_playback_diag(job_id: str):
+    path = ROOT_DIR / "results" / "playback-diag" / f"{job_id}.log"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No diagnostics for this job")
+    return Response(content=path.read_text(encoding="utf-8"), media_type="text/plain")
 
 
 @app.post("/api/uploads/{job_id}/stop")

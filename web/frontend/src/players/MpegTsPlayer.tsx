@@ -4,6 +4,7 @@ import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
+import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
@@ -163,9 +164,12 @@ export default function MpegTsPlayer({
     setDiagLines([]);
     lastErrorRef.current = null;
 
+    const diagReporter = createPlaybackDiagReporter(jobId, "mpegts");
+
     function pushDiag(line: string) {
       if (!destroyed) {
         setDiagLines((current) => [...current.slice(-12), line]);
+        diagReporter.push(line);
       }
     }
     pushDiag(`url=${url}`);
@@ -386,6 +390,7 @@ export default function MpegTsPlayer({
 
     return () => {
       destroyed = true;
+      diagReporter.stop();
       clearReconnect();
       if (timeTimer != null) {
         window.clearInterval(timeTimer);
