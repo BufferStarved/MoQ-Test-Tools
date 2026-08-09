@@ -49,6 +49,8 @@ interface StreamPlayerProps {
   playbackGate?: PlaybackGate;
   jobId?: string;
   encodeStartedAtEpoch?: number | null;
+  /** LL-HLS: server-measured encoder→packager transit added to PDT latency. */
+  packagerTransitMs?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
   benchmarkLoading?: boolean;
@@ -90,6 +92,7 @@ export function StreamPlayer({
   playbackGate = "idle",
   jobId,
   encodeStartedAtEpoch,
+  packagerTransitMs = null,
   onPlaybackSample,
   jobStatus,
   benchmarkLoading = false,
@@ -232,6 +235,7 @@ export function StreamPlayer({
               playbackGate={playbackGate}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
+              packagerTransitMs={packagerTransitMs}
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}

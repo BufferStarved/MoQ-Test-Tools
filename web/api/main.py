@@ -208,6 +208,8 @@ def job_to_dict(job) -> dict:
         "encoder_vmaf_error": job.encoder_vmaf_error,
         "started_at_epoch": job.started_at_epoch,
         "first_sample_at_epoch": getattr(job, "first_sample_at_epoch", None),
+        "media_zero_epoch": getattr(job, "media_zero_epoch", None),
+        "packager_transit_ms": getattr(job, "packager_transit_ms", None),
     }
 
 
@@ -862,6 +864,8 @@ async def upload_events(job_id: str):
                 # wall−playhead e2e estimate (RTMP HTTP-TS) stays 0.
                 "started_at_epoch": current.started_at_epoch,
                 "first_sample_at_epoch": getattr(current, "first_sample_at_epoch", None),
+                "media_zero_epoch": getattr(current, "media_zero_epoch", None),
+                "packager_transit_ms": getattr(current, "packager_transit_ms", None),
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
 

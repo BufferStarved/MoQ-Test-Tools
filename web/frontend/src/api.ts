@@ -317,6 +317,8 @@ export function subscribeToUpload(
     encoder_vmaf_error?: string | null;
     started_at_epoch?: number | null;
     first_sample_at_epoch?: number | null;
+    media_zero_epoch?: number | null;
+    packager_transit_ms?: number | null;
   }) => void,
 ): () => void {
   const source = new EventSource(`${API_BASE}/uploads/${jobId}/events`);

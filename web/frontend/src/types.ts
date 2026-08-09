@@ -130,6 +130,12 @@ export interface UploadJob {
    * etc.) varies a lot by protocol and otherwise biases cross-protocol
    * latency comparisons toward whichever protocol takes longer to set up. */
   first_sample_at_epoch?: number | null;
+  /** Wall epoch stamped right before the leg encoder spawned — media time m
+   * was read at media_zero_epoch + m. Preferred glass-to-glass anchor. */
+  media_zero_epoch?: number | null;
+  /** LL-HLS only: encoder→packager transit (ms) measured server-side from the
+   * first EXT-X-PROGRAM-DATE-TIME; added to PDT-based player latency. */
+  packager_transit_ms?: number | null;
   csv_path?: string | null;
   summary_path?: string | null;
   error?: string | null;

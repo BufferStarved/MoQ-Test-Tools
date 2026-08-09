@@ -210,7 +210,10 @@ export function parseOutTimeSec(outTime?: string | null): number {
  * rather than ever falling back to started_at_epoch.
  */
 export function deriveEncodeAnchorEpoch(
-  job: { first_sample_at_epoch?: number | null } | null | undefined,
+  job:
+    | { media_zero_epoch?: number | null; first_sample_at_epoch?: number | null }
+    | null
+    | undefined,
   samples:
     | Array<{
         elapsed_sec: number;
@@ -221,6 +224,16 @@ export function deriveEncodeAnchorEpoch(
     | null
     | undefined,
 ): number | null {
+  // Preferred: the server stamps media_zero_epoch immediately before the leg
+  // encoder spawns — media time m is read at media_zero_epoch + m. The
+  // out_time-based derivation below is a fallback for old payloads: out_time
+  // is the MUX clock, which lags the read clock by the encoder pipeline delay
+  // (x264 lookahead + mux buffering, ~2s measured 2026-08-09), so it
+  // understates latency by that amount on every leg.
+  const mediaZero = job?.media_zero_epoch;
+  if (mediaZero && mediaZero > 0) {
+    return mediaZero;
+  }
   const firstSampleEpoch = job?.first_sample_at_epoch;
   if (!firstSampleEpoch || firstSampleEpoch <= 0 || !samples || samples.length === 0) {
     return null;

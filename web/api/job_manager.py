@@ -130,6 +130,19 @@ class UploadJobRecord:
     # cross-protocol anchor; started_at_epoch remains as a fallback for
     # clients that haven't picked up the new field yet.
     first_sample_at_epoch: Optional[float] = None
+    # Wall epoch stamped immediately before the leg ENCODER process spawns
+    # (after endpoint probes / ingest locks, before ffmpeg pipeline delay).
+    # This is the glass-to-glass latency anchor: with -re/live capture, media
+    # time m is read at media_zero_epoch + m. first_sample_at_epoch lags this
+    # by the encoder pipeline delay (~2s measured 2026-08-09: x264 lookahead +
+    # mux buffering before ffmpeg's first progress report), which understated
+    # every leg's e2e latency by the same amount.
+    media_zero_epoch: Optional[float] = None
+    # LL-HLS (MediaMTX) only: encoder→packager transit measured server-side as
+    # first EXT-X-PROGRAM-DATE-TIME − (media_zero_epoch + segment media time).
+    # The browser adds this to PDT-based player latency, which otherwise
+    # misses SRT tsbpd + network + remux upstream of the packager.
+    packager_transit_ms: Optional[float] = None
     playback_samples: List[dict] = field(default_factory=list)
     playback_engine: str = ""
     publisher_host: str = "cloud"
@@ -257,6 +270,12 @@ class JobManager:
         job.on_encoder_vmaf_status = lambda status, _job_id=job_id: self._update(
             _job_id, encoder_vmaf_status=str(status)
         )
+        job.on_media_zero = lambda epoch, _job_id=job_id: self._update(
+            _job_id, media_zero_epoch=float(epoch)
+        )
+        job.on_packager_transit = lambda ms, _job_id=job_id: self._update(
+            _job_id, packager_transit_ms=float(ms)
+        )
         with self._lock:
             self._jobs[job_id] = record
 
@@ -343,6 +362,8 @@ class JobManager:
                 on_sample=on_sample,
                 on_preview_ready=job.on_preview_ready,
                 on_encoder_vmaf_status=job.on_encoder_vmaf_status,
+                on_media_zero=job.on_media_zero,
+                on_packager_transit=job.on_packager_transit,
             )
         else:
             if job.publisher_host == "local" and not local_publisher_enabled():

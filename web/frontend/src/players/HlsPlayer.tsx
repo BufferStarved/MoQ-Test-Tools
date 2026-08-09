@@ -32,6 +32,10 @@ interface HlsPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (ms). */
   encoderLagMs?: number;
+  /** LL-HLS: server-measured encoder→packager transit (ms). PDT is stamped at
+   * PACKAGING time, so PDT-based latency alone misses SRT tsbpd + network +
+   * remux upstream of the packager (~2.7s measured 2026-08-09). */
+  packagerTransitMs?: number | null;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -331,6 +335,7 @@ export default function HlsPlayer({
   lowLatencyMode = false,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  packagerTransitMs = null,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -373,6 +378,16 @@ export default function HlsPlayer({
     // (webcam run 2026-08-08 23:45, SRT leg) and made the stalled leg look
     // faster than the healthy ones.
     playheadPdtMs: 0,
+    // Raw video.currentTime (un-rebased) — used with fragTimelineOffsetSec.
+    rawVideoTime: 0,
+    // Zixi Fast HLS: hls.js maps buffer time 0 to the start of the playlist
+    // window AT JOIN, not to media 0 — a mid-stream join reads several
+    // seconds behind the true encoder-timeline position (3.8s vs a burnt-in
+    // timer, 2026-08-09) and overstates wall−playhead latency by exactly
+    // that. Zixi cuts uniform-duration chunks numbered from 0 per input
+    // session, so frag.sn × duration − frag.start recovers the offset from
+    // buffer timeline to encoder media timeline.
+    fragTimelineOffsetSec: null as number | null,
   });
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
@@ -404,12 +419,19 @@ export default function HlsPlayer({
 
   // Live upstream lag components (props change every sample poll); refs keep
   // the memoized snapshot getter reading fresh values.
-  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0, lowLatency: false });
+  const lagRef = useRef({
+    bridgeMs: 0,
+    encoderMs: 0,
+    epoch: 0,
+    lowLatency: false,
+    transitMs: null as number | null,
+  });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
     encoderMs: encoderLagMs,
     epoch: encodeStartedAtEpoch ?? 0,
     lowLatency: lowLatencyMode,
+    transitMs: packagerTransitMs,
   };
 
   /**
@@ -427,24 +449,35 @@ export default function HlsPlayer({
    * estimate individually read 2.5-4s low/high with mismatched anchors.
    */
   function captureAnchoredE2eMs(): number | undefined {
-    const { bridgeMs, epoch, lowLatency } = lagRef.current;
+    const { bridgeMs, epoch, lowLatency, transitMs } = lagRef.current;
     const session = sessionRef.current;
     if (lowLatency) {
       if (session.playheadPdtMs > 0) {
-        // PDT is stamped by the (NTP-synced) packager VM; express browser
-        // time on the server clock before differencing. Computing the
-        // difference HERE (not at timeupdate) keeps the estimate honest
-        // while the playhead is stalled.
-        const total = Date.now() + clockSkewMs() - session.playheadPdtMs + bridgeMs;
+        // PDT is stamped by the (NTP-synced) packager VM *at packaging time*;
+        // (now − PDT) covers packager→glass only. packagerTransitMs is the
+        // server-measured encoder→packager leg (SRT tsbpd + network + remux);
+        // without it LL-HLS understated e2e by ~2.7s vs a burnt-in timer
+        // (2026-08-09). Computing the difference HERE (not at timeupdate)
+        // keeps the estimate honest while the playhead is stalled.
+        const total =
+          Date.now() + clockSkewMs() - session.playheadPdtMs + (transitMs ?? 0) + bridgeMs;
         return total > 0 && total < 120_000 ? Math.round(total) : undefined;
       }
       return undefined;
     }
     if (epoch > 0 && session.maxVideoTime > 0) {
       // The anchor epoch is stamped with the API server's clock — correct
-      // Date.now() onto that clock before differencing.
-      const total =
-        Date.now() + clockSkewMs() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
+      // Date.now() onto that clock before differencing. Prefer the
+      // fragment-sequence mapping (encoder media timeline); the rebased
+      // maxVideoTime fallback under-counts by the join offset when hls.js
+      // starts its buffer timeline at the join window, and stays for
+      // ts-offset (SRT→Zixi republish) sessions where chunk numbering
+      // continues across sessions and sn-mapping would lie.
+      const mediaPosSec =
+        session.fragTimelineOffsetSec != null && session.videoTimeOrigin === 0
+          ? session.rawVideoTime + session.fragTimelineOffsetSec
+          : session.maxVideoTime;
+      const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }
     return undefined;
@@ -569,6 +602,8 @@ export default function HlsPlayer({
       liveStartedAtMs: Date.now(),
       bufferSec: 0,
       playheadPdtMs: 0,
+      rawVideoTime: 0,
+      fragTimelineOffsetSec: null,
     };
     setElapsedSec(0);
     rebufferRef.current.reset();
@@ -592,6 +627,7 @@ export default function HlsPlayer({
     function noteVideoProgress(source: string) {
       const relTime = sessionRelativeVideoTime(video);
       sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
+      sessionRef.current.rawVideoTime = video.currentTime;
       setElapsedSec(sessionRef.current.maxVideoTime);
       const { videoWidth, videoHeight } = video;
       pushDiag(
@@ -964,6 +1000,27 @@ export default function HlsPlayer({
           }
         });
 
+        // Buffer-timeline → encoder-media-timeline offset for Zixi Fast HLS
+        // (uniform chunks numbered from 0 per input session): the media
+        // position of fragment sn is sn × duration, while hls.js places it
+        // at frag.start on the buffer timeline. See fragTimelineOffsetSec.
+        instance.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
+          if (destroyed || lowLatencyMode) {
+            return;
+          }
+          const frag = data?.frag;
+          if (!frag || !Number.isFinite(frag.start) || !Number.isFinite(frag.duration)) {
+            return;
+          }
+          if (typeof frag.sn !== "number" || frag.duration <= 0) {
+            return;
+          }
+          const offset = frag.sn * frag.duration - frag.start;
+          if (Number.isFinite(offset) && Math.abs(offset) < 600) {
+            sessionRef.current.fragTimelineOffsetSec = offset;
+          }
+        });
+
         instance.on(Hls.Events.BUFFER_APPENDED, (_event, data) => {
           if (destroyed) {
             return;
@@ -1207,6 +1264,7 @@ export default function HlsPlayer({
         }
         const relTime = sessionRelativeVideoTime(video);
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relTime);
+        sessionRef.current.rawVideoTime = video.currentTime;
         setElapsedSec(sessionRef.current.maxVideoTime);
         sessionRef.current.bufferSec = bufferedAheadSec(video);
         // Playhead PDT (finite only when the playlist carries
