@@ -6,6 +6,12 @@ import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import {
+  attachHtmlPlaybackMonitors,
+  loadJobRebuffer,
+  persistJobRebuffer,
+  readVideoFrameStats,
+} from "../videoPlaybackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -100,24 +106,28 @@ export default function MpegTsPlayer({
   }
 
   const getPlaybackSnapshot = useCallback(
-    (): PlaybackMetricsSnapshot => ({
-      playback_stats_events: 0,
-      playback_stall_count: 0,
-      playback_frames_rendered: 0,
-      playback_frames_dropped: 0,
-      playback_bitrate_bps: 0,
-      playback_ttff_ms: sessionRef.current.ttffMs,
-      playback_hls_errors: sessionRef.current.errorCount,
-      playback_hls_fatal_errors: 0,
-      playback_hls_buffer_stalls: 0,
-      playback_hls_frag_loads: 0,
-      playback_video_time_sec: sessionRef.current.maxVideoTime,
-      playback_buffer_sec: bufferedAheadSec(videoRef.current),
-      playback_rebuffer_sec: rebufferRef.current.totalSec,
-      e2e_latency_ms: captureAnchoredE2eMs(),
-    }),
+    (): PlaybackMetricsSnapshot => {
+      const frames = readVideoFrameStats(videoRef.current);
+      persistJobRebuffer(jobId, rebufferRef.current);
+      return {
+        playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
+        playback_stall_count: rebufferRef.current.stallCount,
+        playback_frames_rendered: frames.framesRendered,
+        playback_frames_dropped: frames.framesDropped,
+        playback_bitrate_bps: 0,
+        playback_ttff_ms: sessionRef.current.ttffMs,
+        playback_hls_errors: sessionRef.current.errorCount,
+        playback_hls_fatal_errors: 0,
+        playback_hls_buffer_stalls: 0,
+        playback_hls_frag_loads: 0,
+        playback_video_time_sec: sessionRef.current.maxVideoTime,
+        playback_buffer_sec: bufferedAheadSec(videoRef.current),
+        playback_rebuffer_sec: rebufferRef.current.totalSec,
+        e2e_latency_ms: captureAnchoredE2eMs(),
+      };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [jobId],
   );
 
   usePlaybackMetricsReporter({
@@ -161,6 +171,8 @@ export default function MpegTsPlayer({
       errorCount: 0,
     };
     rebufferRef.current = new RebufferTracker();
+    loadJobRebuffer(jobId, rebufferRef.current);
+    let detachHtmlMonitors: (() => void) | undefined;
     setDiagLines([]);
     lastErrorRef.current = null;
 
@@ -236,13 +248,15 @@ export default function MpegTsPlayer({
       }
     };
 
-    // RebufferTracker's API is beginWait/endWait — the old onWaiting/onPlaying
-    // calls threw TypeErrors on every stall, so rebuffer time was never counted.
-    const onWaiting = () => rebufferRef.current.beginWait(sessionRef.current.ttffMs > 0);
-    const onPlaying = () => rebufferRef.current.endWait();
     video.addEventListener("timeupdate", onTimeUpdate);
-    video.addEventListener("waiting", onWaiting);
-    video.addEventListener("playing", onPlaying);
+    detachHtmlMonitors = attachHtmlPlaybackMonitors(video, {
+      rebuffer: rebufferRef.current,
+      hasPlayedOnce: () => sessionRef.current.ttffMs > 0,
+      onStallBegin: () => {
+        pushDiag(`html_stall count=${rebufferRef.current.stallCount}`);
+        persistJobRebuffer(jobId, rebufferRef.current);
+      },
+    });
     timeTimer = window.setInterval(onTimeUpdate, 500);
 
     async function start() {
@@ -390,19 +404,19 @@ export default function MpegTsPlayer({
 
     return () => {
       destroyed = true;
+      persistJobRebuffer(jobId, rebufferRef.current);
+      detachHtmlMonitors?.();
       diagReporter.stop();
       clearReconnect();
       if (timeTimer != null) {
         window.clearInterval(timeTimer);
       }
       video.removeEventListener("timeupdate", onTimeUpdate);
-      video.removeEventListener("waiting", onWaiting);
-      video.removeEventListener("playing", onPlaying);
       destroyPlayer();
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate]);
+  }, [url, playbackGate, jobId]);
 
   const gateMessage =
     playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;

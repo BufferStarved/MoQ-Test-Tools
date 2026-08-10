@@ -8,6 +8,12 @@ import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import {
+  attachHtmlPlaybackMonitors,
+  loadJobRebuffer,
+  persistJobRebuffer,
+  readVideoFrameStats,
+} from "../videoPlaybackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface HlsPlayerProps {
@@ -392,6 +398,7 @@ export default function HlsPlayer({
     // buffer timeline to encoder media timeline.
     fragTimelineOffsetSec: null as number | null,
     wallOriginCalibrated: false,
+    bitrateBps: 0,
   });
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
@@ -504,24 +511,29 @@ export default function HlsPlayer({
   }
 
   const getPlaybackSnapshot = useCallback(
-    (): PlaybackMetricsSnapshot => ({
-      playback_stats_events: 0,
-      playback_stall_count: sessionRef.current.hlsBufferStalls,
-      playback_frames_rendered: 0,
-      playback_frames_dropped: 0,
-      playback_bitrate_bps: 0,
-      playback_ttff_ms: sessionRef.current.ttffMs,
-      playback_hls_errors: sessionRef.current.hlsErrors,
-      playback_hls_fatal_errors: sessionRef.current.hlsFatalErrors,
-      playback_hls_buffer_stalls: sessionRef.current.hlsBufferStalls,
-      playback_hls_frag_loads: sessionRef.current.fragmentLoads,
-      playback_video_time_sec: sessionRef.current.maxVideoTime,
-      playback_buffer_sec: sessionRef.current.bufferSec,
-      playback_rebuffer_sec: rebufferRef.current.totalSec,
-      e2e_latency_ms: captureAnchoredE2eMs(),
-    }),
+    (): PlaybackMetricsSnapshot => {
+      const frames = readVideoFrameStats(videoRef.current);
+      persistJobRebuffer(jobId, rebufferRef.current);
+      return {
+        playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
+        // HTML wait brackets (same definition as MoQ / MPEG-TS / DASH / WHEP).
+        playback_stall_count: rebufferRef.current.stallCount,
+        playback_frames_rendered: frames.framesRendered,
+        playback_frames_dropped: frames.framesDropped,
+        playback_bitrate_bps: sessionRef.current.bitrateBps || 0,
+        playback_ttff_ms: sessionRef.current.ttffMs,
+        playback_hls_errors: sessionRef.current.hlsErrors,
+        playback_hls_fatal_errors: sessionRef.current.hlsFatalErrors,
+        playback_hls_buffer_stalls: sessionRef.current.hlsBufferStalls,
+        playback_hls_frag_loads: sessionRef.current.fragmentLoads,
+        playback_video_time_sec: sessionRef.current.maxVideoTime,
+        playback_buffer_sec: sessionRef.current.bufferSec,
+        playback_rebuffer_sec: rebufferRef.current.totalSec,
+        e2e_latency_ms: captureAnchoredE2eMs(),
+      };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [jobId],
   );
 
   usePlaybackMetricsReporter({
@@ -625,9 +637,20 @@ export default function HlsPlayer({
       rawVideoTime: 0,
       fragTimelineOffsetSec: null,
       wallOriginCalibrated: false,
+      bitrateBps: 0,
     };
     setElapsedSec(0);
     rebufferRef.current.reset();
+    loadJobRebuffer(jobId, rebufferRef.current);
+    // Attach BEFORE async manifest/hls setup — otherwise join-time stalls after
+    // first frame are invisible to metrics (truth harness Δ1s+ on RTMP/SRT).
+    const detachHtmlMonitors = attachHtmlPlaybackMonitors(video, {
+      rebuffer: rebufferRef.current,
+      hasPlayedOnce: () => sessionRef.current.ttffMs > 0,
+      onStallBegin: () => {
+        persistJobRebuffer(jobId, rebufferRef.current);
+      },
+    });
 
     const diagReporter = createPlaybackDiagReporter(jobId, lowLatencyMode ? "ll-hls" : "hls");
 
@@ -1000,6 +1023,11 @@ export default function HlsPlayer({
 
         instance.on(Hls.Events.FRAG_LOADED, () => {
           sessionRef.current.fragmentLoads += 1;
+          const level = instance.levels?.[instance.currentLevel];
+          const estimate = instance.bandwidthEstimate;
+          sessionRef.current.bitrateBps = Math.round(
+            level?.bitrate || (Number.isFinite(estimate) ? estimate : 0) || 0,
+          );
           sessionRef.current.uniqueFragUrls.add(lastRequestUrl);
           const uniqueCount = sessionRef.current.uniqueFragUrls.size;
           // Only treat as stale after several loads of the *same* URL; clear once
@@ -1297,10 +1325,6 @@ export default function HlsPlayer({
       video.addEventListener("loadeddata", () => noteVideoProgress("loadeddata"));
       video.addEventListener("playing", () => {
         noteVideoProgress("playing");
-        rebufferRef.current.endWait();
-      });
-      video.addEventListener("waiting", () => {
-        rebufferRef.current.beginWait(sessionRef.current.ttffMs > 0);
       });
       video.addEventListener("timeupdate", () => {
         if (destroyed) {
@@ -1348,6 +1372,8 @@ export default function HlsPlayer({
 
     return () => {
       destroyed = true;
+      persistJobRebuffer(jobId, rebufferRef.current);
+      detachHtmlMonitors();
       diagReporter.stop();
       if (playRetryTimer != null) {
         window.clearTimeout(playRetryTimer);
@@ -1361,7 +1387,7 @@ export default function HlsPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate, jobStatus]);
+  }, [url, playbackGate, jobStatus, jobId]);
 
   const gateMessage =
     playbackGate !== "live" ? playbackGateLabel(playbackGate, "hls") : null;

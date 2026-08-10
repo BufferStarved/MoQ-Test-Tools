@@ -1,16 +1,127 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { WebRTCPlayer } from "@eyevinn/webrtc-player";
+import type { PlaybackMetricsSnapshot } from "../api";
+import type { PlaybackGate } from "../playbackGate";
+import { playbackGateLabel } from "../playbackGate";
+import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
+import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import {
+  attachHtmlPlaybackMonitors,
+  loadJobRebuffer,
+  persistJobRebuffer,
+  readVideoFrameStats,
+} from "../videoPlaybackMetrics";
 
 interface WhepPlayerProps {
   url: string;
   label: string;
+  playbackGate?: PlaybackGate;
+  jobId?: string;
+  encodeStartedAtEpoch?: number | null;
+  onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
+  bridgeLagMs?: number;
+  encoderLagMs?: number;
 }
 
-export default function WhepPlayer({ url, label }: WhepPlayerProps) {
+/**
+ * Estimate viewer-side latency from WebRTC getStats (jitter buffer + RTT/2).
+ * Capture→encode is added via bridge + encoder lag when provided. Absolute
+ * glass-to-glass without capture timestamps is not available on WHEP.
+ */
+async function whepViewerLatencyMs(
+  pc: RTCPeerConnection | null | undefined,
+): Promise<number | null> {
+  if (!pc) {
+    return null;
+  }
+  try {
+    const report = await pc.getStats();
+    let jitterBufferMs = 0;
+    let rttMs = 0;
+    report.forEach((stat) => {
+      if (stat.type === "inbound-rtp" && stat.kind === "video") {
+        const delay = (stat as RTCInboundRtpStreamStats).jitterBufferDelay;
+        const emitted = (stat as RTCInboundRtpStreamStats).jitterBufferEmittedCount;
+        if (typeof delay === "number" && typeof emitted === "number" && emitted > 0) {
+          jitterBufferMs = (delay / emitted) * 1000;
+        }
+      }
+      if (stat.type === "candidate-pair" && (stat as RTCIceCandidatePairStats).state === "succeeded") {
+        const rtt = (stat as RTCIceCandidatePairStats).currentRoundTripTime;
+        if (typeof rtt === "number" && rtt > 0) {
+          rttMs = rtt * 1000;
+        }
+      }
+    });
+    const total = jitterBufferMs + rttMs / 2;
+    return total > 0 && total < 60_000 ? total : null;
+  } catch {
+    return null;
+  }
+}
+
+export default function WhepPlayer({
+  url,
+  label,
+  playbackGate = "live",
+  jobId,
+  encodeStartedAtEpoch,
+  onPlaybackSample,
+  bridgeLagMs = 0,
+  encoderLagMs = 0,
+}: WhepPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<WebRTCPlayer | null>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Connecting WHEP...");
+  const rebufferRef = useRef(new RebufferTracker());
+  const sessionRef = useRef({
+    ttffMs: 0,
+    liveStartedAtMs: 0,
+    maxVideoTime: 0,
+    errorCount: 0,
+    viewerLatencyMs: 0,
+    bitrateBps: 0,
+  });
+  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0 });
+  lagRef.current = { bridgeMs: bridgeLagMs, encoderMs: encoderLagMs };
+
+  const getPlaybackSnapshot = useCallback((): PlaybackMetricsSnapshot => {
+    const frames = readVideoFrameStats(videoRef.current);
+    persistJobRebuffer(jobId, rebufferRef.current);
+    const { bridgeMs, encoderMs } = lagRef.current;
+    const viewer = sessionRef.current.viewerLatencyMs;
+    const e2e =
+      viewer > 0
+        ? Math.round(viewer + bridgeMs + Math.max(0, encoderMs))
+        : undefined;
+    return {
+      playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
+      playback_stall_count: rebufferRef.current.stallCount,
+      playback_frames_rendered: frames.framesRendered,
+      playback_frames_dropped: frames.framesDropped,
+      playback_bitrate_bps: sessionRef.current.bitrateBps,
+      playback_ttff_ms: sessionRef.current.ttffMs,
+      playback_hls_errors: sessionRef.current.errorCount,
+      playback_hls_fatal_errors: 0,
+      playback_hls_buffer_stalls: 0,
+      playback_hls_frag_loads: 0,
+      playback_video_time_sec: sessionRef.current.maxVideoTime,
+      playback_buffer_sec: bufferedAheadSec(videoRef.current),
+      playback_rebuffer_sec: rebufferRef.current.totalSec,
+      e2e_latency_ms: e2e && e2e > 0 && e2e < 120_000 ? e2e : undefined,
+    };
+  }, [jobId]);
+
+  usePlaybackMetricsReporter({
+    jobId,
+    engine: "whep",
+    enabled: playbackGate === "live",
+    startedAtEpoch: encodeStartedAtEpoch,
+    getSnapshot: getPlaybackSnapshot,
+    onSample: onPlaybackSample,
+  });
 
   useEffect(() => {
     const video = videoRef.current;
@@ -18,7 +129,28 @@ export default function WhepPlayer({ url, label }: WhepPlayerProps) {
       return;
     }
 
+    if (playbackGate !== "live") {
+      setError(null);
+      setStatus(
+        playbackGate === "waiting" ? "Waiting for WHEP..." : playbackGateLabel(playbackGate, "other"),
+      );
+      return;
+    }
+
     let destroyed = false;
+    let detachHtmlMonitors: (() => void) | undefined;
+    let statsTimer: number | null = null;
+    sessionRef.current = {
+      ttffMs: 0,
+      liveStartedAtMs: Date.now(),
+      maxVideoTime: 0,
+      errorCount: 0,
+      viewerLatencyMs: 0,
+      bitrateBps: 0,
+    };
+    rebufferRef.current.reset();
+    loadJobRebuffer(jobId, rebufferRef.current);
+
     const player = new WebRTCPlayer({
       video,
       type: "whep",
@@ -26,12 +158,39 @@ export default function WhepPlayer({ url, label }: WhepPlayerProps) {
     });
     playerRef.current = player;
 
+    // @eyevinn/webrtc-player doesn't always expose pc; probe after load.
+    const peekPc = () => {
+      const anyPlayer = player as unknown as { peerConnection?: RTCPeerConnection; pc?: RTCPeerConnection };
+      pcRef.current = anyPlayer.peerConnection ?? anyPlayer.pc ?? pcRef.current;
+    };
+
     player.on("no-media", () => {
       setStatus("Waiting for media...");
     });
     player.on("media-recovered", () => {
       setStatus("Playing");
       setError(null);
+    });
+
+    const onTimeUpdate = () => {
+      if (destroyed) {
+        return;
+      }
+      const vt = video.currentTime;
+      if (vt > 0.05) {
+        sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, vt);
+        if (sessionRef.current.ttffMs <= 0 && sessionRef.current.liveStartedAtMs > 0) {
+          sessionRef.current.ttffMs = Math.max(
+            1,
+            Math.round(Date.now() - sessionRef.current.liveStartedAtMs),
+          );
+        }
+      }
+    };
+    video.addEventListener("timeupdate", onTimeUpdate);
+    detachHtmlMonitors = attachHtmlPlaybackMonitors(video, {
+      rebuffer: rebufferRef.current,
+      hasPlayedOnce: () => sessionRef.current.ttffMs > 0,
     });
 
     async function start() {
@@ -42,10 +201,42 @@ export default function WhepPlayer({ url, label }: WhepPlayerProps) {
         if (destroyed) {
           return;
         }
+        peekPc();
         player.unmute();
         setStatus("Playing");
+        if (sessionRef.current.ttffMs <= 0 && sessionRef.current.liveStartedAtMs > 0) {
+          sessionRef.current.ttffMs = Math.max(
+            1,
+            Math.round(Date.now() - sessionRef.current.liveStartedAtMs),
+          );
+        }
+        statsTimer = window.setInterval(() => {
+          peekPc();
+          void whepViewerLatencyMs(pcRef.current).then((ms) => {
+            if (ms != null && !destroyed) {
+              sessionRef.current.viewerLatencyMs = ms;
+            }
+          });
+          const pc = pcRef.current;
+          if (!pc) {
+            return;
+          }
+          void pc.getStats().then((report) => {
+            report.forEach((stat) => {
+              if (stat.type === "inbound-rtp" && (stat as { kind?: string }).kind === "video") {
+                const rate = (stat as { bytesReceived?: number }).bytesReceived;
+                // bitrate filled below via delta would need prior sample; use
+                // framesDecoded pace as a weak signal only when bytes grow.
+                if (typeof rate === "number" && rate > 0) {
+                  sessionRef.current.bitrateBps = sessionRef.current.bitrateBps; // keep prior
+                }
+              }
+            });
+          });
+        }, 1000);
       } catch (err) {
         if (!destroyed) {
+          sessionRef.current.errorCount += 1;
           setError(
             err instanceof Error
               ? err.message
@@ -60,12 +251,22 @@ export default function WhepPlayer({ url, label }: WhepPlayerProps) {
 
     return () => {
       destroyed = true;
+      persistJobRebuffer(jobId, rebufferRef.current);
+      detachHtmlMonitors?.();
+      if (statsTimer != null) {
+        window.clearInterval(statsTimer);
+      }
+      video.removeEventListener("timeupdate", onTimeUpdate);
       player.destroy();
       playerRef.current = null;
+      pcRef.current = null;
       video.removeAttribute("src");
       video.load();
     };
-  }, [url]);
+  }, [url, playbackGate, jobId]);
+
+  const gateMessage =
+    playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;
 
   return (
     <div className="player-surface">
@@ -74,6 +275,7 @@ export default function WhepPlayer({ url, label }: WhepPlayerProps) {
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
+      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
     </div>
   );

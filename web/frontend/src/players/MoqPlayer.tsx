@@ -16,6 +16,12 @@ import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playback
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import {
+  attachHtmlPlaybackMonitors,
+  loadJobRebuffer,
+  persistJobRebuffer,
+  readVideoFrameStats,
+} from "../videoPlaybackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -238,25 +244,37 @@ export default function MoqPlayer({
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => {
       const session = sessionRef.current;
+      const frames = readVideoFrameStats(videoRef.current);
+      // Prefer browser decoded-frame counters; fall back to playa stats.
+      const framesRendered = frames.framesRendered || session.framesRendered;
+      const framesDropped = frames.framesDropped || session.framesDropped;
+      if (framesRendered > 0) {
+        session.statsEvents = Math.max(session.statsEvents, 1);
+      }
+      persistJobRebuffer(jobId, rebufferRef.current);
       return {
         playback_stats_events: session.statsEvents,
-        playback_stall_count: session.stallCount,
-        playback_frames_rendered: session.framesRendered,
-        playback_frames_dropped: session.framesDropped,
+        // HTML waiting / frozen-playhead truth — not playa stall alone.
+        playback_stall_count: rebufferRef.current.stallCount,
+        playback_frames_rendered: framesRendered,
+        playback_frames_dropped: framesDropped,
         playback_bitrate_bps: session.bitrateBps,
         playback_ttff_ms: session.ttffMs,
         playback_hls_errors: 0,
         playback_hls_fatal_errors: 0,
         playback_hls_buffer_stalls: 0,
         playback_hls_frag_loads: 0,
-        playback_video_time_sec: session.videoTimeSec,
+        playback_video_time_sec: Math.max(
+          session.videoTimeSec,
+          videoRef.current?.currentTime ?? 0,
+        ),
         playback_buffer_sec: bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         e2e_latency_ms: captureAnchoredE2eMs(),
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [jobId],
   );
 
   usePlaybackMetricsReporter({
@@ -324,20 +342,33 @@ export default function MoqPlayer({
     let destroyed = false;
     let connectTimeout: ReturnType<typeof window.setTimeout> | undefined;
     let liveEdgeTimer: ReturnType<typeof window.setInterval> | undefined;
+    const priorOutcome = getMoqPlaybackOutcome(jobId);
     sessionRef.current = {
-      catalogReady: false,
-      firstFrame: false,
+      catalogReady: Boolean(priorOutcome?.catalogReady),
+      firstFrame: Boolean(priorOutcome?.firstFrame),
       statsEvents: 0,
       stallCount: 0,
       framesRendered: 0,
       framesDropped: 0,
       bitrateBps: 0,
-      ttffMs: 0,
-      videoTimeSec: 0,
+      ttffMs: priorOutcome?.ttffMs ?? 0,
+      videoTimeSec: priorOutcome?.videoTimeSec ?? 0,
       playerLatencyMs: 0,
       moqTimelineMs: 0,
     };
+    // Remounts used to wipe rebuffer to 0 mid-run — restore per-job accum.
     rebufferRef.current.reset();
+    loadJobRebuffer(jobId, rebufferRef.current);
+    // Monitor from gate-open so post-first-frame stalls during subscribe are counted.
+    const detachHtmlMonitors = attachHtmlPlaybackMonitors(video, {
+      rebuffer: rebufferRef.current,
+      hasPlayedOnce: () =>
+        sessionRef.current.firstFrame || sessionRef.current.ttffMs > 0,
+      onStallBegin: () => {
+        sessionRef.current.stallCount = rebufferRef.current.stallCount;
+        persistJobRebuffer(jobId, rebufferRef.current);
+      },
+    });
 
     const diagReporter = createPlaybackDiagReporter(jobId, "moq");
 
@@ -628,9 +659,9 @@ export default function MoqPlayer({
         });
 
         player.on("stall", ({ durationMs }) => {
-          sessionRef.current.stallCount += 1;
-          rebufferRef.current.addSec(durationMs / 1000);
-          pushDiag(`stall_ms=${durationMs}`);
+          // Diagnostics only — glass rebuffer/stall come from HTML monitors
+          // so MoQ matches HLS/MPEG-TS definitions (playa stalls undercount).
+          pushDiag(`playa_stall_ms=${durationMs}`);
         });
 
         player.on("timeupdate", ({ currentTime }) => {
@@ -975,6 +1006,8 @@ export default function MoqPlayer({
       // eslint-disable-next-line no-console
       console.log(`[MoqPlayer] live-effect cleanup #${mountNumber}`);
       destroyed = true;
+      persistJobRebuffer(jobId, rebufferRef.current);
+      detachHtmlMonitors();
       diagReporter.stop();
       video.removeEventListener("timeupdate", onTimeUpdate);
       if (connectTimeout) {

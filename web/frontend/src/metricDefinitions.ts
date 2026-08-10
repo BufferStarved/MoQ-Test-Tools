@@ -265,7 +265,8 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   playback_stall_count: {
     label: "Playback stalls",
-    description: "Cumulative stall count from @playa/player (MoQ) or hls.js BUFFER_STALLED_ERROR events (HLS).",
+    description:
+      "Cumulative viewer stalls after first frame — one count per HTML <video> waiting/frozen-playhead bracket (same definition for MoQ, HLS, MPEG-TS, DASH, WHEP). HLS also reports engine-specific BUFFER_STALLED events under playback_hls_buffer_stalls.",
   },
   playback_frames_rendered: {
     label: "Frames rendered",
@@ -292,7 +293,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   playback_rebuffer_sec: {
     label: "Rebuffer time",
     description:
-      "Cumulative seconds the player spent rebuffering after playback started — measured from each HTMLMediaElement 'waiting' event to the following 'playing' event. A rising line means the viewer is seeing stalls/spinners; flat means smooth playback.",
+      "Cumulative seconds the player spent rebuffering after playback started — HTML <video> waiting→playing (plus frozen-playhead detection when waiting never fires). Same glass definition across MoQ / HLS / MPEG-TS / DASH / WHEP. A rising line means the viewer is seeing stalls; flat means smooth playback.",
   },
   playback_hls_errors: {
     label: "HLS errors",

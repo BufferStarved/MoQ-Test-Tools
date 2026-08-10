@@ -233,8 +233,8 @@ not available for MoQ; they are complementary, protocol-native views rather than
 |--------|---------|
 | `e2e_latency_ms` | Estimated glass-to-glass (see above) |
 | `playback_ttff_ms` | Time to first frame after player start |
-| `playback_stall_count` | Stalls (MoQ playa / HLS buffer stalled) |
-| `playback_rebuffer_sec` | Cumulative seconds spent rebuffering, from each `<video>` `waiting`→`playing` bracket (MoQ: `@playa/player` stall `durationMs`) |
+| `playback_stall_count` | Stalls after first frame (HTML waiting / frozen-playhead; all players) |
+| `playback_rebuffer_sec` | Cumulative seconds rebuffering — HTML `<video>` waiting→playing (+ frozen-playhead); same for MoQ/HLS/MPEG-TS/DASH/WHEP |
 | `playback_buffer_sec` | Seconds of media buffered ahead of the playhead (renamed from "Buffer duration" to "Buffer size" in the UI) |
 | `playback_video_time_sec` | Max `<video>.currentTime` |
 | `playback_error_count` | Normalized player errors |
