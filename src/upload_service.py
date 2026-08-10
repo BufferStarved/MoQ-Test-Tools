@@ -888,13 +888,18 @@ class UploadService:
                 break
         if not saw_segment:
             return
-        origin = max(0.0, time.time() - anchor - segment_dur)
+        # First HLS segment READY lags the encode read clock by the encoder
+        # pipeline + Zixi packager spin-up (~1.2s measured 2026-08-10: raw
+        # origin overstated join offset and understated RTMP e2e by the same).
+        packager_spinup_sec = 1.25
+        origin = max(0.0, time.time() - anchor - segment_dur - packager_spinup_sec)
         job._delivery_origin_sent = True
         logger.info(
-            "Zixi delivery_media_origin for %s: %.2fs (segment=%.2fs)",
+            "Zixi delivery_media_origin for %s: %.2fs (segment=%.2fs spinup=%.2fs)",
             job.job_id,
             origin,
             segment_dur,
+            packager_spinup_sec,
         )
         self._notify_delivery_media_origin(job, origin)
 
@@ -1216,7 +1221,10 @@ class UploadService:
                 and abs(pdt_epoch - now) < 2.0
                 and time.time() - anchor > 3.0
             ):
-                transit_ms = elapsed * 1000.0
+                # First live-edge PDT packages media ≈0.5–1s into the publish,
+                # not media 0 — subtract that or transit overstates by ~1s
+                # (truth run 2026-08-10: 3.3s published vs ~2.3s implied by glass).
+                transit_ms = (elapsed - 1.0) * 1000.0
                 if 500.0 < transit_ms < 15000.0:
                     logger.info(
                         "LL-HLS packager transit for %s: %.0fms "
