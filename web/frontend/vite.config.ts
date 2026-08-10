@@ -14,9 +14,12 @@ export default defineConfig({
       // never connect to a local dev API, only prod. HTTP endpoints work
       // either way, so this is additive.
       "/api": {
-        target: "http://127.0.0.1:8000",
+        // Override with VITE_API_PROXY=https://moq.sean-mccarthy.net to validate
+        // a local frontend against prod encodes without deploying the UI.
+        target: process.env.VITE_API_PROXY || "http://127.0.0.1:8000",
         changeOrigin: true,
         ws: true,
+        secure: true,
       },
     },
   },

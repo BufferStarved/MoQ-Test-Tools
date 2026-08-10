@@ -28,17 +28,23 @@ export function bufferedAheadSec(media: HTMLMediaElement | null | undefined): nu
  * Tracks cumulative rebuffer time from `waiting` → `playing` brackets on a
  * native `<video>` element. Ignores stalls before first playback (ttff==0)
  * so initial join/pre-roll buffering isn't counted as a rebuffer.
+ *
+ * `stallCount` increments once per wait bracket (HTML truth used by every
+ * player). `totalSec` includes any in-progress wait so samples during a
+ * freeze are not understated.
  */
 export class RebufferTracker {
   private waitingSinceMs = 0;
   private totalMs = 0;
+  private stalls = 0;
 
-  /** Call from the element's `waiting` handler. */
+  /** Call from the element's `waiting` handler (or frozen-playhead detector). */
   beginWait(hasPlayedOnce: boolean): void {
     if (!hasPlayedOnce || this.waitingSinceMs > 0) {
       return;
     }
     this.waitingSinceMs = Date.now();
+    this.stalls += 1;
   }
 
   /** Call from the element's `playing` (or `canplay`) handler. */
@@ -57,13 +63,43 @@ export class RebufferTracker {
     }
   }
 
+  restore(totalMs: number, stallCount: number, resumeWait = false): void {
+    this.totalMs = Math.max(0, totalMs);
+    this.stalls = Math.max(0, Math.floor(stallCount));
+    // Resume an in-flight stall across remount without incrementing stallCount.
+    this.waitingSinceMs = resumeWait ? Date.now() : 0;
+  }
+
   reset(): void {
     this.waitingSinceMs = 0;
     this.totalMs = 0;
+    this.stalls = 0;
+  }
+
+  get stallCount(): number {
+    return this.stalls;
+  }
+
+  get isWaiting(): boolean {
+    return this.waitingSinceMs > 0;
+  }
+
+  /** Closed wait time only (ms). */
+  get totalMsRaw(): number {
+    return this.totalMs;
+  }
+
+  /** Closed + in-progress wait (ms) — use when persisting across remounts. */
+  get totalMsIncludingOpen(): number {
+    let ms = this.totalMs;
+    if (this.waitingSinceMs > 0) {
+      ms += Date.now() - this.waitingSinceMs;
+    }
+    return ms;
   }
 
   get totalSec(): number {
-    return Math.round((this.totalMs / 1000) * 1000) / 1000;
+    return Math.round((this.totalMsIncludingOpen / 1000) * 1000) / 1000;
   }
 }
 

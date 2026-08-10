@@ -12,7 +12,7 @@ export function elapsedSecFromStart(startedAtEpoch?: number | null): number {
 
 export function usePlaybackMetricsReporter(options: {
   jobId?: string;
-  engine: "moq" | "hls" | "mpegts";
+  engine: "moq" | "hls" | "mpegts" | "dash" | "whep";
   enabled: boolean;
   startedAtEpoch?: number | null;
   getSnapshot: () => PlaybackMetricsSnapshot;
