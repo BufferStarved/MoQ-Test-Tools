@@ -1020,16 +1020,25 @@ export default function HlsPlayer({
           if (frag.duration <= 0) {
             return;
           }
-          let sn: number | null = typeof frag.sn === "number" ? frag.sn : null;
-          // Playback goes through /api/playback/fetch?url=..., so the Zixi
-          // chunk= query is URI-encoded as chunk%3D inside the outer URL —
-          // match both forms.
-          const fragUrl = frag.url || lastRequestUrl || "";
-          const chunkMatch =
-            /[?&]chunk=(\d+)/.exec(fragUrl) ||
-            /(?:\?|&|%3F|%26)chunk(?:%3D|=)(\d+)/i.exec(fragUrl);
+          // Prefer Zixi's chunk=N (advances every rollover). Decode the URL
+          // first — playback goes through /api/playback/fetch?url=... so
+          // chunk= is embedded as chunk%3D. Do NOT trust frag.sn when it is
+          // 0: Zixi keeps EXT-X-MEDIA-SEQUENCE at 0, and sn=0 yields offset≈0
+          // which silently disables the correction (truth runs kept reporting
+          // ~8s e2e vs ~4.6s glass).
+          let sn: number | null = null;
+          const rawUrl = frag.url || lastRequestUrl || "";
+          let decodedUrl = rawUrl;
+          try {
+            decodedUrl = decodeURIComponent(rawUrl);
+          } catch {
+            /* keep raw */
+          }
+          const chunkMatch = /[?&]chunk=(\d+)/i.exec(decodedUrl);
           if (chunkMatch) {
             sn = Number.parseInt(chunkMatch[1], 10);
+          } else if (typeof frag.sn === "number" && frag.sn > 0) {
+            sn = frag.sn;
           }
           if (sn == null || !Number.isFinite(sn)) {
             return;
