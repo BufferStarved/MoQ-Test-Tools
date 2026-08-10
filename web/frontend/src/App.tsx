@@ -846,6 +846,8 @@ function App() {
               media_zero_epoch: status.media_zero_epoch ?? leg.job.media_zero_epoch,
               packager_transit_ms:
                 status.packager_transit_ms ?? leg.job.packager_transit_ms,
+              delivery_media_origin_sec:
+                status.delivery_media_origin_sec ?? leg.job.delivery_media_origin_sec,
             };
             let completedAtMs = leg.completedAtMs;
             if (completedAtMs == null && updatedJob.status === "completed") {
@@ -1346,6 +1348,9 @@ function App() {
                           leg?.samples,
                         )}
                         packagerTransitMs={leg?.job.packager_transit_ms ?? null}
+                        deliveryMediaOriginSec={
+                          leg?.job.delivery_media_origin_sec ?? null
+                        }
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;

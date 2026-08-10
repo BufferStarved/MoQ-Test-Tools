@@ -191,6 +191,12 @@ class UploadJob:
     # media time)) measured server-side; lets the player convert PDT-based
     # latency into encoder-anchored latency.
     on_packager_transit: Optional[Callable[[float], None]] = field(default=None, repr=False)
+    # Zixi Fast HLS: encode-media time of buffer timeline 0 (hls.js maps the
+    # playlist window at join to currentTime 0, not encode media 0). Published
+    # once when the first segment is readable.
+    on_delivery_media_origin: Optional[Callable[[float], None]] = field(
+        default=None, repr=False
+    )
     _media_zero_sent: bool = field(default=False, init=False, repr=False)
     _media_zero_epoch: Optional[float] = field(default=None, init=False, repr=False)
     # JobManager sets this so the UI can show "computing" the moment the
@@ -837,6 +843,53 @@ class UploadService:
         except Exception:
             logger.warning("on_packager_transit callback failed", exc_info=True)
 
+    def _notify_delivery_media_origin(self, job: UploadJob, origin_sec: float) -> None:
+        callback = job.on_delivery_media_origin
+        if not callback:
+            return
+        try:
+            callback(float(origin_sec))
+        except Exception:
+            logger.warning("on_delivery_media_origin callback failed", exc_info=True)
+
+    def _publish_zixi_delivery_media_origin(self, job: UploadJob) -> None:
+        """Encode-media time of Fast HLS buffer time 0 at first segment ready.
+
+        Zixi's 1-deep playlist keeps MEDIA-SEQUENCE at 0, so fragment-sn
+        mapping cannot recover the join offset. At preview-ready the just-
+        published segment of duration D ends near "now" on the encode
+        timeline, so buffer time 0 ≈ (now − media_zero) − D.
+        """
+        anchor = job._media_zero_epoch
+        if anchor is None:
+            return
+        manifest_url = self._managed_hls_manifest_url(job)
+        segment_dur = 2.0
+        if manifest_url:
+            try:
+                body = urllib.request.urlopen(manifest_url, timeout=2.0).read().decode(
+                    "utf-8", errors="replace"
+                )
+                for line in body.splitlines():
+                    if line.startswith("#EXTINF:"):
+                        try:
+                            segment_dur = float(
+                                line.split(":", 1)[1].rstrip(",").split(",")[0]
+                            )
+                        except ValueError:
+                            pass
+                        break
+            except Exception:
+                logger.debug("Zixi origin playlist probe failed", exc_info=True)
+        origin = max(0.0, time.time() - anchor - segment_dur)
+        logger.info(
+            "Zixi delivery_media_origin for %s: %.2fs (segment=%.2fs)",
+            job.job_id,
+            origin,
+            segment_dur,
+        )
+        self._notify_delivery_media_origin(job, origin)
+
     def _is_mediamtx_destination(self, job: UploadJob) -> bool:
         return _is_mediamtx_provider(job.destination.ingest_provider or "")
 
@@ -1021,6 +1074,10 @@ class UploadService:
         while not stop_event.is_set():
             if probe_hls_segment_ready(manifest_url).ok:
                 self._notify_preview_ready(job, True)
+                # Zixi Fast HLS: publish buffer-timeline → encode-media origin
+                # so the player can correct hls.js's join-window mapping.
+                if job.managed_zixi_stream_id():
+                    self._publish_zixi_delivery_media_origin(job)
                 return
             stop_event.wait(0.5)
 
@@ -1031,23 +1088,25 @@ class UploadService:
     ) -> None:
         """Measure encoder→packager transit for MediaMTX LL-HLS legs.
 
-        MediaMTX stamps EXT-X-PROGRAM-DATE-TIME with ITS wall clock at
-        packaging time. A frame at media time m was read by the encoder at
-        media_zero_epoch + m, so:
+        MediaMTX stamps EXT-X-PROGRAM-DATE-TIME at packaging time. A frame at
+        encode media time m was read at media_zero_epoch + m, so:
 
             transit = PDT(m) − (media_zero_epoch + m)
 
-        which folds in SRT tsbpd delay + network + remux. The browser then
-        reports encoder-anchored latency as (now − playingDate) + transit.
-        Media position of the first PDT is derived from the playlist itself
-        (sequence numbers count from 0 for a fresh MediaMTX muxer session),
-        so this must poll EARLY, before the live window slides.
+        which folds in SRT tsbpd + network + remux. The browser adds this to
+        PDT-based player latency.
+
+        PDT applies to the *next* segment/part (HLS spec). We only accept a
+        fresh muxer window (MEDIA-SEQUENCE == 0) whose media position at the
+        PDT cannot exceed wall elapsed since media_zero — leftover segments
+        from a prior publish otherwise invent multi-second media times in the
+        first second of a new encode and produce nonsense negative transit
+        (2026-08-10 truth run: −3697ms from a 7s playlist at T+3.3s).
         """
         index_url = self._managed_hls_manifest_url(job)
         if not index_url:
             return
         deadline = time.time() + 25.0
-        # The probe may launch just before the encoder spawn stamps the anchor.
         while job._media_zero_epoch is None and time.time() < deadline:
             if stop_event.wait(0.2):
                 return
@@ -1075,7 +1134,6 @@ class UploadService:
                 continue
             media_sequence = 0
             media_pos = 0.0
-            extinf_durations: List[float] = []
             pdt_value: Optional[str] = None
             pdt_media_pos: Optional[float] = None
             for line in body.splitlines():
@@ -1090,25 +1148,22 @@ class UploadService:
                         duration = float(line.split(":", 1)[1].rstrip(",").split(",")[0])
                     except ValueError:
                         continue
-                    extinf_durations.append(duration)
                     media_pos += duration
                 else:
                     match = pdt_re.match(line)
                     if match and pdt_value is None:
+                        # PDT timestamps the NEXT segment/part — media time at
+                        # that point is the sum of completed EXTINF so far.
                         pdt_value = match.group(1)
                         pdt_media_pos = media_pos
             if pdt_value is None or pdt_media_pos is None:
                 stop_event.wait(0.5)
                 continue
-            if media_sequence > 2:
-                # Window already slid before we ever saw sequence≈0: the
-                # session start is no longer observable, so sequence-based
-                # media positions would be shifted. Skip rather than lie.
-                logger.warning(
-                    "LL-HLS transit probe joined late (media_sequence=%s); skipping",
-                    media_sequence,
-                )
-                return
+            if media_sequence != 0:
+                # Wait for a fresh muxer session; don't abort — MediaMTX may
+                # still be draining the previous publisher's window.
+                stop_event.wait(0.5)
+                continue
             anchor = job._media_zero_epoch
             if anchor is None:
                 return
@@ -1116,16 +1171,15 @@ class UploadService:
                 pdt_epoch = datetime.fromisoformat(pdt_value.replace("Z", "+00:00")).timestamp()
             except ValueError:
                 logger.warning("Unparseable LL-HLS PDT %r", pdt_value)
-                return
-            # First-PDT media position must account for segments the window
-            # already dropped (sequence offset × observed segment duration).
-            avg_segment_sec = (
-                sum(extinf_durations) / len(extinf_durations) if extinf_durations else 1.0
-            )
-            transit_ms = (
-                pdt_epoch - (anchor + media_sequence * avg_segment_sec + pdt_media_pos)
-            ) * 1000.0
-            if -2000.0 < transit_ms < 30000.0:
+                stop_event.wait(0.5)
+                continue
+            elapsed = pdt_epoch - anchor
+            # Media time cannot exceed wall elapsed (plus tiny NTP/slop).
+            if pdt_media_pos > elapsed + 0.75:
+                stop_event.wait(0.5)
+                continue
+            transit_ms = (pdt_epoch - (anchor + pdt_media_pos)) * 1000.0
+            if 0.0 < transit_ms < 15000.0:
                 logger.info(
                     "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
                     job.job_id,
@@ -1135,13 +1189,12 @@ class UploadService:
                     pdt_media_pos,
                 )
                 self._notify_packager_transit(job, transit_ms)
-            else:
-                logger.warning(
-                    "LL-HLS transit %.0fms out of range (pdt=%s) — not publishing",
-                    transit_ms,
-                    pdt_value,
-                )
-            return
+                return
+            stop_event.wait(0.5)
+        logger.warning(
+            "LL-HLS transit probe timed out for %s without a usable PDT window",
+            job.job_id,
+        )
 
     def _zixi_uses_error_concealment_playback(self, job: UploadJob) -> bool:
         """True when the browser pulls the EC derivative, not the raw SRT input."""

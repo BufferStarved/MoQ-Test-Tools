@@ -36,6 +36,8 @@ interface HlsPlayerProps {
    * PACKAGING time, so PDT-based latency alone misses SRT tsbpd + network +
    * remux upstream of the packager (~2.7s measured 2026-08-09). */
   packagerTransitMs?: number | null;
+  /** Zixi Fast HLS: encode-media seconds corresponding to buffer time 0. */
+  deliveryMediaOriginSec?: number | null;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -336,6 +338,7 @@ export default function HlsPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   packagerTransitMs = null,
+  deliveryMediaOriginSec = null,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -425,6 +428,7 @@ export default function HlsPlayer({
     epoch: 0,
     lowLatency: false,
     transitMs: null as number | null,
+    deliveryOriginSec: null as number | null,
   });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
@@ -432,6 +436,7 @@ export default function HlsPlayer({
     epoch: encodeStartedAtEpoch ?? 0,
     lowLatency: lowLatencyMode,
     transitMs: packagerTransitMs,
+    deliveryOriginSec: deliveryMediaOriginSec,
   };
 
   /**
@@ -449,7 +454,7 @@ export default function HlsPlayer({
    * estimate individually read 2.5-4s low/high with mismatched anchors.
    */
   function captureAnchoredE2eMs(): number | undefined {
-    const { bridgeMs, epoch, lowLatency, transitMs } = lagRef.current;
+    const { bridgeMs, epoch, lowLatency, transitMs, deliveryOriginSec } = lagRef.current;
     const session = sessionRef.current;
     if (lowLatency) {
       if (session.playheadPdtMs > 0) {
@@ -466,17 +471,17 @@ export default function HlsPlayer({
       return undefined;
     }
     if (epoch > 0 && session.maxVideoTime > 0) {
-      // The anchor epoch is stamped with the API server's clock — correct
-      // Date.now() onto that clock before differencing. Prefer the
-      // fragment-sequence mapping (encoder media timeline); the rebased
-      // maxVideoTime fallback under-counts by the join offset when hls.js
-      // starts its buffer timeline at the join window, and stays for
-      // ts-offset (SRT→Zixi republish) sessions where chunk numbering
-      // continues across sessions and sn-mapping would lie.
-      const mediaPosSec =
-        session.fragTimelineOffsetSec != null && session.videoTimeOrigin === 0
-          ? session.rawVideoTime + session.fragTimelineOffsetSec
-          : session.maxVideoTime;
+      // Prefer server-published delivery origin (Zixi 1-deep playlists keep
+      // MEDIA-SEQUENCE at 0, so frag.sn mapping cannot recover the join
+      // offset — truth run 2026-08-10: raw currentTime lagged glass by
+      // ~3.7s and overstated e2e by the same amount). Fall back to
+      // fragment-sequence mapping, then session-relative maxVideoTime.
+      let mediaPosSec = session.maxVideoTime;
+      if (deliveryOriginSec != null && session.videoTimeOrigin === 0) {
+        mediaPosSec = session.rawVideoTime + deliveryOriginSec;
+      } else if (session.fragTimelineOffsetSec != null && session.videoTimeOrigin === 0) {
+        mediaPosSec = session.rawVideoTime + session.fragTimelineOffsetSec;
+      }
       const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
       return total > 0 && total < 120_000 ? Math.round(total) : undefined;
     }

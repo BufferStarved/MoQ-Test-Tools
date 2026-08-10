@@ -51,6 +51,8 @@ interface StreamPlayerProps {
   encodeStartedAtEpoch?: number | null;
   /** LL-HLS: server-measured encoder→packager transit added to PDT latency. */
   packagerTransitMs?: number | null;
+  /** Zixi Fast HLS: encode-media seconds at hls.js buffer time 0. */
+  deliveryMediaOriginSec?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
   benchmarkLoading?: boolean;
@@ -93,6 +95,7 @@ export function StreamPlayer({
   jobId,
   encodeStartedAtEpoch,
   packagerTransitMs = null,
+  deliveryMediaOriginSec = null,
   onPlaybackSample,
   jobStatus,
   benchmarkLoading = false,
@@ -236,6 +239,7 @@ export function StreamPlayer({
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
               packagerTransitMs={packagerTransitMs}
+              deliveryMediaOriginSec={deliveryMediaOriginSec}
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}

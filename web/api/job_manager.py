@@ -143,6 +143,8 @@ class UploadJobRecord:
     # The browser adds this to PDT-based player latency, which otherwise
     # misses SRT tsbpd + network + remux upstream of the packager.
     packager_transit_ms: Optional[float] = None
+    # Zixi Fast HLS: encode-media seconds corresponding to hls.js buffer time 0.
+    delivery_media_origin_sec: Optional[float] = None
     playback_samples: List[dict] = field(default_factory=list)
     playback_engine: str = ""
     publisher_host: str = "cloud"
@@ -276,6 +278,9 @@ class JobManager:
         job.on_packager_transit = lambda ms, _job_id=job_id: self._update(
             _job_id, packager_transit_ms=float(ms)
         )
+        job.on_delivery_media_origin = lambda sec, _job_id=job_id: self._update(
+            _job_id, delivery_media_origin_sec=float(sec)
+        )
         with self._lock:
             self._jobs[job_id] = record
 
@@ -364,6 +369,7 @@ class JobManager:
                 on_encoder_vmaf_status=job.on_encoder_vmaf_status,
                 on_media_zero=job.on_media_zero,
                 on_packager_transit=job.on_packager_transit,
+                on_delivery_media_origin=job.on_delivery_media_origin,
             )
         else:
             if job.publisher_host == "local" and not local_publisher_enabled():

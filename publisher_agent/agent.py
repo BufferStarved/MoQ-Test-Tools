@@ -286,10 +286,29 @@ class PublisherAgent:
                 except Exception:  # noqa: BLE001
                     pass
 
+            def on_delivery_media_origin(origin_sec: float) -> None:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ws.send(
+                        json.dumps(
+                            {
+                                "type": "delivery_media_origin",
+                                "job_id": job_id,
+                                "delivery_media_origin_sec": float(origin_sec),
+                            }
+                        )
+                    ),
+                    loop,
+                )
+                try:
+                    fut.result(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+
             job.on_preview_ready = on_preview
             job.on_encoder_vmaf_status = on_encoder_vmaf
             job.on_media_zero = on_media_zero
             job.on_packager_transit = on_packager_transit
+            job.on_delivery_media_origin = on_delivery_media_origin
 
             logger.info(
                 "Starting job %s %s → %s",

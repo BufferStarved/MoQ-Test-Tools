@@ -43,6 +43,7 @@ class _PendingJob:
     encoder_vmaf_status: Optional[str] = None
     media_zero_epoch: Optional[float] = None
     packager_transit_ms: Optional[float] = None
+    delivery_media_origin_sec: Optional[float] = None
 
 
 @dataclass
@@ -160,6 +161,14 @@ class PublisherHub:
             except (TypeError, ValueError):
                 pass
             return
+        if msg_type == "delivery_media_origin" and pending is not None:
+            try:
+                pending.delivery_media_origin_sec = float(
+                    message.get("delivery_media_origin_sec")
+                )
+            except (TypeError, ValueError):
+                pass
+            return
         if msg_type == "job_done" and pending is not None:
             pending.result_queue.put(message.get("result") or {})
             pending.sample_queue.put(None)  # unblock sample waiter
@@ -180,6 +189,7 @@ class PublisherHub:
         on_encoder_vmaf_status: Optional[Callable[[str], None]] = None,
         on_media_zero: Optional[Callable[[float], None]] = None,
         on_packager_transit: Optional[Callable[[float], None]] = None,
+        on_delivery_media_origin: Optional[Callable[[float], None]] = None,
     ) -> UploadResult:
         if not local_publisher_enabled():
             return UploadResult(
@@ -247,6 +257,12 @@ class PublisherHub:
                 if pending.packager_transit_ms is not None and on_packager_transit:
                     on_packager_transit(pending.packager_transit_ms)
                     pending.packager_transit_ms = None
+                if (
+                    pending.delivery_media_origin_sec is not None
+                    and on_delivery_media_origin
+                ):
+                    on_delivery_media_origin(pending.delivery_media_origin_sec)
+                    pending.delivery_media_origin_sec = None
 
                 try:
                     item = pending.sample_queue.get(timeout=0.5)
