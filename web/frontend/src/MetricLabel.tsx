@@ -1,9 +1,33 @@
+import type { ReactNode } from "react";
 import { metricDefinition } from "./metricDefinitions";
 
 interface MetricLabelProps {
   metricKey: string;
   label?: string;
   className?: string;
+}
+
+/** Hover/focus tip matching the metrics "i" affordance — reusable for section headings. */
+export function InfoTip({
+  tip,
+  children,
+  className = "",
+}: {
+  tip: string;
+  children?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span className={`metric-label-wrap ${className}`.trim()}>
+      {children}
+      <span className="metric-info" aria-hidden="true">
+        i
+      </span>
+      <span className="metric-tooltip" role="tooltip">
+        {tip}
+      </span>
+    </span>
+  );
 }
 
 export function MetricLabel({ metricKey, label, className = "" }: MetricLabelProps) {
@@ -15,15 +39,9 @@ export function MetricLabel({ metricKey, label, className = "" }: MetricLabelPro
   }
 
   return (
-    <span className={`metric-label-wrap ${className}`.trim()}>
+    <InfoTip tip={definition.description} className={className}>
       <span className="metric-label-text">{text}</span>
-      <span className="metric-info" aria-hidden="true">
-        i
-      </span>
-      <span className="metric-tooltip" role="tooltip">
-        {definition.description}
-      </span>
-    </span>
+    </InfoTip>
   );
 }
 

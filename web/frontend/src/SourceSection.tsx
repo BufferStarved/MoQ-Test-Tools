@@ -3,6 +3,7 @@ import type { FeatureFlags, WebcamDeviceInfo } from "./api";
 import { LocalPublisherSetup } from "./LocalPublisherSetup";
 import { IconCamera, IconFilm } from "./Icons";
 import { StatusDot } from "./StatusDot";
+import { StepHeading } from "./StepHeading";
 import { WebcamLivePreview } from "./WebcamLivePreview";
 
 export type MediaSourceId = "dummy" | "bbb" | "upload" | "webcam";
@@ -90,10 +91,11 @@ export function SourceSection({
 
   return (
     <div className="source-media-section source-section">
-      <div className="step-heading">
-        <span className="step-badge">1</span>
-        <h3>Source</h3>
-      </div>
+      <StepHeading
+        step={1}
+        title="Source"
+        tip="Choose what every output will publish from — a live webcam via the local agent, or a VOD asset (color bars or your own file). Same source feeds all protocols below."
+      />
       <div className="source-mode-options" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isWebcam ? " selected" : ""}`}>
           <input
@@ -211,40 +213,49 @@ export function SourceSection({
 
       {isWebcam && webcamAvailable && (
         <div className="source-mode-detail webcam-detail">
-          {features.local_publisher_connected ? (
-            <>
-              <StatusDot
-                tone="ok"
-                label={`Agent connected — auto-stops after ${captureMinutes} min`}
-                className="webcam-detail-connected"
-              />
-              {agentWebcamDevices.length > 0 && (
-                <label className="webcam-device-picker">
-                  Camera
-                  <select
-                    value={webcamDeviceIndex}
-                    disabled={disabled}
-                    onChange={(e) => onWebcamDeviceIndexChange(e.target.value)}
-                  >
-                    <option value="">Auto (default camera)</option>
-                    {agentWebcamDevices.map((device) => (
-                      <option key={device.index} value={String(device.index)}>
-                        {device.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+          <div className="webcam-detail-main">
+            <div className="webcam-detail-controls">
+              {features.local_publisher_connected ? (
+                <>
+                  <StatusDot
+                    tone="ok"
+                    label={`Agent connected — auto-stops after ${captureMinutes} min`}
+                    className="webcam-detail-connected"
+                  />
+                  {agentWebcamDevices.length > 0 && (
+                    <label className="webcam-device-picker">
+                      Camera
+                      <select
+                        value={webcamDeviceIndex}
+                        disabled={disabled}
+                        onChange={(e) => onWebcamDeviceIndexChange(e.target.value)}
+                      >
+                        <option value="">Auto (default camera)</option>
+                        {agentWebcamDevices.map((device) => (
+                          <option key={device.index} value={String(device.index)}>
+                            {device.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
+                </>
+              ) : (
+                <>
+                  <StatusDot tone="warn" label="Agent not connected" />
+                  <LocalPublisherSetup
+                    apiOrigin={window.location.origin}
+                    connected={false}
+                    compact
+                    variant="webcam"
+                  />
+                  <p className="field-hint webcam-detail-blocked">Start stays disabled until it connects.</p>
+                </>
               )}
-              {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
-            </>
-          ) : (
-            <>
-              <StatusDot tone="warn" label="Agent not connected" />
-              <LocalPublisherSetup apiOrigin={window.location.origin} connected={false} compact variant="webcam" />
-              <p className="field-hint webcam-detail-blocked">Start stays disabled until it connects.</p>
-            </>
-          )}
-          <WebcamLivePreview active={isWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+            </div>
+            <WebcamLivePreview active={isWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+          </div>
         </div>
       )}
     </div>
