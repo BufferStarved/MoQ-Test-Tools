@@ -391,6 +391,7 @@ export default function HlsPlayer({
     // session, so frag.sn × duration − frag.start recovers the offset from
     // buffer timeline to encoder media timeline.
     fragTimelineOffsetSec: null as number | null,
+    wallOriginCalibrated: false,
   });
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
@@ -429,6 +430,7 @@ export default function HlsPlayer({
     lowLatency: false,
     transitMs: null as number | null,
     deliveryOriginSec: null as number | null,
+    liveSyncSec: 4,
   });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
@@ -437,6 +439,7 @@ export default function HlsPlayer({
     lowLatency: lowLatencyMode,
     transitMs: packagerTransitMs,
     deliveryOriginSec: deliveryMediaOriginSec,
+    liveSyncSec: liveSyncDurationSec ?? 4,
   };
 
   /**
@@ -475,11 +478,23 @@ export default function HlsPlayer({
       // MEDIA-SEQUENCE at 0, so frag.sn mapping cannot recover the join
       // offset — truth run 2026-08-10: raw currentTime lagged glass by
       // ~3.7s and overstated e2e by the same amount). Fall back to
-      // fragment-sequence mapping, then session-relative maxVideoTime.
+      // fragment chunk= mapping, then a one-shot wall-clock calibration
+      // against the configured live-sync delay, then session-relative time.
       let mediaPosSec = session.maxVideoTime;
       if (deliveryOriginSec != null && session.videoTimeOrigin === 0) {
         mediaPosSec = session.rawVideoTime + deliveryOriginSec;
       } else if (session.fragTimelineOffsetSec != null && session.videoTimeOrigin === 0) {
+        mediaPosSec = session.rawVideoTime + session.fragTimelineOffsetSec;
+      } else if (
+        session.videoTimeOrigin === 0 &&
+        session.rawVideoTime > 1 &&
+        !session.wallOriginCalibrated
+      ) {
+        const { liveSyncSec } = lagRef.current;
+        const estMedia =
+          (Date.now() + clockSkewMs()) / 1000 - epoch - Math.max(2, liveSyncSec);
+        session.fragTimelineOffsetSec = estMedia - session.rawVideoTime;
+        session.wallOriginCalibrated = true;
         mediaPosSec = session.rawVideoTime + session.fragTimelineOffsetSec;
       }
       const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
@@ -609,6 +624,7 @@ export default function HlsPlayer({
       playheadPdtMs: 0,
       rawVideoTime: 0,
       fragTimelineOffsetSec: null,
+      wallOriginCalibrated: false,
     };
     setElapsedSec(0);
     rebufferRef.current.reset();

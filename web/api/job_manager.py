@@ -733,6 +733,9 @@ class JobManager:
                 first_sample_at_epoch=record.first_sample_at_epoch,
                 media_zero_epoch=record.media_zero_epoch,
                 packager_transit_ms=record.packager_transit_ms,
+                # Must copy — SSE/GET go through get_job(); dropping this left
+                # RTMP Fast HLS e2e ~3.5s high (truth runs 2026-08-10).
+                delivery_media_origin_sec=record.delivery_media_origin_sec,
                 playback_samples=list(record.playback_samples),
                 playback_engine=record.playback_engine,
             )
@@ -776,6 +779,7 @@ class JobManager:
                     first_sample_at_epoch=record.first_sample_at_epoch,
                     media_zero_epoch=record.media_zero_epoch,
                     packager_transit_ms=record.packager_transit_ms,
+                    delivery_media_origin_sec=record.delivery_media_origin_sec,
                 )
                 for record in self._jobs.values()
             ]
