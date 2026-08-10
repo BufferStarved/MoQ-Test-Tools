@@ -199,6 +199,7 @@ class UploadJob:
     )
     _media_zero_sent: bool = field(default=False, init=False, repr=False)
     _media_zero_epoch: Optional[float] = field(default=None, init=False, repr=False)
+    _delivery_origin_sent: bool = field(default=False, init=False, repr=False)
     # JobManager sets this so the UI can show "computing" the moment the
     # encoder-side VMAF/PSNR/SSIM run actually starts, instead of only ever
     # seeing "waiting for encode" until the whole job (encode + VMAF) is done.
@@ -860,28 +861,35 @@ class UploadService:
         published segment of duration D ends near "now" on the encode
         timeline, so buffer time 0 ≈ (now − media_zero) − D.
         """
+        if job._delivery_origin_sent:
+            return
         anchor = job._media_zero_epoch
         if anchor is None:
             return
         manifest_url = self._managed_hls_manifest_url(job)
+        if not manifest_url:
+            return
         segment_dur = 2.0
-        if manifest_url:
-            try:
-                body = urllib.request.urlopen(manifest_url, timeout=2.0).read().decode(
-                    "utf-8", errors="replace"
-                )
-                for line in body.splitlines():
-                    if line.startswith("#EXTINF:"):
-                        try:
-                            segment_dur = float(
-                                line.split(":", 1)[1].rstrip(",").split(",")[0]
-                            )
-                        except ValueError:
-                            pass
-                        break
-            except Exception:
-                logger.debug("Zixi origin playlist probe failed", exc_info=True)
+        try:
+            body = urllib.request.urlopen(manifest_url, timeout=2.0).read().decode(
+                "utf-8", errors="replace"
+            )
+        except Exception:
+            logger.debug("Zixi origin playlist probe failed", exc_info=True)
+            return
+        saw_segment = False
+        for line in body.splitlines():
+            if line.startswith("#EXTINF:"):
+                try:
+                    segment_dur = float(line.split(":", 1)[1].rstrip(",").split(",")[0])
+                    saw_segment = True
+                except ValueError:
+                    pass
+                break
+        if not saw_segment:
+            return
         origin = max(0.0, time.time() - anchor - segment_dur)
+        job._delivery_origin_sent = True
         logger.info(
             "Zixi delivery_media_origin for %s: %.2fs (segment=%.2fs)",
             job.job_id,
@@ -1063,6 +1071,19 @@ class UploadService:
                     timeout=2.5,
                 ).ok:
                     self._notify_preview_ready(job, True)
+                    # RTMP/SRT Zixi jobs gate on HTTP-TS first (this branch) and
+                    # never reached the Fast HLS origin publish below — truth run
+                    # 2026-08-10 left delivery_media_origin_sec null and RTMP e2e
+                    # stayed ~3.5s high. Publish origin from the HLS playlist now
+                    # (retry briefly — Fast HLS can lag HTTP-TS by a beat).
+                    if job.managed_zixi_stream_id():
+                        for _ in range(10):
+                            if stop_event.is_set():
+                                break
+                            self._publish_zixi_delivery_media_origin(job)
+                            if job._delivery_origin_sent:
+                                break
+                            stop_event.wait(0.4)
                     return
                 stop_event.wait(0.5)
             return
@@ -1159,11 +1180,6 @@ class UploadService:
             if pdt_value is None or pdt_media_pos is None:
                 stop_event.wait(0.5)
                 continue
-            if media_sequence != 0:
-                # Wait for a fresh muxer session; don't abort — MediaMTX may
-                # still be draining the previous publisher's window.
-                stop_event.wait(0.5)
-                continue
             anchor = job._media_zero_epoch
             if anchor is None:
                 return
@@ -1174,22 +1190,45 @@ class UploadService:
                 stop_event.wait(0.5)
                 continue
             elapsed = pdt_epoch - anchor
-            # Media time cannot exceed wall elapsed (plus tiny NTP/slop).
-            if pdt_media_pos > elapsed + 0.75:
-                stop_event.wait(0.5)
-                continue
-            transit_ms = (pdt_epoch - (anchor + pdt_media_pos)) * 1000.0
-            if 0.0 < transit_ms < 15000.0:
-                logger.info(
-                    "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
-                    job.job_id,
-                    transit_ms,
-                    pdt_value,
-                    media_sequence,
-                    pdt_media_pos,
-                )
-                self._notify_packager_transit(job, transit_ms)
-                return
+            now = time.time()
+            # Prefer a fresh muxer (sequence 0) with a media position that
+            # cannot exceed wall elapsed.
+            if media_sequence == 0 and pdt_media_pos <= elapsed + 0.75:
+                transit_ms = (pdt_epoch - (anchor + pdt_media_pos)) * 1000.0
+                if 0.0 < transit_ms < 15000.0:
+                    logger.info(
+                        "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
+                        job.job_id,
+                        transit_ms,
+                        pdt_value,
+                        media_sequence,
+                        pdt_media_pos,
+                    )
+                    self._notify_packager_transit(job, transit_ms)
+                    return
+            # Fallback: MediaMTX often continues MEDIA-SEQUENCE across
+            # republishes, so sequence==0 never appears. The first live-edge
+            # PDT after our encode starts (PDT wall-clock ≈ now, elapsed < 8s)
+            # packages the head of THIS publish — treat its media time as ~0.
+            # Truth run 2026-08-10: sequence==0 path timed out; this recovers
+            # the ~2.3s encoder→packager leg SRT was missing.
+            if (
+                0.5 < elapsed < 8.0
+                and abs(pdt_epoch - now) < 2.0
+                and time.time() - anchor > 3.0
+            ):
+                transit_ms = elapsed * 1000.0
+                if 500.0 < transit_ms < 15000.0:
+                    logger.info(
+                        "LL-HLS packager transit for %s: %.0fms "
+                        "(live-edge fallback pdt=%s seq=%s)",
+                        job.job_id,
+                        transit_ms,
+                        pdt_value,
+                        media_sequence,
+                    )
+                    self._notify_packager_transit(job, transit_ms)
+                    return
             stop_event.wait(0.5)
         logger.warning(
             "LL-HLS transit probe timed out for %s without a usable PDT window",
