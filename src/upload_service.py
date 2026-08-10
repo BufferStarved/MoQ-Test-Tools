@@ -1071,19 +1071,18 @@ class UploadService:
                     timeout=2.5,
                 ).ok:
                     self._notify_preview_ready(job, True)
-                    # RTMP/SRT Zixi jobs gate on HTTP-TS first (this branch) and
-                    # never reached the Fast HLS origin publish below — truth run
-                    # 2026-08-10 left delivery_media_origin_sec null and RTMP e2e
-                    # stayed ~3.5s high. Publish origin from the HLS playlist now
-                    # (retry briefly — Fast HLS can lag HTTP-TS by a beat).
+                    # RTMP/SRT Zixi jobs gate on HTTP-TS first. Stale HTTP-TS from
+                    # a prior run can become ready BEFORE media_zero is stamped;
+                    # wait for the encoder spawn stamp, then publish origin from
+                    # the Fast HLS playlist (may lag HTTP-TS by a beat).
                     if job.managed_zixi_stream_id():
-                        for _ in range(10):
-                            if stop_event.is_set():
-                                break
-                            self._publish_zixi_delivery_media_origin(job)
-                            if job._delivery_origin_sent:
-                                break
-                            stop_event.wait(0.4)
+                        deadline = time.time() + 20.0
+                        while not stop_event.is_set() and time.time() < deadline:
+                            if job._media_zero_epoch is not None:
+                                self._publish_zixi_delivery_media_origin(job)
+                                if job._delivery_origin_sent:
+                                    break
+                            stop_event.wait(0.3)
                     return
                 stop_event.wait(0.5)
             return
