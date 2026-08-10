@@ -1005,10 +1005,10 @@ export default function HlsPlayer({
           }
         });
 
-        // Buffer-timeline → encoder-media-timeline offset for Zixi Fast HLS
-        // (uniform chunks numbered from 0 per input session): the media
-        // position of fragment sn is sn × duration, while hls.js places it
-        // at frag.start on the buffer timeline. See fragTimelineOffsetSec.
+        // Buffer-timeline → encoder-media-timeline offset for Zixi Fast HLS.
+        // Playlists keep EXT-X-MEDIA-SEQUENCE at 0 (1-deep), so frag.sn is
+        // useless — but the segment URL carries chunk=N which advances each
+        // rollover (verified 2026-08-10: chunk=0,2,3,… during a live run).
         instance.on(Hls.Events.FRAG_CHANGED, (_event, data) => {
           if (destroyed || lowLatencyMode) {
             return;
@@ -1017,10 +1017,18 @@ export default function HlsPlayer({
           if (!frag || !Number.isFinite(frag.start) || !Number.isFinite(frag.duration)) {
             return;
           }
-          if (typeof frag.sn !== "number" || frag.duration <= 0) {
+          if (frag.duration <= 0) {
             return;
           }
-          const offset = frag.sn * frag.duration - frag.start;
+          let sn: number | null = typeof frag.sn === "number" ? frag.sn : null;
+          const chunkMatch = /[?&]chunk=(\d+)/.exec(frag.url || lastRequestUrl || "");
+          if (chunkMatch) {
+            sn = Number.parseInt(chunkMatch[1], 10);
+          }
+          if (sn == null || !Number.isFinite(sn)) {
+            return;
+          }
+          const offset = sn * frag.duration - frag.start;
           if (Number.isFinite(offset) && Math.abs(offset) < 600) {
             sessionRef.current.fragTimelineOffsetSec = offset;
           }
