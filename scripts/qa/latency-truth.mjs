@@ -22,15 +22,15 @@ const page = await browser.newPage({ viewport: { width: 1600, height: 2400 } });
 page.on("pageerror", (err) => log(`pageerror: ${err.message}`));
 
 log(`open ${BASE}`);
-await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 });
+await page.goto(BASE, { waitUntil: "networkidle", timeout: 60000 });
 await page.waitForFunction(
   () => {
     const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-      b.textContent.includes("Start comparison"),
+      (b.textContent || "").includes("Start comparison"),
     );
-    return btn && !btn.disabled;
+    return Boolean(btn && !btn.disabled);
   },
-  { timeout: 60000 },
+  { timeout: 120000 },
 );
 
 // Select "Upload your own file…" and attach the timer clip.

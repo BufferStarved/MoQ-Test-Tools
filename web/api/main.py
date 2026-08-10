@@ -210,6 +210,7 @@ def job_to_dict(job) -> dict:
         "first_sample_at_epoch": getattr(job, "first_sample_at_epoch", None),
         "media_zero_epoch": getattr(job, "media_zero_epoch", None),
         "packager_transit_ms": getattr(job, "packager_transit_ms", None),
+        "delivery_media_origin_sec": getattr(job, "delivery_media_origin_sec", None),
     }
 
 
@@ -866,6 +867,9 @@ async def upload_events(job_id: str):
                 "first_sample_at_epoch": getattr(current, "first_sample_at_epoch", None),
                 "media_zero_epoch": getattr(current, "media_zero_epoch", None),
                 "packager_transit_ms": getattr(current, "packager_transit_ms", None),
+                "delivery_media_origin_sec": getattr(
+                    current, "delivery_media_origin_sec", None
+                ),
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
 

@@ -319,6 +319,7 @@ export function subscribeToUpload(
     first_sample_at_epoch?: number | null;
     media_zero_epoch?: number | null;
     packager_transit_ms?: number | null;
+    delivery_media_origin_sec?: number | null;
   }) => void,
 ): () => void {
   const source = new EventSource(`${API_BASE}/uploads/${jobId}/events`);

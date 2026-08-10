@@ -136,6 +136,8 @@ export interface UploadJob {
   /** LL-HLS only: encoder→packager transit (ms) measured server-side from the
    * first EXT-X-PROGRAM-DATE-TIME; added to PDT-based player latency. */
   packager_transit_ms?: number | null;
+  /** Zixi Fast HLS: encode-media seconds at hls.js buffer time 0. */
+  delivery_media_origin_sec?: number | null;
   csv_path?: string | null;
   summary_path?: string | null;
   error?: string | null;
