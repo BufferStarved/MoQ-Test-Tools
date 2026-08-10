@@ -70,6 +70,7 @@ import {
 import { isSafariBrowser } from "./browserDetect";
 import { IconBroadcast, IconGauge } from "./Icons";
 import { StatusDot } from "./StatusDot";
+import { StepHeading } from "./StepHeading";
 
 const ENCODER_LABEL: Record<EncoderId, string> = {
   ffmpeg: "ffmpeg",
@@ -627,7 +628,7 @@ function App() {
     if (mediaSource === "webcam") {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Live webcam: encoder scores compare each protocol's encode against the shared normalized camera capture. Ingest-side scoring needs a file reference and stays off."
+          ? "Calculates video quality pre and post ingest per protocol."
           : "Live webcam quality scoring needs ffmpeg/libvmaf on the encode host.",
       );
       return;
@@ -1120,7 +1121,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="benchmark-shared-grid">
+              <div className="benchmark-shared-stack">
                 <SourceSection
                   mediaSource={mediaSource}
                   onMediaSourceChange={handleMediaSourceChange}
@@ -1145,99 +1146,104 @@ function App() {
                   running={loading}
                 />
 
-                <div className="source-media-section">
-                  <div className="step-heading">
-                    <span className="step-badge">2</span>
-                    <h3>Encoder &amp; profile</h3>
-                  </div>
-                  <div className="encode-profile-grid">
-                    <label>
-                      Target bitrate / resolution
-                      <select
-                        value={encodeLadder}
-                        onChange={(e) => setEncodeLadder(e.target.value)}
-                        disabled={bootstrapping || !apiOnline || loading}
-                      >
-                        {ENCODE_LADDER_OPTIONS.map((ladder) => (
-                          <option key={ladder.id} value={ladder.id}>
-                            {ladder.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Target latency (ms)
-                      <div className="latency-input-row">
-                        <button
-                          type="button"
-                          className="latency-nudge"
+                <section className="encoder-profile-section">
+                  <StepHeading
+                    step={2}
+                    title="Encoder & profile"
+                    tip="Shared encode settings for every output — bitrate/resolution ladder, target latency (GOP / live sync), and optional VMAF/PSNR/SSIM quality scoring. Change these before you start a comparison."
+                  />
+                  <div className="encoder-profile-body">
+                    <div className="encode-profile-grid">
+                      <label>
+                        Target bitrate / resolution
+                        <select
+                          value={encodeLadder}
+                          onChange={(e) => setEncodeLadder(e.target.value)}
                           disabled={bootstrapping || !apiOnline || loading}
-                          onClick={() => nudgeLatency(-100)}
-                          aria-label="Decrease latency by 100 ms"
                         >
-                          −100
-                        </button>
+                          {ENCODE_LADDER_OPTIONS.map((ladder) => (
+                            <option key={ladder.id} value={ladder.id}>
+                              {ladder.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Target latency (ms)
+                        <div className="latency-input-row">
+                          <button
+                            type="button"
+                            className="latency-nudge"
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onClick={() => nudgeLatency(-100)}
+                            aria-label="Decrease latency by 100 ms"
+                          >
+                            −100
+                          </button>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            autoComplete="off"
+                            spellCheck={false}
+                            value={latencyDraft}
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onFocus={() => setLatencyFocused(true)}
+                            onChange={(e) => {
+                              const next = e.target.value.replace(/[^\d]/g, "");
+                              setLatencyDraft(next);
+                            }}
+                            onBlur={(e) => {
+                              setLatencyFocused(false);
+                              commitLatencyDraft(e.target.value);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.currentTarget.blur();
+                              } else if (e.key === "ArrowUp") {
+                                e.preventDefault();
+                                nudgeLatency(e.shiftKey ? 100 : 50);
+                              } else if (e.key === "ArrowDown") {
+                                e.preventDefault();
+                                nudgeLatency(e.shiftKey ? -100 : -50);
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="latency-nudge"
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onClick={() => nudgeLatency(100)}
+                            aria-label="Increase latency by 100 ms"
+                          >
+                            +100
+                          </button>
+                        </div>
+                        <span className="field-hint">
+                          {MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS} ms · applies to every output below
+                        </span>
+                      </label>
+                    </div>
+                    <div className="vmaf-section">
+                      <h3>
+                        <IconGauge size={15} className="icon-inline" /> Calculate quality
+                      </h3>
+                      <label className="checkbox-row">
                         <input
-                          type="text"
-                          inputMode="numeric"
-                          pattern="[0-9]*"
-                          autoComplete="off"
-                          spellCheck={false}
-                          value={latencyDraft}
-                          disabled={bootstrapping || !apiOnline || loading}
-                          onFocus={() => setLatencyFocused(true)}
-                          onChange={(e) => {
-                            const next = e.target.value.replace(/[^\d]/g, "");
-                            setLatencyDraft(next);
-                          }}
-                          onBlur={(e) => {
-                            setLatencyFocused(false);
-                            commitLatencyDraft(e.target.value);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.currentTarget.blur();
-                            } else if (e.key === "ArrowUp") {
-                              e.preventDefault();
-                              nudgeLatency(e.shiftKey ? 100 : 50);
-                            } else if (e.key === "ArrowDown") {
-                              e.preventDefault();
-                              nudgeLatency(e.shiftKey ? -100 : -50);
-                            }
-                          }}
+                          type="checkbox"
+                          checked={computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)}
+                          disabled={!vmafSelectable || (mediaSource === "webcam" && !encoderVmafAvailable)}
+                          onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
-                        <button
-                          type="button"
-                          className="latency-nudge"
-                          disabled={bootstrapping || !apiOnline || loading}
-                          onClick={() => nudgeLatency(100)}
-                          aria-label="Increase latency by 100 ms"
-                        >
-                          +100
-                        </button>
-                      </div>
+                        <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
+                      </label>
                       <span className="field-hint">
-                        {MIN_TARGET_LATENCY_MS}–{MAX_TARGET_LATENCY_MS} ms · applies to every output below
+                        {vmafUnavailableReason ??
+                          "Calculates video quality pre and post ingest per protocol."}
                       </span>
-                    </label>
+                    </div>
                   </div>
-                </div>
-
-                <div className="vmaf-section">
-                  <h3>
-                    <IconGauge size={15} className="icon-inline" /> Calculate Quality
-                  </h3>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={computeVmaf && (mediaSource !== "webcam" || encoderVmafAvailable)}
-                      disabled={!vmafSelectable || (mediaSource === "webcam" && !encoderVmafAvailable)}
-                      onChange={(e) => setComputeVmaf(e.target.checked)}
-                    />
-                    <span>VMAF / PSNR / SSIM (encoder + ingest)</span>
-                  </label>
-                  {vmafUnavailableReason && <span className="field-hint">{vmafUnavailableReason}</span>}
-                </div>
+                </section>
               </div>
 
               <WorkflowVisualization
@@ -1288,10 +1294,11 @@ function App() {
               </div>
             </section>
 
-            <div className="step-heading">
-              <span className="step-badge">3</span>
-              <h3>Outputs</h3>
-            </div>
+            <StepHeading
+              step={3}
+              title="Outputs"
+              tip="Each column is one protocol → ingest → playback path under the same source and encode profile. Add outputs to compare side by side; remove extras you do not need."
+            />
             <section className="benchmark-streams">
               {endpoints.map((endpoint, index) => {
                 const leg = comparisonLegs[index];

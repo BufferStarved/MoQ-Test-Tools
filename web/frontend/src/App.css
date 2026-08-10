@@ -208,29 +208,60 @@ h1 {
   margin-bottom: 6px;
 }
 
-.benchmark-shared-grid {
+.benchmark-shared-stack {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 20px 28px;
+  gap: 22px;
   margin: 18px 0 8px;
+}
+
+.benchmark-shared-stack .source-media-section {
+  margin: 0;
+}
+
+/* Section 2 — full-width block (parity with Outputs), fields fill the row. */
+.encoder-profile-section {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 16px 18px 18px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border);
+  background: var(--surface-soft);
+}
+
+.encoder-profile-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.9fr);
+  gap: 18px 28px;
   align-items: start;
 }
 
-.benchmark-shared-grid .source-media-section,
-.benchmark-shared-grid .vmaf-section {
+.encoder-profile-body .encode-profile-grid {
   margin: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
 }
 
-.benchmark-shared-grid h3 {
+.encoder-profile-body .vmaf-section {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border);
+  background: var(--surface);
+}
+
+.encoder-profile-body .vmaf-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0 0 10px;
   font-size: 0.82rem;
   color: var(--text-muted);
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+}
+
+.encoder-profile-body .checkbox-row {
+  margin-bottom: 6px !important;
 }
 
 /* Numbered step badge — used before "Source" / "Encoder & location" /
@@ -243,8 +274,23 @@ h1 {
   margin: 0 0 10px;
 }
 
-.step-heading h3 {
+.step-heading h3,
+.step-heading .metric-label-text {
   margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.step-heading-tip {
+  align-items: center;
+  gap: 8px;
+}
+
+.step-heading-tip .metric-tooltip {
+  max-width: 300px;
 }
 
 .step-badge {
@@ -677,14 +723,11 @@ input:disabled {
   margin-top: 10px;
 }
 
-.source-section {
-  grid-column: 1 / -1;
-}
-
 .source-mode-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
+  max-width: 560px;
 }
 
 .source-mode-card {
@@ -760,6 +803,19 @@ input:disabled {
   color: var(--danger);
 }
 
+.webcam-detail-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+  gap: 14px 18px;
+  align-items: start;
+}
+
+.webcam-detail-controls {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
 .webcam-device-picker {
   display: grid;
   gap: 4px;
@@ -773,9 +829,12 @@ input:disabled {
 
 /* Idle self-view while configuring the webcam source — released the
    instant a run starts so the local agent's ffmpeg can open the physical
-   device exclusively (see WebcamLivePreview.tsx). */
+   device exclusively (see WebcamLivePreview.tsx). Kept compact so it
+   does not dominate the Source section. */
 .webcam-live-preview {
-  margin-top: 12px;
+  margin: 0;
+  width: 100%;
+  max-width: 260px;
   border-radius: var(--radius-md);
   overflow: hidden;
   background: #0b1220;
@@ -784,6 +843,7 @@ input:disabled {
   align-items: center;
   justify-content: center;
   position: relative;
+  justify-self: end;
 }
 
 .webcam-live-preview-video {
@@ -1577,15 +1637,13 @@ code {
   color: var(--text);
 }
 
-.source-media-section h3 {
-  margin: 0;
-  font-size: 0.95rem;
-  color: var(--text-soft);
+.source-media-section > .step-heading {
+  margin-bottom: 12px;
 }
 
 .encode-profile-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.85rem 1.25rem;
   margin-bottom: 0.35rem;
 }
@@ -1927,10 +1985,17 @@ code {
   .panel-grid,
   .endpoints-grid,
   .benchmark-streams,
-  .benchmark-shared-grid,
+  .encoder-profile-body,
+  .encode-profile-grid,
+  .webcam-detail-main,
   .scorecard-grid {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .webcam-live-preview {
+    max-width: 320px;
+    justify-self: start;
   }
 
   .hero {
