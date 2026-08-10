@@ -1021,7 +1021,13 @@ export default function HlsPlayer({
             return;
           }
           let sn: number | null = typeof frag.sn === "number" ? frag.sn : null;
-          const chunkMatch = /[?&]chunk=(\d+)/.exec(frag.url || lastRequestUrl || "");
+          // Playback goes through /api/playback/fetch?url=..., so the Zixi
+          // chunk= query is URI-encoded as chunk%3D inside the outer URL —
+          // match both forms.
+          const fragUrl = frag.url || lastRequestUrl || "";
+          const chunkMatch =
+            /[?&]chunk=(\d+)/.exec(fragUrl) ||
+            /(?:\?|&|%3F|%26)chunk(?:%3D|=)(\d+)/i.exec(fragUrl);
           if (chunkMatch) {
             sn = Number.parseInt(chunkMatch[1], 10);
           }
