@@ -91,6 +91,23 @@ class ProgressDeltaTests(unittest.TestCase):
         feed_block(tracker, frame=60, out_time="00:00:02.000000", total_size=222)
         self.assertEqual(tracker.get_status().total_bytes, 222)
 
+    def test_out_time_us_only_still_advances_media_clock(self):
+        """ffmpeg 6+ can omit HH:MM:SS out_time and only print out_time_us."""
+        clock = FakeClock()
+        tracker = ProgressDeltaTracker(clock=clock)
+        tracker.apply_line("frame=30")
+        tracker.apply_line("total_size=250000")
+        tracker.apply_line("out_time_us=1000000")
+        tracker.apply_line("progress=continue")
+        clock.now += 1.0
+        tracker.apply_line("frame=60")
+        tracker.apply_line("total_size=500000")
+        tracker.apply_line("out_time_us=2000000")
+        tracker.apply_line("progress=continue")
+        status = tracker.get_status()
+        self.assertTrue(status.out_time.startswith("00:00:02"))
+        self.assertAlmostEqual(status.speed, 1.0, places=3)
+
 
 class TickSchedulingTests(unittest.TestCase):
     def test_every_integer_second_is_sampled_despite_work_time(self):

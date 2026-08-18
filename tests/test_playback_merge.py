@@ -65,6 +65,34 @@ class PlaybackMergeTests(unittest.TestCase):
         self.assertEqual(rows[3]["e2e_latency_ms"], "900")
         self.assertEqual(rows[4]["e2e_latency_ms"], "900")
 
+    def test_error_count_and_e2e_forward_fill_together(self):
+        """A mid-clip stall must persist both e2e and playback_error_count."""
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            _write_csv(csv_path, count=8)
+            playback = [
+                {
+                    "elapsed_sec": 2,
+                    "e2e_latency_ms": 556,
+                    "playback_error_count": 0,
+                    "playback_video_time_sec": 1.5,
+                },
+                {
+                    "elapsed_sec": 5,
+                    "e2e_latency_ms": 8126,
+                    "playback_error_count": 1,
+                    "playback_video_time_sec": 12.43,
+                },
+            ]
+            rows = merge_playback_into_csv(csv_path, playback, csv_columns=CSV_COLUMNS)
+
+        self.assertEqual(rows[2]["e2e_latency_ms"], "556")
+        self.assertEqual(rows[2]["playback_error_count"], "0")
+        self.assertEqual(rows[5]["e2e_latency_ms"], "8126")
+        self.assertEqual(rows[5]["playback_error_count"], "1")
+        self.assertEqual(rows[7]["playback_error_count"], "1")
+        self.assertEqual(rows[7]["playback_video_time_sec"], "12.43")
+
 
 class RobustE2eTests(unittest.TestCase):
     def test_trims_freeze_runaway(self):

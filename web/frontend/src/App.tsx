@@ -1431,6 +1431,11 @@ function App() {
                           leg?.job.delivery_media_origin_sec ?? null
                         }
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
+                        netRttMs={
+                          leg?.latestSample?.net_rtt_ms ??
+                          leg?.latestSample?.transport_rtt_ms ??
+                          0
+                        }
                         onPlaybackSample={(playback) => {
                           const jobId = comparisonLegs[index]?.job.id;
                           if (!jobId) {

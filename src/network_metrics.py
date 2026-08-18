@@ -25,6 +25,15 @@ def _parse_out_time_sec(out_time: str) -> float:
         return 0.0
 
 
+def _format_out_time(seconds: float) -> str:
+    """HH:MM:SS.microseconds from a media-clock second count."""
+    total = max(0.0, float(seconds))
+    hours = int(total // 3600.0)
+    minutes = int((total % 3600.0) // 60.0)
+    secs = total - hours * 3600.0 - minutes * 60.0
+    return f"{hours:02d}:{minutes:02d}:{secs:09.6f}"
+
+
 @dataclass
 class UploadStatus:
     frame: int = 0
@@ -116,9 +125,22 @@ class ProgressDeltaTracker:
                 elif key == "total_size" and "N/A" not in value:
                     self._raw_total_size = int(float(value))
                     self._status.total_bytes = self._raw_total_size
+                elif key == "out_time_us" and "N/A" not in value:
+                    # Modern ffmpeg often emits only out_time_us / out_time_ms.
+                    # Without this, MoQ encode_lag_ms and out_time stay empty
+                    # even while fps/bitrate advance (comparison CSV 2026-08-18).
+                    us = float(value)
+                    self._raw_out_time_sec = max(0.0, us / 1_000_000.0)
+                    self._status.out_time = _format_out_time(self._raw_out_time_sec)
+                elif key == "out_time_ms" and "N/A" not in value:
+                    ms = float(value)
+                    self._raw_out_time_sec = max(0.0, ms / 1000.0)
+                    self._status.out_time = _format_out_time(self._raw_out_time_sec)
                 elif key == "out_time":
                     self._status.out_time = value
-                    self._raw_out_time_sec = _parse_out_time_sec(value)
+                    parsed = _parse_out_time_sec(value)
+                    if parsed > 0:
+                        self._raw_out_time_sec = parsed
                 elif key == "speed" and "N/A" not in value:
                     if self._prev_wall is None:
                         self._status.speed = float(value.replace("x", "").strip())

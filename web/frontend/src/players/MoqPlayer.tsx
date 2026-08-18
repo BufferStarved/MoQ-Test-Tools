@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Player } from "@playa/player";
-import type { PlaybackMetricsSnapshot } from "../api";
+import { postPlaybackSample, type PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
 import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
@@ -16,7 +16,7 @@ import {
 import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
-import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import { elapsedSecFromStart, usePlaybackMetricsReporter } from "../playbackMetrics";
 import {
   attachHtmlPlaybackMonitors,
   attachFrameStallMonitor,
@@ -24,8 +24,8 @@ import {
   persistJobRebuffer,
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
-import { isPlausibleE2eMs } from "../glassLatency";
-import { isGracefulMoqReset } from "../playbackEos";
+import { computeMoqE2eMs } from "../glassLatency";
+import { isGracefulMoqReset, playedMostOfEncode } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -55,6 +55,8 @@ interface MoqPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (ms). */
   encoderLagMs?: number;
+  /** Path RTT from the latest encode/transport sample (ms). */
+  netRttMs?: number;
   /** MOQT draft to offer on WebTransport (16 for openmoq/ffmpeg, 18 for browser MOQ5). */
   draftVersion?: 16 | 18;
   /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
@@ -135,6 +137,7 @@ export default function MoqPlayer({
   sourceHasAudio = true,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  netRttMs = 0,
   draftVersion = 16,
   mediaPackaging = "cmaf",
 }: MoqPlayerProps) {
@@ -168,14 +171,18 @@ export default function MoqPlayer({
     // makes a capture-anchored latency possible: wall-since-encode minus
     // this position minus nothing else = encoder->glass.
     moqTimelineMs: 0,
+    firstFrameAtMs: 0,
+    firstFrameVideoSec: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
   const lastGoodE2eRef = useRef<number | undefined>(undefined);
-  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0 });
+  const userPausedRef = useRef(false);
+  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0, rttMs: 0 });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
     encoderMs: encoderLagMs,
     epoch: encodeStartedAtEpoch ?? 0,
+    rttMs: netRttMs,
   };
   const jobStatusRef = useRef(jobStatus);
   jobStatusRef.current = jobStatus;
@@ -215,56 +222,29 @@ export default function MoqPlayer({
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
-    const { bridgeMs, epoch } = lagRef.current;
+    const { bridgeMs, epoch, encoderMs, rttMs } = lagRef.current;
     const video = videoRef.current;
-
-    if (isPlausibleE2eMs(session.playerLatencyMs)) {
-      const total = session.playerLatencyMs + bridgeMs;
-      if (isPlausibleE2eMs(total)) {
-        lastGoodE2eRef.current = Math.round(total);
-        return lastGoodE2eRef.current;
-      }
+    const videoTimeSec = Math.max(session.videoTimeSec, video?.currentTime ?? 0);
+    const computed = computeMoqE2eMs({
+      playerLatencyMs: session.playerLatencyMs,
+      bridgeMs,
+      encoderLagMs: encoderMs,
+      rttMs,
+      bufferMs: bufferedAheadSec(video) * 1000,
+      mediaPackaging,
+      joinOffsetSec: playerRef.current?.joinMediaOffsetSec ?? null,
+      videoCurrentTimeSec: videoTimeSec,
+      moqTimelineMs: session.moqTimelineMs,
+      epochSec: epoch,
+      clockSkewMs: clockSkewMs(),
+      ttffMs: session.ttffMs,
+      firstFrameAtMs: session.firstFrameAtMs,
+      firstFrameVideoSec: session.firstFrameVideoSec,
+    });
+    if (computed != null) {
+      lastGoodE2eRef.current = computed;
+      return computed;
     }
-
-    if (mediaPackaging === "loc") {
-      return lastGoodE2eRef.current;
-    }
-
-    const joinOffsetSec = playerRef.current?.joinMediaOffsetSec ?? null;
-    if (joinOffsetSec != null && video && video.currentTime > 0.05) {
-      const mediaPosSec = joinOffsetSec + video.currentTime;
-      if (mediaPosSec > 1e6) {
-        const total = Date.now() + clockSkewMs() - mediaPosSec * 1000 + bridgeMs;
-        if (isPlausibleE2eMs(total)) {
-          lastGoodE2eRef.current = Math.round(total);
-          return lastGoodE2eRef.current;
-        }
-      } else if (epoch > 0) {
-        const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
-        if (isPlausibleE2eMs(total)) {
-          lastGoodE2eRef.current = Math.round(total);
-          return lastGoodE2eRef.current;
-        }
-      }
-    }
-
-    // CMAF join offset can stay null on browser publishes; still report glass
-    // delay from encode epoch + playhead so MoQ e2e is not a column of zeros.
-    if (epoch > 0 && session.moqTimelineMs > 50) {
-      const total = Date.now() + clockSkewMs() - epoch * 1000 - session.moqTimelineMs + bridgeMs;
-      if (isPlausibleE2eMs(total)) {
-        lastGoodE2eRef.current = Math.round(total);
-        return lastGoodE2eRef.current;
-      }
-    }
-    if (epoch > 0 && video && video.currentTime > 0.05) {
-      const total = Date.now() + clockSkewMs() - epoch * 1000 - video.currentTime * 1000 + bridgeMs;
-      if (isPlausibleE2eMs(total)) {
-        lastGoodE2eRef.current = Math.round(total);
-        return lastGoodE2eRef.current;
-      }
-    }
-
     return lastGoodE2eRef.current;
   }
 
@@ -303,6 +283,7 @@ export default function MoqPlayer({
         ),
         playback_buffer_sec: bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
+        playback_error_count: lastErrorRef.current ? 1 : 0,
         e2e_latency_ms: captureAnchoredE2eMs(),
       };
     },
@@ -334,7 +315,11 @@ export default function MoqPlayer({
           sessionRef.current.videoTimeSec > 0.25 ||
           sessionRef.current.ttffMs > 0;
         const catalogReady = Boolean(outcome?.catalogReady || sessionRef.current.catalogReady);
-        if (playedOk) {
+        const coveredClip = playedMostOfEncode({
+          videoTimeSec: sessionRef.current.videoTimeSec,
+          encodeDurationSec: encodeDurationRef.current,
+        });
+        if (playedOk && coveredClip) {
           setError(null);
           lastErrorRef.current = null;
           const restarts = sessionRef.current.sessionRestarts;
@@ -343,6 +328,25 @@ export default function MoqPlayer({
               ? `Playback ended (reconnected ${restarts}× after a freeze)`
               : "Playback OK",
           );
+        } else if (playedOk && !coveredClip) {
+          const vt = sessionRef.current.videoTimeSec;
+          const duration = encodeDurationRef.current;
+          const message =
+            `MoQ playback stalled at ${vt.toFixed(1)}s of a ${duration}s encode.`;
+          lastErrorRef.current = message;
+          setError(message);
+          setStatus("Failed (see diagnostics)");
+          const snapshot = {
+            ...getPlaybackSnapshot(),
+            playback_error_count: 1,
+            elapsed_sec: elapsedSecFromStart(encodeStartedAtEpoch),
+            engine: "moq" as const,
+            at_epoch: Date.now() / 1000,
+          };
+          onPlaybackSample?.(snapshot);
+          if (jobId) {
+            void postPlaybackSample(jobId, snapshot).catch(() => undefined);
+          }
         } else if (lastErrorRef.current) {
           setError(lastErrorRef.current);
           setStatus("Failed (see diagnostics)");
@@ -394,6 +398,8 @@ export default function MoqPlayer({
       videoTimeSec: priorOutcome?.videoTimeSec ?? 0,
       playerLatencyMs: 0,
       moqTimelineMs: 0,
+      firstFrameAtMs: 0,
+      firstFrameVideoSec: 0,
       sessionRestarts: 0,
     };
     // Remounts used to wipe rebuffer to 0 mid-run — restore per-job accum.
@@ -516,6 +522,10 @@ export default function MoqPlayer({
           : video.currentTime;
       sessionRef.current.firstFrame = true;
       sessionRef.current.videoTimeSec = Math.max(sessionRef.current.videoTimeSec, mediaTimeSec);
+      if (sessionRef.current.firstFrameAtMs <= 0) {
+        sessionRef.current.firstFrameAtMs = Date.now();
+        sessionRef.current.firstFrameVideoSec = mediaTimeSec;
+      }
       markMoqFirstFrame(jobId, {
         ttffMs: sessionRef.current.ttffMs,
         videoTimeSec: sessionRef.current.videoTimeSec,
@@ -563,6 +573,7 @@ export default function MoqPlayer({
       pinnedDiagRef.current = [];
       rollingDiagRef.current = [];
       lastTimelineDiagRef.current = 0;
+      userPausedRef.current = false;
       setStatus("Waiting for publisher...");
       pushDiag(`relay=${relayUrl} namespace=${namespace}`, true);
       pushDiag(
@@ -729,6 +740,8 @@ export default function MoqPlayer({
               videoTimeSec: 0,
               playerLatencyMs: 0,
               moqTimelineMs: 0,
+              firstFrameAtMs: sessionRef.current.firstFrameAtMs,
+              firstFrameVideoSec: sessionRef.current.firstFrameVideoSec,
               sessionRestarts: sessionRef.current.sessionRestarts,
             };
             setIsReady(false);
@@ -865,6 +878,10 @@ export default function MoqPlayer({
             } else if (!sessionRef.current.firstFrame) {
               // MSE can report rendered frames slightly before currentTime moves.
               sessionRef.current.firstFrame = true;
+              if (sessionRef.current.firstFrameAtMs <= 0) {
+                sessionRef.current.firstFrameAtMs = Date.now();
+                sessionRef.current.firstFrameVideoSec = sessionRef.current.videoTimeSec;
+              }
               markMoqFirstFrame(jobId, {
                 ttffMs: sessionRef.current.ttffMs,
                 videoTimeSec: sessionRef.current.videoTimeSec,
@@ -1104,8 +1121,11 @@ export default function MoqPlayer({
             }
             return;
           }
-          if (retrying || video.paused) {
+          if (retrying || userPausedRef.current) {
             // Reconnect in flight / user pause: don't count frozen time.
+            // Do NOT treat video.paused as a free pass — MSE/playa often
+            // pause after a stall, which used to disable the watchdog and
+            // hide the crash as "Playback OK" when the encode later ended.
             watchdogVt = -1;
             watchdogAtMs = Date.now();
           } else if (video.currentTime > watchdogVt + 0.2) {
@@ -1142,11 +1162,26 @@ export default function MoqPlayer({
               // decoder hitch. Restarting tears down a live CMAF session
               // and the ended-gate then reports "Playback OK" (cloud run:
               // playhead_frozen_5.95s_early_join while the encode was fine).
-              if (aheadNow >= 0.35) {
+              if (aheadNow >= 0.35 && sessionRestarts < MAX_SESSION_RESTARTS) {
+                // Buffered hole that gap-jump missed: one restart, then fail.
+                // Holding forever left a frozen picture for the rest of the
+                // encode (prod comparison 2026-08-18, vt stuck at 12.4s / 8.8s).
                 pushDiag(
                   `playhead_frozen_hold vt=${video.currentTime.toFixed(2)}s ahead=${aheadNow.toFixed(2)}s`,
                 );
+                watchdogVt = -1;
                 watchdogAtMs = Date.now();
+                scheduleSessionRestart(
+                  `playhead_frozen_${video.currentTime.toFixed(2)}s_buffered${earlyWindow ? "_early_join" : ""}`,
+                  earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
+                );
+                return;
+              } else if (aheadNow >= 0.35) {
+                watchdogGaveUp = true;
+                fail(
+                  `MoQ playback stalled at ${video.currentTime.toFixed(1)}s and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
+                );
+                return;
               } else if (sessionRestarts < MAX_SESSION_RESTARTS) {
                 watchdogVt = -1;
                 watchdogAtMs = Date.now();
@@ -1254,11 +1289,13 @@ export default function MoqPlayer({
     // Pause before the first frame sends forward:0 at the relay and the
     // live objects stop. Until then, Play only starts decode.
     if (isPlaying && sessionRef.current.firstFrame) {
+      userPausedRef.current = true;
       player.pause();
       setIsPlaying(false);
       setStatus("Paused");
       return;
     }
+    userPausedRef.current = false;
     player.play();
     setIsPlaying(true);
     setStatus("Playing");

@@ -17,7 +17,8 @@ export function encodeLooksFinished(options: {
   return options.benchmarkLoading === false;
 }
 
-function playedMostOfClip(options: {
+/** True when the playhead covered most of the published clip. */
+export function playedMostOfEncode(options: {
   videoTimeSec?: number;
   encodeDurationSec?: number;
 }): boolean {
@@ -37,7 +38,7 @@ export function isGracefulMpegTsEos(options: {
   if (!options.playedOk) {
     return false;
   }
-  return encodeLooksFinished(options) || playedMostOfClip(options);
+  return encodeLooksFinished(options) || playedMostOfEncode(options);
 }
 
 export function isGracefulMoqReset(options: {
@@ -58,7 +59,10 @@ export function isGracefulMoqReset(options: {
   if (!reset) {
     return false;
   }
-  return encodeLooksFinished(options) || playedMostOfClip(options);
+  // Job completion alone is not EOS: a mid-clip freeze sits dead until the
+  // publisher closes, then RESET_STREAM looks like success (prod comparison
+  // 2026-08-18: playhead stuck at 12s of a 60s encode, UI said Playback OK).
+  return playedMostOfEncode(options);
 }
 
 export function isGracefulWhepDisconnect(options: {
@@ -76,7 +80,7 @@ export function isGracefulWhepDisconnect(options: {
   if (state !== "failed" && state !== "disconnected" && state !== "closed") {
     return false;
   }
-  return encodeLooksFinished(options) || playedMostOfClip(options);
+  return playedMostOfEncode(options);
 }
 
 /** FastAPI and similar bodies show up as `{"detail":"..."}` in player errors. */

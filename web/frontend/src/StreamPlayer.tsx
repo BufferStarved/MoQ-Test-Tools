@@ -57,6 +57,8 @@ interface StreamPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (from -progress samples). */
   encoderLagMs?: number;
+  /** Path RTT from the latest encode/transport sample (ms). */
+  netRttMs?: number;
   /** MOQT draft the in-page publisher negotiated; ffmpeg/openmoq legs stay 16. */
   moqDraftVersion?: 16 | 18;
   /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
@@ -100,6 +102,7 @@ export function StreamPlayer({
   sourceHasAudio = true,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  netRttMs = 0,
   moqDraftVersion = 16,
   moqMediaPackaging = "cmaf",
 }: StreamPlayerProps) {
@@ -273,6 +276,7 @@ export function StreamPlayer({
               sourceHasAudio={sourceHasAudio}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              netRttMs={netRttMs}
               draftVersion={moqDraftVersion}
               mediaPackaging={moqMediaPackaging}
             />
