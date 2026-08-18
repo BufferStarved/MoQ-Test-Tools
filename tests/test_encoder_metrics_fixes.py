@@ -150,6 +150,24 @@ class TickSchedulingTests(unittest.TestCase):
         self.assertAlmostEqual(sleeps[0], 0.3, places=6)
         self.assertEqual(tick, 4)
 
+    def test_cancel_event_interrupts_sleep(self) -> None:
+        import threading
+
+        clock = FakeClock(start=1000.0)
+        cancel = threading.Event()
+        cancel.set()
+        slept = []
+
+        def fake_sleep(sec):
+            slept.append(sec)
+            clock.now += sec
+
+        tick = sleep_until_next_tick(
+            1000.0, 1, now=clock, sleep=fake_sleep, cancel_event=cancel
+        )
+        self.assertEqual(slept, [])
+        self.assertEqual(tick, 2)
+
 
 class FakeProcess:
     """Popen stand-in for _terminate_process."""

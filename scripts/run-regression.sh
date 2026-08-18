@@ -15,6 +15,7 @@ fi
 export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
 
 "$PYTHON" -m unittest \
+  tests.test_ffmpeg_sigterm_exit \
   tests.test_east_ffmpeg_regressions \
   tests.test_browser_moq_api_gates \
   tests.test_mediamtx_loopback_and_whip_audio \

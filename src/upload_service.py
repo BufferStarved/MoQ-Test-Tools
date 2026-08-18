@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -120,6 +121,42 @@ def _hls_stale_rolling_threshold_sec(target_latency_ms: int) -> float:
 _MOQ_PREVIEW_GRACE_SEC_VOD = 8.0
 _MOQ_PREVIEW_GRACE_SEC_LIVE_MIN = 8.0
 _MOQ_PREVIEW_GRACE_SEC_LIVE_MAX = 30.0
+
+# libx264 prints per-frame QP/NAL stats on SIGTERM teardown. That dump is
+# normal encoder shutdown, not a codec crash — keep it out of UI errors.
+_FFMPEG_TEARDOWN_NOISE = re.compile(
+    r"^(?:frame=\s*\d+|x264 \[info\]: frame )",
+    re.IGNORECASE,
+)
+_FFMPEG_SIGTERM_LOG = re.compile(
+    r"received signal\s+(?:15|SIGTERM)\b|Exiting normally, received signal",
+    re.IGNORECASE,
+)
+
+
+def ffmpeg_exit_is_sigterm(returncode: Optional[int], stderr: str = "") -> bool:
+    """True when ffmpeg exited because it was sent SIGTERM (signal 15).
+
+    Python reports a signaled child as ``-15``. ffmpeg itself often exits
+    255 after catching SIGTERM and printing "Exiting normally, received
+    signal 15". Bare 255 without that log is *not* treated as SIGTERM —
+    ffmpeg uses 255 for many real muxer/encoder failures.
+    """
+    if returncode is None:
+        return False
+    if returncode < 0:
+        return -returncode == signal.SIGTERM
+    if returncode == 128 + signal.SIGTERM:
+        return True
+    return bool(_FFMPEG_SIGTERM_LOG.search(stderr or ""))
+
+
+def ffmpeg_stderr_useful_detail(stderr: str, *, max_lines: int = 12) -> str:
+    """Last useful ffmpeg log lines, without x264 frame-stat teardown dumps."""
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    kept = [line for line in lines if not _FFMPEG_TEARDOWN_NOISE.match(line)]
+    chosen = kept[-max_lines:] if kept else lines[-max_lines:]
+    return " | ".join(chosen) if chosen else ""
 
 
 def moq_preview_ready_grace_sec(media_path: str, duration_sec: float) -> float:
@@ -485,6 +522,7 @@ def sleep_until_next_tick(
     *,
     now: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
+    cancel_event: Optional[threading.Event] = None,
 ) -> int:
     """Sleep until ``start_time + tick`` seconds; return the next tick index.
 
@@ -494,11 +532,18 @@ def sleep_until_next_tick(
     each iteration to ``start_time + n×1s`` samples every integer second. If
     an iteration overruns its slot, the missed seconds are skipped (never
     burst-sampled) and scheduling stays aligned to the original epoch.
+
+    When *cancel_event* is set, return as soon as Stop is requested instead
+    of sleeping out the rest of the tick (otherwise SIGTERM lands while we
+    are still in this sleep and the next poll treats exit 255 as a crash).
     """
     deadline = start_time + tick
     remaining = deadline - now()
     if remaining > 0:
-        sleep(remaining)
+        if cancel_event is not None:
+            cancel_event.wait(timeout=remaining)
+        else:
+            sleep(remaining)
         return tick + 1
     # Overran the slot: jump to the next whole-second tick still ahead.
     return max(tick + 1, int(now() - start_time) + 1)
@@ -530,10 +575,10 @@ class UploadService:
                 )
                 while True:
                     if job.is_cancelled():
-                        return UploadResult(
-                            success=False,
-                            error="Cancelled while waiting for exclusive SRT ingest access",
-                        )
+                        # Stop while queued behind another SRT job is not an
+                        # encode crash — finalize as success so the UI does
+                        # not paint a red "ffmpeg 255" / ingest failure.
+                        return UploadResult(success=True)
                     acquired = self._zixi_srt_ingest_lock.acquire(timeout=1.0)
                     if acquired:
                         break
@@ -629,6 +674,7 @@ class UploadService:
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
         sample_tick = 1
+        had_samples = False
         # Zixi tears down and recreates its RTMP push input between runs; a
         # push that lands during that window is rejected with an instant I/O
         # error (ffmpeg exit 251 within seconds — reproduced during gauntlet
@@ -645,15 +691,26 @@ class UploadService:
                     logger.info("Upload job %s cancelled by user", job.job_id)
                     break
                 if process.poll() is not None:
-                    if process.returncode == 0:
-                        # Source ended cleanly before wall-clock duration — finalize + VMAF.
-                        break
                     ran_sec = time.time() - start_time
+                    outcome = self._ffmpeg_exit_outcome(
+                        job,
+                        process,
+                        ran_sec=ran_sec,
+                        preview_ready=had_samples,
+                        had_samples=had_samples,
+                        encode_speed=(
+                            progress_reader.get_status().speed if progress_reader else 0.0
+                        ),
+                    )
+                    if outcome is None:
+                        # Clean EOF, user Stop, or SIGTERM after we asked to stop.
+                        break
                     if (
                         job.destination.protocol == "rtmp"
                         and ran_sec < _EARLY_EXIT_RETRY_WINDOW_SEC
                         and early_exit_retries < _EARLY_EXIT_MAX_RETRIES
                         and not job.is_cancelled()
+                        and "SIGTERM" not in (outcome.error or "")
                     ):
                         early_exit_retries += 1
                         logger.warning(
@@ -677,11 +734,9 @@ class UploadService:
                         start_time = time.time()
                         encode_lag_tracker = EncodeLagTracker()
                         sample_tick = 1
+                        had_samples = False
                         continue
-                    return UploadResult(
-                        success=False,
-                        error=self._ffmpeg_failure_message(process),
-                    )
+                    return outcome
 
                 status = progress_reader.get_status()
                 zixi_stats = zixi_poller.poll()
@@ -772,7 +827,10 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                sample_tick = sleep_until_next_tick(start_time, sample_tick)
+                had_samples = True
+                sample_tick = sleep_until_next_tick(
+                    start_time, sample_tick, cancel_event=job.cancel_event
+                )
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -1630,6 +1688,7 @@ class UploadService:
         encode_lag_tracker = EncodeLagTracker()
         sample_tick = 1
         manifest_url = self._managed_hls_manifest_url(job)
+        had_samples = False
         preview_ready = False
         bad_since: Optional[float] = None
         rolling_sig: Optional[tuple] = None
@@ -1642,14 +1701,18 @@ class UploadService:
                     logger.info("SRT upload job %s cancelled by user", job.job_id)
                     break
                 if ffmpeg_proc.poll() is not None:
-                    if ffmpeg_proc.returncode == 0:
-                        # Media EOF before wall-clock duration — still finalize so VMAF runs.
-                        logger.info("ffmpeg finished cleanly before duration; finalizing SRT job")
-                        break
-                    return UploadResult(
-                        success=False,
-                        error=self._ffmpeg_failure_message(ffmpeg_proc),
+                    outcome = self._ffmpeg_exit_outcome(
+                        job,
+                        ffmpeg_proc,
+                        ran_sec=time.time() - start_time,
+                        preview_ready=preview_ready,
+                        had_samples=had_samples,
+                        encode_speed=progress_reader.get_status().speed,
                     )
+                    if outcome is None:
+                        logger.info("ffmpeg finished before duration; finalizing SRT job")
+                        break
+                    return outcome
                 if srt_proc is not None and srt_proc.poll() is not None and srt_proc.returncode not in (0, None):
                     stderr = ""
                     if srt_proc.stderr:
@@ -1879,7 +1942,10 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                sample_tick = sleep_until_next_tick(start_time, sample_tick)
+                had_samples = True
+                sample_tick = sleep_until_next_tick(
+                    start_time, sample_tick, cancel_event=job.cancel_event
+                )
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -2086,6 +2152,7 @@ class UploadService:
         # signal here becomes a permanent latency floor for the viewer).
         if moqx_poller.enabled:
             moqx_poller.poll()
+        had_samples = False
         preview_ready_notified = False
         # If moqx metrics are unreachable/disabled, or the relay never shows a
         # namespace-publish success within this window, don't strand the
@@ -2105,28 +2172,51 @@ class UploadService:
                     logger.info("MoQ upload job %s cancelled by user", job.job_id)
                     break
                 if ffmpeg_proc.poll() is not None:
-                    if ffmpeg_proc.returncode == 0:
-                        logger.info("ffmpeg finished cleanly before duration; finalizing MoQ job")
-                        break
                     if ffmpeg_drain_thread is not None:
                         ffmpeg_drain_thread.join(timeout=2)
-                    return UploadResult(
-                        success=False,
-                        error=self._ffmpeg_failure_message(ffmpeg_proc, ffmpeg_log_path),
+                    outcome = self._ffmpeg_exit_outcome(
+                        job,
+                        ffmpeg_proc,
+                        log_path=ffmpeg_log_path,
+                        ran_sec=time.time() - start_time,
+                        preview_ready=preview_ready_notified,
+                        had_samples=had_samples,
+                        encode_speed=progress_reader.get_status().speed,
                     )
+                    if outcome is None:
+                        logger.info("ffmpeg finished before duration; finalizing MoQ job")
+                        break
+                    return outcome
                 if publisher_proc.poll() is not None:
                     if drain_thread is not None:
                         drain_thread.join(timeout=2)
+                    if job.is_cancelled():
+                        break
                     detail = self._tail_file(publisher_log_path) or "unknown error"
                     code = publisher_proc.returncode
+                    ffmpeg_tail = ""
+                    if ffmpeg_drain_thread is not None:
+                        ffmpeg_drain_thread.join(timeout=1)
+                    ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
+                    # Publisher stdin EOF after we already stopped ffmpeg
+                    # (duration, user Stop, or SIGTERM teardown) is graceful
+                    # EOS — not "publisher crashed".
+                    ffmpeg_code = ffmpeg_proc.poll()
+                    if (
+                        code in (0, None)
+                        and ffmpeg_code is not None
+                        and (
+                            ffmpeg_code == 0
+                            or ffmpeg_exit_is_sigterm(ffmpeg_code, ffmpeg_tail)
+                        )
+                    ):
+                        logger.info(
+                            "MoQ publisher reached EOF after ffmpeg stop; finalizing job"
+                        )
+                        break
                     # "stdin EOF before ftyp box" means the publisher never saw a
                     # usable fMP4 header — ffmpeg upstream never muxed a frame.
-                    # Surface ffmpeg's own log so this isn't a dead end (see the
-                    # 2026-08-06 incident where this printed with no other clue).
                     if "ftyp" in detail.lower() or "eof" in detail.lower():
-                        if ffmpeg_drain_thread is not None:
-                            ffmpeg_drain_thread.join(timeout=1)
-                        ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
                         if ffmpeg_tail:
                             detail += f"\nffmpeg log tail ({ffmpeg_log_path}):\n{ffmpeg_tail}"
                     if code not in (0, None):
@@ -2264,7 +2354,10 @@ class UploadService:
 
                 if on_sample:
                     on_sample(sample)
-                sample_tick = sleep_until_next_tick(start_time, sample_tick)
+                had_samples = True
+                sample_tick = sleep_until_next_tick(
+                    start_time, sample_tick, cancel_event=job.cancel_event
+                )
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
@@ -2499,7 +2592,7 @@ class UploadService:
             encoder_vmaf_error=encoder_vmaf_error,
         )
 
-    def _ffmpeg_failure_message(self, process: subprocess.Popen, log_path: str = "") -> str:
+    def _ffmpeg_stderr_text(self, process: subprocess.Popen, log_path: str = "") -> str:
         stderr = ""
         if process.stderr:
             # If a drain thread already owns this pipe (see _run_moq_pipeline),
@@ -2508,13 +2601,101 @@ class UploadService:
             stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
         if not stderr and log_path:
             stderr = self._tail_file(log_path, max_lines=40)
-        detail = "unknown error"
-        if stderr:
-            # Last line is almost always the generic "Conversion failed!" —
-            # keep the preceding encoder/muxer lines so WHIP ICE / opus / HTTP
-            # failures are actually visible in the UI.
-            lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-            detail = " | ".join(lines[-12:]) if lines else "unknown error"
+        return stderr
+
+    def _ffmpeg_exit_outcome(
+        self,
+        job: UploadJob,
+        process: subprocess.Popen,
+        *,
+        log_path: str = "",
+        ran_sec: float = 0.0,
+        preview_ready: bool = True,
+        had_samples: bool = True,
+        encode_speed: float = 0.0,
+    ) -> Optional[UploadResult]:
+        """Classify a dead ffmpeg. None = finalize as success (not a crash).
+
+        User Stop, wall-clock duration teardown, and SIGTERM after we asked
+        the process to stop must not become a red ``ffmpeg exited with code
+        255`` encode crash. Unexpected SIGTERM (we did not cancel) is still
+        a failure, but the message says so explicitly — no x264 dump.
+        """
+        if process.returncode == 0:
+            return None
+        if job.is_cancelled():
+            return None
+        stderr = self._ffmpeg_stderr_text(process, log_path)
+        if ffmpeg_exit_is_sigterm(process.returncode, stderr):
+            # Duration-end and Stop both SIGTERM from ``finally``. If the
+            # sample loop notices the death before ``is_cancelled()`` (or
+            # before the while-duration check), we still treat requested
+            # teardown as success. An unexpected kill while the job should
+            # still be running is the remaining failure case.
+            if ran_sec >= max(1.0, float(job.duration_sec) - 1.5):
+                return None
+            return UploadResult(
+                success=False,
+                error=self._unexpected_sigterm_message(
+                    job,
+                    ran_sec=ran_sec,
+                    preview_ready=preview_ready,
+                    had_samples=had_samples,
+                    encode_speed=encode_speed,
+                ),
+            )
+        return UploadResult(
+            success=False,
+            error=self._ffmpeg_failure_message(process, log_path, stderr=stderr),
+        )
+
+    def _unexpected_sigterm_message(
+        self,
+        job: UploadJob,
+        *,
+        ran_sec: float,
+        preview_ready: bool,
+        had_samples: bool,
+        encode_speed: float,
+    ) -> str:
+        protocol = (job.destination.protocol or "").lower()
+        parts = [
+            f"ffmpeg was terminated (SIGTERM) after {ran_sec:.1f}s while the "
+            f"{protocol or 'encode'} job was still running. This is a process "
+            "kill, not a codec crash."
+        ]
+        if 0 < encode_speed < 0.9:
+            parts.append(
+                f" Encode was at {encode_speed:.2f}x realtime; there is no "
+                "watchdog that kills a slow encode."
+            )
+        if not preview_ready or not had_samples:
+            if protocol in {"rtmp", "srt", "hls", "dash"}:
+                parts.append(
+                    " Ingest never produced a playable preview — RTMP/SRT "
+                    "wait for a readable segment after the encoder starts, "
+                    "and SRT may still have been queued on the shared Zixi "
+                    "input lock."
+                )
+            else:
+                parts.append(" The encoder died before the first sample or preview.")
+        return "".join(parts)
+
+    def _ffmpeg_failure_message(
+        self,
+        process: subprocess.Popen,
+        log_path: str = "",
+        *,
+        stderr: str = "",
+    ) -> str:
+        if not stderr:
+            stderr = self._ffmpeg_stderr_text(process, log_path)
+        if ffmpeg_exit_is_sigterm(process.returncode, stderr):
+            return (
+                f"ffmpeg was terminated (SIGTERM, exit {process.returncode}). "
+                "This is a process kill, not a codec crash."
+            )
+        detail = ffmpeg_stderr_useful_detail(stderr) or "unknown error"
         message = f"ffmpeg exited with code {process.returncode}: {detail}"
         if "Input/output error" in stderr and "rtmp://" in stderr.lower():
             message += (
