@@ -259,11 +259,6 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       {chartLegs.length > 0 && (
         <section className="scorecard-section session-charts-section">
-          <h4>Session charts</h4>
-          <p className="hint">
-            Same Encode/Publish, Ingest, Media Health, and Playback charts as the Benchmark tab,
-            built from the saved CSV for this session.
-          </p>
           <ComparisonCharts legs={chartLegs} minLegs={1} />
         </section>
       )}
@@ -296,6 +291,22 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                   label="Stalls"
                   value={String(avg.playback_stall_count ?? "—")}
                   tone={healthTone(avg.playback_stall_count)}
+                />
+                <ScoreCell
+                  metricKey="net_rtt_ms"
+                  label="RTT"
+                  value={formatMs(avg.net_rtt_ms || avg.transport_rtt_ms || avg.quic_rtt_ms)}
+                />
+                <ScoreCell
+                  metricKey="fps"
+                  label="Playback FPS"
+                  value={
+                    avg.playback_fps != null
+                      ? avg.playback_fps.toFixed(1)
+                      : avg.playback_frames_rendered && result.samples
+                        ? (avg.playback_frames_rendered / Math.max(1, result.samples)).toFixed(1)
+                        : "—"
+                  }
                 />
                 <ScoreCell
                   metricKey="playback_buffer_sec"

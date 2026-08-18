@@ -9,8 +9,14 @@ export interface ToastItem {
 export function useToasts() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const nextId = useRef(0);
+  const lastPush = useRef({ message: "", at: 0 });
 
   const pushToast = useCallback((message: string, tone: ToastItem["tone"] = "info") => {
+    const now = Date.now();
+    if (message === lastPush.current.message && now - lastPush.current.at < 2500) {
+      return;
+    }
+    lastPush.current = { message, at: now };
     const id = nextId.current++;
     setToasts((current) => [...current, { id, message, tone }]);
     window.setTimeout(() => {

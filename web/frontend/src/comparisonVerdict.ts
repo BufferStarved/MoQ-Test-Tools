@@ -1,5 +1,6 @@
 import { protocolLabel } from "./protocolTheme";
 import type { ResultSummary } from "./types";
+import { isPlausibleE2eMs, playbackFpsFromCounters } from "./glassLatency";
 
 export interface VerdictHighlight {
   /** Short metric name shown in the board, e.g. "Fastest join". */
@@ -90,6 +91,22 @@ function formatMs(value: number): string {
   return `${Math.round(value)} ms`;
 }
 
+function streamRtt(result: ResultSummary): number | undefined {
+  const avg = result.averages;
+  const rtt = avg.net_rtt_ms || avg.transport_rtt_ms || avg.quic_rtt_ms;
+  return finitePositive(rtt) ? rtt : undefined;
+}
+
+function streamPlaybackFps(result: ResultSummary): number | undefined {
+  if (finitePositive(result.averages.playback_fps)) {
+    return result.averages.playback_fps;
+  }
+  return playbackFpsFromCounters(
+    result.averages.playback_frames_rendered ?? 0,
+    Math.max(result.samples, result.averages.playback_video_time_sec ?? 0),
+  );
+}
+
 /**
  * Derive a short, decision-oriented verdict from a finished comparison.
  * Prefers join time, stalls, and glass-to-glass latency — the questions
@@ -136,34 +153,57 @@ export function buildComparisonVerdict(
     }
   }
 
-  // E2E latency estimates use protocol-specific formulas with different
-  // anchors/biases (Zixi wall−playhead, LL-HLS PDT, MoQ buffer-lead proxy).
-  // Crowning a cross-protocol winner on those numbers is misleading — only
-  // rank when every stream with an estimate shares one protocol; otherwise
-  // surface an explicit "not comparable" note until anchors are unified.
-  const e2eProtocols = new Set(
-    streams
-      .filter((r) => finitePositive(r.averages.e2e_latency_ms))
-      .map((r) => r.protocol),
+  // Glass delay: MoQ LOC uses CaptureTimestamp; WebRTC uses encode + RTT/2 +
+  // jitter buffer; HLS/TS uses wall − encoder playhead. Same units, same
+  // question (how late is the glass vs capture). Rank any plausible sample.
+  const e2e = pickLowest(streams, (r) =>
+    isPlausibleE2eMs(r.averages.e2e_latency_ms) ? r.averages.e2e_latency_ms : null,
   );
-  if (e2eProtocols.size > 1) {
+  if (e2e) {
+    const name = streamName(streams[e2e.index], e2e.index, labels);
     highlights.push({
-      label: "E2E latency",
-      winner: "Not comparable",
-      value: "estimates use different anchors per protocol",
+      label: "Lowest glass delay",
+      winner: name,
+      value: formatMs(e2e.value),
+      protocol: streams[e2e.index].protocol,
     });
-  } else {
-    const e2e = pickLowest(streams, (r) => r.averages.e2e_latency_ms);
-    if (e2e) {
-      const name = streamName(streams[e2e.index], e2e.index, labels);
-      highlights.push({
-        label: "Lowest E2E",
-        winner: name,
-        value: formatMs(e2e.value),
-        protocol: streams[e2e.index].protocol,
-      });
-      parts.push(`${name} lowest E2E (${formatMs(e2e.value)})`);
-    }
+    parts.push(`${name} lowest glass delay (${formatMs(e2e.value)})`);
+  }
+
+  const rtt = pickLowest(streams, streamRtt);
+  if (rtt) {
+    const name = streamName(streams[rtt.index], rtt.index, labels);
+    highlights.push({
+      label: "Lowest RTT",
+      winner: name,
+      value: formatMs(rtt.value),
+      protocol: streams[rtt.index].protocol,
+    });
+  }
+
+  const fps = pickHighest(streams, streamPlaybackFps);
+  if (fps) {
+    const name = streamName(streams[fps.index], fps.index, labels);
+    highlights.push({
+      label: "Highest playback FPS",
+      winner: name,
+      value: `${fps.value.toFixed(1)} fps`,
+      protocol: streams[fps.index].protocol,
+    });
+  }
+
+  const dropped = pickLowestOrZero(streams, (r) => r.averages.playback_frames_dropped);
+  if (dropped && highlights.length < 7) {
+    const name = streamName(streams[dropped.index], dropped.index, labels);
+    highlights.push({
+      label: "Fewest drops",
+      winner: name,
+      value:
+        dropped.value === 0
+          ? "0 dropped"
+          : `${Math.round(dropped.value)} dropped`,
+      protocol: streams[dropped.index].protocol,
+    });
   }
 
   const encoderVmaf = pickHighest(streams, (r) => r.quality?.encoder?.vmaf_score);

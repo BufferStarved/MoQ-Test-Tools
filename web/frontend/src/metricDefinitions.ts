@@ -70,12 +70,17 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   encode_lag_ms: {
     label: "Encode lag",
     description:
-      "Growth of (wall-clock − ffmpeg media out_time) past its startup baseline. The constant startup offset (process spawn, webcam warmup) is subtracted at the first encoded sample, so this reads ~0 for an encoder keeping up with realtime and only rises when the encoder falls further behind. Not a latency component — do not add it to e2e estimates.",
+      "How far the encoder is behind realtime (ms). ffmpeg: wall-clock minus media out_time after subtracting startup. Browser WebCodecs: wall since encode start minus the frame’s media timestamp. WebRTC WHIP: per-frame encode time from getStats, plus any capture-vs-encoded frame backlog.",
   },
   e2e_latency_ms: {
-    label: "E2E latency (estimated)",
+    label: "Glass delay (estimated)",
     description:
-      "Estimated glass-to-glass latency, directly comparable across protocols. Anchor: the wall instant the leg encoder spawned (media time 0). Every player computes (clock-skew-corrected wall now − anchor) − (playhead position on the encoder's media timeline) + webcam bridge lag. Media position per player: Zixi Fast HLS maps the hls.js buffer timeline via fragment sequence × duration; MoQ adds the raw CMAF join offset to the MSE playhead (webcam legs carry absolute capture wall-clock timestamps and need no anchor); MediaMTX LL-HLS uses playhead PROGRAM-DATE-TIME plus the server-measured encoder→packager transit. Validated against a burnt-in frame timer (2026-08-09). Includes intentional live buffers — this is what the viewer experiences. Distinct from TTFF.",
+      "Capture-to-glass delay in milliseconds, comparable across protocols. MoQ LOC: playa latency from LOC CaptureTimestamp (Unix-epoch µs stamped at camera capture). WebRTC: encode time + RTT/2 + jitter buffer. HLS/HTTP-TS: clock-skew-corrected wall now minus the encoder-timeline playhead. Frozen playheads are not allowed to make this climb with wall clock. Distinct from TTFF.",
+  },
+  playback_fps: {
+    label: "Playback FPS",
+    description:
+      "Decoded frames rendered per second at the browser player, from the decoded-frame counter (or playa’s canvas counter for MoQ LOC). Compare with encode FPS to see whether the player is keeping up.",
   },
   playback_error_count: {
     label: "Player errors",

@@ -116,6 +116,10 @@ async function postWhipEncodeSample(
   let bytes = 0;
   let fps = 0;
   let rttMs = 0;
+  let framesEncoded = 0;
+  let totalEncodeTime = 0;
+  let sourceFrames = 0;
+  let sourceFps = 0;
   report.forEach((stat) => {
     if (stat.type === "outbound-rtp") {
       const outbound = stat as RTCOutboundRtpStreamStats;
@@ -128,7 +132,14 @@ async function postWhipEncodeSample(
       if (sent >= bytes) {
         bytes = sent;
         fps = outbound.framesPerSecond ?? fps;
+        framesEncoded = outbound.framesEncoded ?? framesEncoded;
+        totalEncodeTime = outbound.totalEncodeTime ?? totalEncodeTime;
       }
+    }
+    if (stat.type === "media-source" && (stat as RTCMediaSourceStats).kind === "video") {
+      const source = stat as RTCVideoSourceStats;
+      sourceFrames = source.frames ?? sourceFrames;
+      sourceFps = source.framesPerSecond ?? sourceFps;
     }
     if (stat.type === "candidate-pair" && (stat as RTCIceCandidatePairStats).state === "succeeded") {
       const pair = stat as RTCIceCandidatePairStats;
@@ -154,12 +165,24 @@ async function postWhipEncodeSample(
   }
   rate.lastBytes = bytes;
   rate.lastAt = now;
+  let encodeLagMs = 0;
+  if (framesEncoded > 0 && totalEncodeTime > 0) {
+    encodeLagMs = (totalEncodeTime / framesEncoded) * 1000;
+  }
+  const fpsForBacklog = fps || sourceFps || 30;
+  if (sourceFrames > framesEncoded && fpsForBacklog > 0) {
+    encodeLagMs = Math.max(
+      encodeLagMs,
+      ((sourceFrames - framesEncoded) / fpsForBacklog) * 1000,
+    );
+  }
   await postEncodeSample(jobId, {
     elapsed_sec: elapsedSec,
     encoded_bitrate_kbps: kbps,
     fps,
     encoder_send_rate_mbps: kbps / 1000,
-    encode_lag_ms: 0,
+    encode_lag_ms: encodeLagMs,
     transport_rtt_ms: rttMs,
+    net_rtt_ms: rttMs,
   });
 }

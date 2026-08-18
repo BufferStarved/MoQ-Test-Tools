@@ -171,7 +171,7 @@ async function bindPublisherSession(args: {
     }
     const extensions = encodeLocHeaders(
       {
-        captureTimestamp: BigInt(Math.round(chunk.timestampUs)),
+        captureTimestamp: BigInt(Math.round(chunk.captureTimestampUs || Date.now() * 1000)),
         videoFrameMarking: {
           independent: chunk.isKeyframe,
           discardable: !chunk.isKeyframe,

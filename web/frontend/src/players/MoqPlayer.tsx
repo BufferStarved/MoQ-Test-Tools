@@ -20,10 +20,12 @@ import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import {
   attachHtmlPlaybackMonitors,
+  attachFrameStallMonitor,
   loadJobRebuffer,
   persistJobRebuffer,
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
+import { isPlausibleE2eMs } from "../glassLatency";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -167,6 +169,7 @@ export default function MoqPlayer({
     moqTimelineMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
+  const lastGoodE2eRef = useRef<number | undefined>(undefined);
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0 });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
@@ -194,84 +197,51 @@ export default function MoqPlayer({
   }, [jobId]);
 
   /**
-   * Capture-anchored glass-to-glass estimate (ms) — the same unified
-   * formula as the HLS/HTTP-TS players:
+   * Glass delay in ms.
    *
-   *   e2e = (server-clock now − encode anchor) − encoder-timeline playhead + bridge
+   * LOC: playa `latencyMs` from LOC CaptureTimestamp (Unix-epoch µs stamped
+   * at camera capture). wall−videoTime is forbidden here — when the canvas
+   * freezes, videoTime stops and e2e used to climb 1:1 with wall clock.
    *
-   * The MSE `<video>` clock re-zeros at join, so `video.currentTime` alone
-   * is useless here — but playa's assembler records the raw tfdt of the
-   * first appended segment (`joinMediaOffsetSec`), and `joinOffset +
-   * currentTime` IS the playhead on the encoder's timeline (tfdt starts ~0
-   * at encode start for a live encode). Wall time is skew-corrected to the
-   * API server's clock, which stamps the anchor epochs.
-   *
-   * Fallbacks, in order: playa's CaptureTimestamp latency when reported,
-   * then the old buffer-lead proxy (buffered media + decode/render pad).
-   * encode_lag_ms is deliberately NOT added: it is a baseline-subtracted
-   * "encoder falling behind" gauge, and the old raw form summed ~1.2-2.4s
-   * of one-time startup offset into every sample.
+   * CMAF: encoder-timeline playhead (join offset + MSE currentTime) vs
+   * encode epoch. Hold the last good sample if the playhead is frozen.
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
     const { bridgeMs, epoch } = lagRef.current;
     const video = videoRef.current;
 
+    if (isPlausibleE2eMs(session.playerLatencyMs)) {
+      const total = session.playerLatencyMs + bridgeMs;
+      if (isPlausibleE2eMs(total)) {
+        lastGoodE2eRef.current = Math.round(total);
+        return lastGoodE2eRef.current;
+      }
+    }
+
     if (mediaPackaging === "loc") {
-      // Playa timeupdate on canvas is playbackDuration (wall clock), not
-      // encoder media time — using it as the playhead made e2e 0. Prefer
-      // CaptureTimestamp latency when playa reports it; otherwise count
-      // rendered frames so a freeze shows up as rising latency.
-      if (session.playerLatencyMs > 10 && session.playerLatencyMs < 30_000) {
-        const total = session.playerLatencyMs + bridgeMs;
-        if (total > 0 && total < 120_000) {
-          return Math.round(total);
-        }
-      }
-      if (session.videoTimeSec > 0.05 && epoch > 0) {
-        const total =
-          Date.now() + clockSkewMs() - epoch * 1000 - session.videoTimeSec * 1000 + bridgeMs;
-        if (total > 0 && total < 120_000) {
-          return Math.round(total);
-        }
-      }
+      return lastGoodE2eRef.current;
     }
 
     const joinOffsetSec = playerRef.current?.joinMediaOffsetSec ?? null;
     if (joinOffsetSec != null && video && video.currentTime > 0.05) {
-      // joinOffset + currentTime is the playhead on the encoder's media
-      // timeline (raw CMAF tfdt at join + MSE progress). Validated exact vs a
-      // burnt-in timer 2026-08-09 (56.81 computed vs 56.70 on the glass).
       const mediaPosSec = joinOffsetSec + video.currentTime;
       if (mediaPosSec > 1e6) {
-        // Live webcam legs mux with -use_wallclock_as_timestamps: tfdt IS the
-        // capture wall epoch (at the leg encoder's demux), so no anchor is
-        // needed at all — difference against the (skew-corrected) wall clock.
         const total = Date.now() + clockSkewMs() - mediaPosSec * 1000 + bridgeMs;
-        if (total > 0 && total < 120_000) {
-          return Math.round(total);
+        if (isPlausibleE2eMs(total)) {
+          lastGoodE2eRef.current = Math.round(total);
+          return lastGoodE2eRef.current;
         }
       } else if (epoch > 0) {
         const total = Date.now() + clockSkewMs() - epoch * 1000 - mediaPosSec * 1000 + bridgeMs;
-        if (total > 0 && total < 120_000) {
-          return Math.round(total);
+        if (isPlausibleE2eMs(total)) {
+          lastGoodE2eRef.current = Math.round(total);
+          return lastGoodE2eRef.current;
         }
       }
     }
 
-    if (session.playerLatencyMs > 0) {
-      const total = session.playerLatencyMs + bridgeMs;
-      return total > 0 && total < 120_000 ? Math.round(total) : undefined;
-    }
-    if (!session.firstFrame) {
-      return undefined;
-    }
-    const bufferMs = bufferedAheadSec(videoRef.current) * 1000;
-    if (bufferMs <= 0) {
-      return undefined;
-    }
-    const total = bufferMs + 250 + bridgeMs;
-    return total > 0 && total < 120_000 ? Math.round(total) : undefined;
+    return lastGoodE2eRef.current;
   }
 
   const getPlaybackSnapshot = useCallback(
@@ -402,9 +372,15 @@ export default function MoqPlayer({
     // LOC has no MSE <video> clock. The frozen-playhead monitor on a hidden
     // element counted a stall every ~800ms and the watchdog resubscribed —
     // that read as extreme chop, not as a bandwidth problem.
+    lastGoodE2eRef.current = undefined;
     const detachHtmlMonitors =
       mediaPackaging === "loc"
-        ? () => undefined
+        ? attachFrameStallMonitor({
+            rebuffer: rebufferRef.current,
+            getFrames: () => sessionRef.current.framesRendered,
+            hasPlayedOnce: () =>
+              sessionRef.current.firstFrame || sessionRef.current.ttffMs > 0,
+          })
         : attachHtmlPlaybackMonitors(video, {
             rebuffer: rebufferRef.current,
             hasPlayedOnce: () =>

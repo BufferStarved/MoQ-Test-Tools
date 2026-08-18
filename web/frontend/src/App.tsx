@@ -281,6 +281,7 @@ function App() {
   const [sessionFromHistory, setSessionFromHistory] = useState(false);
   const [sessionHistoryRefreshToken, setSessionHistoryRefreshToken] = useState(0);
   const { toasts, pushToast } = useToasts();
+  const comparisonFinishedRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
@@ -703,8 +704,8 @@ function App() {
     if (mediaSource === "browser_moq") {
       setVmafUnavailableReason(
         anyIngestVmafAvailable
-          ? "Ingest-only: scores the relay recording against this browser’s encoded bitstream. Encoder VMAF does not apply (WebCodecs has no ffmpeg capture)."
-          : "Ingest VMAF needs a managed MoQ relay with a recorder.",
+          ? "Computes video quality after encode and at the ingest server. Does not apply to WebRTC."
+          : "Ingest VMAF needs a managed MoQ relay with a recorder. Does not apply to WebRTC.",
       );
       return;
     }
@@ -977,7 +978,9 @@ function App() {
               completedAtMs,
             };
           });
-          if (next.every((leg) => isEncodeFinished(leg.job))) {
+          const allEncoded = next.every((leg) => isEncodeFinished(leg.job));
+          const wasAllEncoded = current.every((leg) => isEncodeFinished(leg.job));
+          if (allEncoded && !wasAllEncoded) {
             onAllFinished?.();
           }
           if (
@@ -1025,6 +1028,7 @@ function App() {
   async function handleStart() {
     setError(null);
     setComparisonLegs([]);
+    comparisonFinishedRef.current = false;
     setSessionMetrics([]);
     setSessionMetricLabels([]);
     setSelectedSessionKey(null);
@@ -1220,6 +1224,10 @@ function App() {
       pushToast(`Started comparison — ${startEndpoints.length} streams`, "info");
 
       const finish = () => {
+        if (comparisonFinishedRef.current) {
+          return;
+        }
+        comparisonFinishedRef.current = true;
         setLoading(false);
         pushToast("Comparison finished", "success");
         if (mediaSource === "webcam") {
@@ -1422,13 +1430,13 @@ function App() {
                         />
                         <span>
                           {mediaSource === "browser_moq"
-                            ? "VMAF / PSNR / SSIM after ingest (MoQ recorder)"
+                            ? "VMAF / PSNR / SSIM after encode and at ingest (not WebRTC)"
                             : "VMAF / PSNR / SSIM at encode and after ingest"}
                         </span>
                       </label>
                       <span className="field-hint">
                         {vmafUnavailableReason ??
-                          "Encoder scores every file publish except WHIP. Ingest scores need a Zixi or MoQ recorder — MediaMTX cannot."}
+                          "Encoder scores every file publish except WHIP. Ingest scores need a Zixi or MoQ recorder. WebRTC is not scored."}
                       </span>
                     </div>
                   </div>

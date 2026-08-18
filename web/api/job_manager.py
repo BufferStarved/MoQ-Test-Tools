@@ -19,7 +19,7 @@ from remote_vmaf import (
 )
 from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
-from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback
+from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback, robust_e2e_stats
 from encode_profile import encode_profile_summary
 from moq_publish import is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
@@ -163,6 +163,7 @@ class JobManager:
         self._jobs: Dict[str, UploadJobRecord] = {}
         self._lock = threading.Lock()
         self._service = UploadService()
+        self._path_probes: Dict[str, object] = {}
 
     def create_job(
         self,
@@ -715,7 +716,20 @@ class JobManager:
             "encode_lag_ms": float(sample.get("encode_lag_ms") or 0),
             "transport_rtt_ms": float(sample.get("transport_rtt_ms") or 0),
             "net_rtt_ms": float(sample.get("transport_rtt_ms") or sample.get("net_rtt_ms") or 0),
+            "net_jitter_ms": float(sample.get("net_jitter_ms") or 0),
         }
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if not record or record.publisher_host != "browser":
+                return False
+            protocol = record.protocol
+            endpoint_url = record.endpoint_url
+        if float(payload["net_rtt_ms"] or 0) <= 0 and (protocol or "").lower() == "moq":
+            rtt_ms, jitter_ms = self._browser_moq_path_rtt(job_id, endpoint_url)
+            if rtt_ms > 0:
+                payload["transport_rtt_ms"] = rtt_ms
+                payload["net_rtt_ms"] = rtt_ms
+                payload["net_jitter_ms"] = jitter_ms
         with self._lock:
             record = self._jobs.get(job_id)
             if not record or record.publisher_host != "browser":
@@ -731,6 +745,27 @@ class JobManager:
             self._apply_playback_fields(payload, record.playback_samples)
             record.samples.append(payload)
         return True
+
+    def _browser_moq_path_rtt(self, job_id: str, endpoint_url: str) -> tuple:
+        """TCP connect RTT to the relay admin port (same probe ffmpeg MoQ uses)."""
+        with self._lock:
+            probe = self._path_probes.get(job_id)
+            if probe is None:
+                try:
+                    from path_rtt import PathRttProbe
+
+                    probe = PathRttProbe(endpoint_url)
+                    self._path_probes[job_id] = probe
+                except Exception:
+                    return (0.0, 0.0)
+        try:
+            snap = probe.poll()  # type: ignore[union-attr]
+        except Exception:
+            return (0.0, 0.0)
+        return (
+            float(getattr(snap, "rtt_ms", 0) or 0),
+            float(getattr(snap, "jitter_ms", 0) or 0),
+        )
 
     def mark_browser_publisher_ready(self, job_id: str) -> bool:
         with self._lock:
@@ -835,6 +870,7 @@ class JobManager:
                     "encode_lag_ms",
                     "transport_rtt_ms",
                     "net_rtt_ms",
+                    "net_jitter_ms",
                     *PLAYBACK_FIELD_NAMES,
                 ):
                     if key in CSV_COLUMNS:
@@ -1123,9 +1159,10 @@ def read_result_summary(csv_path: str) -> dict:
         for r in rows
         if r.get("e2e_latency_ms") not in (None, "", "0", "0.0")
     ]
-    if e2e_values:
-        averages["e2e_latency_ms"] = round(sum(e2e_values) / len(e2e_values), 1)
-        averages["e2e_latency_max_ms"] = round(max(e2e_values), 1)
+    e2e_stats = robust_e2e_stats(e2e_values)
+    if e2e_stats:
+        averages["e2e_latency_ms"] = round(e2e_stats["avg"], 1)
+        averages["e2e_latency_max_ms"] = round(e2e_stats["max"], 1)
 
     vmaf_values = [float(r["vmaf_score"]) for r in rows if r.get("vmaf_score")]
     if vmaf_values:

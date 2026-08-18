@@ -186,6 +186,7 @@ export function postEncodeSample(
     encoder_send_rate_mbps?: number;
     encode_lag_ms?: number;
     transport_rtt_ms?: number;
+    net_rtt_ms?: number;
     progress?: string;
   },
 ): Promise<{ ok: boolean }> {

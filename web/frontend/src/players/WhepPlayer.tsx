@@ -11,7 +11,7 @@ import {
   persistJobRebuffer,
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
-import { proxiedWebrtcSignalingUrl } from "../webrtcSignaling";
+import { isPlausibleE2eMs, pathDelayMs } from "../glassLatency";
 
 interface WhepPlayerProps {
   url: string;
@@ -24,14 +24,16 @@ interface WhepPlayerProps {
   encoderLagMs?: number;
 }
 
+const whepJitterState = new WeakMap<RTCPeerConnection, { delay: number; emitted: number }>();
+
 /**
- * Estimate viewer-side latency from WebRTC getStats (jitter buffer + RTT/2).
- * Capture→encode is added via bridge + encoder lag when provided. Absolute
- * glass-to-glass without capture timestamps is not available on WHEP.
+ * Viewer-side delay from WebRTC getStats: encode is added by the caller.
+ * Prefer the latest jitter-buffer interval over the lifetime average so a
+ * stall does not get smoothed into a fake ~30 ms glass time.
  */
 async function whepViewerLatencyMs(
   pc: RTCPeerConnection | null | undefined,
-): Promise<number | null> {
+): Promise<{ jitterBufferMs: number; rttMs: number } | null> {
   if (!pc) {
     return null;
   }
@@ -41,10 +43,19 @@ async function whepViewerLatencyMs(
     let rttMs = 0;
     report.forEach((stat) => {
       if (stat.type === "inbound-rtp" && stat.kind === "video") {
-        const delay = (stat as RTCInboundRtpStreamStats).jitterBufferDelay;
-        const emitted = (stat as RTCInboundRtpStreamStats).jitterBufferEmittedCount;
+        const inbound = stat as RTCInboundRtpStreamStats;
+        const delay = inbound.jitterBufferDelay;
+        const emitted = inbound.jitterBufferEmittedCount;
         if (typeof delay === "number" && typeof emitted === "number" && emitted > 0) {
-          jitterBufferMs = (delay / emitted) * 1000;
+          const prev = whepJitterState.get(pc);
+          const dDelay = prev ? delay - prev.delay : delay;
+          const dEmitted = prev ? emitted - prev.emitted : emitted;
+          whepJitterState.set(pc, { delay, emitted });
+          if (dEmitted > 0) {
+            jitterBufferMs = (dDelay / dEmitted) * 1000;
+          } else {
+            jitterBufferMs = (delay / emitted) * 1000;
+          }
         }
       }
       if (stat.type === "candidate-pair" && (stat as RTCIceCandidatePairStats).state === "succeeded") {
@@ -54,8 +65,7 @@ async function whepViewerLatencyMs(
         }
       }
     });
-    const total = jitterBufferMs + rttMs / 2;
-    return total > 0 && total < 60_000 ? total : null;
+    return { jitterBufferMs, rttMs };
   } catch {
     return null;
   }
@@ -84,6 +94,7 @@ export default function WhepPlayer({
     errorCount: 0,
     viewerLatencyMs: 0,
     bitrateBps: 0,
+    rttMs: 0,
   });
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0 });
   lagRef.current = { bridgeMs: bridgeLagMs, encoderMs: encoderLagMs };
@@ -92,11 +103,11 @@ export default function WhepPlayer({
     const frames = readVideoFrameStats(videoRef.current);
     persistJobRebuffer(jobId, rebufferRef.current);
     const { bridgeMs, encoderMs } = lagRef.current;
-    const viewer = sessionRef.current.viewerLatencyMs;
-    const e2e =
-      viewer > 0
-        ? Math.round(viewer + bridgeMs + Math.max(0, encoderMs))
-        : undefined;
+    const e2e = pathDelayMs({
+      encodeLagMs: encoderMs,
+      rttMs: sessionRef.current.rttMs,
+      playerBufferMs: sessionRef.current.viewerLatencyMs + bridgeMs,
+    });
     return {
       playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
       playback_stall_count: rebufferRef.current.stallCount,
@@ -111,7 +122,7 @@ export default function WhepPlayer({
       playback_video_time_sec: sessionRef.current.maxVideoTime,
       playback_buffer_sec: bufferedAheadSec(videoRef.current),
       playback_rebuffer_sec: rebufferRef.current.totalSec,
-      e2e_latency_ms: e2e && e2e > 0 && e2e < 120_000 ? e2e : undefined,
+      e2e_latency_ms: e2e && isPlausibleE2eMs(e2e) ? e2e : undefined,
     };
   }, [jobId]);
 
@@ -151,6 +162,7 @@ export default function WhepPlayer({
       errorCount: 0,
       viewerLatencyMs: 0,
       bitrateBps: 0,
+      rttMs: 0,
     };
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
@@ -227,9 +239,12 @@ export default function WhepPlayer({
         }
         statsTimer = window.setInterval(() => {
           peekPc();
-          void whepViewerLatencyMs(pcRef.current).then((ms) => {
-            if (ms != null && !destroyed) {
-              sessionRef.current.viewerLatencyMs = ms;
+          void whepViewerLatencyMs(pcRef.current).then((sample) => {
+            if (sample != null && !destroyed) {
+              sessionRef.current.viewerLatencyMs = sample.jitterBufferMs;
+              if (sample.rttMs > 0) {
+                sessionRef.current.rttMs = sample.rttMs;
+              }
             }
           });
           const pc = pcRef.current;

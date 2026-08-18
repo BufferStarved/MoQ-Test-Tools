@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from metrics import CSV_COLUMNS  # noqa: E402
-from playback_metrics import merge_playback_into_csv  # noqa: E402
+from playback_metrics import merge_playback_into_csv, robust_e2e_stats  # noqa: E402
 
 
 def _write_csv(path: str, count: int, base_ts: float = 1000.0) -> None:
@@ -64,6 +64,17 @@ class PlaybackMergeTests(unittest.TestCase):
         self.assertEqual(rows[2]["e2e_latency_ms"], "0")
         self.assertEqual(rows[3]["e2e_latency_ms"], "900")
         self.assertEqual(rows[4]["e2e_latency_ms"], "900")
+
+
+class RobustE2eTests(unittest.TestCase):
+    def test_trims_freeze_runaway(self):
+        stats = robust_e2e_stats([0, 2900, 3100, 3300, 16000, 17000])
+        self.assertIsNotNone(stats)
+        self.assertLess(stats["avg"], 4000)
+        self.assertEqual(stats["max"], 3300)
+
+    def test_rejects_media_timeline_as_unix_epoch(self):
+        self.assertIsNone(robust_e2e_stats([0, 0, 3, 5]))
 
 
 if __name__ == "__main__":

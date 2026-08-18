@@ -135,6 +135,53 @@ export function attachHtmlPlaybackMonitors(
   };
 }
 
+/**
+ * Stall detector for canvas / LOC players where `<video>.currentTime` does
+ * not advance. Counts a freeze when decoded-frame counters stop increasing.
+ */
+export function attachFrameStallMonitor(options: {
+  rebuffer: RebufferTracker;
+  getFrames: () => number;
+  hasPlayedOnce: () => boolean;
+  frozenPollMs?: number;
+  frozenStuckMs?: number;
+}): () => void {
+  const {
+    rebuffer,
+    getFrames,
+    hasPlayedOnce,
+    frozenPollMs = 250,
+    frozenStuckMs = 800,
+  } = options;
+  let lastFrames = getFrames();
+  let stuckSinceMs = 0;
+  const timer = window.setInterval(() => {
+    if (!hasPlayedOnce()) {
+      lastFrames = getFrames();
+      stuckSinceMs = 0;
+      return;
+    }
+    const frames = getFrames();
+    if (frames > lastFrames) {
+      lastFrames = frames;
+      stuckSinceMs = 0;
+      rebuffer.endWait();
+      return;
+    }
+    if (stuckSinceMs <= 0) {
+      stuckSinceMs = Date.now();
+      return;
+    }
+    if (Date.now() - stuckSinceMs >= frozenStuckMs) {
+      rebuffer.beginWait(true);
+    }
+  }, frozenPollMs);
+  return () => {
+    window.clearInterval(timer);
+    rebuffer.endWait();
+  };
+}
+
 /** Per-job cumulative rebuffer so player remounts don't wipe stall history. */
 const jobRebufferAccum = new Map<
   string,

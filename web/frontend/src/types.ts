@@ -191,6 +191,7 @@ export interface ResultSummary {
     speed: number;
     encode_lag_ms?: number;
     transport_rtt_ms?: number;
+    net_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
     pkt_rcv_drop?: number;
     pkt_snd_drop?: number;
@@ -225,6 +226,7 @@ export interface ResultSummary {
     playback_stall_count?: number;
     playback_frames_rendered?: number;
     playback_frames_dropped?: number;
+    playback_fps?: number;
     playback_bitrate_bps?: number;
     playback_ttff_ms?: number;
     playback_hls_errors?: number;

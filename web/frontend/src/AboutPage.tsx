@@ -33,6 +33,7 @@ const ABOUT_METRIC_KEYS = [
   "e2e_latency_ms",
   "playback_ttff_ms",
   "playback_stall_count",
+  "playback_fps",
   "playback_buffer_sec",
   "playback_rebuffer_sec",
   "playback_frames_dropped",
@@ -309,10 +310,10 @@ export function AboutPage() {
             WebTransport-capable browser (Chrome / Edge).
           </li>
           <li>
-            Estimated E2E latency is capture-anchored per player: Zixi HTTP-TS/HLS uses wall clock
-            minus encode-anchored playhead; MediaMTX LL-HLS uses PDT + encode lag; MoQ uses buffer
-            lead (MSE <code>currentTime</code> is join-relative — not glass-to-glass). TTFF stays a
-            separate join metric.
+            Glass delay is comparable across protocols: MoQ LOC uses CaptureTimestamp at camera
+            capture; WebRTC uses encode time + RTT/2 + jitter buffer; HLS/HTTP-TS uses wall clock
+            minus the encoder-timeline playhead. Frozen playheads no longer inflate the series.
+            TTFF stays a separate join metric.
           </li>
           <li>
             Every publish encode burns an <code>ENC …Z</code> UTC clock into the video via ffmpeg{" "}

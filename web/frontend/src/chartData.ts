@@ -98,6 +98,7 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "playback_buffer_sec", label: "Buffer size", color: "#a78bfa", unit: "s" },
       { key: "playback_bitrate_bps", label: "Playback bitrate", color: "#38bdf8", unit: "bps" },
       { key: "playback_frames_rendered", label: "Frames rendered", color: "#4ade80", unit: "frames" },
+      { key: "playback_fps", label: "Playback FPS", color: "#86efac", unit: "fps" },
       { key: "playback_frames_dropped", label: "Frames dropped", color: "#fb923c", unit: "frames" },
       { key: "playback_error_count", label: "Player errors", color: "#ef4444", unit: "count" },
       { key: "playback_video_time_sec", label: "Video time", color: "#c084fc", unit: "s" },
@@ -139,7 +140,7 @@ export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] 
 
   const firstTimestamp = parseNumber(rows[0].timestamp);
 
-  return rows.map((row, index) => {
+  const points = rows.map((row, index) => {
     const timestamp = parseNumber(row.timestamp);
     const second =
       firstTimestamp > 0 && timestamp > 0
@@ -223,6 +224,16 @@ export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] 
       psnr_db_ingest: 0,
       ssim_ingest: 0,
     };
+  });
+  let prevFrames = 0;
+  let prevSecond = 0;
+  return points.map((point, index) => {
+    const dt = Math.max(1, point.second - prevSecond);
+    const playbackFps =
+      index === 0 ? 0 : Math.max(0, (point.playback_frames_rendered - prevFrames) / dt);
+    prevFrames = point.playback_frames_rendered;
+    prevSecond = point.second;
+    return { ...point, playback_fps: playbackFps };
   });
 }
 
@@ -669,6 +680,7 @@ const COMPARISON_METRIC_KEYS = [
   "quic_packets_lost",
   "playback_stall_count",
   "playback_frames_rendered",
+  "playback_fps",
   "playback_frames_dropped",
   "playback_bitrate_bps",
   "playback_ttff_ms",
@@ -848,6 +860,7 @@ export function comparisonVisibleGroups(
   }
   if (
     comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||
+    comparisonHasMetric(points, "playback_fps", legs.length) ||
     comparisonHasMetricPresent(points, "playback_stall_count", legs.length) ||
     comparisonHasMetric(points, "playback_ttff_ms", legs.length) ||
     comparisonHasMetric(points, "playback_video_time_sec", legs.length)

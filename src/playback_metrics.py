@@ -137,6 +137,12 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
         if key not in rows[0]:
             continue
         values = [float(row.get(key, 0) or 0) for row in rows]
+        if key == "e2e_latency_ms":
+            stats = robust_e2e_stats(values)
+            if stats:
+                averages[key] = round(stats["avg"], 3)
+                averages["e2e_latency_max_ms"] = round(stats["max"], 3)
+            continue
         if any(value > 0 for value in values):
             averages[key] = round(sum(values) / count, 3)
 
@@ -153,7 +159,39 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
         if rebuffer_sec > 0:
             averages["playback_rebuffer_sec"] = rebuffer_sec
 
+    frames = float(rows[-1].get("playback_frames_rendered", 0) or 0)
+    if frames > 0 and count > 0:
+        averages["playback_fps"] = round(frames / count, 2)
+
     return averages
+
+
+E2E_MIN_MS = 8.0
+E2E_MAX_MS = 30_000.0
+
+
+def robust_e2e_stats(values: List[float]) -> Optional[Dict[str, float]]:
+    """Drop zeros / freeze runaways (values > 3× median), then average the rest."""
+    filtered = sorted(
+        value
+        for value in values
+        if isinstance(value, (int, float)) and E2E_MIN_MS <= float(value) < E2E_MAX_MS
+    )
+    if not filtered:
+        return None
+    mid = len(filtered) // 2
+    median = (
+        float(filtered[mid])
+        if len(filtered) % 2 == 1
+        else (float(filtered[mid - 1]) + float(filtered[mid])) / 2.0
+    )
+    cap = max(median * 3.0, 5000.0)
+    healthy = [value for value in filtered if value <= cap]
+    pool = healthy or filtered
+    return {
+        "avg": sum(pool) / len(pool),
+        "max": pool[-1],
+    }
 
 
 def patch_summary_with_playback(

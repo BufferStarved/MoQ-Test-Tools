@@ -20,6 +20,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_mediamtx_loopback_and_whip_audio \
   tests.test_mediamtx_stats \
   tests.test_job_manager_preview_gate \
+  tests.test_playback_merge \
   tests.test_cloud_placement \
   tests.test_encoder_metrics_fixes \
   -q

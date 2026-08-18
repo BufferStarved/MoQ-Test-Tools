@@ -11,6 +11,8 @@ export interface BrowserVideoChunk {
   data: Uint8Array;
   isKeyframe: boolean;
   timestampUs: number;
+  /** Unix-epoch microseconds at camera capture — LOC CaptureTimestamp. */
+  captureTimestampUs: number;
   description?: Uint8Array;
 }
 
@@ -65,6 +67,8 @@ export function createBrowserVideoEncoder(
   let framesWindow = 0;
   let windowStarted = 0;
   let lastFrameAt = 0;
+  let lastEncodeLagMs = 0;
+  const pendingCaptureUs: number[] = [];
   let sampleTimer: number | null = null;
   let frameCount = 0;
   let forceKeyframe = true;
@@ -88,10 +92,16 @@ export function createBrowserVideoEncoder(
         }
         const key = forceKeyframe || frameCount % KEYFRAME_INTERVAL === 0;
         forceKeyframe = false;
+        pendingCaptureUs.push(Math.round(Date.now() * 1000));
         encoder.encode(frame, { keyFrame: key });
         frameCount += 1;
         framesWindow += 1;
         lastFrameAt = performance.now();
+        const mediaMs = frame.timestamp / 1000;
+        const wallMs = lastFrameAt - startedAt;
+        if (startedAt > 0 && mediaMs >= 0) {
+          lastEncodeLagMs = Math.max(0, wallMs - mediaMs);
+        }
       } finally {
         frame.close();
       }
@@ -119,9 +129,8 @@ export function createBrowserVideoEncoder(
           onChunk({
             data,
             isKeyframe: chunk.type === "key",
-            // WebCodecs media timeline (µs). Playa render is relative to the
-            // first frame; Unix-epoch stamps are not required for decode.
             timestampUs: chunk.timestamp,
+            captureTimestampUs: pendingCaptureUs.shift() ?? Math.round(Date.now() * 1000),
             description,
           });
         },
@@ -154,7 +163,7 @@ export function createBrowserVideoEncoder(
           elapsedSec: Math.max(0, Math.round((now - startedAt) / 1000)),
           encodedBitrateKbps: (bytesWindow * 8) / windowSec / 1000,
           fps: framesWindow / windowSec,
-          encodeLagMs: lastFrameAt ? Math.max(0, now - lastFrameAt) : 0,
+          encodeLagMs: lastEncodeLagMs,
         });
         bytesWindow = 0;
         framesWindow = 0;
