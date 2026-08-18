@@ -178,15 +178,13 @@ export function playbackModeBlockedReason(
   return undefined;
 }
 
-/** Compatible players plus greyed-out blocked options (so Fast HLS stays visible but unusable). */
+/** Compatible players only — unsupported modes are omitted, not greyed out. */
 export function playbackModesForSelection(
   protocol: string,
   ingestEndpointId?: string,
 ): typeof PLAYBACK_MODE_OPTIONS {
-  return PLAYBACK_MODE_OPTIONS.filter(
-    (item) =>
-      isPlaybackModeCompatible(item.id, protocol, ingestEndpointId) ||
-      Boolean(playbackModeBlockedReason(item.id, protocol, ingestEndpointId)),
+  return PLAYBACK_MODE_OPTIONS.filter((item) =>
+    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId),
   );
 }
 
@@ -686,8 +684,19 @@ export function proxiedPlaybackUrl(remoteUrl: string): string {
   return `/api/playback/fetch?url=${encodeURIComponent(remoteUrl)}`;
 }
 
-export function showWhepUrlField(mode: PlaybackMode | undefined, _protocol?: string): boolean {
-  return mode === "whep";
+export function showWhepUrlField(
+  mode: PlaybackMode | undefined,
+  _protocol?: string,
+  ingestEndpointId?: string,
+): boolean {
+  if (mode !== "whep") {
+    return false;
+  }
+  // Managed MediaMTX already has a derived WHEP URL — don't let a paste override it.
+  if (ingestEndpointId && isMediaMtxManaged(ingestEndpointId)) {
+    return false;
+  }
+  return true;
 }
 
 export function showMoqUrlFields(

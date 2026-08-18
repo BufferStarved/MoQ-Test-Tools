@@ -80,11 +80,20 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
 ];
 
+/**
+ * Hosts that must never appear in a web recipe. us-central1 Zixi
+ * (`35.222.33.58`) is unreachable from the cloud encoder; keep the preset
+ * in the API for scripts, but do not let the UI target it. Use east/Linode
+ * Zixi or a Custom URL instead.
+ */
+export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set(["gcp_zixi"]);
+
 /** Static list (legacy). Prefer `ingestEndpointsFromPresets` when presets are loaded. */
 export const INGEST_ENDPOINTS: IngestEndpointOption[] = INGEST_ENDPOINT_DEFS.map((item) => ({
   ...item,
   available:
-    item.id === "custom" || item.id.startsWith("gcp_"),
+    item.id === "custom" ||
+    (!RECIPE_HIDDEN_INGEST_IDS.has(item.id) && item.id.startsWith("gcp_")),
 }));
 
 const ENDPOINT_PROVIDER: Record<IngestEndpointId, string | ""> = {
@@ -164,6 +173,9 @@ function regionLabelForProvider(presets: Preset[], ingestPrefix: string): string
 }
 
 function endpointAvailable(endpointId: IngestEndpointId, presets: Preset[]): boolean {
+  if (RECIPE_HIDDEN_INGEST_IDS.has(endpointId)) {
+    return false;
+  }
   if (endpointId === "custom") {
     return true;
   }
@@ -189,6 +201,9 @@ export function isIngestEndpointIdAvailable(
   protocol: string,
   presets: Preset[],
 ): boolean {
+  if (RECIPE_HIDDEN_INGEST_IDS.has(ingestEndpointId)) {
+    return false;
+  }
   if (isCustomIngestEndpoint(ingestEndpointId)) {
     return true;
   }
@@ -346,13 +361,26 @@ export function defaultIngestForProtocol(
   host: CloudEncodeHostId = "gcp",
 ): IngestEndpointId {
   const prefix = ingestPrefixForCloudHost(host);
-  if (protocol === "moq") {
-    return `${prefix}_moq_relay` as IngestEndpointId;
+  const preferred: IngestEndpointId =
+    protocol === "moq"
+      ? (`${prefix}_moq_relay` as IngestEndpointId)
+      : protocol === "srt" || protocol === "webrtc"
+        ? (`${prefix}_mediamtx` as IngestEndpointId)
+        : (`${prefix}_zixi` as IngestEndpointId);
+  if (!RECIPE_HIDDEN_INGEST_IDS.has(preferred)) {
+    return preferred;
   }
-  if (protocol === "srt" || protocol === "webrtc") {
-    return `${prefix}_mediamtx` as IngestEndpointId;
+  const role = ingestRole(preferred);
+  if (!role) {
+    return preferred;
   }
-  return `${prefix}_zixi` as IngestEndpointId;
+  for (const fallback of ["gcp_east", "linode", "gcp"] as CloudEncodeHostId[]) {
+    const candidate = `${ingestPrefixForCloudHost(fallback)}_${role}` as IngestEndpointId;
+    if (!RECIPE_HIDDEN_INGEST_IDS.has(candidate)) {
+      return candidate;
+    }
+  }
+  return preferred;
 }
 
 /** Host options that make sense for the selected upload protocol. */
@@ -364,17 +392,25 @@ export function ingestEndpointsForProtocol(protocol: string, presets: Preset[] =
       : protocol === "webrtc"
         ? options.filter((item) => item.id.endsWith("_mediamtx") || item.id === "custom")
         : options.filter((item) => !item.id.endsWith("_moq_relay"));
-  // Hide unconfigured / roadmap hosts (AWS, etc.) instead of greying them out.
-  return forProtocol.filter((item) => item.available || item.id === "custom");
+  // Hide unconfigured / roadmap / broken hosts instead of greying them out.
+  return forProtocol.filter((item) => {
+    if (RECIPE_HIDDEN_INGEST_IDS.has(item.id)) {
+      return false;
+    }
+    if (item.id === "custom") {
+      return true;
+    }
+    if (!item.available) {
+      return false;
+    }
+    return isIngestEndpointIdAvailable(item.id, protocol, presets);
+  });
 }
 
 function browserPublishIngestId(endpoint: {
   protocol: string;
   ingestEndpointId: string;
 }): IngestEndpointId {
-  if (isCustomIngestEndpoint(endpoint.ingestEndpointId) && (endpoint.protocol === "moq" || endpoint.protocol === "webrtc")) {
-    return "custom";
-  }
   if (endpoint.protocol === "webrtc") {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
   }

@@ -86,7 +86,7 @@ class MoqxStatsPoller:
 
         try:
             request = urllib.request.Request(self._metrics_url)
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with urllib.request.urlopen(request, timeout=0.8) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             logger.debug("moqx relay stats unavailable at %s: %s", self._metrics_url, exc)
@@ -100,6 +100,8 @@ class MoqxStatsPoller:
                 quic_packets_sent=self._latest.quic_packets_sent,
                 quic_bytes_written=self._latest.quic_bytes_written,
                 publish_namespace_success=self._latest.publish_namespace_success,
+                subscribe_success=self._latest.subscribe_success,
+                subscribe_error=self._latest.subscribe_error,
             )
         return self._latest
 
@@ -123,9 +125,11 @@ class MoqxStatsPoller:
         if base is None:
             return current
         return MoqxStatsSnapshot(
-            subscribe_success=current.subscribe_success,
-            subscribe_error=current.subscribe_error,
-            publish_namespace_success=current.publish_namespace_success,
+            subscribe_success=max(0, current.subscribe_success - base.subscribe_success),
+            subscribe_error=max(0, current.subscribe_error - base.subscribe_error),
+            publish_namespace_success=max(
+                0, current.publish_namespace_success - base.publish_namespace_success
+            ),
             publish_received=current.publish_received,
             publish_done=current.publish_done,
             quic_packets_sent=max(0, current.quic_packets_sent - base.quic_packets_sent),
@@ -187,3 +191,5 @@ class MoqxBaseline:
     quic_packets_sent: int = 0
     quic_bytes_written: int = 0
     publish_namespace_success: int = 0
+    subscribe_success: int = 0
+    subscribe_error: int = 0

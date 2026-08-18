@@ -130,10 +130,17 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         packager:
           result.protocol.toLowerCase() === "moq"
             ? "Objects"
-            : result.summary_extra?.hls_segment_sec
-              ? `HLS ${result.summary_extra.hls_segment_sec}s`
-              : "Packager",
-        player: result.protocol.toLowerCase() === "moq" ? "MoQ" : "HLS",
+            : result.protocol.toLowerCase() === "webrtc"
+              ? "Direct WHEP"
+              : result.summary_extra?.hls_segment_sec
+                ? `HLS ${result.summary_extra.hls_segment_sec}s`
+                : "Packager",
+        player:
+          result.protocol.toLowerCase() === "moq"
+            ? "MoQ"
+            : result.protocol.toLowerCase() === "webrtc"
+              ? "WHEP"
+              : "HLS",
         accentColor: protocolColor(result.protocol),
       })),
     };
@@ -142,14 +149,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
   if (streams.length === 0) {
     return (
       <div className="results-empty">
-        <p className="muted">
-          Run a comparison on the Benchmark tab to answer which protocol and host path fit your
-          latency, quality, and delivery goals.
-        </p>
-        <p className="hint">
-          When a run finishes — or you pick a past session — this tab shows a verdict, scorecard,
-          charts, and downloadable CSV/JSON.
-        </p>
+        <p className="muted">Run a comparison, or pick a past session.</p>
       </div>
     );
   }
@@ -183,10 +183,6 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
       <div className="session-metrics-header">
         <div>
           <h3>{title}</h3>
-          <p className="hint">
-            Scorecard for latency, throughput, quality, and host health. Download raw samples (CSV)
-            or the summary (JSON) for all streams in one file.
-          </p>
         </div>
         <div className="download-actions">
           <button
@@ -430,15 +426,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                   </p>
                 )}
                 {!encoder && !ingest && (result.protocol || "").toLowerCase() === "webrtc" && (
-                  <p className="hint">
-                    WHIP has no encoder capture tee and no ingest recorder. Quality scores do not apply.
-                  </p>
-                )}
-                {!encoder && !ingest && (result.protocol || "").toLowerCase() !== "webrtc" && (
-                  <p className="hint">
-                    No quality scores for this output. Enable Calculate quality — ingest scoring needs Zixi or a MoQ
-                    recorder (not MediaMTX).
-                  </p>
+                  <p className="hint">WHIP is not scored.</p>
                 )}
               </div>
             );

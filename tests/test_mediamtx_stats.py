@@ -174,6 +174,19 @@ class MediaMtxMergeTests(unittest.TestCase):
         self.assertAlmostEqual(encoded, 2800.0)
 
 
+class MediaMtxAgentScrapeTests(unittest.TestCase):
+    def test_poll_uses_agent_prometheus_body(self):
+        poller = MediaMtxStatsPoller(
+            endpoint_url="srt://35.196.97.22:8890?streamid=publish:benchmark",
+            agent_metrics=lambda: SAMPLE_SRT,
+            agent_path=lambda: '{"ready": true}',
+        )
+        snap = poller.poll()
+        self.assertAlmostEqual(snap.net_rtt_ms, 28.5)
+        self.assertAlmostEqual(snap.net_recv_mbps, 4.0)
+        self.assertTrue(snap.ready)
+
+
 class MediaMtxPlaybackUrlTests(unittest.TestCase):
     def test_hls_url(self):
         url = mediamtx_hls_playback_url(

@@ -21,17 +21,31 @@ from cloud_placement import (
 )
 from moq_publish import MoqPublishTarget, parse_moq_publish_url
 
-CENTRAL_MOQ_RECORDER_AGENT = "http://35.222.33.58:8090"
+CENTRAL_WEB_INGEST_AGENT = "http://34.9.217.178:8090"
+# Unreachable from the cloud encoder; never use this as a default recorder.
+DEAD_CENTRAL_ZIXI_AGENT = "http://35.222.33.58:8090"
 
 
-def moq_recorder_agent_url(fallback: str = CENTRAL_MOQ_RECORDER_AGENT) -> str:
-    """VMAF recordings subscribe over WebTransport; run them on the worker
-    that has openmoq-recorder, not on regional Zixi boxes that often don't."""
-    explicit = os.environ.get("MOQ_RECORDER_AGENT_URL", "").strip()
+def _usable_recorder_url(url: str) -> str:
+    cleaned = (url or "").strip().rstrip("/")
+    if not cleaned or DEAD_CENTRAL_ZIXI_AGENT.split("://", 1)[-1].split(":")[0] in cleaned:
+        return ""
+    return cleaned
+
+
+def moq_recorder_agent_url(regional_fallback: str = "") -> str:
+    """MoQ VMAF recordings subscribe over WebTransport on an ingest agent.
+
+    Do not default to us-central1 Zixi (35.222.33.58) — that host is down and
+    a 10s health wait blocked encode start. Prefer an explicit
+    MOQ_RECORDER_AGENT_URL, else the regional web agent, else INGEST_AGENT_URL.
+    """
+    explicit = _usable_recorder_url(os.environ.get("MOQ_RECORDER_AGENT_URL", ""))
     if explicit:
         return explicit
-    central = os.environ.get("INGEST_AGENT_URL", "").strip()
-    return central or fallback
+    return _usable_recorder_url(
+        regional_fallback or os.environ.get("INGEST_AGENT_URL", "")
+    )
 
 
 class DestinationConfigError(Exception):
@@ -231,7 +245,7 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
             "publisher: ./scripts/install-openmoq-publisher.sh"
         ),
         supports_vmaf=True,
-        ingest_agent_url="http://35.222.33.58:8090",
+        ingest_agent_url=moq_recorder_agent_url(CENTRAL_WEB_INGEST_AGENT),
         ingest_recording_dir="/var/lib/moq-relay-recordings",
         ingest_provider="gcp_moq_relay",
     ),
@@ -540,7 +554,7 @@ def _build_linode_presets() -> List[ServicePreset]:
             url=relay_publish,
             notes=f"OpenMOQ moqx relay on Linode ({relay_base}).",
             supports_vmaf=True,
-            ingest_agent_url=moq_recorder_agent_url(),
+            ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="linode_moq_relay",
             **common,
@@ -663,7 +677,7 @@ def _build_gcp_east_presets() -> List[ServicePreset]:
             url=relay_publish,
             notes=f"OpenMOQ moqx relay on GCP {region} ({relay_base}).",
             supports_vmaf=True,
-            ingest_agent_url=moq_recorder_agent_url(),
+            ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="gcp_east_moq_relay",
             **common,

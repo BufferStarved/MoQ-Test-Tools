@@ -7,6 +7,11 @@ from typing import Iterable, Optional
 
 DUMMY_RELATIVE = "dummy.mp4"
 BBB_RELATIVE = "bbb.mp4"
+# Color bars is a 60s file. BBB is ~10 min; clip bundled VOD to the same
+# window so a comparison is apples-to-apples and does not sit on the
+# encode host for the whole Blender short.
+DEFAULT_BUNDLED_CLIP_SEC = 60
+MAX_FILE_DURATION_SEC = 300
 
 # First existing path wins. Keep names unspecialized so a downloaded
 # Blender/Google copy can be dropped next to dummy.mp4.
@@ -37,6 +42,20 @@ def dummy_media_path(root: Path) -> Optional[Path]:
 
 def bbb_media_path(root: Path) -> Optional[Path]:
     return _first_existing(root, BBB_CANDIDATES)
+
+
+def clip_vod_duration_sec(
+    *,
+    probed_sec: int,
+    requested: Optional[int],
+    bundled: bool,
+) -> int:
+    """Bound a file encode so BBB cannot run ~10 minutes by accident."""
+    probed = max(5, int(probed_sec or 0) or DEFAULT_BUNDLED_CLIP_SEC)
+    if requested is not None:
+        return max(5, min(MAX_FILE_DURATION_SEC, int(requested), probed))
+    cap = DEFAULT_BUNDLED_CLIP_SEC if bundled else MAX_FILE_DURATION_SEC
+    return max(5, min(cap, probed))
 
 
 def resolve_bundled_vod(root: Path, media_path: str) -> Optional[Path]:
@@ -72,7 +91,7 @@ def media_source_catalog(root: Path) -> list[dict]:
             "media_path": BBB_RELATIVE,
             "available": bbb is not None,
             "hint": (
-                "Ready"
+                f"First {DEFAULT_BUNDLED_CLIP_SEC}s of Blender's short — encoded live"
                 if bbb is not None
                 else "Place bbb.mp4 next to dummy.mp4, or run scripts/fetch-bbb.sh"
             ),

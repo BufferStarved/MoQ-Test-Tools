@@ -1,7 +1,9 @@
 import logging
 import os
 import shutil
-import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -114,23 +116,9 @@ def health() -> dict:
 
     ffmpeg = _resolve_ffmpeg()
     recorder_bin_ok = os.path.isfile(MOQ_RECORDER_BIN) and os.access(MOQ_RECORDER_BIN, os.X_OK)
-    recorder_runtime_ok = False
-    recorder_runtime_error = ""
-    if recorder_bin_ok:
-        try:
-            probe = subprocess.run(
-                [MOQ_RECORDER_BIN, "--probe"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            recorder_runtime_ok = probe.returncode == 0
-            if not recorder_runtime_ok:
-                recorder_runtime_error = (probe.stderr or probe.stdout or "probe failed").strip()[:300]
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            recorder_runtime_error = str(exc)
-
+    # Health is polled on every job start. Do not subprocess --probe here —
+    # a hung recorder used to stall encode for 10–20s and surface
+    # "Ingest agent health check failed: timed out".
     return {
         "status": "ok",
         "service": "moq-ingest-agent",
@@ -138,9 +126,9 @@ def health() -> dict:
         "ffmpeg": ffmpeg or "",
         "libvmaf_available": bool(ffmpeg),
         "moq_recorder_bin": MOQ_RECORDER_BIN,
-        "moq_recorder_available": recorder_bin_ok and recorder_runtime_ok,
-        "moq_recorder_runtime_ok": recorder_runtime_ok,
-        "moq_recorder_runtime_error": recorder_runtime_error,
+        "moq_recorder_available": recorder_bin_ok,
+        "moq_recorder_runtime_ok": recorder_bin_ok,
+        "moq_recorder_runtime_error": "" if recorder_bin_ok else "recorder binary missing",
         "moq_relay_url": MOQ_RELAY_URL,
         "moq_relay_cert_configured": bool(MOQ_RELAY_CERT_SHA256),
     }
@@ -180,6 +168,61 @@ def host_metrics() -> dict:
         "memory_percent": snapshot.memory_percent,
         "disk_percent": snapshot.disk_percent,
     }
+
+
+def _fetch_local(url: str, timeout: float = 1.0) -> str:
+    request = urllib.request.Request(url, headers={"Accept": "text/plain, application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+@app.get("/api/v1/mediamtx/metrics", dependencies=[Depends(verify_token)])
+def mediamtx_metrics() -> dict:
+    """Loopback Prometheus scrape so a remote encode host can read this MediaMTX."""
+    try:
+        body = _fetch_local("http://127.0.0.1:9998/metrics")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MediaMTX metrics unavailable: {exc}") from exc
+    return {"ok": True, "body": body}
+
+
+@app.get("/api/v1/mediamtx/paths/{path_name}", dependencies=[Depends(verify_token)])
+def mediamtx_path(path_name: str) -> dict:
+    safe = "".join(ch for ch in path_name if ch.isalnum() or ch in {"_", "-"})
+    if not safe:
+        raise HTTPException(status_code=400, detail="Invalid MediaMTX path")
+    try:
+        body = _fetch_local(f"http://127.0.0.1:9997/v3/paths/get/{safe}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MediaMTX path API unavailable: {exc}") from exc
+    return {"ok": True, "body": body}
+
+
+@app.get("/api/v1/zixi/input-stats", dependencies=[Depends(verify_token)])
+def zixi_input_stats(func: str = "fill_inputs_stats", id: str = "") -> dict:
+    """Loopback Zixi REST so a remote encode host can read this Broadcaster."""
+    allowed = {"fill_inputs_stats", "fill_ts_anaysis_data"}
+    if func not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid Zixi stats function")
+    input_id = (id or "").strip()
+    if not input_id:
+        raise HTTPException(status_code=400, detail="Missing Zixi input id")
+    encoded_id = urllib.parse.quote(input_id, safe="")
+    url = f"http://127.0.0.1:4444/input_stream_stats.json?func={func}&id={encoded_id}"
+    request = urllib.request.Request(url)
+    user = os.environ.get("ZIXI_API_USER", "admin")
+    password = os.environ.get("ZIXI_API_PASSWORD", "")
+    if password:
+        import base64
+
+        token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+        request.add_header("Authorization", f"Basic {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=0.8) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Zixi stats unavailable: {exc}") from exc
+    return {"ok": True, "body": body}
 
 
 @app.post("/api/v1/jobs/{job_id}/recording/start", dependencies=[Depends(verify_token)])

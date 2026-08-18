@@ -39,7 +39,7 @@ class PathRttProbe:
         endpoint_url: str,
         *,
         port: Optional[int] = None,
-        timeout_sec: float = 1.5,
+        timeout_sec: float = 0.4,
     ):
         parsed = urlparse(endpoint_url.strip())
         self._host = parsed.hostname or ""

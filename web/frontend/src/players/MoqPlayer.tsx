@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Player } from "@playa/player";
 import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
-import { playbackGateLabel } from "../playbackGate";
 import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
@@ -26,6 +25,7 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { isPlausibleE2eMs } from "../glassLatency";
+import { isGracefulMoqReset } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -161,6 +161,7 @@ export default function MoqPlayer({
     ttffMs: 0,
     videoTimeSec: 0,
     playerLatencyMs: 0,
+    sessionRestarts: 0,
     // Latest MoQ media-timeline position (ms) from playa's timeupdate — the
     // LEG ENCODER's output timeline (fMP4 tfdt starts ~0 at encode start),
     // unlike video.currentTime which MSE re-zeroes at join. This is what
@@ -176,6 +177,12 @@ export default function MoqPlayer({
     encoderMs: encoderLagMs,
     epoch: encodeStartedAtEpoch ?? 0,
   };
+  const jobStatusRef = useRef(jobStatus);
+  jobStatusRef.current = jobStatus;
+  const loadingRef = useRef(benchmarkLoading);
+  loadingRef.current = benchmarkLoading;
+  const encodeDurationRef = useRef(encodeDurationSec);
+  encodeDurationRef.current = encodeDurationSec;
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
   // more than once for this component instance — e.g. because `namespace`
@@ -313,7 +320,12 @@ export default function MoqPlayer({
         if (playedOk) {
           setError(null);
           lastErrorRef.current = null;
-          setStatus("Playback OK");
+          const restarts = sessionRef.current.sessionRestarts;
+          setStatus(
+            restarts > 0
+              ? `Playback ended (reconnected ${restarts}× after a freeze)`
+              : "Playback OK",
+          );
         } else if (lastErrorRef.current) {
           setError(lastErrorRef.current);
           setStatus("Failed (see diagnostics)");
@@ -365,6 +377,7 @@ export default function MoqPlayer({
       videoTimeSec: priorOutcome?.videoTimeSec ?? 0,
       playerLatencyMs: 0,
       moqTimelineMs: 0,
+      sessionRestarts: 0,
     };
     // Remounts used to wipe rebuffer to 0 mid-run — restore per-job accum.
     rebufferRef.current.reset();
@@ -561,6 +574,7 @@ export default function MoqPlayer({
         }
         retrying = true;
         sessionRestarts += 1;
+        sessionRef.current.sessionRestarts = sessionRestarts;
         // Fresh subscription starts at the live edge — no leftover catch-up.
         catchUpRate = 1;
         video.playbackRate = 1;
@@ -698,6 +712,7 @@ export default function MoqPlayer({
               videoTimeSec: 0,
               playerLatencyMs: 0,
               moqTimelineMs: 0,
+              sessionRestarts: sessionRef.current.sessionRestarts,
             };
             setIsReady(false);
             await sleep(delayMs);
@@ -864,6 +879,28 @@ export default function MoqPlayer({
             return;
           }
           if (sessionRef.current.firstFrame) {
+            if (
+              isGracefulMoqReset({
+                playedOk: true,
+                code,
+                message: playerError || "",
+                jobStatus: jobStatusRef.current,
+                benchmarkLoading: loadingRef.current,
+                videoTimeSec: sessionRef.current.videoTimeSec,
+                encodeDurationSec: encodeDurationRef.current,
+              })
+            ) {
+              player.destroy();
+              if (playerRef.current === player) {
+                playerRef.current = null;
+              }
+              lastErrorRef.current = null;
+              setError(null);
+              setIsPlaying(false);
+              setStatus("Playback OK");
+              pushDiag("graceful_eos RESET_STREAM after successful playback");
+              return;
+            }
             // Fatal after frames rendered. Returning here (the old behavior)
             // swallowed the error and left a dead session frozen on screen —
             // reconnect while the encode is still live, and only surface a
@@ -1083,20 +1120,31 @@ export default function MoqPlayer({
               }
             }
             if (!jumped && Date.now() - watchdogAtMs > stallLimitMs) {
-              if (sessionRestarts < MAX_SESSION_RESTARTS) {
+              const aheadNow = bufferedAheadSec(video);
+              // Frozen playhead with media still queued is an MSE hole or
+              // decoder hitch. Restarting tears down a live CMAF session
+              // and the ended-gate then reports "Playback OK" (cloud run:
+              // playhead_frozen_5.95s_early_join while the encode was fine).
+              if (aheadNow >= 0.35) {
+                pushDiag(
+                  `playhead_frozen_hold vt=${video.currentTime.toFixed(2)}s ahead=${aheadNow.toFixed(2)}s`,
+                );
+                watchdogAtMs = Date.now();
+              } else if (sessionRestarts < MAX_SESSION_RESTARTS) {
                 watchdogVt = -1;
                 watchdogAtMs = Date.now();
                 scheduleSessionRestart(
                   `playhead_frozen_${video.currentTime.toFixed(2)}s${earlyWindow ? "_early_join" : ""}`,
                   earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
                 );
+                return;
               } else if (!watchdogGaveUp) {
                 watchdogGaveUp = true;
                 fail(
                   `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
                 );
+                return;
               }
-              return;
             }
           }
           // Rate-based catch-up runs on every 500ms tick — fine cadence keeps
@@ -1199,9 +1247,6 @@ export default function MoqPlayer({
     setStatus("Playing");
   }
 
-  const gateMessage =
-    playbackGate !== "live" ? playbackGateLabel(playbackGate, "moq") : null;
-
   return (
     <div className="player-surface">
       <canvas ref={canvasRef} className="player-canvas" />
@@ -1220,7 +1265,6 @@ export default function MoqPlayer({
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
-      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
       <PlayerDiagnostics
         engine="moq"

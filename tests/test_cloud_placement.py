@@ -88,7 +88,7 @@ class LinodePresetTests(unittest.TestCase):
 
 
 class MoqRecorderAgentTests(unittest.TestCase):
-    def test_east_and_linode_moq_record_via_central_worker(self) -> None:
+    def test_east_and_linode_moq_record_on_regional_web_agent(self) -> None:
         env = {
             "MOQ_RECORDER_AGENT_URL": "http://35.222.33.58:8090",
             "LINODE_STACK_ENABLED": "1",
@@ -107,16 +107,38 @@ class MoqRecorderAgentTests(unittest.TestCase):
             importlib.reload(dest_mod)
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_linode_relay"].ingest_agent_url,
-                "http://35.222.33.58:8090",
+                "http://203.0.113.20:8090",
             )
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_gcp_east_relay"].ingest_agent_url,
-                "http://35.222.33.58:8090",
+                "http://203.0.113.50:8090",
+            )
+            self.assertNotIn(
+                "35.222.33.58",
+                dest_mod.PRESET_BY_ID["moq_gcp_relay"].ingest_agent_url,
             )
             # Zixi SRT still records on the regional ingest worker.
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_zixi_linode"].ingest_agent_url,
                 "http://203.0.113.10:8090",
+            )
+
+    def test_moq_recorder_env_override_when_not_dead_zixi(self) -> None:
+        env = {
+            "MOQ_RECORDER_AGENT_URL": "http://203.0.113.99:8090",
+            "LINODE_STACK_ENABLED": "1",
+            "LINODE_ZIXI_IP": "203.0.113.10",
+            "LINODE_WEB_IP": "203.0.113.20",
+            "LINODE_RELAY_IP": "203.0.113.30",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            import importlib
+            import destinations as dest_mod
+
+            importlib.reload(dest_mod)
+            self.assertEqual(
+                dest_mod.PRESET_BY_ID["moq_linode_relay"].ingest_agent_url,
+                "http://203.0.113.99:8090",
             )
 
 
@@ -173,6 +195,28 @@ class GcpEastPresetTests(unittest.TestCase):
             self.assertIsNotNone(central)
             self.assertEqual(east.token, "east-token")
             self.assertEqual(central.token, "central-token")
+
+    def test_health_timeout_is_short(self) -> None:
+        from ingest_agent_client import HEALTH_TIMEOUT_SEC
+
+        self.assertLessEqual(HEALTH_TIMEOUT_SEC, 2.0)
+
+    def test_linode_agent_does_not_fall_back_to_central_token(self) -> None:
+        env = {
+            "INGEST_AGENT_TOKEN": "central-token",
+            "LINODE_INGEST_AGENT_TOKEN": "",
+            "LINODE_ZIXI_IP": "203.0.113.10",
+            "LINODE_WEB_IP": "203.0.113.20",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            import ingest_agent_client as agent_mod
+
+            linode = agent_mod.resolve_ingest_agent(agent_url="http://203.0.113.10:8090")
+            self.assertIsNone(linode)
+            with mock.patch.dict(os.environ, {"LINODE_INGEST_AGENT_TOKEN": "linode-token"}):
+                linode_ok = agent_mod.resolve_ingest_agent(agent_url="http://203.0.113.10:8090")
+                self.assertIsNotNone(linode_ok)
+                self.assertEqual(linode_ok.token, "linode-token")
 
 
 if __name__ == "__main__":

@@ -73,6 +73,39 @@ class ZixiStatsTests(unittest.TestCase):
             else:
                 os.environ["ZIXI_API_BASE"] = previous
 
+    def test_agent_fetch_enables_poller_without_password(self):
+        calls = []
+
+        def fetch(func, input_id):
+            calls.append((func, input_id))
+            if func == "fill_inputs_stats":
+                return SAMPLE_TR101_JSONP
+            return None
+
+        poller = ZixiStatsPoller(
+            "srt://35.196.215.179:10080?mode=caller",
+            agent_fetch=fetch,
+        )
+        self.assertTrue(poller.enabled)
+        snap = poller.poll()
+        self.assertEqual(snap.rtt_ms, 42.0)
+        self.assertEqual(calls[0][0], "fill_inputs_stats")
+        self.assertEqual(calls[1][0], "fill_ts_anaysis_data")
+
+    def test_failed_stats_skips_analysis_fetch(self):
+        calls = []
+
+        def fetch(func, _input_id):
+            calls.append(func)
+            return None
+
+        poller = ZixiStatsPoller(
+            "srt://35.196.215.179:10080?mode=caller",
+            agent_fetch=fetch,
+        )
+        poller.poll()
+        self.assertEqual(calls, ["fill_inputs_stats"])
+
     def test_http_ts_playback_url(self):
         url = zixi_http_ts_playback_url(
             "SRT Test",

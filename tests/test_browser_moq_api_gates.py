@@ -321,6 +321,7 @@ class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
                 "encoded_bitrate_kbps": 2200,
                 "fps": 30,
                 "transport_rtt_ms": 18,
+                "encoder_send_rate_mbps": 2.2,
             },
         )
         self.assertTrue(ok)
@@ -328,6 +329,7 @@ class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
         self.assertEqual(record.media_zero_epoch, record.pipeline_start_epoch)
         self.assertEqual(record.samples[0]["transport_rtt_ms"], 18)
         self.assertEqual(record.samples[0]["net_rtt_ms"], 18)
+        self.assertEqual(record.samples[0]["net_send_mbps"], 2.2)
 
         job = MagicMock()
         job.destination.protocol = "webrtc"

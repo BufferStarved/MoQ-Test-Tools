@@ -5,6 +5,8 @@ import {
   resolvePlaybackTarget,
   resolvedPlaybackMode,
 } from "./playbackUrls";
+import { playbackModeAllowedInBrowser } from "./recipeSupport";
+import { isSafariBrowser } from "./browserDetect";
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
@@ -154,6 +156,9 @@ export function StreamPlayer({
       ? "waiting"
       : playbackGate;
 
+  const previewActive =
+    playbackGate === "live" || playbackGate === "ended" || playbackGate === "waiting";
+
   return (
     <div className={`stream-player-card${compactHeader ? " stream-player-card-embedded" : ""}`}>
       {!compactHeader && (
@@ -162,15 +167,9 @@ export function StreamPlayer({
           <span className="pill">{target.label}</span>
         </div>
       )}
-      {target.url && target.engine !== "unsupported" && (
-        <details className="output-advanced">
-          <summary>Playback URL</summary>
-          <p className="hint player-url">
-            <code>{target.url}</code>
-          </p>
-        </details>
-      )}
-
+      {!previewActive ? (
+        <div className="player-idle-placeholder" aria-hidden="true" />
+      ) : (
       <PlayerErrorBoundary engine={target.engine}>
         <Suspense fallback={<PlayerFallback />}>
           {target.engine === "hls" && (
@@ -197,7 +196,12 @@ export function StreamPlayer({
               onUnrecoverableHls={
                 resolvedMode === "hls" &&
                 onPlaybackModeChange &&
-                isPlaybackModeCompatible("mpegts", protocol, ingestEndpointId)
+                isPlaybackModeCompatible("mpegts", protocol, ingestEndpointId) &&
+                playbackModeAllowedInBrowser("mpegts", {
+                  safari: isSafariBrowser(),
+                  webTransport: typeof WebTransport !== "undefined",
+                  rtcPeerConnection: typeof RTCPeerConnection !== "undefined",
+                })
                   ? () => onPlaybackModeChange("mpegts")
                   : undefined
               }
@@ -231,6 +235,7 @@ export function StreamPlayer({
               skipConnectProbe={playbackGate === "live"}
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}
+              encodeDurationSec={encodeDurationSec}
             />
           )}
           {target.engine === "whep" && (
@@ -244,6 +249,9 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              jobStatus={jobStatus}
+              benchmarkLoading={benchmarkLoading}
+              encodeDurationSec={encodeDurationSec}
             />
           )}
           {target.engine === "moq" && moqReadyNamespace && (
@@ -277,6 +285,7 @@ export function StreamPlayer({
           {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
         </Suspense>
       </PlayerErrorBoundary>
+      )}
     </div>
   );
 }

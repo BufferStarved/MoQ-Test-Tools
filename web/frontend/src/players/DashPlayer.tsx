@@ -3,7 +3,6 @@ import type { PlaybackMetricsSnapshot } from "../api";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import type { PlaybackGate } from "../playbackGate";
-import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
@@ -253,15 +252,23 @@ export default function DashPlayer({
       } as Parameters<typeof instance.updateSettings>[0]);
       instance.initialize(video, proxied, true);
       instance.on(dashjs.MediaPlayer.events.ERROR, ((e: { error?: { message?: string } }) => {
-        if (!destroyed) {
-          sessionRef.current.errorCount += 1;
-          const detail = e?.error?.message ? ` (${e.error.message})` : "";
-          setError(
-            lowLatencyMode
-              ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
-              : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`,
-          );
+        if (destroyed) {
+          return;
         }
+        sessionRef.current.errorCount += 1;
+        const message = e?.error?.message || "";
+        const played = sessionRef.current.maxVideoTime > 0.25 || sessionRef.current.ttffMs > 0;
+        if (played && /404|manifest|MPD/i.test(message)) {
+          setError(null);
+          setStatus("Playback OK");
+          return;
+        }
+        const detail = message ? ` (${message})` : "";
+        setError(
+          lowLatencyMode
+            ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
+            : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`,
+        );
       }) as (e: Event) => void);
       instance.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, (() => {
         if (!destroyed) {
@@ -290,9 +297,6 @@ export default function DashPlayer({
     };
   }, [url, playbackGate, lowLatencyMode, jobId]);
 
-  const gateMessage =
-    playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;
-
   return (
     <div className="player-surface">
       <video ref={videoRef} className="player-video" controls playsInline muted autoPlay />
@@ -300,7 +304,6 @@ export default function DashPlayer({
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
-      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
     </div>
   );

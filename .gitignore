@@ -55,6 +55,9 @@ media/bbb.mov
 big_buck_bunny.mp4
 BigBuckBunny.mp4
 
+# Nested clone used as local scratch — never ship it.
+MoQ-Test-Tools/
+
 # Terraform plugin cache / local plans / secrets
 **/.terraform/
 *.tfstate

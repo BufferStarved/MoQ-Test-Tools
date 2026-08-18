@@ -132,6 +132,25 @@ class MoqxStatsPollerTests(unittest.TestCase):
         live.poll()
         self.assertTrue(live.observing)
 
+    def test_subscribe_counters_are_job_window_deltas(self):
+        poller = self._poller_with_responses(
+            [
+                "moqx_pubSubscribeSuccess_total 39\n"
+                "moqx_pubSubscribeError_total 66\n"
+                "moqx_pubPublishNamespaceSuccess_total 10\n",
+                "moqx_pubSubscribeSuccess_total 41\n"
+                "moqx_pubSubscribeError_total 67\n"
+                "moqx_pubPublishNamespaceSuccess_total 11\n",
+            ]
+        )
+        poller.poll()
+        self.assertEqual(poller.job_window_deltas().subscribe_error, 0)
+        poller.poll()
+        delta = poller.job_window_deltas()
+        self.assertEqual(delta.subscribe_success, 2)
+        self.assertEqual(delta.subscribe_error, 1)
+        self.assertEqual(delta.publish_namespace_success, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ import type { PlaybackMetricsSnapshot } from "../api";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import type { PlaybackGate } from "../playbackGate";
-import { playbackGateLabel } from "../playbackGate";
+import { isGracefulHlsEos } from "../hlsEos";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
@@ -1134,13 +1134,16 @@ export default function HlsPlayer({
             return;
           }
 
-          // End-of-stream: Zixi tears down the input; playlist refresh can 404 or
-          // return an unparseable body. If we already played video, treat as EOS.
-          const parseEos =
-            data.details === Hls.ErrorDetails.LEVEL_PARSING_ERROR ||
-            data.details === Hls.ErrorDetails.LEVEL_EMPTY_ERROR ||
-            data.response?.code === 404;
-          if (parseEos && hlsPlaybackOk(sessionRef.current)) {
+          // End-of-stream: Zixi/MediaMTX tear down the input; playlist refresh
+          // 404s, fails to parse, or fatally fails level/audio loads. If we
+          // already played video, treat as EOS instead of a red error.
+          if (
+            isGracefulHlsEos({
+              details: String(data.details || ""),
+              httpStatus: data.response?.code,
+              playbackOk: hlsPlaybackOk(sessionRef.current),
+            })
+          ) {
             pushDiag("eos_graceful=playlist_gone_after_playback_ok");
             try {
               instance.stopLoad();
@@ -1381,9 +1384,6 @@ export default function HlsPlayer({
     };
   }, [url, playbackGate, jobStatus, jobId]);
 
-  const gateMessage =
-    playbackGate !== "live" ? playbackGateLabel(playbackGate, "hls") : null;
-
   function togglePlayPause() {
     const video = videoRef.current;
     if (!video) {
@@ -1444,7 +1444,6 @@ export default function HlsPlayer({
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
-      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
       <PlayerDiagnostics
         engine="hls"

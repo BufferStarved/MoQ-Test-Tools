@@ -24,7 +24,28 @@ from encode_profile import encode_profile_summary
 from moq_publish import is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
+from publisher_protocol import sample_to_dict
 from upload_service import UploadJob, UploadSample, UploadService
+
+
+def live_sample_payload(sample: UploadSample) -> dict:
+    """Full UploadSample dict for live /api/uploads charts.
+
+    A previous field whitelist dropped net_* and encode_lag_ms, so the UI
+    showed zeros while MetricsCollector CSV still had encoder_send_rate_mbps
+    / transport_rtt_ms. Always persist the dataclass, then alias those CSV
+    names onto the chart keys.
+    """
+    payload = sample_to_dict(sample)
+    if not payload.get("net_send_mbps") and payload.get("encoder_send_rate_mbps"):
+        payload["net_send_mbps"] = payload["encoder_send_rate_mbps"]
+    if not payload.get("net_recv_mbps") and payload.get("transport_recv_rate_mbps"):
+        payload["net_recv_mbps"] = payload["transport_recv_rate_mbps"]
+    if not payload.get("net_rtt_ms") and payload.get("transport_rtt_ms"):
+        payload["net_rtt_ms"] = payload["transport_rtt_ms"]
+    for name in PLAYBACK_FIELD_NAMES:
+        payload.setdefault(name, 0)
+    return payload
 
 try:
     from publisher_hub import local_publisher_enabled, publisher_hub
@@ -323,48 +344,15 @@ class JobManager:
         start_epoch = started_at_epoch
 
         if job.compute_vmaf_on_ingest:
-            self._prepare_remote_vmaf(job_id, job)
+            threading.Thread(
+                target=self._prepare_remote_vmaf,
+                args=(job_id, job),
+                daemon=True,
+                name=f"vmaf-prep-{job_id}",
+            ).start()
 
         def on_sample(sample: UploadSample) -> None:
-            payload = {
-                "elapsed_sec": sample.elapsed_sec,
-                "encoded_bitrate_kbps": sample.encoded_bitrate_kbps,
-                "fps": sample.fps,
-                "fps_stability": sample.fps_stability,
-                "speed": sample.speed,
-                "out_time": sample.out_time,
-                "cpu_percent": sample.cpu_percent,
-                "memory_mb": sample.memory_mb,
-                "progress": sample.progress,
-                "transport_rtt_ms": sample.transport_rtt_ms,
-                "transport_rtt_jitter_ms": sample.transport_rtt_jitter_ms,
-                "pkt_rcv_drop": sample.pkt_rcv_drop,
-                "pkt_snd_drop": sample.pkt_snd_drop,
-                "pkt_snd_loss": sample.pkt_snd_loss,
-                "pkt_retrans": sample.pkt_retrans,
-                "pkt_fec_extra": sample.pkt_fec_extra,
-                "ts_continuity_counter_errors": sample.ts_continuity_counter_errors,
-                "vmaf_score": sample.vmaf_score,
-                "psnr_db": sample.psnr_db,
-                "ssim": sample.ssim,
-                "encoder_send_rate_mbps": sample.encoder_send_rate_mbps,
-                "transport_recv_rate_mbps": sample.transport_recv_rate_mbps,
-                "client_memory_percent": sample.client_memory_percent,
-                "client_disk_percent": sample.client_disk_percent,
-                "server_cpu_percent": sample.server_cpu_percent,
-                "server_memory_percent": sample.server_memory_percent,
-                "server_disk_percent": sample.server_disk_percent,
-                "moqx_subscribe_success": sample.moqx_subscribe_success,
-                "moqx_subscribe_error": sample.moqx_subscribe_error,
-                "moqx_publish_namespace_success": sample.moqx_publish_namespace_success,
-                "moqx_publish_received": sample.moqx_publish_received,
-                "moqx_publish_done": sample.moqx_publish_done,
-                "quic_rtt_ms": sample.quic_rtt_ms,
-                "quic_cwnd_bytes": sample.quic_cwnd_bytes,
-                "quic_packets_lost": sample.quic_packets_lost,
-            }
-            for name in PLAYBACK_FIELD_NAMES:
-                payload[name] = 0
+            payload = live_sample_payload(sample)
             with self._lock:
                 record = self._jobs.get(job_id)
                 if record:
@@ -717,6 +705,12 @@ class JobManager:
             "transport_rtt_ms": float(sample.get("transport_rtt_ms") or 0),
             "net_rtt_ms": float(sample.get("transport_rtt_ms") or sample.get("net_rtt_ms") or 0),
             "net_jitter_ms": float(sample.get("net_jitter_ms") or 0),
+            "net_send_mbps": float(
+                sample.get("net_send_mbps") or sample.get("encoder_send_rate_mbps") or 0
+            ),
+            "net_recv_mbps": float(
+                sample.get("net_recv_mbps") or sample.get("transport_recv_rate_mbps") or 0
+            ),
         }
         with self._lock:
             record = self._jobs.get(job_id)
@@ -871,6 +865,8 @@ class JobManager:
                     "transport_rtt_ms",
                     "net_rtt_ms",
                     "net_jitter_ms",
+                    "net_send_mbps",
+                    "net_recv_mbps",
                     *PLAYBACK_FIELD_NAMES,
                 ):
                     if key in CSV_COLUMNS:
@@ -1102,6 +1098,12 @@ def read_result_summary(csv_path: str) -> dict:
         "encode_lag_ms",
         "transport_rtt_ms",
         "transport_rtt_jitter_ms",
+        "net_rtt_ms",
+        "net_jitter_ms",
+        "net_send_mbps",
+        "net_recv_mbps",
+        "net_loss_pct",
+        "net_retrans_pct",
         "quic_rtt_ms",
         "quic_cwnd_bytes",
         "playback_bitrate_bps",
@@ -1187,6 +1189,9 @@ def read_result_summary(csv_path: str) -> dict:
             "encode_lag_ms",
             "e2e_latency_ms",
             "fps_stability",
+            "net_rtt_ms",
+            "net_send_mbps",
+            "net_recv_mbps",
             "cmaf_fragment_count",
             "cmaf_seq_gap_count",
             "cmaf_tfdt_gap_count",

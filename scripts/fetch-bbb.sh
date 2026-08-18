@@ -37,3 +37,11 @@ else
   mv "$tmp" "$DEST"
 fi
 echo "Saved $DEST ($(du -h "$DEST" | awk '{print $1}'))"
+if command -v ffprobe >/dev/null 2>&1; then
+  dur="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$DEST" 2>/dev/null || true)"
+  if [[ -z "$dur" || "$dur" == "N/A" ]]; then
+    echo "WARNING: ffprobe could not read $DEST — cloud playout may fail." >&2
+  else
+    echo "Duration ${dur}s (comparisons clip to 60s)"
+  fi
+fi

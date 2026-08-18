@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -79,7 +79,14 @@ class MediaMtxStatsPoller:
       MEDIAMTX_PATH         default benchmark (or derived from publish URL)
     """
 
-    def __init__(self, endpoint_url: str = "", path: str = ""):
+    def __init__(
+        self,
+        endpoint_url: str = "",
+        path: str = "",
+        *,
+        agent_metrics: Optional[Callable[[], Optional[str]]] = None,
+        agent_path: Optional[Callable[[], Optional[str]]] = None,
+    ):
         self._metrics_url = (
             os.environ.get("MEDIAMTX_METRICS_URL", "").strip() or DEFAULT_METRICS_URL
         )
@@ -95,16 +102,19 @@ class MediaMtxStatsPoller:
         self._prev_bytes: Optional[_ByteSample] = None
         self._prev_rtt_ms: float = 0.0
         self._jitter_ms: float = 0.0
+        self._agent_metrics = agent_metrics
+        self._agent_path = agent_path
 
         # If publish target is remote and metrics stay on loopback, still enable —
         # production encode runs on the MediaMTX host. Override URL for remote.
         host = urlparse(endpoint_url).hostname if endpoint_url else None
         if host and host not in {"127.0.0.1", "localhost"} and "127.0.0.1" in self._metrics_url:
-            # Prefer localhost when co-located (moq-web). Allow explicit remote metrics.
-            remote = os.environ.get("MEDIAMTX_REMOTE_METRICS", "").strip().lower()
-            if remote in {"1", "true", "yes"}:
-                self._metrics_url = f"http://{host}:9998/metrics"
-                self._api_url = f"http://{host}:9997"
+            # Prefer the ingest-agent scrape (loopback on the remote MTX host).
+            if self._agent_metrics is None:
+                remote = os.environ.get("MEDIAMTX_REMOTE_METRICS", "").strip().lower()
+                if remote in {"1", "true", "yes"}:
+                    self._metrics_url = f"http://{host}:9998/metrics"
+                    self._api_url = f"http://{host}:9997"
 
     @property
     def enabled(self) -> bool:
@@ -144,7 +154,7 @@ class MediaMtxStatsPoller:
         if not self._enabled:
             return self._latest
 
-        body = self._fetch(self._metrics_url)
+        body = self._agent_metrics() if self._agent_metrics else self._fetch(self._metrics_url)
         if body is None:
             return self._latest
 
@@ -157,8 +167,7 @@ class MediaMtxStatsPoller:
         return snap
 
     def _fetch_path_ready(self) -> Optional[bool]:
-        url = f"{self._api_url}/v3/paths/get/{self._path}"
-        raw = self._fetch(url)
+        raw = self._agent_path() if self._agent_path else self._fetch(f"{self._api_url}/v3/paths/get/{self._path}")
         if raw is None:
             return None
         try:
@@ -349,7 +358,7 @@ class MediaMtxStatsPoller:
     def _fetch(url: str) -> Optional[str]:
         try:
             request = urllib.request.Request(url, headers={"Accept": "text/plain, application/json"})
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with urllib.request.urlopen(request, timeout=1.2) as response:
                 return response.read().decode("utf-8", errors="replace")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             logger.debug("MediaMTX stats unavailable at %s: %s", url, exc)

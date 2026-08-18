@@ -1,4 +1,5 @@
 import { postEncodeSample, postPublisherReady } from "../api";
+import { unwrapFastApiDetail } from "../playbackEos";
 import { proxiedWebrtcSignalingUrl } from "../webrtcSignaling";
 
 export interface WhipPublishSession {
@@ -45,6 +46,7 @@ export async function startWhipPublish(options: {
   }
   const pc = new RTCPeerConnection({
     bundlePolicy: "max-bundle",
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
   for (const track of options.stream.getTracks()) {
     pc.addTrack(track, options.stream);
@@ -66,7 +68,7 @@ export async function startWhipPublish(options: {
     body: localSdp,
   });
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
+    const detail = unwrapFastApiDetail(await response.text().catch(() => ""));
     pc.close();
     throw new Error(detail || `WHIP publish failed (HTTP ${response.status}).`);
   }
@@ -136,8 +138,8 @@ async function postWhipEncodeSample(
         totalEncodeTime = outbound.totalEncodeTime ?? totalEncodeTime;
       }
     }
-    if (stat.type === "media-source" && (stat as RTCMediaSourceStats).kind === "video") {
-      const source = stat as RTCVideoSourceStats;
+    if (stat.type === "media-source" && (stat as { kind?: string }).kind === "video") {
+      const source = stat as { frames?: number; framesPerSecond?: number };
       sourceFrames = source.frames ?? sourceFrames;
       sourceFps = source.framesPerSecond ?? sourceFps;
     }

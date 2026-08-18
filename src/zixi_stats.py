@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, quote, unquote_plus, urlparse
 
 import urllib.error
@@ -169,6 +169,7 @@ class ZixiStatsPoller:
         input_id: Optional[str] = None,
         *,
         enabled: Optional[bool] = None,
+        agent_fetch: Optional[Callable[[str, str], Optional[str]]] = None,
     ):
         self._enabled = False
         self._base_url = zixi_api_base_for_endpoint(endpoint_url)
@@ -184,10 +185,11 @@ class ZixiStatsPoller:
         if not self._input_id and self._looks_like_gcp_zixi_srt(endpoint_url):
             self._input_id = "SRT Test"
         self._latest = ZixiStatsSnapshot()
+        self._agent_fetch = agent_fetch
 
         if enabled is False:
             self._enabled = False
-        elif self._password:
+        elif enabled is True or self._agent_fetch is not None or self._password:
             self._enabled = True
 
     @staticmethod
@@ -239,7 +241,13 @@ class ZixiStatsPoller:
             return self._latest
 
         stats_payload = self._fetch_input_stats(func="fill_inputs_stats")
-        analysis_payload = self._fetch_input_stats(func="fill_ts_anaysis_data")
+        # A firewalled :4444 used to cost 3s × 2 fetches and starve the sample
+        # loop. If the first call fails, skip analysis for this tick.
+        analysis_payload = (
+            self._fetch_input_stats(func="fill_ts_anaysis_data")
+            if stats_payload is not None
+            else None
+        )
 
         if stats_payload is None and analysis_payload is None:
             return self._latest
@@ -261,15 +269,18 @@ class ZixiStatsPoller:
             return None
 
         encoded_id = quote(self._input_id, safe="")
-        url = f"{self._base_url}/input_stream_stats.json?func={func}&id={encoded_id}"
-        payload = self._fetch(url)
+        if self._agent_fetch is not None:
+            payload = self._agent_fetch(func, self._input_id)
+        else:
+            url = f"{self._base_url}/input_stream_stats.json?func={func}&id={encoded_id}"
+            payload = self._fetch(url)
         if payload is None:
             return None
 
         try:
             return parse_zixi_jsonp(payload)
         except (json.JSONDecodeError, ValueError) as exc:
-            logger.debug("Zixi stats parse failed for %s: %s", url, exc)
+            logger.debug("Zixi stats parse failed for %s: %s", func, exc)
             return None
 
     def _fetch(self, url: str) -> Optional[str]:
@@ -281,7 +292,7 @@ class ZixiStatsPoller:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with urllib.request.urlopen(request, timeout=0.8) as response:
                 return response.read().decode("utf-8", errors="replace")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             logger.debug("Zixi stats unavailable at %s: %s", url, exc)

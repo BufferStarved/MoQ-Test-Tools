@@ -47,11 +47,7 @@ function playbackModeBlockedReason(mode, protocol, ingestEndpointId = "") {
 
 function playbackModesForSelection(protocol, ingestEndpointId = "") {
   const ids = ["hls", "ll-hls", "dash", "ll-dash", "whep", "moq", "mpegts"];
-  return ids.filter(
-    (id) =>
-      isPlaybackModeCompatible(id, protocol, ingestEndpointId) ||
-      Boolean(playbackModeBlockedReason(id, protocol, ingestEndpointId)),
-  );
+  return ids.filter((id) => isPlaybackModeCompatible(id, protocol, ingestEndpointId));
 }
 
 function playbackModeLabelForSelection(mode, protocol, ingestEndpointId = "") {
@@ -149,7 +145,8 @@ for (const ingest of ["gcp_zixi", "gcp_east_zixi", "linode_zixi"]) {
   assert.equal(resolvedPlaybackMode("hls", "srt", ingest), "mpegts", ingest);
   assert.ok(playbackModeBlockedReason("hls", "srt", ingest), ingest);
   assert.equal(playbackModeBlockedReason("hls", "rtmp", ingest), undefined, ingest);
-  assert.deepEqual(playbackModesForSelection("srt", ingest), ["hls", "mpegts"]);
+  assert.deepEqual(playbackModesForSelection("srt", ingest), ["mpegts"]);
+  assert.deepEqual(playbackModesForSelection("rtmp", ingest), ["hls", "mpegts"]);
 }
 
 // MediaMTX matrix (every cloud, not just us-central1)

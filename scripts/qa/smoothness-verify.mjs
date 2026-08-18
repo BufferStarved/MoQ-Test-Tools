@@ -23,14 +23,12 @@ page.on("pageerror", (err) => log(`pageerror: ${err.message}`));
 log(`open ${BASE}`);
 await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-const startBtn = page.locator("button.primary", { hasText: "Start comparison" });
+const startBtn = page.locator(".benchmark-start-row button.primary");
 await startBtn.waitFor({ state: "visible", timeout: 45000 });
 // Wait for bootstrap to finish (button enabled).
 await page.waitForFunction(
   () => {
-    const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-      b.textContent.includes("Start comparison"),
-    );
+    const btn = document.querySelector(".benchmark-start-row button.primary");
     return btn && !btn.disabled;
   },
   { timeout: 60000 },

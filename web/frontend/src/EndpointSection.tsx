@@ -1,12 +1,8 @@
 import {
-  cloudHostFromIngest,
-  defaultIngestForProtocol,
-  ingestEndpointLabel,
-  ingestEndpointsForProtocol,
   isCustomIngestEndpoint,
   presetIdForIngest,
 } from "./ingestEndpoints";
-import type { EndpointConfig, Preset, Protocol } from "./types";
+import type { EndpointConfig, Protocol } from "./types";
 import type { PlaybackMode } from "./playbackTypes";
 import { IconBroadcast, IconMonitor, IconTarget } from "./Icons";
 import {
@@ -14,14 +10,20 @@ import {
   isManagedMoqRelay,
   managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
-  playbackModeBlockedReason,
   playbackModeLabelForSelection,
-  playbackModesForSelection,
   relayWebTransportUrl,
-  resolvedPlaybackMode,
   showMoqUrlFields,
+  showWhepUrlField,
 } from "./playbackUrls";
 import { protocolLabel } from "./protocolTheme";
+import {
+  destinationsForProtocol,
+  publishProtocolIdsForSource,
+  RECIPE_CHROME_CAPS,
+  resolvedSelectablePlaybackMode,
+  selectablePlaybackModes,
+  type RecipeContext,
+} from "./recipeSupport";
 
 /** Upload protocols not ready for benchmark comparisons yet. */
 const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "dash"]);
@@ -30,12 +32,11 @@ interface EndpointSectionProps {
   index: number;
   endpoint: EndpointConfig;
   protocols: Protocol[];
-  presets: Preset[];
+  recipeContext: RecipeContext;
+  occupiedCollisionKeys: ReadonlySet<string>;
   bootstrapping: boolean;
   apiOnline: boolean;
   canRemove: boolean;
-  /** Browser source publishes MoQ and WebRTC (WHIP) only. */
-  browserPublish?: boolean;
   onChange: (id: string, patch: Partial<EndpointConfig>) => void;
   onRemove: (id: string) => void;
 }
@@ -53,7 +54,7 @@ function parseHostSafe(endpointUrl: string): string | null {
   }
 }
 
-function resolvePresetUrl(endpoint: EndpointConfig, presets: Preset[]): string {
+function resolvePresetUrl(endpoint: EndpointConfig, presets: RecipeContext["presets"]): string {
   const presetId = presetIdForIngest(endpoint.ingestEndpointId, endpoint.protocol);
   if (!presetId) {
     return "";
@@ -61,7 +62,10 @@ function resolvePresetUrl(endpoint: EndpointConfig, presets: Preset[]): string {
   return presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
 }
 
-function moqPatchFromPreset(endpoint: EndpointConfig, presets: Preset[]): Partial<EndpointConfig> {
+function moqPatchFromPreset(
+  endpoint: EndpointConfig,
+  presets: RecipeContext["presets"],
+): Partial<EndpointConfig> {
   const publishUrl = resolvePresetUrl(endpoint, presets);
   if (!publishUrl) {
     return { moqNamespace: "benchmark" };
@@ -74,7 +78,7 @@ function moqPatchFromPreset(endpoint: EndpointConfig, presets: Preset[]): Partia
   };
 }
 
-function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string {
+function managedDisplayUrl(endpoint: EndpointConfig, presets: RecipeContext["presets"]): string {
   const publishUrl = resolvePresetUrl(endpoint, presets);
   if (!publishUrl) {
     return "";
@@ -86,10 +90,11 @@ function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string 
 }
 
 export function playerShortLabel(endpoint: EndpointConfig): string {
-  const mode = resolvedPlaybackMode(
+  const mode = resolvedSelectablePlaybackMode(
     endpoint.playbackMode,
     endpoint.protocol,
     endpoint.ingestEndpointId,
+    RECIPE_CHROME_CAPS,
   );
   return playbackModeLabelForSelection(
     mode,
@@ -102,31 +107,40 @@ export function EndpointSection({
   index,
   endpoint,
   protocols,
-  presets,
+  recipeContext,
+  occupiedCollisionKeys,
   bootstrapping,
   apiOnline,
   canRemove,
-  browserPublish = false,
   onChange,
   onRemove,
 }: EndpointSectionProps) {
+  const { presets, caps } = recipeContext;
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
-  const hostOptions = ingestEndpointsForProtocol(endpoint.protocol, presets);
-  const selectedIngest =
-    hostOptions.find((item) => item.id === endpoint.ingestEndpointId) ??
-    hostOptions.find((item) => item.available) ??
-    hostOptions[0];
+  const allowedProtocolIds = new Set<string>(
+    publishProtocolIdsForSource(recipeContext.source, caps),
+  );
+  const hostOptions = destinationsForProtocol(
+    endpoint.protocol,
+    recipeContext,
+    occupiedCollisionKeys,
+  );
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
   const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
   const managedLabel = managedEndpointUrlLabel(endpoint.protocol);
-  const playerModes = playbackModesForSelection(endpoint.protocol, endpoint.ingestEndpointId);
-  const resolvedMode = resolvedPlaybackMode(
+  const playerModes = selectablePlaybackModes(endpoint.protocol, endpoint.ingestEndpointId, caps);
+  const resolvedMode = resolvedSelectablePlaybackMode(
     endpoint.playbackMode,
     endpoint.protocol,
     endpoint.ingestEndpointId,
+    caps,
   );
-  const showWhepField = resolvedMode === "whep";
+  const showWhepField = showWhepUrlField(
+    resolvedMode,
+    endpoint.protocol,
+    endpoint.ingestEndpointId,
+  );
   const whepPlaceholder = defaultWhepPlaybackUrl(
     parseHostSafe(endpoint.endpointUrl) ?? "34.9.217.178",
     "benchmark",
@@ -135,7 +149,7 @@ export function EndpointSection({
   const controlsLocked = bootstrapping || !apiOnline;
   const liveProtocols = protocols
     .filter((item) => !UPLOAD_PROTOCOLS_COMING_SOON.has(item.id))
-    .filter((item) => !browserPublish || item.id === "moq" || item.id === "webrtc");
+    .filter((item) => allowedProtocolIds.has(item.id));
 
   return (
     <div className="endpoint-section">
@@ -171,23 +185,12 @@ export function EndpointSection({
             value={endpoint.protocol}
             onChange={(e) => {
               const protocol = e.target.value;
-              if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol) || (browserPublish && protocol !== "moq" && protocol !== "webrtc")) {
+              if (!allowedProtocolIds.has(protocol)) {
                 return;
               }
-              const nextIngest = defaultIngestForProtocol(
-                protocol,
-                cloudHostFromIngest(endpoint.ingestEndpointId),
-              );
-              const patch: Partial<EndpointConfig> = {
-                protocol,
-                ingestEndpointId: nextIngest,
-                playbackMode: resolvedPlaybackMode(undefined, protocol, nextIngest),
-              };
+              const patch: Partial<EndpointConfig> = { protocol };
               if (protocol === "moq") {
-                Object.assign(
-                  patch,
-                  moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: nextIngest }, presets),
-                );
+                Object.assign(patch, moqPatchFromPreset({ ...endpoint, protocol }, presets));
               }
               onChange(endpoint.id, patch);
             }}
@@ -210,16 +213,11 @@ export function EndpointSection({
           value={
             hostOptions.some((item) => item.id === endpoint.ingestEndpointId)
               ? endpoint.ingestEndpointId
-              : (hostOptions.find((item) => item.available)?.id ??
-                hostOptions[0]?.id ??
-                endpoint.ingestEndpointId)
+              : (hostOptions[0]?.id ?? endpoint.ingestEndpointId)
           }
           onChange={(e) => {
             const ingestEndpointId = e.target.value;
-            const patch: Partial<EndpointConfig> = {
-              ingestEndpointId,
-              playbackMode: resolvedPlaybackMode(undefined, endpoint.protocol, ingestEndpointId),
-            };
+            const patch: Partial<EndpointConfig> = { ingestEndpointId };
             if (endpoint.protocol === "moq" && isManagedMoqRelay(ingestEndpointId)) {
               Object.assign(patch, moqPatchFromPreset({ ...endpoint, ingestEndpointId }, presets));
             }
@@ -233,9 +231,6 @@ export function EndpointSection({
             </option>
           ))}
         </select>
-        {selectedIngest && !selectedIngest.available && (
-          <span className="hint">This host is not configured yet.</span>
-        )}
       </label>
 
       {isCustom && (
@@ -270,31 +265,19 @@ export function EndpointSection({
               onChange={(e) => onChange(endpoint.id, { playbackMode: e.target.value as PlaybackMode })}
               disabled={controlsLocked}
             >
-              {playerModes.map((item) => {
-                const blocked = playbackModeBlockedReason(
-                  item.id,
-                  endpoint.protocol,
-                  endpoint.ingestEndpointId,
-                );
-                return (
-                  <option key={item.id} value={item.id} disabled={Boolean(blocked)} title={blocked}>
-                    {playbackModeLabelForSelection(item.id, endpoint.protocol, endpoint.ingestEndpointId)}
-                  </option>
-                );
-              })}
+              {playerModes.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {playbackModeLabelForSelection(item.id, endpoint.protocol, endpoint.ingestEndpointId)}
+                </option>
+              ))}
             </select>
           </label>
-          {playbackModeBlockedReason("hls", endpoint.protocol, endpoint.ingestEndpointId) ? (
-            <p className="field-hint">
-              Fast HLS is disabled for Zixi SRT — the packager playlist stalls. MPEG-TS is the working player.
-            </p>
-          ) : null}
         </>
       )}
 
       {showWhepField && (
         <label>
-          WHEP Playback URL
+          WHEP URL
           <input
             type="url"
             value={endpoint.whepPlaybackUrl ?? ""}

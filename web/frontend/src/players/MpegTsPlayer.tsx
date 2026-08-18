@@ -13,6 +13,7 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
+import { isGracefulMpegTsEos } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MpegTsPlayerProps {
@@ -30,6 +31,7 @@ interface MpegTsPlayerProps {
   skipConnectProbe?: boolean;
   jobStatus?: string;
   benchmarkLoading?: boolean;
+  encodeDurationSec?: number;
 }
 
 /** Max automatic reconnects after the Zixi HTTP-TS session ends on republish. */
@@ -51,6 +53,7 @@ export default function MpegTsPlayer({
   skipConnectProbe = false,
   jobStatus,
   benchmarkLoading = false,
+  encodeDurationSec = 30,
 }: MpegTsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +76,12 @@ export default function MpegTsPlayer({
     encoderMs: encoderLagMs,
     epoch: encodeStartedAtEpoch ?? 0,
   };
+  const jobStatusRef = useRef(jobStatus);
+  jobStatusRef.current = jobStatus;
+  const loadingRef = useRef(benchmarkLoading);
+  loadingRef.current = benchmarkLoading;
+  const encodeDurationRef = useRef(encodeDurationSec);
+  encodeDurationRef.current = encodeDurationSec;
 
   function sessionRelativeVideoTime(video: HTMLVideoElement): number {
     const session = sessionRef.current;
@@ -207,12 +216,38 @@ export default function MpegTsPlayer({
       player = null;
     };
 
+    const mpegTsEosOptions = (playedOk: boolean) => ({
+      playedOk,
+      jobStatus: jobStatusRef.current,
+      benchmarkLoading: loadingRef.current,
+      videoTimeSec: sessionRef.current.maxVideoTime,
+      encodeDurationSec: encodeDurationRef.current,
+    });
+
+    const markPlaybackOk = (diag: string) => {
+      lastErrorRef.current = null;
+      setError(null);
+      setStatus("Playback OK");
+      pushDiag(diag);
+    };
+
     const scheduleReconnect = (reason: string) => {
       if (destroyed) {
         return;
       }
+      const playedOk =
+        sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+      if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+        destroyPlayer();
+        markPlaybackOk(`graceful_eos ${reason}`);
+        return;
+      }
       pushDiag(`reconnect_reason=${reason}`);
       if (reconnects >= MAX_RECONNECTS) {
+        if (playedOk) {
+          markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`);
+          return;
+        }
         const message = `MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`;
         lastErrorRef.current = message;
         setError(message);
@@ -390,6 +425,13 @@ export default function MpegTsPlayer({
           return;
         }
         pushDiag(`mpegtsjs_error type=${type} detail=${detail} code=${info?.code ?? "n/a"}`);
+        const playedOk =
+          sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+        if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+          destroyPlayer();
+          markPlaybackOk("graceful_eos mpegts_error after successful playback");
+          return;
+        }
         destroyPlayer();
         scheduleReconnect(info?.code != null ? `error ${info.code}` : "stream error");
       });
@@ -397,7 +439,13 @@ export default function MpegTsPlayer({
         if (destroyed) {
           return;
         }
-        // Live HTTP-TS ends cleanly when the publisher disconnects — re-pull.
+        const playedOk =
+          sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+        if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+          destroyPlayer();
+          markPlaybackOk("loading_complete (encode ended)");
+          return;
+        }
         pushDiag("loading_complete (publisher session ended)");
         destroyPlayer();
         scheduleReconnect("publisher session ended");
@@ -422,9 +470,6 @@ export default function MpegTsPlayer({
     };
   }, [url, playbackGate, jobId]);
 
-  const gateMessage =
-    playbackGate !== "live" ? playbackGateLabel(playbackGate, "other") : null;
-
   return (
     <div className="player-surface">
       <video ref={videoRef} className="player-video" controls playsInline muted autoPlay />
@@ -432,7 +477,6 @@ export default function MpegTsPlayer({
         <span>{label}</span>
         <span className="hint">{status}</span>
       </div>
-      {gateMessage && <p className="hint player-note">{gateMessage}</p>}
       {error && <p className="player-error">{error}</p>}
       <PlayerDiagnostics
         engine="mpegts"

@@ -15,6 +15,7 @@ from ingest_host import host_from_endpoint
 logger = logging.getLogger("MoQ-SRT-Bench")
 
 DEFAULT_AGENT_PORT = int(os.environ.get("INGEST_AGENT_PORT", "8090"))
+HEALTH_TIMEOUT_SEC = 1.5
 
 
 @dataclass(frozen=True)
@@ -60,13 +61,9 @@ def resolve_agent_token(explicit_token: str = "", *, host: str = "") -> str:
     if explicit_token.strip():
         return explicit_token.strip()
     if host and host in _east_ingest_hosts():
-        east_token = os.environ.get("GCP_EAST_INGEST_AGENT_TOKEN", "").strip()
-        if east_token:
-            return east_token
+        return os.environ.get("GCP_EAST_INGEST_AGENT_TOKEN", "").strip()
     if host and host in _linode_ingest_hosts():
-        linode_token = os.environ.get("LINODE_INGEST_AGENT_TOKEN", "").strip()
-        if linode_token:
-            return linode_token
+        return os.environ.get("LINODE_INGEST_AGENT_TOKEN", "").strip()
     return os.environ.get("INGEST_AGENT_TOKEN", "").strip()
 
 
@@ -144,7 +141,7 @@ class IngestAgentClient:
         path: str,
         *,
         body: Optional[dict] = None,
-        timeout: int = 60,
+        timeout: float = 60,
     ) -> dict:
         url = f"{self._config.base_url}{path}"
         data = None
@@ -160,6 +157,8 @@ class IngestAgentClient:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RuntimeError(f"Ingest agent unreachable at {url}: timed out") from exc
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             try:
@@ -167,6 +166,13 @@ class IngestAgentClient:
                 message = payload.get("detail", detail)
             except json.JSONDecodeError:
                 message = detail or exc.reason
+            if isinstance(message, str) and message.startswith("{") and '"detail"' in message:
+                try:
+                    nested = json.loads(message)
+                    if isinstance(nested.get("detail"), str):
+                        message = nested["detail"]
+                except json.JSONDecodeError:
+                    pass
             raise RuntimeError(message) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Ingest agent unreachable at {url}: {exc.reason}") from exc
@@ -175,14 +181,53 @@ class IngestAgentClient:
         url = f"{self._config.base_url}/api/v1/health"
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(request, timeout=HEALTH_TIMEOUT_SEC) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise RuntimeError("Ingest agent health check failed: timed out") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Ingest agent health check failed: {exc.reason}") from exc
 
     def host_metrics(self) -> dict:
         # Sample loops call this every ~1s; do not block on a dead agent.
         return self._request("GET", "/api/v1/host/metrics", timeout=2)
+
+    def mediamtx_metrics_text(self) -> Optional[str]:
+        try:
+            payload = self._request("GET", "/api/v1/mediamtx/metrics", timeout=1)
+        except Exception:
+            return None
+        body = payload.get("body") if isinstance(payload, dict) else None
+        return str(body) if body else None
+
+    def mediamtx_path_text(self, path_name: str) -> Optional[str]:
+        safe = "".join(ch for ch in (path_name or "") if ch.isalnum() or ch in {"_", "-"})
+        if not safe:
+            return None
+        try:
+            payload = self._request("GET", f"/api/v1/mediamtx/paths/{safe}", timeout=1)
+        except Exception:
+            return None
+        body = payload.get("body") if isinstance(payload, dict) else None
+        return str(body) if body else None
+
+    def zixi_input_stats_text(self, func: str, input_id: str) -> Optional[str]:
+        from urllib.parse import quote
+
+        safe_func = quote(func or "", safe="")
+        safe_id = quote(input_id or "", safe="")
+        if not safe_func or not safe_id:
+            return None
+        try:
+            payload = self._request(
+                "GET",
+                f"/api/v1/zixi/input-stats?func={safe_func}&id={safe_id}",
+                timeout=1,
+            )
+        except Exception:
+            return None
+        body = payload.get("body") if isinstance(payload, dict) else None
+        return str(body) if body else None
 
     def upload_reference(self, job_id: str, media_path: str) -> None:
         filename = Path(media_path).name

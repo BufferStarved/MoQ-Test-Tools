@@ -69,9 +69,7 @@ async function runOnce(label, configure) {
   await page.goto(BASE, { waitUntil: "networkidle", timeout: 90000 });
   await page.waitForFunction(
     () => {
-      const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-        (b.textContent || "").includes("Start comparison"),
-      );
+      const btn = document.querySelector(".benchmark-start-row button.primary");
       return Boolean(btn && !btn.disabled);
     },
     { timeout: 180000 },
@@ -160,7 +158,7 @@ async function runOnce(label, configure) {
   });
 
   log(`[${label}] start comparison`);
-  await page.locator("button.primary", { hasText: "Start comparison" }).click();
+  await page.locator(".benchmark-start-row button.primary").click();
 
   // Sample for ~90s of encode (or until completed).
   const rounds = [];
@@ -206,17 +204,13 @@ async function runOnce(label, configure) {
           .join(" | "),
     );
     const done = await page.evaluate(() => {
-      const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-        (b.textContent || "").includes("Start comparison"),
-      );
+      const btn = document.querySelector(".benchmark-start-row button.primary");
       return Boolean(btn && !btn.disabled && !(b => false)());
     });
     // Stop early once Start is enabled again and we've collected ≥8 rounds.
     if (round >= 8) {
       const startEnabled = await page.evaluate(() => {
-        const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-          (b.textContent || "").includes("Start comparison"),
-        );
+        const btn = document.querySelector(".benchmark-start-row button.primary");
         return Boolean(btn && !btn.disabled);
       });
       if (startEnabled) break;
@@ -333,10 +327,8 @@ async function configureVod(page) {
       log("uploaded timer clip");
       await page.waitForFunction(
         () => {
-          const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-            b.textContent.includes("Start comparison"),
-          );
-          return btn && !btn.disabled && !btn.textContent.includes("Preparing");
+          const btn = document.querySelector(".benchmark-start-row button.primary");
+          return btn && !btn.disabled && !(btn.textContent || "").includes("Preparing");
         },
         { timeout: 180000 },
       );

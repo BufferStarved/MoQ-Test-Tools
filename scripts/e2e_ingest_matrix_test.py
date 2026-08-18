@@ -182,7 +182,99 @@ EAST_CASES = [
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
+    {
+        "id": "east_mediamtx_srt_llhls",
+        "preset_id": "moq_mediamtx_gcp_east_srt",
+        "playback": "hls",
+        "url": f"http://{EAST_WEB}:8888/benchmark/index.m3u8",
+        "expect_preview": True,
+        "metric_keys": ("net_send_mbps", "net_recv_mbps", "encoded_bitrate_kbps"),
+    },
+    {
+        "id": "east_mediamtx_rtmp_llhls",
+        "preset_id": "moq_mediamtx_gcp_east_rtmp",
+        "playback": "hls",
+        "url": f"http://{EAST_WEB}:8888/benchmark/index.m3u8",
+        "expect_preview": True,
+        "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+    },
 ]
+
+LINODE_ZIXI = os.environ.get("LINODE_ZIXI_IP", "45.33.68.151")
+LINODE_WEB = os.environ.get("LINODE_WEB_IP", "66.175.213.81")
+LINODE_RELAY = os.environ.get("LINODE_RELAY_DOMAIN", "45-79-177-85.sslip.io")
+LINODE_CASES = [
+    {
+        "id": "linode_zixi_srt_mpegts",
+        "preset_id": "moq_zixi_linode",
+        "playback": "mpegts",
+        "url": f"http://{LINODE_ZIXI}:7777/SRT%20Test%20EC.ts",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+    {
+        "id": "linode_zixi_rtmp_mpegts",
+        "preset_id": "moq_zixi_linode_rtmp",
+        "playback": "mpegts",
+        "url": f"http://{LINODE_ZIXI}:7777/benchmark.ts",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+    {
+        "id": "linode_zixi_tsput",
+        "preset_id": "moq_zixi_linode_hls",
+        "playback": "skip",
+        "url": "",
+        "expect_preview": False,
+        "metric_keys": ("encoded_bitrate_kbps",),
+        "known_gap": "zixi_http_ts_push_no_playback",
+    },
+    {
+        "id": "linode_mediamtx_srt_llhls",
+        "preset_id": "moq_mediamtx_linode_srt",
+        "playback": "hls",
+        "url": f"http://{LINODE_WEB}:8888/benchmark/index.m3u8",
+        "expect_preview": True,
+        "metric_keys": ("net_send_mbps", "net_recv_mbps", "encoded_bitrate_kbps"),
+    },
+    {
+        "id": "linode_mediamtx_rtmp_llhls",
+        "preset_id": "moq_mediamtx_linode_rtmp",
+        "playback": "hls",
+        "url": f"http://{LINODE_WEB}:8888/benchmark/index.m3u8",
+        "expect_preview": True,
+        "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+    },
+    {
+        "id": "linode_mediamtx_whip_whep",
+        "preset_id": "moq_mediamtx_linode_whip",
+        "playback": "whep",
+        "url": f"http://{LINODE_WEB}:8889/benchmark/whep",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_recv_mbps", "net_send_mbps"),
+    },
+    {
+        "id": "linode_moq_relay_playa",
+        "preset_id": "moq_linode_relay",
+        "playback": "moq",
+        "url": f"https://{LINODE_RELAY}:4433/moq-relay",
+        "expect_preview": False,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+]
+
+# Keys we expect to move on a healthy encode (0 can be valid for lag/loss).
+COMPLETENESS_KEYS = (
+    "encoded_bitrate_kbps",
+    "fps",
+    "speed",
+    "encoder_send_rate_mbps",
+    "net_send_mbps",
+    "net_recv_mbps",
+    "net_rtt_ms",
+    "encode_lag_ms",
+    "cpu_percent",
+)
 
 
 @dataclass
@@ -289,6 +381,20 @@ def summarize_metrics(samples: List[dict], keys: tuple) -> tuple[bool, str, dict
     return ok, json.dumps(stats, sort_keys=True), stats
 
 
+def metric_completeness(samples: List[dict]) -> dict:
+    if not samples:
+        return {"n": 0, "populated": [], "zero": list(COMPLETENESS_KEYS)}
+    populated = []
+    zero = []
+    for key in COMPLETENESS_KEYS:
+        vals = [_sample_num(s, key) for s in samples]
+        if max(vals) > 0:
+            populated.append(key)
+        else:
+            zero.append(key)
+    return {"n": len(samples), "populated": populated, "zero": zero}
+
+
 def proxied(url: str) -> str:
     return f"{BASE_URL}/api/playback/fetch?url={urllib.parse.quote(url, safe='')}"
 
@@ -371,28 +477,49 @@ async function main() {
       p.attachMediaElement(video); p.load(); p.play();
       p.on(mpegts.Events.ERROR, () => { state.error = 'mpegts error'; });
     } else if (mode === 'whep') {
-      // Minimal WHEP via fetch+RTCPeerConnection
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-      pc.addTransceiver('video', { direction: 'recvonly' });
-      pc.addTransceiver('audio', { direction: 'recvonly' });
-      pc.ontrack = (ev) => { video.srcObject = ev.streams[0]; };
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await new Promise((r) => {
-        if (pc.iceGatheringState === 'complete') r();
-        else pc.addEventListener('icegatheringstatechange', () => {
+      // Native WHEP: gather ICE, strip trickle (MediaMTX waits on PATCH otherwise),
+      // POST via the site SDP proxy, retry 404 until the WHIP publisher is up.
+      let last = 'whep connect failed';
+      for (let attempt = 1; attempt <= 8; attempt++) {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+        pc.ontrack = (ev) => { video.srcObject = ev.streams[0] || new MediaStream([ev.track]); video.play().catch(()=>{}); };
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await new Promise((r) => {
           if (pc.iceGatheringState === 'complete') r();
+          else pc.addEventListener('icegatheringstatechange', () => {
+            if (pc.iceGatheringState === 'complete') r();
+          });
+          setTimeout(r, 3500);
         });
-        setTimeout(r, 2000);
-      });
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/sdp' },
-        body: pc.localDescription.sdp,
-      });
-      if (!resp.ok) { state.error = 'whep http '+resp.status; return; }
-      const answer = await resp.text();
-      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+        const sdp = (pc.localDescription && pc.localDescription.sdp || '').replace(/a=ice-options:trickle\\s*\\r?\\n/gi, '');
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp', 'Accept': 'application/sdp' },
+          body: sdp,
+        });
+        if (resp.status === 406) {
+          pc.close();
+          last = 'whep http 406';
+          continue;
+        }
+        if (!resp.ok) {
+          last = 'whep http '+resp.status;
+          pc.close();
+          if (resp.status === 404 || resp.status === 400) {
+            await new Promise((r) => setTimeout(r, 400 * attempt));
+            continue;
+          }
+          state.error = last;
+          return;
+        }
+        await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() });
+        last = '';
+        break;
+      }
+      if (last) { state.error = last; return; }
     } else if (mode === 'moq') {
       state.error = 'moq_skipped_in_harness';
       state.ready = false;
@@ -409,8 +536,10 @@ async function main() {
 }
 setInterval(() => {
   state.currentTime = video.currentTime || 0;
+  state.videoWidth = video.videoWidth || 0;
   // Playing with advancing media time is enough; transient live stalls are OK.
-  state.ready = state.currentTime > 0.2 && !state.error;
+  // WHEP can decode frames before currentTime moves; videoWidth is the signal.
+  state.ready = (state.currentTime > 0.2 || state.videoWidth > 0) && !state.error;
 }, 250);
 main();
 </script>
@@ -434,9 +563,9 @@ def run_chrome_playback(mode: str, play_url: str, seconds: float = 12.0) -> tupl
         CHROME_PLAYER_HTML.replace("__BASE_HREF__", BASE_URL.rstrip("/") + "/"),
         encoding="utf-8",
     )
-    # Prefer site proxy for mixed-content / CORS. WHEP needs a direct POST (proxy is GET-only).
+    # HTTPS pages cannot POST SDP to http://:8889; /api/webrtc/sdp forwards WHIP/WHEP.
     if mode == "whep":
-        fetch_url = play_url
+        fetch_url = f"{BASE_URL}/api/webrtc/sdp?url={urllib.parse.quote(play_url, safe='')}"
     else:
         fetch_url = proxied(play_url) if play_url.startswith("http://") else play_url
     page_url = html_path.resolve().as_uri() + "?" + urllib.parse.urlencode(
@@ -637,8 +766,13 @@ def run_case(case: dict, media_path: str) -> CaseResult:
         result.errors = [e for e in result.errors if e != "preview_not_ready"]
     # WHIP muxer often omits ffmpeg -progress bitrate; Chrome + preview is the signal.
     chrome_ok = result.chrome.startswith("playing")
+    result.detail["metric_completeness"] = metric_completeness(final.get("samples") or samples)
     if (
-        case["id"].startswith("mediamtx_whip") or case["id"].startswith("east_mediamtx_whip")
+        (
+            case["id"].startswith("mediamtx_whip")
+            or case["id"].startswith("east_mediamtx_whip")
+            or case["id"].startswith("linode_mediamtx_whip")
+        )
         and chrome_ok
         and (final.get("preview_ready") or preview)
         and "metrics_stale_or_zero" in result.errors
@@ -656,8 +790,10 @@ def selected_cases() -> List[dict]:
     stack = os.environ.get("STACK", "central").strip().lower()
     if stack in {"east", "gcp-east", "gcp_east"}:
         return EAST_CASES
+    if stack in {"linode"}:
+        return LINODE_CASES
     if stack in {"all", "both"}:
-        return CASES + EAST_CASES
+        return CASES + EAST_CASES + LINODE_CASES
     return CASES
 
 

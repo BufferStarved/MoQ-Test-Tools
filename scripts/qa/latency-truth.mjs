@@ -25,9 +25,7 @@ log(`open ${BASE}`);
 await page.goto(BASE, { waitUntil: "networkidle", timeout: 60000 });
 await page.waitForFunction(
   () => {
-    const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-      (b.textContent || "").includes("Start comparison"),
-    );
+    const btn = document.querySelector(".benchmark-start-row button.primary");
     return Boolean(btn && !btn.disabled);
   },
   { timeout: 120000 },
@@ -43,18 +41,14 @@ log("uploading clip...");
 // Wait until the media is uploaded (start button enabled again + not "Preparing").
 await page.waitForFunction(
   () => {
-    const btn = [...document.querySelectorAll("button.primary")].find((b) =>
-      b.textContent.includes("Start comparison"),
-    );
-    return btn && !btn.disabled && !btn.textContent.includes("Preparing");
+    const btn = document.querySelector(".benchmark-start-row button.primary");
+    return btn && !btn.disabled && !(btn.textContent || "").includes("Preparing");
   },
   { timeout: 180000 },
 );
 
 log("start comparison");
-await page
-  .locator("button.primary", { hasText: "Start comparison" })
-  .click();
+await page.locator(".benchmark-start-row button.primary").click();
 
 // Helper: measure server clock offset (serverEpochMs - Date.now()) in-page.
 async function serverOffsetMs() {

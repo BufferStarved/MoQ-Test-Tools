@@ -149,6 +149,11 @@ rsync -az --delete \
   --exclude 'tools/openmoq-publisher' \
   --exclude 'tools/*/node_modules' \
   --exclude 'MoQ-Test-Tools' \
+  --exclude 'bbb.mp4' \
+  --exclude 'bbb.mp4.part' \
+  --exclude 'bbb.mov' \
+  --exclude 'media/bbb.mp4' \
+  --exclude 'media/bbb.mov' \
   --exclude 'infra/**/.terraform' \
   --exclude 'infra/**/tfplan' \
   --exclude 'infra/**/terraform.tfvars' \
@@ -237,6 +242,17 @@ cd "\$INSTALL_ROOT"
 test -f web/frontend/dist/index.html
 echo "Frontend build OK."
 
+# Cloud-playout BBB is gitignored (~300MB) and must survive rsync --delete.
+if [[ ! -s "\$INSTALL_ROOT/bbb.mp4" ]]; then
+  echo "Fetching Big Buck Bunny onto this encode host..."
+  PATH="/usr/local/bin:/usr/bin:/bin" BBB_DEST="\$INSTALL_ROOT/bbb.mp4" \
+    bash "\$INSTALL_ROOT/scripts/fetch-bbb.sh" </dev/null || true
+fi
+if [[ ! -s "\$INSTALL_ROOT/bbb.mp4" ]]; then
+  echo "WARNING: bbb.mp4 is still missing after fetch — Big Buck Bunny Start will stay disabled." >&2
+fi
+chown ubuntu:ubuntu "\$INSTALL_ROOT/bbb.mp4" 2>/dev/null || true
+
 mkdir -p "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads"
 # Service runs as ubuntu; rsync often lands files owned by the deploy SSH user.
 chown -R ubuntu:ubuntu "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads" || true
@@ -264,7 +280,6 @@ FFMPEG=\${FFMPEG_BIN}
 PATH=\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
 PYTHONPATH=\${INSTALL_ROOT}/src:\${INSTALL_ROOT}/web/api
 MEDIAMTX_LOOPBACK_PUBLISH=1
-MOQ_RECORDER_AGENT_URL=http://35.222.33.58:8090
 # Local publisher agent is a laptop/dev feature — keep off on the hosted web VM.
 LOCAL_PUBLISHER_ENABLED=1
 LOCAL_PUBLISHER_TOKEN=dev-local-publisher
@@ -278,6 +293,10 @@ append_missing_env() {
     esac
     local key="\${line%%=*}"
     [[ -z "\$key" ]] && continue
+    # us-central1 Zixi is down; restoring this blocked every MoQ job on health timeout.
+    if [[ "\$key" == "MOQ_RECORDER_AGENT_URL" && "\$line" == *"35.222.33.58"* ]]; then
+      continue
+    fi
     if ! grep -q "^\$key=" "\$ENV_FILE"; then
       printf '%s\n' "\$line" >> "\$ENV_FILE"
     fi

@@ -37,11 +37,21 @@ INGEST_AGENT_PORT=8090
 INGEST_RECORDING_DIR=/opt/zixi_broadcaster-linux64
 INGEST_AGENT_WORK_DIR=/var/lib/moq-ingest-agent
 INGEST_FFMPEG_BIN=/usr/local/bin/ffmpeg
+ZIXI_API_USER=${ZIXI_API_USER:-admin}
+ZIXI_API_PASSWORD=${ZIXI_API_PASSWORD:-}
+ZIXI_API_BASE=http://127.0.0.1:4444
 EOF
   chmod 600 "$TOKEN_FILE"
   echo "Generated agent token in $TOKEN_FILE"
 else
   echo "Using existing $TOKEN_FILE"
+  if [[ -n "${ZIXI_API_PASSWORD:-}" ]] && ! grep -q '^ZIXI_API_PASSWORD=' "$TOKEN_FILE"; then
+    {
+      printf '\nZIXI_API_USER=%s\n' "${ZIXI_API_USER:-admin}"
+      printf 'ZIXI_API_PASSWORD=%s\n' "${ZIXI_API_PASSWORD}"
+      printf 'ZIXI_API_BASE=http://127.0.0.1:4444\n'
+    } >> "$TOKEN_FILE"
+  fi
 fi
 
 cat > /etc/systemd/system/moq-ingest-agent.service <<EOF

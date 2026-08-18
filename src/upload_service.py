@@ -617,10 +617,7 @@ class UploadService:
             cloud_provider=job.destination.cloud_provider or "",
             cloud_region=job.destination.cloud_region or "",
         )
-        zixi_poller = ZixiStatsPoller(
-            zixi_stats_url,
-            enabled=False if self._is_mediamtx_destination(job) else None,
-        )
+        zixi_poller = self._zixi_poller_for_job(job, zixi_stats_url)
         mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
@@ -628,33 +625,7 @@ class UploadService:
             ingest_provider=job.destination.ingest_provider,
             publisher_host=job.publisher_host,
         )
-        # RTMP has no libsrt RTT; prefer Zixi/MediaMTX receiver stats when available,
-        # otherwise TCP-connect probe to the RTMP host:port as net_rtt / jitter.
-        path_rtt_probe: Optional[PathRttProbe] = None
-        if job.destination.protocol == "rtmp":
-            rtmp_parsed = urlparse(job.destination.url)
-            path_rtt_probe = PathRttProbe(
-                job.destination.url,
-                port=rtmp_parsed.port or 1935,
-            )
-        elif job.destination.protocol == "webrtc" and mtx_poller:
-            # WHIP HTTP control plane — TCP probe as RTT fallback when WebRTC has no RTT metric.
-            whip_parsed = urlparse(job.destination.url)
-            path_rtt_probe = PathRttProbe(
-                job.destination.url,
-                port=whip_parsed.port or 8889,
-            )
-        elif job.destination.protocol == "srt":
-            # Direct ffmpeg→SRT exposes no libsrt stats, and off-VM publishes
-            # (publisher_host=local) can't reach the MediaMTX loopback metrics
-            # API either, leaving the SRT leg with ZERO transport telemetry.
-            # SRT itself is UDP, so probe TCP-connect RTT to the same host's
-            # HTTPS port as a path-RTT stand-in (Zixi receiver stats, when
-            # present, still take precedence in the sample merge below).
-            path_rtt_probe = PathRttProbe(
-                job._resolved_srt_destination_url(),
-                port=443,
-            )
+        path_rtt_probe = self._path_rtt_probe_for_job(job)
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
         sample_tick = 1
@@ -941,7 +912,71 @@ class UploadService:
     def _mediamtx_poller_for_job(self, job: UploadJob) -> Optional[MediaMtxStatsPoller]:
         if not self._is_mediamtx_destination(job):
             return None
-        return MediaMtxStatsPoller(endpoint_url=job.destination.url)
+        agent_metrics = None
+        agent_path = None
+        if self._is_remote_mediamtx_publish(job):
+            client = self._ingest_agent_client_for_job(job)
+            if client is not None:
+                path_name = MediaMtxStatsPoller._path_from_url(job.destination.url) or "benchmark"
+                agent_metrics = client.mediamtx_metrics_text
+                agent_path = lambda: client.mediamtx_path_text(path_name)
+        return MediaMtxStatsPoller(
+            endpoint_url=job.destination.url,
+            agent_metrics=agent_metrics,
+            agent_path=agent_path,
+        )
+
+    def _ingest_agent_client_for_job(self, job: UploadJob):
+        from ingest_agent_client import IngestAgentClient, resolve_ingest_agent
+
+        config = resolve_ingest_agent(
+            job.destination.url,
+            agent_url=job.ingest_agent_url,
+            agent_token=job.ingest_agent_token,
+        )
+        if config is None:
+            return None
+        return IngestAgentClient(config)
+
+    def _zixi_poller_for_job(self, job: UploadJob, stats_url: str) -> ZixiStatsPoller:
+        if self._is_mediamtx_destination(job):
+            return ZixiStatsPoller(stats_url, enabled=False)
+        agent_fetch = None
+        client = self._ingest_agent_client_for_job(job)
+        if client is not None:
+            agent_fetch = client.zixi_input_stats_text
+        return ZixiStatsPoller(
+            stats_url,
+            input_id=(job.zixi_stream_id or "").strip() or None,
+            agent_fetch=agent_fetch,
+        )
+
+    def _path_rtt_probe_for_job(self, job: UploadJob) -> Optional[PathRttProbe]:
+        """TCP-connect RTT when the publish path has no native RTT gauge.
+
+        Probe the ingest host's already-open TCP port (agent / HLS / HTTP-TS /
+        RTMP / WHIP) instead of UDP SRT or a guessed :443 that may be closed.
+        """
+        protocol = (job.destination.protocol or "").strip().lower()
+        dest_url = job.destination.url
+        if protocol == "rtmp":
+            parsed = urlparse(dest_url)
+            return PathRttProbe(dest_url, port=parsed.port or 1935)
+        if protocol == "webrtc":
+            parsed = urlparse(dest_url)
+            return PathRttProbe(dest_url, port=parsed.port or 8889)
+        if protocol == "http":
+            parsed = urlparse(dest_url)
+            return PathRttProbe(dest_url, port=parsed.port or 7777)
+        if protocol != "srt":
+            return None
+        url = job._resolved_srt_destination_url()
+        if job.ingest_agent_url:
+            parsed = urlparse(job.ingest_agent_url)
+            return PathRttProbe(job.ingest_agent_url, port=parsed.port or 8090)
+        if self._is_mediamtx_destination(job):
+            return PathRttProbe(url, port=8888)
+        return PathRttProbe(url, port=7777)
 
     @staticmethod
     def _merge_mediamtx_transport(
@@ -1582,10 +1617,7 @@ class UploadService:
         )
         # Zixi API lookups on MediaMTX streamids (publish:benchmark) hang and
         # stall the sample loop — only poll Zixi for managed Zixi SRT.
-        zixi_poller = ZixiStatsPoller(
-            resolved_srt_url,
-            enabled=False if self._is_mediamtx_destination(job) else None,
-        )
+        zixi_poller = self._zixi_poller_for_job(job, resolved_srt_url)
         mtx_poller = self._mediamtx_poller_for_job(job)
         ingest_poller = IngestHostMetricsPoller(
             job.destination.url,
@@ -1593,6 +1625,7 @@ class UploadService:
             ingest_provider=job.destination.ingest_provider,
             publisher_host=job.publisher_host,
         )
+        path_rtt_probe = self._path_rtt_probe_for_job(job)
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
         sample_tick = 1
@@ -1634,6 +1667,9 @@ class UploadService:
                 srt_stats = srt_reader.poll()
                 zixi_stats = zixi_poller.poll()
                 mtx_stats = mtx_poller.poll() if mtx_poller else MediaMtxStatsSnapshot()
+                path_rtt = (
+                    path_rtt_probe.poll() if path_rtt_probe and path_rtt_probe.enabled else None
+                )
                 # MediaMTX: open the player from path/encode signals only.
                 # Do not HLS-probe here — nested LL-HLS fetches were blocking the
                 # sample loop (~10s) and Zixi-style heal must never run on MTX.
@@ -1751,8 +1787,12 @@ class UploadService:
                 # Publisher libsrt first; MediaMTX fills receiver RTT/loss/recv rate (and Zixi if any).
                 merged = self._merge_mediamtx_transport(
                     mtx=mtx_stats,
-                    net_rtt_ms=srt_stats.rtt_ms or zixi_stats.rtt_ms,
-                    net_jitter_ms=srt_stats.rtt_jitter_ms or zixi_stats.jitter_ms,
+                    net_rtt_ms=srt_stats.rtt_ms
+                    or zixi_stats.rtt_ms
+                    or (path_rtt.rtt_ms if path_rtt else 0.0),
+                    net_jitter_ms=srt_stats.rtt_jitter_ms
+                    or zixi_stats.jitter_ms
+                    or (path_rtt.jitter_ms if path_rtt else 0.0),
                     net_send_mbps=send_mbps,
                     net_recv_mbps=srt_stats.mbps_recv_rate,
                     net_loss_pct=zixi_stats.packet_loss_pct,
@@ -2175,10 +2215,10 @@ class UploadService:
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
-                    moqx_subscribe_success=moqx_stats.subscribe_success if moqx_stats else 0,
-                    moqx_subscribe_error=moqx_stats.subscribe_error if moqx_stats else 0,
+                    moqx_subscribe_success=moqx_deltas.subscribe_success if moqx_deltas else 0,
+                    moqx_subscribe_error=moqx_deltas.subscribe_error if moqx_deltas else 0,
                     moqx_publish_namespace_success=(
-                        moqx_stats.publish_namespace_success if moqx_stats else 0
+                        moqx_deltas.publish_namespace_success if moqx_deltas else 0
                     ),
                     moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
                     moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,

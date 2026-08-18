@@ -9,8 +9,11 @@ function playbackGateForJob(job, benchmarkStarting) {
   if (!job) return "idle";
   if (job.status === "pending") return "waiting";
   if (job.status === "running") {
-    if (job.preview_ready === false && (job.protocol || "").toLowerCase() !== "moq") {
-      return "waiting";
+    if (job.preview_ready === false) {
+      const protocol = (job.protocol || "").toLowerCase();
+      if (protocol !== "moq" && protocol !== "webrtc") {
+        return "waiting";
+      }
     }
     return "live";
   }
@@ -32,6 +35,10 @@ assert.equal(
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "rtmp", preview_ready: false }, false),
   "waiting",
+);
+assert.equal(
+  playbackGateForJob({ status: "running", protocol: "webrtc", preview_ready: false }, false),
+  "live",
 );
 assert.equal(playbackGateForJob({ status: "pending", protocol: "moq" }, false), "waiting");
 assert.equal(playbackGateForJob({ status: "completed", protocol: "moq" }, false), "ended");

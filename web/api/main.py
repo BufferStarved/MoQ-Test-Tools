@@ -68,7 +68,11 @@ from moq_publish import (  # noqa: E402
     with_srt_stream_id,
     zixi_srt_streamid_value,
 )
-from vod_assets import media_source_catalog, resolve_bundled_vod  # noqa: E402
+from vod_assets import (  # noqa: E402
+    clip_vod_duration_sec,
+    media_source_catalog,
+    resolve_bundled_vod,
+)
 from upload_service import UploadJob  # noqa: E402
 from job_manager import (  # noqa: E402
     JobManager,
@@ -761,10 +765,8 @@ def create_upload(request: CreateUploadRequest):
             )
         preset_id = request.preset_id or destination.preset_id
         if not vmaf_available_for_endpoint(destination.url, preset_id=preset_id):
-            raise HTTPException(
-                status_code=400,
-                detail="VMAF is not available for this destination. Use a managed ingest endpoint.",
-            )
+            # Missing regional token must not 401 the ingest agent or block encode.
+            compute_vmaf_on_ingest = False
 
     if compute_vmaf_encoder and not libvmaf_available():
         # Encoder VMAF for local publisher runs on the agent — still require
@@ -777,13 +779,18 @@ def create_upload(request: CreateUploadRequest):
             )
 
     duration_sec = request.duration_sec
-    if duration_sec is None:
-        if is_live:
-            duration_sec = DEFAULT_LIVE_DURATION_SEC
-        else:
-            duration_sec = probe_media_duration_sec(media_path)
     if is_live:
+        if duration_sec is None:
+            duration_sec = DEFAULT_LIVE_DURATION_SEC
         duration_sec = max(5, min(MAX_LIVE_DURATION_SEC, int(duration_sec)))
+    else:
+        duration_sec = clip_vod_duration_sec(
+            probed_sec=probe_media_duration_sec(media_path),
+            requested=duration_sec,
+            bundled=resolve_bundled_vod(ROOT_DIR, media_path) is not None
+            or Path(media_path).name.lower()
+            in {"dummy.mp4", "bbb.mp4", "bbb.mov", "big_buck_bunny.mp4", "bigbuckbunny.mp4"},
+        )
 
     try:
         encode_ladder = ensure_known_ladder(request.encode_ladder)
@@ -1198,11 +1205,17 @@ async def webrtc_sdp_proxy(request: Request, url: str):
             upstream = await client.request(request.method, url, content=body, headers=headers)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"WebRTC signaling failed: {exc}") from exc
-    out_headers = {"Cache-Control": "no-store", "Access-Control-Expose-Headers": "Location"}
+    out_headers = {
+        "Cache-Control": "no-store",
+        "Access-Control-Expose-Headers": "Location, ETag",
+    }
     location = upstream.headers.get("location")
     if location:
         absolute = urljoin(url, location)
         out_headers["Location"] = f"/api/webrtc/sdp?url={quote(absolute, safe='')}"
+    etag = upstream.headers.get("etag")
+    if etag:
+        out_headers["ETag"] = etag
     media_type = upstream.headers.get("content-type") or "application/sdp"
     return Response(
         content=upstream.content,

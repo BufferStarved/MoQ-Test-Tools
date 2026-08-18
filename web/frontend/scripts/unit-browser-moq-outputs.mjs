@@ -23,9 +23,6 @@ function defaultIngestForProtocol(protocol, host = "gcp") {
 }
 
 function browserPublishIngestId(endpoint) {
-  if (isCustom(endpoint.ingestEndpointId) && (endpoint.protocol === "moq" || endpoint.protocol === "webrtc")) {
-    return "custom";
-  }
   if (endpoint.protocol === "webrtc") {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
   }
@@ -118,5 +115,10 @@ assert.deepEqual(
 
 const identity = [{ id: "1", protocol: "moq", ingestEndpointId: "gcp_moq_relay", playbackMode: "moq" }];
 assert.equal(collapseOutputsForBrowserMoq(identity), identity);
+
+const custom = collapseOutputsForBrowserMoq([
+  { id: "1", protocol: "moq", ingestEndpointId: "custom", playbackMode: "moq" },
+]);
+assert.equal(custom[0].ingestEndpointId, "gcp_moq_relay");
 
 console.log("unit-browser-moq-outputs: ok");

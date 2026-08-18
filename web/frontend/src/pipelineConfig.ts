@@ -75,8 +75,8 @@ export function diagramHopsForStream(
   } else if (ingest.includes("zixi")) {
     packager = mode === "mpegts" ? "HTTP-TS" : `Fast HLS ${summary.hls_segment_sec}s`;
   } else if (ingest.includes("mediamtx")) {
-    if (mode === "whep") {
-      packager = "None";
+    if (mode === "whep" || protocol === "webrtc") {
+      packager = "Direct WHEP";
     } else if (mode === "ll-dash" || mode === "dash") {
       packager = "LL-DASH";
     } else {
@@ -92,6 +92,8 @@ export function diagramHopsForStream(
     player: playbackShortLabel(stream.playbackMode, protocol),
   };
 }
+
+export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "browser";
 
 export interface StreamConfigInput {
   label: string;
@@ -130,11 +132,51 @@ function playbackLabel(mode?: string | null): string {
   }
 }
 
-function encoderSection(summary: EncodeProfileSummary): ConfigDetailSection {
+function encoderSection(
+  summary: EncodeProfileSummary,
+  kind: PipelineEncodeKind = "ffmpeg",
+  protocols: string[] = [],
+): ConfigDetailSection {
+  const proto = new Set(protocols.map((item) => item.toLowerCase()));
+  const hasMoq = proto.size === 0 || proto.has("moq");
+  const hasWebrtc = proto.has("webrtc");
+
+  if (kind === "browser") {
+    const rows: ConfigDetailRow[] = [
+      {
+        label: "Engine",
+        value: "This browser — ffmpeg is not used",
+        note: "MoQ uses WebCodecs. WebRTC uses the native RTC encoder over WHIP.",
+      },
+      { label: "Target ladder", value: summary.encode_ladder_label },
+    ];
+    if (hasMoq) {
+      rows.push({
+        label: "MoQ (WebCodecs)",
+        value: "H.264 realtime · ~2.5 Mbps · 1s GOP",
+        note: `LOC objects on the relay. Player hold ${summary.moq_target_latency_ms} ms.`,
+      });
+    }
+    if (hasWebrtc) {
+      rows.push({
+        label: "WebRTC (WHIP)",
+        value: "Native RTCPeerConnection encode",
+        note: "Not WebCodecs and not libx264 — the browser/OS encoder talks WHIP to MediaMTX.",
+      });
+    }
+    return {
+      id: "encoder",
+      title: "Encoder",
+      subtitle: "In-page camera encode for this recipe",
+      rows,
+    };
+  }
+
+  const where = kind === "ffmpeg-local" ? "this computer" : "the API host";
   return {
     id: "encoder",
     title: "Encoder",
-    subtitle: "Shared ffmpeg / libx264 settings for every stream in the recipe",
+    subtitle: `Shared ffmpeg / libx264 on ${where}`,
     rows: [
       { label: "Ladder", value: summary.encode_ladder_label },
       {
@@ -171,6 +213,7 @@ function encoderSection(summary: EncodeProfileSummary): ConfigDetailSection {
 function publisherRows(
   stream: StreamConfigInput,
   summary: EncodeProfileSummary,
+  encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
   const protocol = stream.protocol.toLowerCase();
   const rows: ConfigDetailRow[] = [
@@ -192,12 +235,19 @@ function publisherRows(
     rows.push({
       label: "MoQ publish",
       value: stream.moqNamespace ? `namespace ${stream.moqNamespace}` : "relay namespace from recipe",
-      note: "openmoq CMAF publish; paced to wall clock",
+      note:
+        encodeKind === "browser"
+          ? "In-page WebCodecs → LOC objects on the relay (not ffmpeg / openmoq CMAF)"
+          : "openmoq CMAF publish; paced to wall clock",
     });
   } else if (protocol === "webrtc") {
     rows.push({
       label: "WHIP publish",
-      value: "WebRTC ingest (WHIP)",
+      value: encodeKind === "browser" ? "Browser camera → MediaMTX WHIP" : "ffmpeg WHIP ingest",
+      note:
+        encodeKind === "browser"
+          ? "Native WebRTC encode. WHEP playback is the same session — there is no HLS packager."
+          : "ffmpeg publishes WHIP; WHEP playback has no HLS packager.",
     });
   }
   if (stream.endpointUrl?.trim()) {
@@ -245,7 +295,9 @@ function ingestRows(stream: StreamConfigInput): ConfigDetailRow[] {
 function packagerRows(
   stream: StreamConfigInput,
   summary: EncodeProfileSummary,
+  encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
+  const protocol = stream.protocol.toLowerCase();
   const ingest = stream.ingestEndpointId;
   const mode = (stream.playbackMode || "auto").toLowerCase();
   const rows: ConfigDetailRow[] = [];
@@ -276,11 +328,11 @@ function packagerRows(
         value: "MediaMTX + CMAF / LL-DASH sidecar",
         note: "Low-latency DASH via ffmpeg CMAF → nginx",
       });
-    } else if (mode === "whep") {
+    } else if (mode === "whep" || protocol === "webrtc") {
       rows.push({
         label: "Packager",
-        value: "None (WebRTC)",
-        note: "WHEP pulls the live WebRTC session directly",
+        value: "None — expected for WebRTC",
+        note: "WHEP plays the live WHIP session directly. No HLS/DASH packager in this path.",
       });
     } else {
       rows.push({
@@ -292,8 +344,11 @@ function packagerRows(
   } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
     rows.push({
       label: "Packager",
-      value: "MoQ / CMAF objects",
-      note: "No classic HLS segments — objects on the relay",
+      value: encodeKind === "browser" ? "MoQ / LOC objects" : "MoQ / CMAF objects",
+      note:
+        encodeKind === "browser"
+          ? "No HLS segments — LOC objects from this tab onto the relay."
+          : "No classic HLS segments — objects on the relay.",
     });
   } else {
     rows.push({
@@ -355,14 +410,17 @@ function playerRows(
 export function buildSharedPipelineSections(
   ladderId: string | null | undefined,
   targetLatencyMs: number | null | undefined,
+  encodeKind: PipelineEncodeKind = "ffmpeg",
+  protocols: string[] = [],
 ): ConfigDetailSection[] {
-  return [encoderSection(encodeProfileSummary(ladderId, targetLatencyMs))];
+  return [encoderSection(encodeProfileSummary(ladderId, targetLatencyMs), encodeKind, protocols)];
 }
 
 export function buildStreamPipelineSections(
   stream: StreamConfigInput,
   ladderId: string | null | undefined,
   targetLatencyMs: number | null | undefined,
+  encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailSection[] {
   const summary = encodeProfileSummary(ladderId, targetLatencyMs);
   const prefix = stream.label;
@@ -371,7 +429,7 @@ export function buildStreamPipelineSections(
       id: `${prefix}-publisher`,
       title: "Publisher",
       subtitle: prefix,
-      rows: publisherRows(stream, summary),
+      rows: publisherRows(stream, summary, encodeKind),
     },
     {
       id: `${prefix}-ingest`,
@@ -383,7 +441,7 @@ export function buildStreamPipelineSections(
       id: `${prefix}-packager`,
       title: "Packager",
       subtitle: prefix,
-      rows: packagerRows(stream, summary),
+      rows: packagerRows(stream, summary, encodeKind),
     },
     {
       id: `${prefix}-player`,
@@ -398,8 +456,10 @@ export function buildRecipePipelineSections(
   ladderId: string | null | undefined,
   targetLatencyMs: number | null | undefined,
   endpoints: EndpointConfig[],
+  encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailSection[] {
-  const shared = buildSharedPipelineSections(ladderId, targetLatencyMs);
+  const protocols = endpoints.map((endpoint) => endpoint.protocol);
+  const shared = buildSharedPipelineSections(ladderId, targetLatencyMs, encodeKind, protocols);
   const perStream = endpoints.flatMap((endpoint, index) =>
     buildStreamPipelineSections(
       {
@@ -412,6 +472,7 @@ export function buildRecipePipelineSections(
       },
       ladderId,
       targetLatencyMs,
+      encodeKind,
     ),
   );
   return [...shared, ...perStream];

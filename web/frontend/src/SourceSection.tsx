@@ -16,6 +16,8 @@ export type EncoderId = "ffmpeg" | "obs" | "wowza";
 
 export const LOCAL_DEVICE_WEBCAM = "device:webcam";
 export const BBB_MEDIA_PATH = "bbb.mp4";
+/** Cloud playout clip length — matches color bars and the API bundled cap. */
+export const CLOUD_PLAYOUT_DURATION_SEC = 60;
 
 interface SourceSectionProps {
   mediaSource: MediaSourceId;
@@ -53,7 +55,7 @@ export function SourceSection({
   webcamDeviceIndex,
   onWebcamDeviceIndexChange,
   agentWebcamDevices,
-  captureMinutes,
+  captureMinutes: _captureMinutes,
   webcamStatus,
   disabled,
   running,
@@ -95,7 +97,7 @@ export function SourceSection({
       <StepHeading
         step={1}
         title="Source"
-        tip="Choose a live camera or a cloud playout (a file encoded live on the API host). A webcam then asks where to encode — Browser or this computer."
+        tip="Webcam encodes in this browser or on this computer. Cloud playout encodes a file on the API host."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isLiveCamera ? " selected" : ""}`}>
@@ -110,7 +112,6 @@ export function SourceSection({
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
-            <span className="field-hint">This machine’s camera</span>
           </span>
         </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
@@ -125,14 +126,12 @@ export function SourceSection({
             <strong>
               <IconFilm size={15} /> Cloud playout
             </strong>
-            <span className="field-hint">File encoded live on the API host</span>
           </span>
         </label>
       </div>
 
       {isLiveCamera && (
         <div className="encode-location-block">
-          <p className="encode-location-lede">Where should this camera encode?</p>
           <div className="source-mode-options encode-location-options" role="radiogroup" aria-label="Encode location">
             <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
               <input
@@ -146,11 +145,7 @@ export function SourceSection({
                 <strong>
                   <IconCpu size={15} /> Browser
                 </strong>
-                <span className="field-hint">
-                  {browserCaps.ok
-                    ? "MoQ or WebRTC with WebCodecs"
-                    : browserCaps.reason}
-                </span>
+                {!browserCaps.ok && <span className="field-hint">{browserCaps.reason}</span>}
               </span>
             </label>
             <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
@@ -165,45 +160,46 @@ export function SourceSection({
                 <strong>
                   <IconLaptop size={15} /> This computer
                 </strong>
-                <span className="field-hint">
-                  {localAgentAvailable
-                    ? "FFMPEG - SRT, RTMP, MOQ, WebRTC"
-                    : "Needs the local publisher agent (not enabled here)."}
-                </span>
+                {!localAgentAvailable && (
+                  <span className="field-hint">Needs the local publisher agent.</span>
+                )}
               </span>
             </label>
           </div>
-          <p className="field-hint source-roadmap-hint">OBS, Wowza, and AWS ingest are next.</p>
         </div>
       )}
 
       {isCloudPlayout && (
-        <div className="source-mode-detail">
-          <label>
-            Asset
-            <select
-              value={mediaSource}
-              disabled={disabled}
-              onChange={(e) => onMediaSourceChange(e.target.value as MediaSourceId)}
-            >
-              <option value="dummy">Default Color Bars</option>
-              <option value="bbb">Big Buck Bunny</option>
-              <option value="upload">Upload your own file…</option>
-            </select>
-            {mediaSource === "dummy" && <span className="field-hint">60s color bars with time counter</span>}
-            {mediaSource === "bbb" && (
-              <span className="field-hint">
-                {bbbAvailable
-                  ? "Blender Foundation short — encoded live on the API host"
-                  : bbbHint || "Place bbb.mp4 next to dummy.mp4, or run scripts/fetch-bbb.sh"}
-              </span>
-            )}
-            {mediaSource === "upload" && (
-              <span className="field-hint">{mediaPath ? `Using: ${mediaLabel}` : "Choose a file to upload"}</span>
-            )}
-          </label>
+        <div className="source-mode-detail source-cloud-detail">
+          <div className="source-asset-row">
+            <label>
+              Asset
+              <select
+                value={mediaSource}
+                disabled={disabled}
+                onChange={(e) => onMediaSourceChange(e.target.value as MediaSourceId)}
+              >
+                <option value="dummy">Default Color Bars</option>
+                <option value="bbb">Big Buck Bunny</option>
+                <option value="upload">Upload your own file…</option>
+              </select>
+            </label>
+            {(mediaSource === "bbb" &&
+              (!bbbAvailable || (bbbHint && bbbHint !== "Ready"))) ||
+            (mediaSource === "upload" && mediaPath) ? (
+              <p className="field-hint source-asset-hint">
+                {mediaSource === "bbb" &&
+                  (bbbAvailable
+                    ? bbbHint && bbbHint !== "Ready"
+                      ? bbbHint
+                      : null
+                    : "bbb.mp4 is not on this host yet.")}
+                {mediaSource === "upload" && mediaPath ? mediaLabel : null}
+              </p>
+            ) : null}
+          </div>
           {mediaSource === "upload" && (
-            <div className="button-row" style={{ marginTop: 0 }}>
+            <div className="button-row source-upload-row">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -227,11 +223,6 @@ export function SourceSection({
               </button>
             </div>
           )}
-          <p className="field-hint">
-            Encoded with ffmpeg on the API host (GCP us-central1). Each output’s Destination
-            chooses the ingest independently.
-          </p>
-          <p className="field-hint source-roadmap-hint">OBS, Wowza, and AWS ingest are next.</p>
         </div>
       )}
 
@@ -243,7 +234,7 @@ export function SourceSection({
                 <>
                   <StatusDot
                     tone="ok"
-                    label={`Agent connected — auto-stops after ${captureMinutes} min`}
+                    label="Agent connected"
                     className="webcam-detail-connected"
                   />
                   {agentWebcamDevices.length > 0 && (
@@ -274,7 +265,6 @@ export function SourceSection({
                     compact
                     variant="webcam"
                   />
-                  <p className="field-hint webcam-detail-blocked">Start stays disabled until it connects.</p>
                 </>
               )}
             </div>
@@ -289,11 +279,7 @@ export function SourceSection({
             <div className="webcam-detail-controls">
               <StatusDot
                 tone={browserCaps.ok ? "ok" : "warn"}
-                label={
-                  browserCaps.ok
-                    ? `Ready — auto-stops after ${captureMinutes} min`
-                    : "Browser cannot publish yet"
-                }
+                label={browserCaps.ok ? "Ready" : "Browser cannot publish"}
               />
               {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
             </div>

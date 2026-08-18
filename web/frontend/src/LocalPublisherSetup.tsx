@@ -45,16 +45,9 @@ export function LocalPublisherSetup({
       <p className="local-publisher-setup-lede">
         {variant === "webcam" ? (
           hosted ? (
-            <>
-              Clone the repo once, run the command below in a terminal, and leave it open. When the
-              page shows <strong>Agent connected</strong>, press Start — ffmpeg on this laptop will
-              open your camera.
-            </>
+            <>Run this in a terminal and leave it open.</>
           ) : (
-            <>
-              Run the local agent in another terminal — ffmpeg on this machine will capture the
-              camera when you press Start.
-            </>
+            <>Start the local agent in another terminal.</>
           )
         ) : hosted ? (
           <>
