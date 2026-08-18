@@ -169,6 +169,14 @@ async function bindPublisherSession(args: {
     if (chunk.isKeyframe) {
       videoGroupId += 1n;
     }
+    const descriptionChanged =
+      Boolean(chunk.description) &&
+      (!lastDescription ||
+        chunk.description!.byteLength !== lastDescription.byteLength ||
+        chunk.description!.some((byte, i) => byte !== lastDescription![i]));
+    if (chunk.description && (descriptionChanged || !lastDescription)) {
+      lastDescription = chunk.description;
+    }
     const extensions = encodeLocHeaders(
       {
         captureTimestamp: BigInt(Math.round(chunk.captureTimestampUs || Date.now() * 1000)),
@@ -180,7 +188,7 @@ async function bindPublisherSession(args: {
           endOfFrame: true,
           temporalId: 0,
         },
-        ...(lastDescription ? { videoConfig: lastDescription } : {}),
+        ...(chunk.isKeyframe && lastDescription ? { videoConfig: lastDescription } : {}),
       },
       { deltaEncoded: true },
     );
@@ -189,7 +197,9 @@ async function bindPublisherSession(args: {
         if (sub.streamId !== null) {
           const old = sub.streamId;
           sub.streamId = null;
-          await connection.closeSubgroup(old).catch(() => undefined);
+          // Do not await — a hung close on one subscriber used to stall the
+          // shared encode write chain for every relay.
+          void connection.closeSubgroup(old).catch(() => undefined);
         }
         sub.objectId = 0n;
         try {

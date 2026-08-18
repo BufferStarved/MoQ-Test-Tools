@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { WebCodecsVideoDecoder } from "@moqt/browser";
 import { Player } from "@playa/player";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
@@ -6,6 +7,7 @@ import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
+import { classifyLocFrameStall, locSubscribeOptions } from "../moqLocPlayback";
 import {
   markMoqCatalogReady,
   markMoqFirstFrame,
@@ -660,7 +662,7 @@ export default function MoqPlayer({
           pushDiag(`subscribe_retry=attempt${attempt}`, true);
         }
 
-        const catchUp = moqCatchUpConfig(targetLatencyMs || 400);
+        const catchUp = moqCatchUpConfig(targetLatencyMs || 400, mediaPackaging);
         pushDiag(
           `catch_up target=${catchUp.targetLatencyMs}ms maxRate=${catchUp.maxCatchUpRate} ` +
             `threshold=${catchUp.catchUpThresholdMs}ms warmup=${PUBLISHER_WARMUP_MS}ms`,
@@ -690,7 +692,13 @@ export default function MoqPlayer({
               draftVersion,
             }),
             ...(mediaPackaging === "loc"
-              ? { catalog: browserLocCatalogTracks({ includeAudio: sourceHasAudio }) }
+              ? {
+                  catalog: browserLocCatalogTracks({ includeAudio: sourceHasAudio }),
+                  // Hardware VideoDecoder can fail silently mid-stream (~9s on
+                  // both relays, recv still ~2.3 Mbps). Software is slower but
+                  // keeps the canvas painting for a 300s webcam run.
+                  createVideoDecoder: () => new WebCodecsVideoDecoder({ preferSoftwareDecoder: true }),
+                }
               : {}),
             // LOC carries CaptureTimestamps; CMAF from openmoq does not.
             maxCatchUpRate: catchUp.maxCatchUpRate,
@@ -700,16 +708,15 @@ export default function MoqPlayer({
             // of ms, so Playa skipped every frame after the join cushion
             // (observed: ~36 rendered frames then a freeze while 2.2 Mbps
             // still arrived). Show a late frame rather than a black canvas.
-            lateFrameThresholdMs: mediaPackaging === "loc" ? 5_000 : 400,
-            // LOC: LargestObject + warm-start of the current GOP. NextGroupStart
-            // on moqx delivered one group then froze (~1–2 fps with the
-            // resubscribe watchdog). CMAF still joins on the next fragment.
+            // LOC: LargestObject at the live edge — do not FETCH-warm-start
+            // the current GOP. moqx honored that fetch for one group and
+            // never attached later groups (same stall as NextGroupStart).
             ...(mediaPackaging === "loc"
-              ? {
-                  subscriptionFilter: { type: "LargestObject" as const },
-                  warmStartCurrentGroup: true,
-                }
-              : { subscriptionFilter: { type: "NextGroupStart" as const } }),
+              ? locSubscribeOptions()
+              : {
+                  lateFrameThresholdMs: 400,
+                  subscriptionFilter: { type: "NextGroupStart" as const },
+                }),
           },
         });
         playerRef.current = player;
@@ -1102,22 +1109,27 @@ export default function MoqPlayer({
           if (mediaPackaging === "loc") {
             const frames = sessionRef.current.framesRendered;
             const locStallMs = earlyWindow ? 3_000 : STALL_RESTART_MS;
-            if (retrying) {
-              watchdogAtMs = Date.now();
-            } else if (frames > lastLocFrames) {
+            if (frames > lastLocFrames) {
               lastLocFrames = frames;
               watchdogAtMs = Date.now();
-            } else if (Date.now() - watchdogAtMs > locStallMs) {
-              if (sessionRestarts < MAX_SESSION_RESTARTS) {
-                watchdogAtMs = Date.now();
-                scheduleSessionRestart(
-                  `loc_frames_frozen_${frames}${earlyWindow ? "_early_join" : ""}`,
-                  SESSION_RESTART_DELAY_MS,
-                );
-              } else if (!watchdogGaveUp) {
-                watchdogGaveUp = true;
-                pushDiag(`loc_stalled_frames=${frames} (gave up reconnects)`);
-              }
+            }
+            const locAction = classifyLocFrameStall({
+              framesRendered: frames,
+              lastAdvanceAtMs: watchdogAtMs,
+              nowMs: Date.now(),
+              sessionRestarts,
+              stallLimitMs: locStallMs,
+              retrying,
+            });
+            if (locAction === "restart") {
+              watchdogAtMs = Date.now();
+              scheduleSessionRestart(
+                `loc_frames_frozen_${frames}${earlyWindow ? "_early_join" : ""}`,
+                SESSION_RESTART_DELAY_MS,
+              );
+            } else if (locAction === "give_up" && !watchdogGaveUp) {
+              watchdogGaveUp = true;
+              pushDiag(`loc_stalled_frames=${frames} (gave up reconnects)`);
             }
             return;
           }

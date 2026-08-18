@@ -148,9 +148,15 @@ export function moqPlayerTargetLatencyMs(targetLatencyMs?: number): number {
  * openmoq CMAF does not publish LOC CaptureTimestamps. Enabling maxCatchUpRate
  * with media-timeline timestamps treated as capture times makes the player
  * think latency is huge and warps A/V — reported as "half speed" / rubber-banding.
- * Keep rate at 1.0; live-edge is handled by buffer seek in MoqPlayer.
+ * Keep CMAF at 1.0; live-edge is handled by buffer seek in MoqPlayer.
+ *
+ * Browser LOC *does* stamp CaptureTimestamp. A 1.0 rate left both east and
+ * Linode players falling behind (~16 fps) until the canvas froze at ~9s.
  */
-export function moqCatchUpConfig(targetLatencyMs?: number): {
+export function moqCatchUpConfig(
+  targetLatencyMs?: number,
+  packaging: "cmaf" | "loc" = "cmaf",
+): {
   targetLatencyMs: number;
   maxCatchUpRate: number;
   catchUpThresholdMs: number;
@@ -159,7 +165,7 @@ export function moqCatchUpConfig(targetLatencyMs?: number): {
   const target = moqPlayerTargetLatencyMs(targetLatencyMs);
   return {
     targetLatencyMs: target,
-    maxCatchUpRate: 1.0,
+    maxCatchUpRate: packaging === "loc" ? 1.25 : 1.0,
     catchUpThresholdMs: Math.max(80, Math.round(target * 0.2)),
     catchUpRecoveryMs: Math.max(40, Math.round(target * 0.12)),
   };

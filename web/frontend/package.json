@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@moqt/browser": "file:vendor/moq-playa/packages/browser",
     "@moqt/loc": "file:vendor/moq-playa/packages/loc",
     "@moqt/msf": "file:vendor/moq-playa/packages/msf",
     "@moqt/transport": "file:vendor/moq-playa/packages/transport",
