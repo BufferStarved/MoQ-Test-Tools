@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
+  cmafSubscribeOptions,
   isPublisherNotReadyError,
   moqHasRenderedMedia,
+  moqRenderSink,
   noMediaFailMessage,
   noMediaTimeoutMs,
   shouldKeepSessionOnSubscribeError,
+  CMAF_LATE_FRAME_THRESHOLD_MS,
   MOQ_ALL_TRACKS_REFUSED,
   MOQ_NO_MEDIA_TIMEOUT_MS,
   MOQ_SUBSCRIPTION_REFUSED,
@@ -107,5 +111,84 @@ describe("classifyMoqEndVerdict", () => {
 describe("noMediaFailMessage", () => {
   it("names the namespace so a 0x10 miss is diagnosable", () => {
     assert.match(noMediaFailMessage({ catalogReady: false, namespace: "bench-6a9355b9" }), /bench-6a9355b9/);
+  });
+});
+
+describe("cmafSubscribeOptions", () => {
+  it("joins live CMAF with NextGroupStart and no open-group FETCH", () => {
+    const opts = cmafSubscribeOptions();
+    assert.equal(opts.subscriptionFilter.type, "NextGroupStart");
+    assert.equal(opts.warmStartCurrentGroup, false);
+    assert.equal(opts.lateFrameThresholdMs, CMAF_LATE_FRAME_THRESHOLD_MS);
+  });
+});
+
+describe("moqRenderSink", () => {
+  it("keeps CMAF on the <video> element even when playa reports unknown", () => {
+    assert.equal(moqRenderSink("cmaf"), "video");
+    assert.equal(moqRenderSink("loc"), "canvas");
+  });
+});
+
+describe("classifyCmafPlayheadStall", () => {
+  const base = {
+    videoTimeSec: 2.97,
+    aheadSec: 0.53,
+    frozenMs: 1_800,
+    earlyWindow: true,
+    sessionRestarts: 0,
+    stallLimitMs: 1_750,
+    retrying: false,
+  };
+
+  it("holds the prod BBB case: 2.97s playhead + 0.53s buffer during early join", () => {
+    assert.equal(classifyCmafPlayheadStall(base), "hold");
+  });
+
+  it("does not restart a reconnect that reset the playhead to 0", () => {
+    assert.equal(
+      classifyCmafPlayheadStall({
+        ...base,
+        videoTimeSec: 0,
+        aheadSec: 0,
+        sessionRestarts: 1,
+      }),
+      "hold",
+    );
+  });
+
+  it("holds a buffered freeze after the early window (keep the catalog)", () => {
+    assert.equal(
+      classifyCmafPlayheadStall({
+        ...base,
+        earlyWindow: false,
+        frozenMs: 8_500,
+        stallLimitMs: 8_000,
+        videoTimeSec: 12.4,
+        aheadSec: 0.8,
+      }),
+      "hold",
+    );
+  });
+
+  it("is ok while the playhead is still inside the stall limit", () => {
+    assert.equal(classifyCmafPlayheadStall({ ...base, frozenMs: 1_000 }), "ok");
+  });
+
+  it("is ok while a reconnect is in flight", () => {
+    assert.equal(classifyCmafPlayheadStall({ ...base, aheadSec: 0, retrying: true }), "ok");
+  });
+
+  it("restarts a mid-run starve after the early window, then gives up", () => {
+    const starved = {
+      ...base,
+      earlyWindow: false,
+      aheadSec: 0,
+      frozenMs: 8_500,
+      stallLimitMs: 8_000,
+      videoTimeSec: 20,
+    };
+    assert.equal(classifyCmafPlayheadStall(starved), "restart");
+    assert.equal(classifyCmafPlayheadStall({ ...starved, sessionRestarts: 3 }), "give_up");
   });
 });

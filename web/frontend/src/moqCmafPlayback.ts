@@ -18,6 +18,83 @@ export const SUBSCRIBE_KEEPALIVE_ON_0X10 = true;
 /** Fail the visible player if nothing rendered by then (fits a 60s BBB). */
 export const MOQ_NO_MEDIA_TIMEOUT_MS = 15_000;
 
+/** MSE still has a GOP-sized lead — do not tear down a live-edge join. */
+export const CMAF_BUFFERED_HOLD_SEC = 0.35;
+/** Playhead that has actually started (MSE join), not a reconnect reset. */
+export const CMAF_JOINED_PLAYHEAD_SEC = 0.25;
+/** Same class of late-frame floor as the previous inline CMAF config. */
+export const CMAF_LATE_FRAME_THRESHOLD_MS = 400;
+
+/**
+ * Live CMAF subscribe: NextGroupStart at the next keyframe, no joining
+ * FETCH of the open group. moqx honored a warm-start / mid-stream FETCH
+ * for one GOP (~0.5–1s) and never attached later groups — same stall as
+ * LOC. Catalog init comes from the publisher; do not fetch the open GOP.
+ */
+export function cmafSubscribeOptions(): {
+  subscriptionFilter: { type: "NextGroupStart" };
+  warmStartCurrentGroup: false;
+  lateFrameThresholdMs: number;
+} {
+  return {
+    subscriptionFilter: { type: "NextGroupStart" },
+    warmStartCurrentGroup: false,
+    lateFrameThresholdMs: CMAF_LATE_FRAME_THRESHOLD_MS,
+  };
+}
+
+/** CMAF paints MSE on <video>; LOC paints WebCodecs on <canvas>. */
+export function moqRenderSink(mediaPackaging: "cmaf" | "loc"): "video" | "canvas" {
+  return mediaPackaging === "loc" ? "canvas" : "video";
+}
+
+export type CmafStallAction = "ok" | "hold" | "restart" | "give_up";
+
+/**
+ * Frozen-playhead watchdog for CMAF/MSE.
+ *
+ * Prod `0b1e1ac` / `100826e`: catalog ready, vt=2.97s, ahead=0.53s,
+ * then `playhead_frozen_*_buffered_early_join` tore the session down.
+ * Reconnects 2/3 and 3/3 came back at vt=0 (catalog/group gone) and
+ * never recovered. A GOP-sized buffer at ~3s is a live-edge join
+ * waiting for the next fragment — keep the session.
+ */
+export function classifyCmafPlayheadStall(input: {
+  videoTimeSec: number;
+  aheadSec: number;
+  frozenMs: number;
+  earlyWindow: boolean;
+  sessionRestarts: number;
+  maxRestarts?: number;
+  retrying: boolean;
+  stallLimitMs: number;
+}): CmafStallAction {
+  if (input.retrying) {
+    return "ok";
+  }
+  if (input.frozenMs <= input.stallLimitMs) {
+    return "ok";
+  }
+  const maxRestarts = input.maxRestarts ?? 3;
+  const buffered = input.aheadSec >= CMAF_BUFFERED_HOLD_SEC;
+  const joined = input.videoTimeSec >= CMAF_JOINED_PLAYHEAD_SEC;
+
+  // Buffered hole / live-edge GOP wait. Restarting burns the one-shot
+  // catalog and the next subscribe starts at vt=0.
+  if (buffered) {
+    return "hold";
+  }
+  // Early-join starvation or a reconnect that wiped MSE: keep-alive
+  // (playa REQUEST_UPDATE) beats a session teardown.
+  if (input.earlyWindow || !joined) {
+    return "hold";
+  }
+  if (input.sessionRestarts < maxRestarts) {
+    return "restart";
+  }
+  return "give_up";
+}
+
 export function isPublisherNotReadyError(code: number): boolean {
   return (
     code === MOQ_ALL_TRACKS_REFUSED ||

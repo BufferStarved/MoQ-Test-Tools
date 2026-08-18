@@ -9,8 +9,11 @@ import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
 import { classifyLocFrameStall, locSubscribeOptions } from "../moqLocPlayback";
 import {
+  classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
+  cmafSubscribeOptions,
   moqHasRenderedMedia,
+  moqRenderSink,
   noMediaFailMessage,
   noMediaTimeoutMs,
   shouldKeepSessionOnSubscribeError,
@@ -95,13 +98,12 @@ const SESSION_RESTART_DELAY_MS = 2_000;
 // Playhead frozen this long while the encode is live => the session is dead
 // even if playa never surfaced an error; tear down and resubscribe.
 const STALL_RESTART_MS = 8_000;
-// CMAF/NextGroupStart: moqx sometimes honors a mid-stream subscribe for
-// exactly one group then never attaches later groups — recover with a
-// fast resubscribe. LOC uses LargestObject; fan-out on the publisher means
-// a player resubscribe no longer steals the ingest recorder's alias.
+// Early-join window: used to fast-resubscribe CMAF after a 1.75s freeze.
+// That killed healthy live-edge holds (vt≈3s, ~0.5s buffered) and the
+// reconnect reset MSE to 0 — catalog is one-shot, so 2/3 and 3/3 never
+// recovered. CMAF now holds; LOC still uses the fast path.
 const EARLY_JOIN_WINDOW_MS = 15_000;
 const EARLY_STALL_RESTART_MS = 1_750;
-const EARLY_RESTART_DELAY_MS = 250;
 // Watchdog needs sub-second ticks to catch early starvation promptly; the
 // live-edge trim keeps its original 2s cadence via a tick divider below.
 const WATCHDOG_TICK_MS = 500;
@@ -307,6 +309,15 @@ export default function MoqPlayer({
     if (!canvas || !video) {
       return;
     }
+    // CMAF MSE is the <video> element. JSX starts it `hidden`; leaving it
+    // display:none until catalog_received lets Chrome suspend the pipeline.
+    if (mediaPackaging === "cmaf") {
+      canvas.hidden = true;
+      video.hidden = false;
+    } else {
+      canvas.hidden = false;
+      video.hidden = true;
+    }
 
     if (playbackGate !== "live") {
       if (playbackGate === "ended") {
@@ -476,9 +487,13 @@ export default function MoqPlayer({
     }
 
     function updateMediaVisibility(player: Player) {
-      const mediaType = player.activeMediaType;
-      pushDiag(`media_sink=${mediaType ?? "unknown"}`);
-      if (mediaType === "video") {
+      // Packaging decides the sink — not playa.activeMediaType. That getter
+      // is null until catalog_received, and updateMediaVisibility used to
+      // hide <video> on "unknown" (display:none suspends Chrome MSE).
+      const sink = moqRenderSink(mediaPackaging);
+      const playaType = player.activeMediaType;
+      pushDiag(`media_sink=${sink} playa=${playaType ?? "unknown"}`, true);
+      if (sink === "video") {
         canvas.hidden = true;
         video.hidden = false;
       } else {
@@ -592,6 +607,12 @@ export default function MoqPlayer({
         retrying = true;
         sessionRestarts += 1;
         sessionRef.current.sessionRestarts = sessionRestarts;
+        // CMAF catalog is one-shot. After destroy(), MSE currentTime is 0 —
+        // drop firstFrame so the watchdog waits for the new session instead
+        // of counting vt=0 as playhead_frozen_0.00s_early_join.
+        if (mediaPackaging === "cmaf") {
+          sessionRef.current.firstFrame = false;
+        }
         // Fresh subscription starts at the live edge — no leftover catch-up.
         catchUpRate = 1;
         video.playbackRate = 1;
@@ -699,12 +720,7 @@ export default function MoqPlayer({
             // LOC: LargestObject at the live edge — do not FETCH-warm-start
             // the current GOP. moqx honored that fetch for one group and
             // never attached later groups (same stall as NextGroupStart).
-            ...(mediaPackaging === "loc"
-              ? locSubscribeOptions()
-              : {
-                  lateFrameThresholdMs: 400,
-                  subscriptionFilter: { type: "NextGroupStart" as const },
-                }),
+            ...(mediaPackaging === "loc" ? locSubscribeOptions() : cmafSubscribeOptions()),
           },
         });
         playerRef.current = player;
@@ -1121,11 +1137,9 @@ export default function MoqPlayer({
             firstMediaAtMs = Date.now();
           }
           watchdogTick += 1;
-          // First-join starvation fast path (see EARLY_STALL_RESTART_MS): a
-          // freshly-joined subscription that delivered one group then went
-          // silent is dead — resubscribing is the known-good recovery, so do
-          // it in ~2s instead of letting the 8s watchdog turn a startup
-          // hiccup into a ~12s freeze.
+          // Early-join freeze: kick play / hold the CMAF session after
+          // EARLY_STALL_RESTART_MS. Do not tear down — reconnect resets
+          // vt to 0 and misses the one-shot catalog. LOC still restarts.
           const earlyWindow = Date.now() - firstMediaAtMs < EARLY_JOIN_WINDOW_MS;
           const stallLimitMs = earlyWindow ? EARLY_STALL_RESTART_MS : STALL_RESTART_MS;
           if (mediaPackaging === "loc") {
@@ -1192,42 +1206,44 @@ export default function MoqPlayer({
             }
             if (!jumped && Date.now() - watchdogAtMs > stallLimitMs) {
               const aheadNow = bufferedAheadSec(video);
-              // Frozen playhead with media still queued is an MSE hole or
-              // decoder hitch. Restarting tears down a live CMAF session
-              // and the ended-gate then reports "Playback OK" (cloud run:
-              // playhead_frozen_5.95s_early_join while the encode was fine).
-              if (aheadNow >= 0.35 && sessionRestarts < MAX_SESSION_RESTARTS) {
-                // Buffered hole that gap-jump missed: one restart, then fail.
-                // Holding forever left a frozen picture for the rest of the
-                // encode (prod comparison 2026-08-18, vt stuck at 12.4s / 8.8s).
+              const cmafAction = classifyCmafPlayheadStall({
+                videoTimeSec: video.currentTime,
+                aheadSec: aheadNow,
+                frozenMs: Date.now() - watchdogAtMs,
+                earlyWindow,
+                sessionRestarts,
+                stallLimitMs,
+                retrying,
+              });
+              if (cmafAction === "hold") {
+                // Prod 0b1e1ac: vt=2.97s ahead=0.53s early_join — a GOP-sized
+                // live-edge hold, not a dead session. Kick play(); do not
+                // destroy the one-shot catalog.
                 pushDiag(
                   `playhead_frozen_hold vt=${video.currentTime.toFixed(2)}s ahead=${aheadNow.toFixed(2)}s`,
                 );
-                watchdogVt = -1;
                 watchdogAtMs = Date.now();
-                scheduleSessionRestart(
-                  `playhead_frozen_${video.currentTime.toFixed(2)}s_buffered${earlyWindow ? "_early_join" : ""}`,
-                  earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
-                );
+                try {
+                  playerRef.current?.play();
+                } catch {
+                  // ignore
+                }
+                void video.play().catch(() => undefined);
                 return;
-              } else if (aheadNow >= 0.35) {
-                watchdogGaveUp = true;
-                fail(
-                  `MoQ playback stalled at ${video.currentTime.toFixed(1)}s and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
-                );
-                return;
-              } else if (sessionRestarts < MAX_SESSION_RESTARTS) {
+              }
+              if (cmafAction === "restart") {
                 watchdogVt = -1;
                 watchdogAtMs = Date.now();
                 scheduleSessionRestart(
                   `playhead_frozen_${video.currentTime.toFixed(2)}s${earlyWindow ? "_early_join" : ""}`,
-                  earlyWindow ? EARLY_RESTART_DELAY_MS : SESSION_RESTART_DELAY_MS,
+                  SESSION_RESTART_DELAY_MS,
                 );
                 return;
-              } else if (!watchdogGaveUp) {
+              }
+              if (cmafAction === "give_up" && !watchdogGaveUp) {
                 watchdogGaveUp = true;
                 fail(
-                  `MoQ playback stalled and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
+                  `MoQ playback stalled at ${video.currentTime.toFixed(1)}s and did not recover after ${MAX_SESSION_RESTARTS} reconnects.`,
                 );
                 return;
               }
