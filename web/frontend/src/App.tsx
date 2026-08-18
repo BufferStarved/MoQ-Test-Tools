@@ -89,7 +89,7 @@ import { StepHeading } from "./StepHeading";
 type Tab = "benchmark" | "metrics" | "about";
 
 const MIN_ENDPOINTS = 2;
-const MAX_ENDPOINTS = 5;
+const MAX_ENDPOINTS = 6;
 
 function minEndpointsForSource(source: MediaSourceId): number {
   return source === "browser_moq" ? 1 : MIN_ENDPOINTS;
@@ -365,13 +365,13 @@ function App() {
     const sourceDetail = mediaSource === "browser_moq"
       ? "Captured in this browser"
       : mediaSource === "webcam"
-        ? "This computer’s camera"
+        ? "Local camera"
         : "Cloud playout on the API host";
     const encodeTitle =
       mediaSource === "browser_moq"
         ? "Browser encode"
         : mediaSource === "webcam"
-          ? "This computer · ffmpeg"
+          ? "Local ffmpeg"
           : "API host · ffmpeg";
     const encodeDetail =
       mediaSource === "browser_moq"
@@ -701,7 +701,7 @@ function App() {
     if (mediaSource === "webcam") {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Encoder VMAF runs on file publishes (not WHIP). Ingest VMAF needs a Zixi or MoQ recorder."
+          ? "Encoder VMAF runs on file publishes (not WHIP). Ingest VMAF is MoQ post-relay or Zixi TS — never WebRTC."
           : "Live webcam quality scoring needs ffmpeg/libvmaf on the encode host.",
       );
       return;
@@ -709,15 +709,15 @@ function App() {
     if (mediaSource === "browser_moq") {
       setVmafUnavailableReason(
         anyIngestVmafAvailable
-          ? "Computes video quality after encode and at the ingest server. Does not apply to WebRTC."
-          : "Ingest VMAF needs a managed MoQ relay with a recorder. Does not apply to WebRTC.",
+          ? "MoQ ingest VMAF records after the relay. WebRTC cannot tee encoder VMAF — it reports a QP-mapped quality score instead."
+          : "MoQ ingest VMAF needs openmoq-fmp4-record on the ingest worker (post-relay subscribe). WebRTC uses a QP quality stand-in; it never uses that recorder.",
       );
       return;
     }
     if (!vmafBothAvailable) {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Ingest VMAF needs a Zixi or MoQ recorder — encoder scores still run on file publishes except WHIP."
+          ? "Ingest VMAF needs a Zixi TS recorder or MoQ post-relay recorder — encoder scores still run on file publishes except WHIP."
           : "Encoder libvmaf is unavailable — ingest scores will still run where a recorder exists.",
       );
       return;

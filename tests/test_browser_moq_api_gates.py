@@ -343,6 +343,56 @@ class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
         self.assertEqual(float(rows[0]["transport_rtt_ms"]), 18)
         self.assertEqual(float(rows[0]["net_rtt_ms"]), 18)
 
+    def test_writes_transport_and_quality_equivalents(self) -> None:
+        from job_manager import JobManager, JobStatus, UploadJobRecord
+
+        manager = JobManager()
+        record = UploadJobRecord(
+            id="browser-job-full",
+            status=JobStatus.RUNNING,
+            protocol="webrtc",
+            endpoint_url="http://example/whip",
+            media_path="device:browser",
+            duration_sec=30,
+            publisher_host="browser",
+        )
+        manager._jobs[record.id] = record
+        ok = manager.record_browser_encode_sample(
+            record.id,
+            {
+                "elapsed_sec": 3,
+                "encoded_bitrate_kbps": 900,
+                "fps": 30,
+                "transport_rtt_ms": 47,
+                "net_jitter_ms": 4.2,
+                "net_recv_mbps": 0.8,
+                "net_loss_pct": 0.5,
+                "net_retrans_pct": 0.1,
+                "pkt_snd_loss": 2,
+                "vmaf_score": 72.5,
+            },
+        )
+        self.assertTrue(ok)
+        sample = record.samples[0]
+        self.assertEqual(sample["transport_recv_rate_mbps"], 0.8)
+        self.assertEqual(sample["transport_rtt_jitter_ms"], 4.2)
+        self.assertEqual(sample["vmaf_score"], 72.5)
+
+        job = MagicMock()
+        job.destination.protocol = "webrtc"
+        job.destination.url = "http://example/whip"
+        job.destination.cloud_provider = "gcp"
+        job.destination.cloud_region = "us-central1"
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = os.path.join(tmp, "browser.csv")
+            manager._write_browser_metrics_csv(csv_path, job, record.samples)
+            with open(csv_path, encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(float(rows[0]["net_recv_mbps"]), 0.8)
+        self.assertEqual(float(rows[0]["transport_recv_rate_mbps"]), 0.8)
+        self.assertEqual(float(rows[0]["vmaf_score"]), 72.5)
+        self.assertEqual(rows[0]["cloud_provider"], "gcp")
+
 
 if __name__ == "__main__":
     unittest.main()

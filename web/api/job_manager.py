@@ -185,6 +185,9 @@ class JobManager:
         self._lock = threading.Lock()
         self._service = UploadService()
         self._path_probes: Dict[str, object] = {}
+        self._moqx_pollers: Dict[str, object] = {}
+        self._ingest_pollers: Dict[str, object] = {}
+        self._moqx_recv_bytes: Dict[str, int] = {}
 
     def create_job(
         self,
@@ -488,6 +491,35 @@ class JobManager:
         if job.destination.protocol != "moq" or job.destination.moq_target is None:
             return
 
+        # Same namespace-live gate as the player (should_mark_moq_preview_ready).
+        # Starting the recorder immediately SUBSCRIBEs before PUBLISH_NAMESPACE
+        # and inflates relay track_not_exist — the comparison then looks like
+        # playback is broken when only ingest VMAF raced the publisher.
+        deadline = time.time() + min(45.0, max(8.0, float(job.duration_sec or 8)))
+        preview_ready = False
+        while time.time() < deadline:
+            with self._lock:
+                live = self._jobs.get(job_id)
+                if live is None:
+                    return
+                preview_ready = bool(live.preview_ready)
+                cancelled = live.cancel_event.is_set()
+                status = live.status
+            if preview_ready or cancelled or status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                break
+            time.sleep(0.4)
+        if not preview_ready:
+            self._update(
+                job_id,
+                vmaf_status=VmafStatus.FAILED.value,
+                vmaf_error=(
+                    "MoQ ingest VMAF waited for this job's namespace to go live "
+                    "before subscribing; preview never became ready. Encode and "
+                    "playback still run."
+                ),
+            )
+            return
+
         relay_url = job.destination.moq_target.endpoint
         namespace = job.destination.moq_target.namespace
         record_error = start_moq_recording_via_agent(
@@ -690,40 +722,71 @@ class JobManager:
             return False
         if elapsed_sec < 0:
             return False
+
+        def _num(key: str, *aliases: str) -> float:
+            for name in (key, *aliases):
+                if sample.get(name) not in (None, ""):
+                    try:
+                        return float(sample.get(name) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+            return 0.0
+
+        send_mbps = _num("encoder_send_rate_mbps", "net_send_mbps")
+        recv_mbps = _num("net_recv_mbps", "transport_recv_rate_mbps")
+        rtt_ms = _num("net_rtt_ms", "transport_rtt_ms")
+        jitter_ms = _num("net_jitter_ms", "transport_rtt_jitter_ms")
         payload = {
             "elapsed_sec": elapsed_sec,
-            "encoded_bitrate_kbps": float(sample.get("encoded_bitrate_kbps") or 0),
-            "fps": float(sample.get("fps") or 0),
+            "encoded_bitrate_kbps": _num("encoded_bitrate_kbps"),
+            "fps": _num("fps"),
             "fps_stability": 1.0,
             "speed": 1.0,
             "out_time": "",
             "cpu_percent": 0.0,
             "memory_mb": 0.0,
             "progress": str(sample.get("progress") or "continue"),
-            "encoder_send_rate_mbps": float(sample.get("encoder_send_rate_mbps") or 0),
-            "encode_lag_ms": float(sample.get("encode_lag_ms") or 0),
-            "transport_rtt_ms": float(sample.get("transport_rtt_ms") or 0),
-            "net_rtt_ms": float(sample.get("transport_rtt_ms") or sample.get("net_rtt_ms") or 0),
-            "net_jitter_ms": float(sample.get("net_jitter_ms") or 0),
-            "net_send_mbps": float(
-                sample.get("net_send_mbps") or sample.get("encoder_send_rate_mbps") or 0
-            ),
-            "net_recv_mbps": float(
-                sample.get("net_recv_mbps") or sample.get("transport_recv_rate_mbps") or 0
-            ),
+            "encoder_send_rate_mbps": send_mbps,
+            "encode_lag_ms": _num("encode_lag_ms"),
+            "transport_rtt_ms": rtt_ms or _num("transport_rtt_ms"),
+            "transport_rtt_jitter_ms": jitter_ms,
+            "net_rtt_ms": rtt_ms or _num("transport_rtt_ms"),
+            "net_jitter_ms": jitter_ms,
+            "net_send_mbps": send_mbps or _num("net_send_mbps"),
+            "net_recv_mbps": recv_mbps,
+            "transport_recv_rate_mbps": recv_mbps,
+            "net_loss_pct": _num("net_loss_pct"),
+            "net_retrans_pct": _num("net_retrans_pct"),
+            "pkt_snd_loss": _num("pkt_snd_loss"),
+            "pkt_retrans": _num("pkt_retrans"),
         }
+        if sample.get("vmaf_score") not in (None, ""):
+            payload["vmaf_score"] = _num("vmaf_score")
         with self._lock:
             record = self._jobs.get(job_id)
             if not record or record.publisher_host != "browser":
                 return False
             protocol = record.protocol
             endpoint_url = record.endpoint_url
+            preset_id = record.preset_id
+            ingest_agent_url = record.ingest_agent_url
         if float(payload["net_rtt_ms"] or 0) <= 0 and (protocol or "").lower() == "moq":
             rtt_ms, jitter_ms = self._browser_moq_path_rtt(job_id, endpoint_url)
             if rtt_ms > 0:
                 payload["transport_rtt_ms"] = rtt_ms
                 payload["net_rtt_ms"] = rtt_ms
-                payload["net_jitter_ms"] = jitter_ms
+                if float(payload["net_jitter_ms"] or 0) <= 0:
+                    payload["net_jitter_ms"] = jitter_ms
+                    payload["transport_rtt_jitter_ms"] = jitter_ms
+        payload.update(
+            self._browser_transport_enrichment(
+                job_id,
+                protocol=protocol,
+                endpoint_url=endpoint_url,
+                preset_id=preset_id,
+                ingest_agent_url=ingest_agent_url,
+            )
+        )
         with self._lock:
             record = self._jobs.get(job_id)
             if not record or record.publisher_host != "browser":
@@ -760,6 +823,113 @@ class JobManager:
             float(getattr(snap, "rtt_ms", 0) or 0),
             float(getattr(snap, "jitter_ms", 0) or 0),
         )
+
+    def _browser_transport_enrichment(
+        self,
+        job_id: str,
+        *,
+        protocol: str,
+        endpoint_url: str,
+        preset_id: str,
+        ingest_agent_url: str,
+    ) -> dict:
+        """Fill the same net/moqx/host columns ffmpeg legs write.
+
+        Browser publishers only POST encode telemetry. Without this merge the
+        comparison CSV drops moqx_*, quic_*, net_recv, loss, and cloud fields
+        even though the relay and ingest agent already expose them.
+        """
+        extra: dict = {}
+        try:
+            from destinations import PRESET_BY_ID
+            from cloud_placement import placement_from_ingest_provider
+
+            preset = PRESET_BY_ID.get(preset_id) if preset_id else None
+            ingest_provider = (
+                (preset.ingest_provider if preset else "")
+                or ""
+            )
+            placement = placement_from_ingest_provider(ingest_provider)
+            extra["cloud_provider"] = (
+                (preset.cloud_provider if preset else "") or placement.cloud_provider
+            )
+            extra["cloud_region"] = (
+                (preset.cloud_region if preset else "") or placement.cloud_region
+            )
+        except Exception:
+            ingest_provider = ""
+
+        if (protocol or "").lower() == "moq":
+            extra.update(self._browser_moqx_fields(job_id, endpoint_url))
+
+        try:
+            from ingest_host_metrics import IngestHostMetricsPoller
+
+            with self._lock:
+                poller = self._ingest_pollers.get(job_id)
+                if poller is None:
+                    poller = IngestHostMetricsPoller(
+                        endpoint_url,
+                        agent_url=ingest_agent_url,
+                        ingest_provider=ingest_provider,
+                        publisher_host="browser",
+                    )
+                    self._ingest_pollers[job_id] = poller
+            if getattr(poller, "enabled", False):
+                host = poller.poll()
+                extra["server_cpu_percent"] = float(host.cpu_percent or 0)
+                extra["server_memory_percent"] = float(host.memory_percent or 0)
+                extra["server_disk_percent"] = float(host.disk_percent or 0)
+        except Exception:
+            pass
+        return extra
+
+    def _browser_moqx_fields(self, job_id: str, endpoint_url: str) -> dict:
+        try:
+            from moqx_stats import MoqxStatsPoller
+        except Exception:
+            return {}
+        with self._lock:
+            poller = self._moqx_pollers.get(job_id)
+            if poller is None:
+                poller = MoqxStatsPoller(endpoint_url)
+                self._moqx_pollers[job_id] = poller
+        if not getattr(poller, "enabled", False):
+            return {}
+        try:
+            poller.poll()
+        except Exception:
+            return {}
+        deltas = poller.job_window_deltas()
+        latest = poller._latest
+        recv_mbps = 0.0
+        with self._lock:
+            prev_bytes = self._moqx_recv_bytes.get(job_id)
+            self._moqx_recv_bytes[job_id] = latest.quic_bytes_read
+        if prev_bytes is not None and latest.quic_bytes_read >= prev_bytes:
+            recv_mbps = max(0.0, (latest.quic_bytes_read - prev_bytes) * 8 / 1_000_000)
+        sent = max(deltas.quic_packets_sent, 1)
+        loss_pct = 0.0
+        retrans_pct = 0.0
+        if deltas.quic_packets_sent > 0:
+            loss_pct = min(100.0, (deltas.quic_packet_loss / sent) * 100.0)
+            retrans_pct = min(
+                100.0, (deltas.quic_packet_retransmissions / sent) * 100.0
+            )
+        return {
+            "moqx_subscribe_success": deltas.subscribe_success,
+            "moqx_subscribe_error": deltas.subscribe_error,
+            "moqx_publish_namespace_success": deltas.publish_namespace_success,
+            "moqx_publish_received": latest.publish_received,
+            "moqx_publish_done": latest.publish_done,
+            "quic_packets_lost": deltas.quic_packet_loss,
+            "net_loss_pct": loss_pct,
+            "net_retrans_pct": retrans_pct,
+            "pkt_snd_loss": deltas.quic_packet_loss,
+            "pkt_retrans": deltas.quic_packet_retransmissions,
+            "net_recv_mbps": recv_mbps,
+            "transport_recv_rate_mbps": recv_mbps,
+        }
 
     def mark_browser_publisher_ready(self, job_id: str) -> bool:
         with self._lock:
@@ -817,6 +987,22 @@ class JobManager:
         quality = {}
         if job.compute_vmaf_on_ingest:
             quality["ingest"] = {"status": "pending", "computed_on": "ingest_agent"}
+        qp_scores = [
+            float(s["vmaf_score"])
+            for s in samples
+            if s.get("vmaf_score") not in (None, "")
+        ]
+        if qp_scores and (job.destination.protocol or "").lower() == "webrtc":
+            avg_qp = round(sum(qp_scores) / len(qp_scores), 3)
+            quality["encoder"] = {
+                "status": "completed",
+                "computed_on": "webrtc_qp",
+                "vmaf_score": avg_qp,
+                "note": (
+                    "WebRTC cannot tee encoder VMAF; this is H.264 QP mapped "
+                    "to a 0–100 score so the quality column is comparable."
+                ),
+            }
         bitrate_vals = [float(s.get("encoded_bitrate_kbps") or 0) for s in samples]
         fps_vals = [float(s.get("fps") or 0) for s in samples]
         averages = {}
@@ -824,6 +1010,8 @@ class JobManager:
             averages["encoded_bitrate_kbps"] = round(sum(bitrate_vals) / len(bitrate_vals), 1)
         if fps_vals:
             averages["fps"] = round(sum(fps_vals) / len(fps_vals), 2)
+        if qp_scores:
+            averages["vmaf_score"] = round(sum(qp_scores) / len(qp_scores), 3)
         payload = {
             "protocol": job.destination.protocol,
             "endpoint": job.destination.url,
@@ -839,39 +1027,52 @@ class JobManager:
         }
         with open(summary_path, mode="w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
-        return UploadResult(success=True, csv_path=csv_path, summary_path=summary_path)
+        encoder_score = averages.get("vmaf_score") if qp_scores else None
+        return UploadResult(
+            success=True,
+            csv_path=csv_path,
+            summary_path=summary_path,
+            encoder_vmaf_status="completed" if encoder_score is not None else "disabled",
+            encoder_vmaf_score=encoder_score,
+            vmaf_score=encoder_score,
+        )
 
     @staticmethod
     def _write_browser_metrics_csv(csv_path: str, job: UploadJob, samples: List[dict]) -> None:
         from metrics import CSV_COLUMNS
 
+        protocol = job.destination.protocol
+        endpoint = job.destination.url
+        cloud_provider = getattr(job.destination, "cloud_provider", "") or ""
+        cloud_region = getattr(job.destination, "cloud_region", "") or ""
         with open(csv_path, mode="w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             for sample in samples:
-                row = {col: "" for col in CSV_COLUMNS}
+                row = {col: sample.get(col, "") for col in CSV_COLUMNS}
                 row["timestamp"] = str(sample.get("elapsed_sec", ""))
-                row["protocol"] = job.destination.protocol
-                row["endpoint"] = job.destination.url
-                for key in (
-                    "encoded_bitrate_kbps",
-                    "fps",
-                    "fps_stability",
-                    "speed",
-                    "cpu_percent",
-                    "memory_mb",
-                    "encoder_send_rate_mbps",
-                    "encode_lag_ms",
-                    "transport_rtt_ms",
-                    "net_rtt_ms",
-                    "net_jitter_ms",
-                    "net_send_mbps",
-                    "net_recv_mbps",
-                    *PLAYBACK_FIELD_NAMES,
-                ):
-                    if key in CSV_COLUMNS:
-                        value = sample.get(key, 0)
-                        row[key] = "" if value is None else value
+                row["protocol"] = protocol
+                row["endpoint"] = endpoint
+                if not row.get("cloud_provider"):
+                    row["cloud_provider"] = cloud_provider
+                if not row.get("cloud_region"):
+                    row["cloud_region"] = cloud_region
+                if not row.get("net_send_mbps") and sample.get("encoder_send_rate_mbps"):
+                    row["net_send_mbps"] = sample["encoder_send_rate_mbps"]
+                if not row.get("encoder_send_rate_mbps") and sample.get("net_send_mbps"):
+                    row["encoder_send_rate_mbps"] = sample["net_send_mbps"]
+                if not row.get("transport_recv_rate_mbps") and sample.get("net_recv_mbps"):
+                    row["transport_recv_rate_mbps"] = sample["net_recv_mbps"]
+                if not row.get("net_recv_mbps") and sample.get("transport_recv_rate_mbps"):
+                    row["net_recv_mbps"] = sample["transport_recv_rate_mbps"]
+                if not row.get("net_rtt_ms") and sample.get("transport_rtt_ms"):
+                    row["net_rtt_ms"] = sample["transport_rtt_ms"]
+                if not row.get("transport_rtt_ms") and sample.get("net_rtt_ms"):
+                    row["transport_rtt_ms"] = sample["net_rtt_ms"]
+                if not row.get("transport_rtt_jitter_ms") and sample.get("net_jitter_ms"):
+                    row["transport_rtt_jitter_ms"] = sample["net_jitter_ms"]
+                if not row.get("net_jitter_ms") and sample.get("transport_rtt_jitter_ms"):
+                    row["net_jitter_ms"] = sample["transport_rtt_jitter_ms"]
                 writer.writerow(row)
 
     @staticmethod

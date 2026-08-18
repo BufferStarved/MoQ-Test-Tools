@@ -248,6 +248,23 @@ export default function MoqPlayer({
       }
     }
 
+    // CMAF join offset can stay null on browser publishes; still report glass
+    // delay from encode epoch + playhead so MoQ e2e is not a column of zeros.
+    if (epoch > 0 && session.moqTimelineMs > 50) {
+      const total = Date.now() + clockSkewMs() - epoch * 1000 - session.moqTimelineMs + bridgeMs;
+      if (isPlausibleE2eMs(total)) {
+        lastGoodE2eRef.current = Math.round(total);
+        return lastGoodE2eRef.current;
+      }
+    }
+    if (epoch > 0 && video && video.currentTime > 0.05) {
+      const total = Date.now() + clockSkewMs() - epoch * 1000 - video.currentTime * 1000 + bridgeMs;
+      if (isPlausibleE2eMs(total)) {
+        lastGoodE2eRef.current = Math.round(total);
+        return lastGoodE2eRef.current;
+      }
+    }
+
     return lastGoodE2eRef.current;
   }
 

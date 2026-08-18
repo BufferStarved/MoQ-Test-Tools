@@ -1,10 +1,15 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { HarnessPage } from "./HarnessPage";
 import "./App.css";
+
+const params = new URLSearchParams(window.location.search);
+const harnessJob = params.get("harnessJob") || params.get("harness_job");
+const playback = params.get("playback") || "";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    {harnessJob ? <HarnessPage jobId={harnessJob} playback={playback} /> : <App />}
   </StrictMode>,
 );

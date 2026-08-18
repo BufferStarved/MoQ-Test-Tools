@@ -109,13 +109,30 @@ def agent_health_url(config: IngestAgentConfig) -> str:
     return f"{config.base_url}/api/v1/health"
 
 
-def vmaf_available_for_endpoint(
+def _preset_needs_moq_recorder(preset_id: str = "", endpoint_url: str = "") -> bool:
+    if preset_id:
+        from destinations import PRESET_BY_ID
+
+        preset = PRESET_BY_ID.get(preset_id)
+        if preset is not None:
+            return (preset.protocol or "").lower() == "moq"
+    url = (endpoint_url or "").lower()
+    return "moq-relay" in url or "/moq" in url
+
+
+def vmaf_availability_for_endpoint(
     endpoint_url: str = "",
     *,
     preset_id: str = "",
     agent_url: str = "",
     recording_dir: str = "",
-) -> bool:
+) -> tuple[bool, str]:
+    """Whether ingest VMAF can actually run for this destination.
+
+    Token-configured is not enough for MoQ: the worker must also have
+    ``openmoq-fmp4-record``. Missing that binary is how comparison CSVs
+    end up with a blank quality column after the UI offered the checkbox.
+    """
     if not agent_url and preset_id:
         from destinations import ingest_agent_url_for_preset
 
@@ -124,11 +141,42 @@ def vmaf_available_for_endpoint(
         from destinations import recording_dir_for_preset
 
         recording_dir = recording_dir_for_preset(preset_id)
-    return resolve_ingest_agent(
+    config = resolve_ingest_agent(
         endpoint_url,
         agent_url=agent_url,
         recording_dir=recording_dir,
-    ) is not None
+    )
+    if config is None:
+        return False, "VMAF is not configured for this destination on the server"
+    if not _preset_needs_moq_recorder(preset_id, endpoint_url):
+        return True, ""
+    try:
+        health = IngestAgentClient(config).health()
+    except RuntimeError as exc:
+        return False, f"MoQ ingest VMAF cannot reach the ingest worker ({exc})"
+    if health.get("moq_recorder_available"):
+        return True, ""
+    return False, (
+        "MoQ ingest VMAF needs openmoq-fmp4-record on the ingest worker "
+        "(post-relay subscribe scoring). WebRTC/WHIP and encoder VMAF do not "
+        "use this recorder."
+    )
+
+
+def vmaf_available_for_endpoint(
+    endpoint_url: str = "",
+    *,
+    preset_id: str = "",
+    agent_url: str = "",
+    recording_dir: str = "",
+) -> bool:
+    available, _reason = vmaf_availability_for_endpoint(
+        endpoint_url,
+        preset_id=preset_id,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+    )
+    return available
 
 
 class IngestAgentClient:

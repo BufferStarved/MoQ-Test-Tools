@@ -151,6 +151,20 @@ class MoqxStatsPollerTests(unittest.TestCase):
         self.assertEqual(delta.subscribe_error, 1)
         self.assertEqual(delta.publish_namespace_success, 1)
 
+    def test_track_not_exist_is_a_job_window_delta(self):
+        poller = self._poller_with_responses(
+            [
+                'moqx_pubSubscribeError_by_code_total{code="track_not_exist"} 64\n'
+                "moqx_pubSubscribeError_total 66\n",
+                'moqx_pubSubscribeError_by_code_total{code="track_not_exist"} 64\n'
+                "moqx_pubSubscribeError_total 66\n",
+            ]
+        )
+        poller.poll()
+        self.assertEqual(poller.job_window_deltas().subscribe_error_track_not_exist, 0)
+        poller.poll()
+        self.assertEqual(poller.job_window_deltas().subscribe_error_track_not_exist, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

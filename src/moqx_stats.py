@@ -25,6 +25,7 @@ DEFAULT_ADMIN_PORT = int(os.environ.get("MOQX_ADMIN_PORT", "8000"))
 class MoqxStatsSnapshot:
     subscribe_success: int = 0
     subscribe_error: int = 0
+    subscribe_error_track_not_exist: int = 0
     publish_namespace_success: int = 0
     publish_received: int = 0
     publish_done: int = 0
@@ -102,6 +103,7 @@ class MoqxStatsPoller:
                 publish_namespace_success=self._latest.publish_namespace_success,
                 subscribe_success=self._latest.subscribe_success,
                 subscribe_error=self._latest.subscribe_error,
+                subscribe_error_track_not_exist=self._latest.subscribe_error_track_not_exist,
             )
         return self._latest
 
@@ -127,6 +129,10 @@ class MoqxStatsPoller:
         return MoqxStatsSnapshot(
             subscribe_success=max(0, current.subscribe_success - base.subscribe_success),
             subscribe_error=max(0, current.subscribe_error - base.subscribe_error),
+            subscribe_error_track_not_exist=max(
+                0,
+                current.subscribe_error_track_not_exist - base.subscribe_error_track_not_exist,
+            ),
             publish_namespace_success=max(
                 0, current.publish_namespace_success - base.publish_namespace_success
             ),
@@ -143,45 +149,11 @@ class MoqxStatsPoller:
         )
 
     @staticmethod
-    def _metric_value(body: str, name: str) -> int:
-        for line in body.splitlines():
-            if line.startswith("#") or not line.strip():
-                continue
-            if line.startswith(f"{name} ") or line.startswith(f"{name}{{"):
-                try:
-                    return int(float(line.rsplit(" ", 1)[-1]))
-                except ValueError:
-                    return 0
-        return 0
+    def _metric_value(body: str, name: str, labels: str = "") -> int:
+        return metric_value(body, name, labels)
 
     def _parse(self, body: str) -> MoqxStatsSnapshot:
-        return MoqxStatsSnapshot(
-            subscribe_success=self._metric_value(body, "moqx_pubSubscribeSuccess_total"),
-            subscribe_error=self._metric_value(body, "moqx_pubSubscribeError_total"),
-            # moqx prefixes counters by the *relay's* role in that session:
-            # a publisher's PUBLISH_NAMESPACE lands on the relay's
-            # subscriber-side handler (sub*), not pub*. On the live relay
-            # moqx_pubPublishNamespaceSuccess_total is permanently 0 while
-            # moqx_subPublishNamespaceSuccess_total counts every real publish
-            # (verified 2026-07-20). Reading only pub* made the MoQ
-            # preview-ready gate never confirm, so every live run silently
-            # burned the full fallback grace period before playback started.
-            # Sum both so either relay build/version works.
-            publish_namespace_success=(
-                self._metric_value(body, "moqx_pubPublishNamespaceSuccess_total")
-                + self._metric_value(body, "moqx_subPublishNamespaceSuccess_total")
-            ),
-            publish_received=self._metric_value(body, "moqx_moqPublishReceived_total"),
-            publish_done=self._metric_value(body, "moqx_pubPublishDone_total"),
-            quic_packets_sent=self._metric_value(body, "moqx_quicPacketsSent_total"),
-            quic_packets_received=self._metric_value(body, "moqx_quicPacketsReceived_total"),
-            quic_packet_loss=self._metric_value(body, "moqx_quicPacketLoss_total"),
-            quic_packet_retransmissions=self._metric_value(
-                body, "moqx_quicPacketRetransmissions_total"
-            ),
-            quic_bytes_written=self._metric_value(body, "moqx_quicBytesWritten_total"),
-            quic_bytes_read=self._metric_value(body, "moqx_quicBytesRead_total"),
-        )
+        return parse_moqx_metrics(body)
 
 
 @dataclass
@@ -193,3 +165,158 @@ class MoqxBaseline:
     publish_namespace_success: int = 0
     subscribe_success: int = 0
     subscribe_error: int = 0
+    subscribe_error_track_not_exist: int = 0
+
+
+def metric_value(body: str, name: str, labels: str = "") -> int:
+    """Parse one Prometheus counter. Shared by the poller and /api/moq/probe."""
+    for line in body.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        if labels:
+            if f"{name}{{{labels}" not in line:
+                continue
+        elif not (line.startswith(f"{name} ") or line.startswith(f"{name}{{")):
+            continue
+        try:
+            return int(float(line.rsplit(" ", 1)[-1]))
+        except ValueError:
+            return 0
+    return 0
+
+
+def parse_moqx_metrics(body: str) -> MoqxStatsSnapshot:
+    """Lifetime moqx /metrics body → snapshot (same fields job samples use)."""
+    return MoqxStatsSnapshot(
+        subscribe_success=metric_value(body, "moqx_pubSubscribeSuccess_total"),
+        subscribe_error=metric_value(body, "moqx_pubSubscribeError_total"),
+        subscribe_error_track_not_exist=metric_value(
+            body,
+            "moqx_pubSubscribeError_by_code_total",
+            'code="track_not_exist"',
+        ),
+        # moqx prefixes counters by the *relay's* role in that session:
+        # a publisher's PUBLISH_NAMESPACE lands on the relay's
+        # subscriber-side handler (sub*), not pub*. On the live relay
+        # moqx_pubPublishNamespaceSuccess_total is permanently 0 while
+        # moqx_subPublishNamespaceSuccess_total counts every real publish
+        # (verified 2026-07-20). Reading only pub* made the MoQ
+        # preview-ready gate never confirm, so every live run silently
+        # burned the full fallback grace period before playback started.
+        # Sum both so either relay build/version works.
+        publish_namespace_success=(
+            metric_value(body, "moqx_pubPublishNamespaceSuccess_total")
+            + metric_value(body, "moqx_subPublishNamespaceSuccess_total")
+        ),
+        publish_received=metric_value(body, "moqx_moqPublishReceived_total"),
+        publish_done=metric_value(body, "moqx_pubPublishDone_total"),
+        quic_packets_sent=metric_value(body, "moqx_quicPacketsSent_total"),
+        quic_packets_received=metric_value(body, "moqx_quicPacketsReceived_total"),
+        quic_packet_loss=metric_value(body, "moqx_quicPacketLoss_total"),
+        quic_packet_retransmissions=metric_value(
+            body, "moqx_quicPacketRetransmissions_total"
+        ),
+        quic_bytes_written=metric_value(body, "moqx_quicBytesWritten_total"),
+        quic_bytes_read=metric_value(body, "moqx_quicBytesRead_total"),
+    )
+
+
+def snapshot_delta(current: MoqxStatsSnapshot, base: MoqxStatsSnapshot) -> MoqxStatsSnapshot:
+    """Subtract two lifetime scrapes (since-last-probe / job-window)."""
+    return MoqxStatsSnapshot(
+        subscribe_success=max(0, current.subscribe_success - base.subscribe_success),
+        subscribe_error=max(0, current.subscribe_error - base.subscribe_error),
+        subscribe_error_track_not_exist=max(
+            0,
+            current.subscribe_error_track_not_exist - base.subscribe_error_track_not_exist,
+        ),
+        publish_namespace_success=max(
+            0, current.publish_namespace_success - base.publish_namespace_success
+        ),
+        publish_received=current.publish_received,
+        publish_done=current.publish_done,
+        quic_packets_sent=max(0, current.quic_packets_sent - base.quic_packets_sent),
+        quic_packets_received=current.quic_packets_received,
+        quic_packet_loss=max(0, current.quic_packet_loss - base.quic_packet_loss),
+        quic_packet_retransmissions=max(
+            0, current.quic_packet_retransmissions - base.quic_packet_retransmissions
+        ),
+        quic_bytes_written=max(0, current.quic_bytes_written - base.quic_bytes_written),
+        quic_bytes_read=current.quic_bytes_read,
+    )
+
+
+def publish_seen(snap: MoqxStatsSnapshot) -> bool:
+    """True when this scrape shows a publisher has registered or sent."""
+    return (
+        snap.publish_namespace_success > 0
+        or snap.publish_received > 0
+        or snap.publish_done > 0
+    )
+
+
+def interpret_moqx_probe(
+    lifetime: MoqxStatsSnapshot,
+    window: MoqxStatsSnapshot,
+    *,
+    had_prior_probe: bool,
+) -> list[str]:
+    """Verdicts for /api/moq/probe.
+
+    Lifetime ``track_not_exist`` is historical on a busy relay and must not
+    become ``relay_playback_broken`` once a publish has been seen, or when
+    the since-last-probe / job window shows no new 0x10 errors.
+    """
+    checks: list[str] = []
+    lifetime_publish = publish_seen(lifetime)
+    window_tne = window.subscribe_error_track_not_exist
+    window_failing = (
+        had_prior_probe
+        and window.subscribe_success == 0
+        and window.subscribe_error > 0
+        and not lifetime_publish
+    )
+
+    # Lifetime TNE on a reused relay is historical. Only the since-last-probe
+    # window can claim a *current* subscribe-before-publish failure.
+    if had_prior_probe and window_tne > 0 and not lifetime_publish:
+        checks.append("subscribe_track_not_exist")
+    elif lifetime.subscribe_error_track_not_exist > 0:
+        checks.append("historical_track_not_exist")
+
+    if lifetime.publish_namespace_success == 0 and not lifetime_publish:
+        checks.append("publish_never_received")
+    if window_failing:
+        checks.append("subscribe_always_fails")
+
+    broken = {"subscribe_track_not_exist", "publish_never_received", "subscribe_always_fails"}
+    if broken.intersection(checks) and not lifetime_publish:
+        checks.append("relay_playback_broken")
+    elif not broken.intersection(checks):
+        checks.append("relay_metrics_look_healthy")
+    return checks
+
+
+def snapshot_as_probe_dict(snap: MoqxStatsSnapshot) -> dict:
+    return {
+        "subscribe_success": snap.subscribe_success,
+        "subscribe_error": snap.subscribe_error,
+        "subscribe_error_track_not_exist": snap.subscribe_error_track_not_exist,
+        "publish_namespace_success": snap.publish_namespace_success,
+        "publish_received": snap.publish_received,
+        "publish_done": snap.publish_done,
+        "quic_packet_loss": snap.quic_packet_loss,
+        "quic_packet_retransmissions": snap.quic_packet_retransmissions,
+        "quic_bytes_written": snap.quic_bytes_written,
+        "quic_bytes_read": snap.quic_bytes_read,
+    }
+
+
+_LAST_PROBE: dict[str, MoqxStatsSnapshot] = {}
+
+
+def remember_probe(metrics_url: str, snap: MoqxStatsSnapshot) -> MoqxStatsSnapshot | None:
+    """Store this scrape and return the previous one for since-last-probe deltas."""
+    previous = _LAST_PROBE.get(metrics_url)
+    _LAST_PROBE[metrics_url] = snap
+    return previous

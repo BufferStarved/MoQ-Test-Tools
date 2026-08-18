@@ -46,6 +46,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test%20EC",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
     },
     {
         "id": "zixi_srt_mpegts",
@@ -63,6 +64,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=benchmark",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
     },
     {
         "id": "zixi_rtmp_mpegts",
@@ -71,6 +73,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/benchmark.ts",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps",),
+        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
     },
     {
         "id": "zixi_tsput_hls",
@@ -138,7 +141,7 @@ CASES = [
         "preset_id": "moq_gcp_relay",
         "playback": "moq",
         "url": "https://34-28-164-90.sslip.io:4433/moq-relay",
-        "expect_preview": False,
+        "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
 ]
@@ -163,7 +166,7 @@ EAST_CASES = [
         "preset_id": "moq_gcp_east_relay",
         "playback": "moq",
         "url": f"https://{EAST_RELAY}:4433/moq-relay",
-        "expect_preview": False,
+        "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
     {
@@ -258,7 +261,7 @@ LINODE_CASES = [
         "preset_id": "moq_linode_relay",
         "playback": "moq",
         "url": f"https://{LINODE_RELAY}:4433/moq-relay",
-        "expect_preview": False,
+        "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
 ]
@@ -548,31 +551,35 @@ main();
 """
 
 
-def run_chrome_playback(mode: str, play_url: str, seconds: float = 12.0) -> tuple[bool, str]:
+def _job_has_real_playback(job_id: str) -> tuple[int, float]:
+    samples = get_job(job_id).get("samples") or []
+    frames = 0
+    e2e = 0.0
+    for sample in samples:
+        try:
+            frames = max(frames, int(sample.get("playback_frames_rendered") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            e2e = max(e2e, float(sample.get("e2e_latency_ms") or 0))
+        except (TypeError, ValueError):
+            pass
+    return frames, e2e
+
+
+def run_site_player(job_id: str, mode: str, seconds: float = 14.0) -> tuple[bool, str]:
+    """Drive the real site StreamPlayer so playback_* / e2e are posted by the reporter."""
     if SKIP_CHROME or mode in {"skip", "none", ""}:
         return True, "skipped"
-    if mode == "moq":
-        return True, "moq_chrome_deferred_to_site_player"
     if not Path(CHROME_BIN).exists():
         return False, f"chrome_missing:{CHROME_BIN}"
 
+    page_url = (
+        f"{BASE_URL}/?harnessJob={urllib.parse.quote(job_id)}"
+        f"&playback={urllib.parse.quote(mode)}"
+    )
     cache = ensure_playwright()
-    html_path = cache / "player.html"
-    # <base href> makes relative /api/playback/fetch segment URLs resolve to the site.
-    html_path.write_text(
-        CHROME_PLAYER_HTML.replace("__BASE_HREF__", BASE_URL.rstrip("/") + "/"),
-        encoding="utf-8",
-    )
-    # HTTPS pages cannot POST SDP to http://:8889; /api/webrtc/sdp forwards WHIP/WHEP.
-    if mode == "whep":
-        fetch_url = f"{BASE_URL}/api/webrtc/sdp?url={urllib.parse.quote(play_url, safe='')}"
-    else:
-        fetch_url = proxied(play_url) if play_url.startswith("http://") else play_url
-    page_url = html_path.resolve().as_uri() + "?" + urllib.parse.urlencode(
-        {"mode": mode, "url": fetch_url}
-    )
-
-    runner = cache / "run_chrome.mjs"
+    runner = cache / "run_site_player.mjs"
     runner.write_text(
         f"""
 import {{ chromium }} from 'playwright';
@@ -582,22 +589,19 @@ const waitMs = {int(seconds * 1000)};
 const browser = await chromium.launch({{
   executablePath: chrome,
   headless: true,
-  args: ['--autoplay-policy=no-user-gesture-required', '--disable-web-security'],
+  args: ['--autoplay-policy=no-user-gesture-required', '--ignore-certificate-errors'],
 }});
 const context = await browser.newContext();
 const page = await context.newPage();
-const consoleLogs = [];
-page.on('console', (msg) => consoleLogs.push(msg.text()));
 await page.goto(pageUrl, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
 await page.waitForTimeout(waitMs);
-const state = await page.evaluate(() => window.__MATRIX__ || {{}});
 await browser.close();
-console.log(JSON.stringify({{ state, consoleLogs: consoleLogs.slice(-20) }}));
+console.log(JSON.stringify({{ ok: true }}));
 """,
         encoding="utf-8",
     )
     try:
-        out = subprocess.check_output(
+        subprocess.check_output(
             ["node", str(runner)],
             cwd=str(cache),
             text=True,
@@ -608,43 +612,10 @@ console.log(JSON.stringify({{ state, consoleLogs: consoleLogs.slice(-20) }}));
     except subprocess.TimeoutExpired:
         return False, "chrome_timeout"
 
-    line = out.strip().splitlines()[-1]
-    payload = json.loads(line)
-    state = payload.get("state") or {}
-    if state.get("ready"):
-        return True, f"playing t={state.get('currentTime'):.2f} events={state.get('events')}"
-    if state.get("error") == "moq_skipped_in_harness":
-        return True, "moq_skipped"
-    # Late live errors after sustained playback (publisher ended / level reload).
-    try:
-        t = float(state.get("currentTime") or 0)
-        events = int(state.get("events") or 0)
-    except (TypeError, ValueError):
-        t, events = 0.0, 0
-    if t >= 2.0 and events >= 3:
-        return True, f"playing_recovered t={t:.2f} events={events} late={state.get('error')}"
-    err = state.get("error") or "not_playing"
-    return False, f"{err} t={state.get('currentTime')} events={state.get('events')}"
-
-
-def post_playback_sample(job_id: str, engine: str, ok: bool) -> None:
-    try:
-        api(
-            "POST",
-            f"/api/uploads/{job_id}/playback-sample",
-            data={
-                "elapsed_sec": max(1, DURATION // 2),
-                "engine": engine,
-                "playback_stats_events": 3 if ok else 0,
-                "playback_frames_rendered": 100 if ok else 0,
-                "playback_ttff_ms": 800 if ok else 0,
-                "playback_video_time_sec": 2.0 if ok else 0,
-                "playback_buffer_sec": 1.0 if ok else 0,
-                "playback_error_count": 0 if ok else 1,
-            },
-        )
-    except Exception:
-        pass
+    frames, e2e = _job_has_real_playback(job_id)
+    if frames > 0:
+        return True, f"playing site_player frames={frames} e2e={e2e:.0f}"
+    return False, "site_player_no_playback_samples"
 
 
 def run_case(case: dict, media_path: str) -> CaseResult:
@@ -700,38 +671,16 @@ def run_case(case: dict, media_path: str) -> CaseResult:
             result.errors.append("preview_not_ready")
     result.ingest = " ".join(ingest_bits)
 
-    # Only drive Chrome while ingest is still live.
+    # Drive the real site player (same StreamPlayer reporter) while ingest is live.
     if job_now.get("status") == "running":
-        play_url = case["url"]
-        # Prefer the job's Zixi playback/EC stream id over hardcoded presets.
-        zixi_play = (
-            str(job_now.get("zixi_playback_stream_id") or job_now.get("zixi_stream_id") or "")
-            .strip()
-        )
-        zixi_host = urllib.parse.urlparse(play_url).hostname or ""
-        if case["playback"] == "hls" and zixi_play and zixi_host and ":7777" in play_url:
-            play_url = f"http://{zixi_host}:7777/playback.m3u8?stream={urllib.parse.quote(zixi_play)}"
-        if case["playback"] == "mpegts" and zixi_play and zixi_host:
-            play_url = f"http://{zixi_host}:7777/{urllib.parse.quote(zixi_play)}.ts"
-        chrome_ok, chrome_msg = run_chrome_playback(case["playback"], play_url, seconds=14)
+        chrome_ok, chrome_msg = run_site_player(job_id, case["playback"], seconds=14)
         if not chrome_ok and job_now.get("status") == "running":
             time.sleep(3)
-            chrome_ok, chrome_msg = run_chrome_playback(case["playback"], play_url, seconds=12)
+            chrome_ok, chrome_msg = run_site_player(job_id, case["playback"], seconds=12)
             chrome_msg = f"retry:{chrome_msg}"
-        # Sustained currentTime with non-fatal late errors still counts as playing.
-        if (not chrome_ok) and "t=" in chrome_msg:
-            try:
-                t_part = chrome_msg.split("t=")[-1].split()[0]
-                if float(t_part) >= 1.5:
-                    chrome_ok = True
-                    chrome_msg = f"playing_soft {chrome_msg}"
-            except (TypeError, ValueError, IndexError):
-                pass
         result.chrome = chrome_msg
         if not chrome_ok:
             result.errors.append(f"chrome:{chrome_msg}")
-        else:
-            post_playback_sample(job_id, case["playback"], True)
     else:
         result.chrome = f"skipped_job_{job_now.get('status')}"
         if job_now.get("status") != "failed":
@@ -828,22 +777,6 @@ def main() -> int:
         print(" metrics", res.metrics[:300])
         print(" chrome", res.chrome)
         print(" ok" if res.ok else f" FAIL {res.errors}")
-
-        # Extra: during Zixi SRT HLS success, also probe MPEG-TS in Chrome once
-        if case["id"] == "zixi_srt_hls" and res.job_id and get_job(res.job_id).get("status") == "running":
-            ok, msg = run_chrome_playback("mpegts", "http://35.222.33.58:7777/SRT%20Test.ts", seconds=10)
-            print(" chrome_mpegts", ok, msg)
-            results.append(
-                CaseResult(
-                    case_id="zixi_srt_mpegts",
-                    ok=ok,
-                    ingest="shared_zixi_srt_job",
-                    metrics="shared",
-                    chrome=msg,
-                    errors=[] if ok else [msg],
-                    job_id=res.job_id,
-                )
-            )
 
     print("\n======== MATRIX SUMMARY ========")
     width = max(len(r.case_id) for r in results) if results else 10

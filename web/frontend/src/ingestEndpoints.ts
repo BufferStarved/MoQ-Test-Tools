@@ -255,6 +255,15 @@ export function resolveEndpointUrl(
   return presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
 }
 
+export function ingestEndpointIdForPreset(presetId: string): IngestEndpointId | "custom" {
+  for (const [endpointId, protocols] of Object.entries(PRESET_IDS_BY_ENDPOINT)) {
+    if (Object.values(protocols).includes(presetId)) {
+      return endpointId as IngestEndpointId;
+    }
+  }
+  return "custom";
+}
+
 export function presetIdForIngest(
   ingestEndpointId: string,
   protocol: string,

@@ -1,0 +1,89 @@
+"""MoQ ingest VMAF is available only when the recorder binary is present."""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from ingest_agent_client import (  # noqa: E402
+    IngestAgentConfig,
+    vmaf_availability_for_endpoint,
+    vmaf_available_for_endpoint,
+)
+
+
+class VmafAvailabilityTests(unittest.TestCase):
+    def test_zixi_token_is_enough(self) -> None:
+        config = IngestAgentConfig(
+            base_url="http://zixi:8090",
+            token="t",
+            recording_dir="/opt/zixi",
+            host="zixi",
+        )
+        with patch(
+            "ingest_agent_client.resolve_ingest_agent",
+            return_value=config,
+        ):
+            ok, reason = vmaf_availability_for_endpoint(
+                "srt://zixi:10080",
+                preset_id="moq_zixi_gcp_east",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_moq_requires_recorder_binary(self) -> None:
+        config = IngestAgentConfig(
+            base_url="http://web:8090",
+            token="t",
+            recording_dir="/var/lib/moq-relay-recordings",
+            host="web",
+        )
+        health = {"moq_recorder_available": False, "moq_recorder_bin": "missing"}
+        with patch(
+            "ingest_agent_client.resolve_ingest_agent",
+            return_value=config,
+        ):
+            with patch.object(
+                __import__("ingest_agent_client", fromlist=["IngestAgentClient"]).IngestAgentClient,
+                "health",
+                return_value=health,
+            ):
+                ok, reason = vmaf_availability_for_endpoint(
+                    "https://relay/moq-relay",
+                    preset_id="moq_gcp_east_relay",
+                )
+        self.assertFalse(ok)
+        self.assertIn("openmoq-fmp4-record", reason)
+        self.assertIn("WebRTC", reason)
+
+    def test_moq_available_when_health_reports_recorder(self) -> None:
+        config = IngestAgentConfig(
+            base_url="http://web:8090",
+            token="t",
+            recording_dir="/var/lib/moq-relay-recordings",
+            host="web",
+        )
+        with patch(
+            "ingest_agent_client.resolve_ingest_agent",
+            return_value=config,
+        ):
+            with patch.object(
+                __import__("ingest_agent_client", fromlist=["IngestAgentClient"]).IngestAgentClient,
+                "health",
+                return_value={"moq_recorder_available": True},
+            ):
+                self.assertTrue(
+                    vmaf_available_for_endpoint(
+                        "https://relay/moq-relay",
+                        preset_id="moq_gcp_east_relay",
+                    )
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

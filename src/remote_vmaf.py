@@ -277,8 +277,9 @@ def start_moq_recording_via_agent(
         health = client.health()
         if not health.get("moq_recorder_available"):
             return (
-                "MoQ recorder is not available on the ingest worker "
-                f"({health.get('moq_recorder_runtime_error') or health.get('moq_recorder_bin', 'missing binary')})"
+                "MoQ ingest VMAF recorder is not available on the ingest worker "
+                f"({health.get('moq_recorder_runtime_error') or health.get('moq_recorder_bin', 'recorder binary missing')}). "
+                "This is post-relay subscribe scoring only — not WebRTC/WHIP or encoder VMAF."
             )
         client.start_moq_recording(
             job_id,

@@ -76,7 +76,7 @@ export async function startWhipPublish(options: {
   await pc.setRemoteDescription({ type: "answer", sdp: answer });
   const sessionUrl = response.headers.get("Location") || "";
   const startedAt = performance.now();
-  const rate = { lastBytes: 0, lastAt: 0 };
+  const rate = { lastBytes: 0, lastRecv: 0, lastAt: 0 };
   let sampleErrorLogged = false;
 
   let stopped = false;
@@ -112,19 +112,30 @@ async function postWhipEncodeSample(
   pc: RTCPeerConnection,
   jobId: string,
   startedAt: number,
-  rate: { lastBytes: number; lastAt: number },
+  rate: { lastBytes: number; lastRecv: number; lastAt: number },
 ): Promise<void> {
   const report = await pc.getStats();
   let bytes = 0;
+  let recvBytes = 0;
   let fps = 0;
   let rttMs = 0;
+  let jitterMs = 0;
   let framesEncoded = 0;
   let totalEncodeTime = 0;
   let sourceFrames = 0;
   let sourceFps = 0;
+  let packetsSent = 0;
+  let packetsLost = 0;
+  let nackCount = 0;
+  let retransmittedPackets = 0;
+  let qpSum = 0;
   report.forEach((stat) => {
     if (stat.type === "outbound-rtp") {
-      const outbound = stat as RTCOutboundRtpStreamStats;
+      const outbound = stat as RTCOutboundRtpStreamStats & {
+        nackCount?: number;
+        retransmittedPacketsSent?: number;
+        qpSum?: number;
+      };
       if (outbound.kind === "audio") {
         return;
       }
@@ -136,6 +147,25 @@ async function postWhipEncodeSample(
         fps = outbound.framesPerSecond ?? fps;
         framesEncoded = outbound.framesEncoded ?? framesEncoded;
         totalEncodeTime = outbound.totalEncodeTime ?? totalEncodeTime;
+        packetsSent = outbound.packetsSent ?? packetsSent;
+        nackCount = outbound.nackCount ?? nackCount;
+        retransmittedPackets = outbound.retransmittedPacketsSent ?? retransmittedPackets;
+        qpSum = outbound.qpSum ?? qpSum;
+      }
+    }
+    if (stat.type === "remote-inbound-rtp") {
+      const remote = stat as { kind?: string; packetsLost?: number; jitter?: number; roundTripTime?: number };
+      if (remote.kind === "audio") {
+        return;
+      }
+      if (typeof remote.packetsLost === "number") {
+        packetsLost = Math.max(packetsLost, remote.packetsLost);
+      }
+      if (typeof remote.jitter === "number" && remote.jitter > 0) {
+        jitterMs = remote.jitter * 1000;
+      }
+      if (typeof remote.roundTripTime === "number" && remote.roundTripTime > 0) {
+        rttMs = remote.roundTripTime * 1000;
       }
     }
     if (stat.type === "media-source" && (stat as { kind?: string }).kind === "video") {
@@ -152,6 +182,7 @@ async function postWhipEncodeSample(
       if (typeof rtt === "number" && rtt > 0) {
         rttMs = rtt * 1000;
       }
+      recvBytes = Math.max(recvBytes, pair.bytesReceived ?? 0);
     }
   });
   const now = performance.now();
@@ -178,6 +209,21 @@ async function postWhipEncodeSample(
       ((sourceFrames - framesEncoded) / fpsForBacklog) * 1000,
     );
   }
+  let recvKbps = 0;
+  if (rate.lastAt > 0 && recvBytes >= rate.lastRecv) {
+    const dt = (now - rate.lastAt) / 1000;
+    if (dt > 0) {
+      recvKbps = ((recvBytes - rate.lastRecv) * 8) / dt / 1000;
+    }
+  }
+  rate.lastRecv = recvBytes;
+  const lossPct =
+    packetsSent + packetsLost > 0 ? Math.min(100, (packetsLost / Math.max(packetsSent + packetsLost, 1)) * 100) : 0;
+  const retransPct =
+    packetsSent > 0 ? Math.min(100, (retransmittedPackets / packetsSent) * 100) : 0;
+  // H.264 QP 0–51 → 100–0 so WebRTC fills the same quality column as VMAF.
+  const qpQuality =
+    framesEncoded > 0 && qpSum > 0 ? Math.max(0, Math.min(100, 100 * (1 - qpSum / framesEncoded / 51))) : undefined;
   await postEncodeSample(jobId, {
     elapsed_sec: elapsedSec,
     encoded_bitrate_kbps: kbps,
@@ -185,6 +231,16 @@ async function postWhipEncodeSample(
     encoder_send_rate_mbps: kbps / 1000,
     encode_lag_ms: encodeLagMs,
     transport_rtt_ms: rttMs,
+    transport_rtt_jitter_ms: jitterMs,
     net_rtt_ms: rttMs,
+    net_jitter_ms: jitterMs,
+    net_send_mbps: kbps / 1000,
+    net_recv_mbps: recvKbps / 1000,
+    transport_recv_rate_mbps: recvKbps / 1000,
+    net_loss_pct: lossPct,
+    net_retrans_pct: retransPct || (packetsSent > 0 ? Math.min(100, (nackCount / packetsSent) * 100) : 0),
+    pkt_snd_loss: packetsLost,
+    pkt_retrans: retransmittedPackets || nackCount,
+    vmaf_score: qpQuality,
   });
 }

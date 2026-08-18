@@ -186,7 +186,17 @@ export function postEncodeSample(
     encoder_send_rate_mbps?: number;
     encode_lag_ms?: number;
     transport_rtt_ms?: number;
+    transport_rtt_jitter_ms?: number;
     net_rtt_ms?: number;
+    net_jitter_ms?: number;
+    net_send_mbps?: number;
+    net_recv_mbps?: number;
+    transport_recv_rate_mbps?: number;
+    net_loss_pct?: number;
+    net_retrans_pct?: number;
+    pkt_snd_loss?: number;
+    pkt_retrans?: number;
+    vmaf_score?: number;
     progress?: string;
   },
 ): Promise<{ ok: boolean }> {
@@ -352,6 +362,9 @@ export function fetchMoqProbe(relayAdmin = "http://34.28.164.90:8000"): Promise<
   publish_namespace_success: number | null;
   publish_received: number | null;
   publish_done: number | null;
+  lifetime?: Record<string, number>;
+  window?: Record<string, number>;
+  window_basis?: string;
   checks: string[];
 }> {
   const query = new URLSearchParams({ relay_admin: relayAdmin });

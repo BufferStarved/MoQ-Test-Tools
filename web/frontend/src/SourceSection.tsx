@@ -97,7 +97,7 @@ export function SourceSection({
       <StepHeading
         step={1}
         title="Source"
-        tip="Webcam encodes in this browser or on this computer. Cloud playout encodes a file on the API host."
+        tip="Webcam encodes in this browser or with local ffmpeg. Cloud playout encodes a file on the API host."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isLiveCamera ? " selected" : ""}`}>
@@ -132,7 +132,14 @@ export function SourceSection({
 
       {isLiveCamera && (
         <div className="encode-location-block">
-          <div className="source-mode-options encode-location-options" role="radiogroup" aria-label="Encode location">
+          <p className="encode-location-lede" id="encode-location-lede">
+            Publish from
+          </p>
+          <div
+            className="source-mode-options encode-location-options"
+            role="radiogroup"
+            aria-labelledby="encode-location-lede"
+          >
             <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
               <input
                 type="radio"
@@ -143,8 +150,9 @@ export function SourceSection({
               />
               <span className="source-mode-card-body">
                 <strong>
-                  <IconCpu size={15} /> Browser
+                  <IconCpu size={14} /> Browser
                 </strong>
+                <span className="source-mode-card-hint">Uses WebCodecs</span>
                 {!browserCaps.ok && <span className="field-hint">{browserCaps.reason}</span>}
               </span>
             </label>
@@ -158,7 +166,7 @@ export function SourceSection({
               />
               <span className="source-mode-card-body">
                 <strong>
-                  <IconLaptop size={15} /> This computer
+                  <IconLaptop size={14} /> Local ffmpeg
                 </strong>
                 {!localAgentAvailable && (
                   <span className="field-hint">Needs the local publisher agent.</span>

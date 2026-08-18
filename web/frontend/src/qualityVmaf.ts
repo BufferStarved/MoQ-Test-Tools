@@ -46,7 +46,7 @@ export function ingestVmafSkipReason(options: {
     return "Webcam ingest VMAF needs a file reference on the ingest host";
   }
   if (!options.vmafAvailable) {
-    return "No ingest recorder on this destination (Zixi or MoQ relay required)";
+    return "Ingest VMAF needs a Zixi TS recorder or a MoQ post-relay recorder (not WebRTC/WHIP)";
   }
   return null;
 }

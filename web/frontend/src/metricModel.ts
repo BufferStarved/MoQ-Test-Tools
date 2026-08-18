@@ -74,17 +74,17 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
 
   // Normalized transport
   net_rtt_ms: ["srt", "rtmp", "webrtc", "moq"],
-  net_jitter_ms: ["srt", "rtmp", "moq"],
+  net_jitter_ms: ["srt", "rtmp", "webrtc", "moq"],
   net_send_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  net_recv_mbps: ["srt", "webrtc"],
-  net_loss_pct: ["srt", "moq"],
-  net_retrans_pct: ["srt", "moq"],
+  net_recv_mbps: ["srt", "rtmp", "webrtc", "moq"],
+  net_loss_pct: ["srt", "rtmp", "webrtc", "moq"],
+  net_retrans_pct: ["srt", "rtmp", "webrtc", "moq"],
   net_fec_pct: ["srt"],
 
   // Legacy aliases (same support as normalized)
   transport_rtt_ms: ["srt", "rtmp", "webrtc", "moq"],
-  transport_rtt_jitter_ms: ["srt", "rtmp", "moq"],
-  transport_recv_rate_mbps: ["srt"],
+  transport_rtt_jitter_ms: ["srt", "rtmp", "webrtc", "moq"],
+  transport_recv_rate_mbps: ["srt", "rtmp", "webrtc", "moq"],
   quic_rtt_ms: ["moq"],
   quic_cwnd_bytes: ["moq"],
   quic_packets_lost: ["moq"],
@@ -92,14 +92,14 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   pkt_snd_drop: ["srt"],
 
   // Server
-  server_cpu_percent: ["srt", "rtmp", "http", "hls", "dash", "moq"],
-  server_memory_percent: ["srt", "rtmp", "http", "hls", "dash", "moq"],
-  server_disk_percent: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  server_cpu_percent: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  server_memory_percent: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  server_disk_percent: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
-  // Edge transport recovery (Zixi/SRT)
-  pkt_retrans: ["srt"],
+  // Edge transport recovery (Zixi/SRT + WebRTC/MoQ stand-ins)
+  pkt_retrans: ["srt", "webrtc", "moq"],
   pkt_fec_extra: ["srt"],
-  pkt_snd_loss: ["srt"],
+  pkt_snd_loss: ["srt", "webrtc", "moq"],
   moqx_subscribe_error: ["moq"],
   moqx_publish_namespace_success: ["moq"],
   moqx_publish_done: ["moq"],
@@ -117,7 +117,7 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   vmaf_score: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   psnr_db: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   ssim: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  vmaf_score_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  vmaf_score_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   psnr_db_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
   ssim_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
   vmaf_score_ingest: ["srt", "rtmp", "http", "hls", "dash", "moq"],

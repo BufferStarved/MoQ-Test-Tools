@@ -44,7 +44,12 @@ from destinations import (  # noqa: E402
     resolve_destination_request,
 )
 from endpoint_probe import probe_endpoint  # noqa: E402
-from ingest_agent_client import IngestAgentClient, resolve_ingest_agent, vmaf_available_for_endpoint  # noqa: E402
+from ingest_agent_client import (  # noqa: E402
+    IngestAgentClient,
+    resolve_ingest_agent,
+    vmaf_availability_for_endpoint,
+    vmaf_available_for_endpoint,
+)
 from vmaf_score import libvmaf_available  # noqa: E402
 from encode_profile import (  # noqa: E402
     DEFAULT_ENCODE_LADDER_ID,
@@ -519,18 +524,14 @@ def vmaf_available(
             "reason": "This preset does not support ingest VMAF",
         }
 
-    available = vmaf_available_for_endpoint(
+    available, ingest_reason = vmaf_availability_for_endpoint(
         resolved_url,
         preset_id=preset_id,
     )
     return {
         "available": available,
         "endpoint_url": resolved_url,
-        "reason": (
-            ""
-            if available
-            else "VMAF is not configured for this destination on the server"
-        ),
+        "reason": "" if available else ingest_reason,
     }
 
 
@@ -559,11 +560,11 @@ def quality_available(
         preset = PRESET_BY_ID.get(preset_id) if preset_id else None
         if preset is not None and not preset.supports_vmaf:
             ingest_reason = "This preset does not support ingest VMAF"
-        elif vmaf_available_for_endpoint(resolved_url, preset_id=preset_id):
-            ingest_available = True
-            ingest_reason = ""
         else:
-            ingest_reason = "VMAF is not configured for this destination on the server"
+            ingest_available, ingest_reason = vmaf_availability_for_endpoint(
+                resolved_url,
+                preset_id=preset_id,
+            )
 
     return {
         "encoder": {
@@ -850,6 +851,19 @@ class EncodeSampleRequest(BaseModel):
     encoder_send_rate_mbps: float = 0.0
     encode_lag_ms: float = 0.0
     transport_rtt_ms: float = 0.0
+    transport_rtt_jitter_ms: float = 0.0
+    net_rtt_ms: float = 0.0
+    net_jitter_ms: float = 0.0
+    net_send_mbps: float = 0.0
+    net_recv_mbps: float = 0.0
+    transport_recv_rate_mbps: float = 0.0
+    net_loss_pct: float = 0.0
+    net_retrans_pct: float = 0.0
+    pkt_snd_loss: float = 0.0
+    pkt_retrans: float = 0.0
+    # WebRTC cannot tee encoder VMAF; publishers may send a QP-mapped 0–100
+    # quality stand-in so the comparison quality column is not blank.
+    vmaf_score: Optional[float] = None
     progress: str = "continue"
 
 
@@ -1553,7 +1567,21 @@ from moq_relay_certs import fingerprint_for_host
 
 @app.get("/api/moq/probe")
 def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
-    """Fetch moqx relay subscribe/publish metrics for playback diagnostics."""
+    """Fetch moqx relay subscribe/publish metrics for playback diagnostics.
+
+    Lifetime Prometheus totals stay in the top-level fields (backward
+    compatible). ``window`` is the delta since the previous probe of this
+    same admin URL — that is what ``relay_playback_broken`` uses, so a busy
+    relay's historical ``track_not_exist`` count cannot fail a healthy job.
+    """
+    from moqx_stats import (
+        interpret_moqx_probe,
+        parse_moqx_metrics,
+        remember_probe,
+        snapshot_as_probe_dict,
+        snapshot_delta,
+    )
+
     metrics_url = f"{relay_admin.rstrip('/')}/metrics"
     result: dict = {
         "relay_admin": metrics_url,
@@ -1562,6 +1590,11 @@ def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
         "subscribe_error": None,
         "subscribe_error_track_not_exist": None,
         "publish_namespace_success": None,
+        "publish_received": None,
+        "publish_done": None,
+        "lifetime": None,
+        "window": None,
+        "window_basis": "none",
         "checks": [],
     }
     try:
@@ -1572,47 +1605,15 @@ def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
         return result
 
     result["reachable"] = True
-
-    def metric_value(name: str, labels: str = "") -> int | None:
-        needle = name
-        if labels:
-            needle = f'{name}{{{labels}}}'
-        for line in body.splitlines():
-            if line.startswith("#") or not line.strip():
-                continue
-            if needle in line or line.startswith(f"{name} "):
-                try:
-                    return int(float(line.rsplit(" ", 1)[-1]))
-                except ValueError:
-                    return None
-        return None
-
-    result["subscribe_success"] = metric_value("moqx_pubSubscribeSuccess_total")
-    result["subscribe_error"] = metric_value("moqx_pubSubscribeError_total")
-    result["subscribe_error_track_not_exist"] = metric_value(
-        "moqx_pubSubscribeError_by_code_total",
-        'code="track_not_exist"',
-    )
-    # A publisher's PUBLISH_NAMESPACE lands on the relay's subscriber-side
-    # (sub*) handler — pub* stays 0 on the live relay. Sum both prefixes so
-    # either moqx build reports correctly (matches src/moqx_stats.py).
-    result["publish_namespace_success"] = (
-        metric_value("moqx_pubPublishNamespaceSuccess_total") or 0
-    ) + (metric_value("moqx_subPublishNamespaceSuccess_total") or 0)
-    result["publish_received"] = metric_value("moqx_moqPublishReceived_total")
-    result["publish_done"] = metric_value("moqx_pubPublishDone_total")
-
-    publish_seen = (result["publish_received"] or 0) > 0 or (result["publish_done"] or 0) > 0
-    if (result["subscribe_error_track_not_exist"] or 0) > 0 and not publish_seen:
-        result["checks"].append("subscribe_track_not_exist")
-    if (result["publish_namespace_success"] or 0) == 0 and not publish_seen:
-        result["checks"].append("publish_never_received")
-    if (result["subscribe_success"] or 0) == 0 and (result["subscribe_error"] or 0) > 0 and not publish_seen:
-        result["checks"].append("subscribe_always_fails")
-    if result["checks"]:
-        result["checks"].append("relay_playback_broken")
-    else:
-        result["checks"].append("relay_metrics_look_healthy")
+    lifetime = parse_moqx_metrics(body)
+    previous = remember_probe(metrics_url, lifetime)
+    had_prior = previous is not None
+    window = snapshot_delta(lifetime, previous) if previous is not None else lifetime
+    result.update(snapshot_as_probe_dict(lifetime))
+    result["lifetime"] = snapshot_as_probe_dict(lifetime)
+    result["window"] = snapshot_as_probe_dict(window)
+    result["window_basis"] = "since_last_probe" if had_prior else "lifetime_no_prior_probe"
+    result["checks"] = interpret_moqx_probe(lifetime, window, had_prior_probe=had_prior)
     return result
 
 

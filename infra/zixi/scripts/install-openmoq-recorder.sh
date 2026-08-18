@@ -16,9 +16,14 @@ IMAGE="openmoq-recorder:latest"
 RECORDER_BIN="$RECORDER_DIR/bin/openmoq-fmp4-record"
 
 apt-get update
-apt-get install -y curl ca-certificates openssl docker.io
-
-systemctl enable --now docker 2>/dev/null || true
+apt-get install -y curl ca-certificates openssl
+# docker-ce (containerd.io) is already on the GCP/Linode web VMs — do not
+# apt-get install docker.io or the resolver conflicts and the recorder never
+# gets built.
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get install -y docker.io
+  systemctl enable --now docker 2>/dev/null || true
+fi
 
 cp "$RECORDER_DIR/.dockerignore" "$REPO_DIR/.dockerignore"
 docker build -f "$RECORDER_DIR/Dockerfile" -t "$IMAGE" "$REPO_DIR"
