@@ -261,6 +261,26 @@ def _looks_like_media_bytes(data: bytes) -> bool:
     return len(data) >= 64 and (b"moof" in data[:64] or b"mdat" in data[:64])
 
 
+def zixi_hls_heal_kind(
+    *,
+    health_ok: bool,
+    stale_rolling: bool,
+    stuck: bool,
+    uses_ec: bool,
+) -> str | None:
+    """Decide how to recover a wedged Zixi Fast HLS playlist.
+
+    ``ec_recreate`` refreshes the error-concealed packager without tearing
+    down the SRT push. ``srt_reset`` is the disruptive delete+recreate of
+    the source input — only for jobs that still play the raw SRT stream.
+    """
+    if health_ok and stale_rolling:
+        return "ec_recreate" if uses_ec else "srt_reset"
+    if not health_ok and stuck:
+        return "ec_recreate" if uses_ec else "srt_reset"
+    return None
+
+
 def probe_hls_segment_ready(
     manifest_url: str,
     *,

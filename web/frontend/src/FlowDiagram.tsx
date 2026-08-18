@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 /**
  * Shared "pipeline" diagram primitives — small labeled boxes joined by
@@ -22,14 +22,23 @@ export function FlowNode({
   detail,
   tone = "default",
   icon,
+  accentColor,
 }: {
   title: string;
   detail?: string;
   tone?: FlowTone;
   icon?: ReactNode;
+  /** Stable output color so a stream can be followed across stages. */
+  accentColor?: string;
 }) {
+  const style = accentColor
+    ? ({ "--protocol-accent": accentColor } as CSSProperties)
+    : undefined;
   return (
-    <div className={`flow-diagram-node tone-${tone}`}>
+    <div
+      className={`flow-diagram-node tone-${tone}${accentColor ? " has-accent" : ""}`}
+      style={style}
+    >
       <span className="flow-diagram-node-title">
         {icon && <span className="icon-inline">{icon}</span>}
         <strong>{title}</strong>

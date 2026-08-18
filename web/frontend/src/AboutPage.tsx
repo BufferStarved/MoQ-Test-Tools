@@ -6,6 +6,10 @@ const GH_BLOB = `${GH_REPO}/blob/main`;
 const GH_LOCAL_PUBLISHER = `${GH_BLOB}/docs/LOCAL-PUBLISHER.md`;
 const GH_BYO_ENCODER = `${GH_BLOB}/docs/BYO-ENCODER.md`;
 
+/** PayPal donate — hosted-button ID not required; business email is enough. */
+export const PAYPAL_DONATE_URL =
+  "https://www.paypal.com/donate/?business=sean.p.mccarthy92%40gmail.com&no_recurring=0&item_name=Help%20support%20this%20project&currency_code=USD";
+
 /** Stable order for the About metric glossary (matches chart / scorecard groups). */
 const ABOUT_METRIC_KEYS = [
   "encoded_bitrate_kbps",
@@ -53,9 +57,19 @@ export function AboutPage() {
             data for protocol choice, ingest placement, player selection, and config recipes.
           </p>
         </div>
-        <a className="csv-download" href={GH_REPO} target="_blank" rel="noreferrer">
-          GitHub repository
-        </a>
+        <div className="about-header-links">
+          <a className="csv-download" href={GH_REPO} target="_blank" rel="noreferrer">
+            GitHub repository
+          </a>
+          <a
+            className="csv-download"
+            href={PAYPAL_DONATE_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Help support this project
+          </a>
+        </div>
       </header>
 
       <section className="about-section about-decisions">
@@ -93,17 +107,17 @@ export function AboutPage() {
       <section className="about-section">
         <h3>Where ffmpeg runs (upload path)</h3>
         <p className="hint">
-          The recipe couples source and encode location: VOD assets always encode on the cloud VM
-          (apples-to-apples player/ingest comparisons); webcam always encodes on your laptop
+          The recipe couples source and encode location: Cloud playout always encodes on the API
+          host (a live encode of a file); webcam always encodes on your laptop
           (realistic ISP/last-mile upload numbers).
         </p>
         <div className="about-encoder-grid">
           <article className="about-encoder-card">
-            <h4>VOD asset → Cloud VM</h4>
+            <h4>Cloud playout → API host</h4>
             <p>
-              ffmpeg on the API host in the same GCP region as ingest. Best for apples-to-apples
+              ffmpeg on the API host in GCP us-central1. Best for apples-to-apples
               protocol and player comparisons. Upload RTT / retrans charts reflect datacenter
-              paths, not a home or studio network.
+              paths, not a home or studio network. You can upload your own file; it is encoded live like color bars.
             </p>
           </article>
           <article className="about-encoder-card recommended">
@@ -150,6 +164,13 @@ export function AboutPage() {
           </a>{" "}
           Slack.
         </p>
+        <p>
+          Relay VMs and Zixi licenses add up.{" "}
+          <a href={PAYPAL_DONATE_URL} target="_blank" rel="noreferrer">
+            Help support this project
+          </a>{" "}
+          via PayPal if you want to offset compute and software costs.
+        </p>
       </div>
 
       <section className="about-section">
@@ -182,12 +203,12 @@ export function AboutPage() {
         </p>
         <div className="flow-diagram">
           <ArchStage step="1" label="Source" tone="client">
-            <FlowNode tone="client" title="VOD asset" detail="Color Bars, Big Buck Bunny, or your own upload" />
+            <FlowNode tone="client" title="Cloud playout" detail="Color bars, Big Buck Bunny, or your upload, encoded live" />
             <FlowNode tone="client" title="Webcam" detail="camera attached to your laptop" />
           </ArchStage>
           <FlowArrow />
           <ArchStage step="2" label="Encode" tone="server">
-            <FlowNode tone="server" title="Cloud VM ffmpeg" detail="for VOD assets — same region as ingest" />
+            <FlowNode tone="server" title="API host ffmpeg" detail="cloud playout on the API host" />
             <FlowNode
               tone="server"
               title="Laptop ffmpeg (agent)"
@@ -225,7 +246,7 @@ export function AboutPage() {
         </div>
         <ul className="about-list">
           <li>
-            <strong>Where ffmpeg runs:</strong> VOD assets always encode on the cloud VM (apples-to-
+            <strong>Where ffmpeg runs:</strong> Cloud playout always encodes on the API host (apples-to-
             apples protocol/player comparisons); webcam always encodes on your laptop via the
             publisher agent, so upload metrics reflect your real ISP/last-mile connection. You can
             also point your own encoder at our publish URLs — see the upload-path section above.
@@ -262,7 +283,7 @@ export function AboutPage() {
         <h3>Client path</h3>
         <div className="flow-diagram flow-diagram-compact">
           <ArchStage step="1" label="Capture" tone="client">
-            <FlowNode tone="client" title="Media source" detail="VOD asset or agent-captured webcam" />
+            <FlowNode tone="client" title="Media source" detail="Cloud playout or agent-captured webcam" />
           </ArchStage>
           <FlowArrow />
           <ArchStage step="2" label="Jobs" tone="server">

@@ -8,6 +8,12 @@ variable "project_id" {
   type        = string
 }
 
+variable "existing_network" {
+  description = "Reuse an existing VPC name (avoids NETWORKS quota). Empty creates a dedicated VPC."
+  type        = string
+  default     = ""
+}
+
 variable "region" {
   type    = string
   default = "us-central1"

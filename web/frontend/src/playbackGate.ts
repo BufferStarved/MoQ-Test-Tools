@@ -13,10 +13,12 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
     return "waiting";
   }
   if (job.status === "running") {
-    // Keep players gated until the backend confirms readable delivery media
-    // (Zixi HTTP-TS / Fast HLS, or MediaMTX LL-HLS). Attaching earlier storms
-    // empty-playlist / empty-.ts errors and inflates TTFF.
-    if (job.preview_ready === false) {
+    // HLS / HTTP-TS still wait for a readable segment. MoQ must NOT — the
+    // publisher emits the catalog as group 0 once; waiting for preview_ready
+    // (often an 8s grace when moqx admin isn't reachable from a laptop)
+    // means AbsoluteStart(0,0) misses it and the player sits on
+    // "catalog pending" for the whole run (east local-ffmpeg 2026-08-18).
+    if (job.preview_ready === false && (job.protocol || "").toLowerCase() !== "moq") {
       return "waiting";
     }
     return "live";

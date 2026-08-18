@@ -15,14 +15,29 @@ provider "google" {
   zone    = var.zone
 }
 
+data "google_compute_network" "existing" {
+  count = var.existing_network != "" ? 1 : 0
+  name  = var.existing_network
+}
+
 resource "google_compute_network" "zixi" {
+  count                   = var.existing_network == "" ? 1 : 0
   name                    = "${var.project_name}-vpc"
   auto_create_subnetworks = true
 }
 
+locals {
+  network_name = var.existing_network != "" ? data.google_compute_network.existing[0].name : google_compute_network.zixi[0].name
+}
+
+moved {
+  from = google_compute_network.zixi
+  to   = google_compute_network.zixi[0]
+}
+
 resource "google_compute_firewall" "ssh" {
   name    = "${var.project_name}-allow-ssh"
-  network = google_compute_network.zixi.name
+  network = local.network_name
 
   allow {
     protocol = "tcp"
@@ -33,9 +48,25 @@ resource "google_compute_firewall" "ssh" {
   target_tags   = ["zixi-broadcaster"]
 }
 
+# Allows SSH via GCP Identity-Aware Proxy (IAP) tunneling.
+# 35.235.240.0/20 is GCP's fixed range for IAP-forwarded traffic.
+# Must target moq-zixi-vpc (not default) — each stack has its own VPC.
+resource "google_compute_firewall" "allow_iap_ssh" {
+  name    = "${var.project_name}-allow-iap-ssh"
+  network = local.network_name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["35.235.240.0/20"]
+  target_tags   = ["zixi-broadcaster"]
+}
+
 resource "google_compute_firewall" "zixi_ingest" {
   name    = "${var.project_name}-allow-ingest"
-  network = google_compute_network.zixi.name
+  network = local.network_name
 
   allow {
     protocol = "tcp"
@@ -92,7 +123,7 @@ resource "google_compute_instance" "zixi" {
   }
 
   network_interface {
-    network = google_compute_network.zixi.name
+    network = local.network_name
     access_config {
       nat_ip = google_compute_address.zixi.address
     }

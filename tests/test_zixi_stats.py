@@ -49,6 +49,30 @@ class ZixiStatsTests(unittest.TestCase):
         poller = ZixiStatsPoller(url)
         self.assertEqual(poller._input_id, "SRT Test")
 
+    def test_east_srt_preset_url_defaults_input_id(self):
+        url = "srt://35.196.215.179:10080?mode=caller&latency=200000"
+        poller = ZixiStatsPoller(url)
+        self.assertEqual(poller._input_id, "SRT Test")
+        self.assertEqual(poller._base_url, "http://35.196.215.179:4444")
+
+    def test_api_base_prefers_endpoint_host_over_env(self):
+        import os
+
+        from zixi_stats import zixi_api_base_for_endpoint
+
+        previous = os.environ.get("ZIXI_API_BASE")
+        os.environ["ZIXI_API_BASE"] = "http://35.222.33.58:4444"
+        try:
+            self.assertEqual(
+                zixi_api_base_for_endpoint("srt://35.196.215.179:10080?mode=caller"),
+                "http://35.196.215.179:4444",
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("ZIXI_API_BASE", None)
+            else:
+                os.environ["ZIXI_API_BASE"] = previous
+
     def test_http_ts_playback_url(self):
         url = zixi_http_ts_playback_url(
             "SRT Test",

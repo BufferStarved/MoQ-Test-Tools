@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PlaybackGate } from "../playbackGate";
 import { fetchPlaybackProbe, fetchZixiSrtDebug } from "../api";
 
@@ -178,6 +178,19 @@ export function PlayerDiagnostics({
     ...lines,
   ].filter(Boolean) as string[];
 
+  const hasError = Boolean(error);
+  const idleHidden = playbackGate === "idle" && !hasError && !benchmarkLoading;
+  const [open, setOpen] = useState(hasError);
+  useEffect(() => {
+    if (hasError) {
+      setOpen(true);
+    }
+  }, [hasError]);
+
+  if (idleHidden) {
+    return null;
+  }
+
   async function copyDiagnostics() {
     const text = [
       ...entries,
@@ -191,10 +204,14 @@ export function PlayerDiagnostics({
   }
 
   const healthTone = error ? "bad" : playbackGate === "live" ? "ok" : "idle";
-  const engineLabel = engine === "mpegts" ? "MPEG-TS" : engine.toUpperCase();
+  const engineLabel = engine === "mpegts" ? "MPEG-TS" : engine === "moq" ? "MoQ" : engine.toUpperCase();
 
   return (
-    <details className="player-diagnostics">
+    <details
+      className="player-diagnostics"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
         <span className={`diagnostics-health-dot tone-${healthTone}`} aria-hidden="true" />
         Playback diagnostics ({engineLabel})
@@ -256,12 +273,14 @@ export function PlayerDiagnostics({
           {recipeText}
         </pre>
       )}
-      <p className="hint">
-        For Zixi support: during a stuck SRT preview, use <strong>Capture stuck playlist</strong>{" "}
-        (raw <code>playback.m3u8</code> + segment status/headers) and{" "}
-        <strong>Copy publish recipe</strong> (ffmpeg / stream id / reconnect notes). Also open
-        DevTools → Network and filter <code>playback/fetch</code>.
-      </p>
+      {engine === "hls" && (
+        <p className="hint">
+          For Zixi support: during a stuck SRT preview, use <strong>Capture stuck playlist</strong>{" "}
+          (raw <code>playback.m3u8</code> + segment status/headers) and{" "}
+          <strong>Copy publish recipe</strong> (ffmpeg / stream id / reconnect notes). Also open
+          DevTools → Network and filter <code>playback/fetch</code>.
+        </p>
+      )}
     </details>
   );
 }

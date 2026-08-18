@@ -1,4 +1,5 @@
 import {
+  cloudHostFromIngest,
   defaultIngestForProtocol,
   ingestEndpointLabel,
   ingestEndpointsForProtocol,
@@ -6,37 +7,24 @@ import {
   presetIdForIngest,
 } from "./ingestEndpoints";
 import type { EndpointConfig, Preset, Protocol } from "./types";
-import { IconBroadcast, IconTarget } from "./Icons";
+import type { PlaybackMode } from "./playbackTypes";
+import { IconBroadcast, IconMonitor, IconTarget } from "./Icons";
 import {
-  defaultPlaybackModeForProtocol,
+  defaultWhepPlaybackUrl,
   isManagedMoqRelay,
   managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
+  playbackModeBlockedReason,
   playbackModeLabelForSelection,
+  playbackModesForSelection,
   relayWebTransportUrl,
+  resolvedPlaybackMode,
   showMoqUrlFields,
 } from "./playbackUrls";
 import { protocolLabel } from "./protocolTheme";
 
 /** Upload protocols not ready for benchmark comparisons yet. */
-const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "webrtc", "dash"]);
-
-/** Per-protocol reason shown under the disabled protocol select. */
-const UPLOAD_PROTOCOL_DISABLED_HINT: Partial<Record<string, string>> = {
-  dash: (
-    "Retired for now — Zixi's TS-over-HTTP push input reproducibly stops draining "
-    + "the socket a couple seconds into a continuous live stream (confirmed independent "
-    + "of this app), so DASH ingest silently produced frozen encodes. Use SRT or RTMP "
-    + "ingest instead; we'll re-enable this once Zixi confirms sustained live TS push support."
-  ),
-};
-const DEFAULT_PROTOCOL_DISABLED_HINT =
-  "This upload protocol is coming soon and is not available for comparisons yet.";
-/** Option suffix — "retired" for protocols we turned off deliberately, "coming soon" otherwise. */
-const UPLOAD_PROTOCOL_DISABLED_SUFFIX: Partial<Record<string, string>> = {
-  dash: " (retired)",
-};
-const DEFAULT_PROTOCOL_DISABLED_SUFFIX = " (coming soon)";
+const UPLOAD_PROTOCOLS_COMING_SOON = new Set(["hls", "dash"]);
 
 interface EndpointSectionProps {
   index: number;
@@ -46,8 +34,23 @@ interface EndpointSectionProps {
   bootstrapping: boolean;
   apiOnline: boolean;
   canRemove: boolean;
+  /** Browser source publishes MoQ and WebRTC (WHIP) only. */
+  browserPublish?: boolean;
   onChange: (id: string, patch: Partial<EndpointConfig>) => void;
   onRemove: (id: string) => void;
+}
+
+function parseHostSafe(endpointUrl: string): string | null {
+  try {
+    if (endpointUrl.startsWith("srt://") || endpointUrl.startsWith("rtmp://")) {
+      const withoutScheme = endpointUrl.split("://")[1] ?? "";
+      const hostPart = withoutScheme.split(/[/?]/)[0] ?? "";
+      return hostPart.split(":")[0] || null;
+    }
+    return new URL(endpointUrl).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 function resolvePresetUrl(endpoint: EndpointConfig, presets: Preset[]): string {
@@ -83,14 +86,13 @@ function managedDisplayUrl(endpoint: EndpointConfig, presets: Preset[]): string 
 }
 
 export function playerShortLabel(endpoint: EndpointConfig): string {
-  const mode = endpoint.playbackMode ?? defaultPlaybackModeForProtocol(
+  const mode = resolvedPlaybackMode(
+    endpoint.playbackMode,
     endpoint.protocol,
     endpoint.ingestEndpointId,
   );
   return playbackModeLabelForSelection(
-    mode === "auto"
-      ? defaultPlaybackModeForProtocol(endpoint.protocol, endpoint.ingestEndpointId)
-      : mode,
+    mode,
     endpoint.protocol,
     endpoint.ingestEndpointId,
   );
@@ -104,19 +106,36 @@ export function EndpointSection({
   bootstrapping,
   apiOnline,
   canRemove,
+  browserPublish = false,
   onChange,
   onRemove,
 }: EndpointSectionProps) {
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
   const hostOptions = ingestEndpointsForProtocol(endpoint.protocol, presets);
-  const selectedIngest = hostOptions.find((item) => item.id === endpoint.ingestEndpointId)
-    ?? hostOptions[0];
+  const selectedIngest =
+    hostOptions.find((item) => item.id === endpoint.ingestEndpointId) ??
+    hostOptions.find((item) => item.available) ??
+    hostOptions[0];
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
   const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
   const managedLabel = managedEndpointUrlLabel(endpoint.protocol);
+  const playerModes = playbackModesForSelection(endpoint.protocol, endpoint.ingestEndpointId);
+  const resolvedMode = resolvedPlaybackMode(
+    endpoint.playbackMode,
+    endpoint.protocol,
+    endpoint.ingestEndpointId,
+  );
+  const showWhepField = resolvedMode === "whep";
+  const whepPlaceholder = defaultWhepPlaybackUrl(
+    parseHostSafe(endpoint.endpointUrl) ?? "34.9.217.178",
+    "benchmark",
+  );
 
   const controlsLocked = bootstrapping || !apiOnline;
+  const liveProtocols = protocols
+    .filter((item) => !UPLOAD_PROTOCOLS_COMING_SOON.has(item.id))
+    .filter((item) => !browserPublish || item.id === "moq" || item.id === "webrtc");
 
   return (
     <div className="endpoint-section">
@@ -136,63 +155,52 @@ export function EndpointSection({
         )}
       </div>
 
-      <p className="stream-path-chips" aria-label="Publish path">
-        <span>{protocolLabel(endpoint.protocol)}</span>
-        <span className="stream-path-sep" aria-hidden="true">
-          →
-        </span>
-        <span>{ingestEndpointLabel(endpoint.ingestEndpointId)}</span>
-        <span className="stream-path-sep" aria-hidden="true">
-          →
-        </span>
-        <span>{playerShortLabel(endpoint)}</span>
-      </p>
-
-      <label>
-        <span className="field-label-with-icon">
-          <IconBroadcast size={14} /> Protocol
-        </span>
-        <select
-          value={endpoint.protocol}
-          onChange={(e) => {
-            const protocol = e.target.value;
-            if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol)) {
-              return;
-            }
-            const nextIngest = defaultIngestForProtocol(protocol);
-            const patch: Partial<EndpointConfig> = {
-              protocol,
-              ingestEndpointId: nextIngest,
-              playbackMode: defaultPlaybackModeForProtocol(protocol, nextIngest),
-            };
-            if (protocol === "moq") {
-              Object.assign(
-                patch,
-                moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: nextIngest }, presets),
-              );
-            }
-            onChange(endpoint.id, patch);
-          }}
-          disabled={controlsLocked}
-        >
-          {protocols.map((item) => {
-            const comingSoon = UPLOAD_PROTOCOLS_COMING_SOON.has(item.id);
-            return (
-              <option key={item.id} value={item.id} disabled={comingSoon}>
-                {item.label}
-                {comingSoon
-                  ? UPLOAD_PROTOCOL_DISABLED_SUFFIX[item.id] ?? DEFAULT_PROTOCOL_DISABLED_SUFFIX
-                  : ""}
-              </option>
-            );
-          })}
-        </select>
-        {UPLOAD_PROTOCOLS_COMING_SOON.has(endpoint.protocol) && (
-          <span className="hint">
-            {UPLOAD_PROTOCOL_DISABLED_HINT[endpoint.protocol] ?? DEFAULT_PROTOCOL_DISABLED_HINT}
+      {liveProtocols.length <= 1 ? (
+        <p className="endpoint-static-field">
+          <span className="field-label-with-icon">
+            <IconBroadcast size={14} /> Protocol
           </span>
-        )}
-      </label>
+          <strong>{protocolLabel(endpoint.protocol)}</strong>
+        </p>
+      ) : (
+        <label>
+          <span className="field-label-with-icon">
+            <IconBroadcast size={14} /> Protocol
+          </span>
+          <select
+            value={endpoint.protocol}
+            onChange={(e) => {
+              const protocol = e.target.value;
+              if (UPLOAD_PROTOCOLS_COMING_SOON.has(protocol) || (browserPublish && protocol !== "moq" && protocol !== "webrtc")) {
+                return;
+              }
+              const nextIngest = defaultIngestForProtocol(
+                protocol,
+                cloudHostFromIngest(endpoint.ingestEndpointId),
+              );
+              const patch: Partial<EndpointConfig> = {
+                protocol,
+                ingestEndpointId: nextIngest,
+                playbackMode: resolvedPlaybackMode(undefined, protocol, nextIngest),
+              };
+              if (protocol === "moq") {
+                Object.assign(
+                  patch,
+                  moqPatchFromPreset({ ...endpoint, protocol, ingestEndpointId: nextIngest }, presets),
+                );
+              }
+              onChange(endpoint.id, patch);
+            }}
+            disabled={controlsLocked}
+          >
+            {liveProtocols.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <label>
         <span className="field-label-with-icon">
@@ -202,13 +210,15 @@ export function EndpointSection({
           value={
             hostOptions.some((item) => item.id === endpoint.ingestEndpointId)
               ? endpoint.ingestEndpointId
-              : (hostOptions[0]?.id ?? endpoint.ingestEndpointId)
+              : (hostOptions.find((item) => item.available)?.id ??
+                hostOptions[0]?.id ??
+                endpoint.ingestEndpointId)
           }
           onChange={(e) => {
             const ingestEndpointId = e.target.value;
             const patch: Partial<EndpointConfig> = {
               ingestEndpointId,
-              playbackMode: defaultPlaybackModeForProtocol(endpoint.protocol, ingestEndpointId),
+              playbackMode: resolvedPlaybackMode(undefined, endpoint.protocol, ingestEndpointId),
             };
             if (endpoint.protocol === "moq" && isManagedMoqRelay(ingestEndpointId)) {
               Object.assign(patch, moqPatchFromPreset({ ...endpoint, ingestEndpointId }, presets));
@@ -218,9 +228,8 @@ export function EndpointSection({
           disabled={controlsLocked}
         >
           {hostOptions.map((item) => (
-            <option key={item.id} value={item.id} disabled={!item.available}>
+            <option key={item.id} value={item.id}>
               {item.label}
-              {!item.available ? " (coming soon)" : ""}
             </option>
           ))}
         </select>
@@ -241,46 +250,105 @@ export function EndpointSection({
         </label>
       )}
 
-      {managedUrl && (
-        <p className="hint managed-endpoint-url">
-          <span className="url-field-label">{managedLabel}</span>
-          <code>{managedUrl}</code>
+      {playerModes.length <= 1 ? (
+        <p className="endpoint-static-field">
+          <span className="field-label-with-icon">
+            <IconMonitor size={14} /> Player
+          </span>
+          <strong>
+            {playbackModeLabelForSelection(resolvedMode, endpoint.protocol, endpoint.ingestEndpointId)}
+          </strong>
         </p>
-      )}
-
-      {showMoq && (
+      ) : (
         <>
           <label>
-            MoQ Publish URL
-            <input
-              type="url"
-              value={endpoint.moqRelayUrl ?? ""}
-              onChange={(e) => onChange(endpoint.id, { moqRelayUrl: e.target.value })}
-              placeholder="https://relay.example.com:4433"
+            <span className="field-label-with-icon">
+              <IconMonitor size={14} /> Player
+            </span>
+            <select
+              value={resolvedMode}
+              onChange={(e) => onChange(endpoint.id, { playbackMode: e.target.value as PlaybackMode })}
               disabled={controlsLocked}
-            />
+            >
+              {playerModes.map((item) => {
+                const blocked = playbackModeBlockedReason(
+                  item.id,
+                  endpoint.protocol,
+                  endpoint.ingestEndpointId,
+                );
+                return (
+                  <option key={item.id} value={item.id} disabled={Boolean(blocked)} title={blocked}>
+                    {playbackModeLabelForSelection(item.id, endpoint.protocol, endpoint.ingestEndpointId)}
+                  </option>
+                );
+              })}
+            </select>
           </label>
-          <label>
-            MoQ namespace
-            <input
-              type="text"
-              value={endpoint.moqNamespace ?? ""}
-              onChange={(e) => onChange(endpoint.id, { moqNamespace: e.target.value })}
-              placeholder="benchmark"
-              disabled={controlsLocked}
-            />
-          </label>
-          <label>
-            MoQ fingerprint URL (optional)
-            <input
-              type="url"
-              value={endpoint.moqFingerprintUrl ?? ""}
-              onChange={(e) => onChange(endpoint.id, { moqFingerprintUrl: e.target.value })}
-              placeholder="https://relay.example.com:4433/fingerprint"
-              disabled={controlsLocked}
-            />
-          </label>
+          {playbackModeBlockedReason("hls", endpoint.protocol, endpoint.ingestEndpointId) ? (
+            <p className="field-hint">
+              Fast HLS is disabled for Zixi SRT — the packager playlist stalls. MPEG-TS is the working player.
+            </p>
+          ) : null}
         </>
+      )}
+
+      {showWhepField && (
+        <label>
+          WHEP Playback URL
+          <input
+            type="url"
+            value={endpoint.whepPlaybackUrl ?? ""}
+            onChange={(e) => onChange(endpoint.id, { whepPlaybackUrl: e.target.value })}
+            placeholder={whepPlaceholder}
+            disabled={controlsLocked}
+          />
+        </label>
+      )}
+
+      {(managedUrl || showMoq) && (
+        <details className="output-advanced">
+          <summary>Advanced</summary>
+          {managedUrl && (
+            <p className="hint managed-endpoint-url">
+              <span className="url-field-label">{managedLabel}</span>
+              <code>{managedUrl}</code>
+            </p>
+          )}
+          {showMoq && (
+            <>
+              <label>
+                MoQ Publish URL
+                <input
+                  type="url"
+                  value={endpoint.moqRelayUrl ?? ""}
+                  onChange={(e) => onChange(endpoint.id, { moqRelayUrl: e.target.value })}
+                  placeholder="https://relay.example.com:4433"
+                  disabled={controlsLocked}
+                />
+              </label>
+              <label>
+                MoQ namespace
+                <input
+                  type="text"
+                  value={endpoint.moqNamespace ?? ""}
+                  onChange={(e) => onChange(endpoint.id, { moqNamespace: e.target.value })}
+                  placeholder="benchmark"
+                  disabled={controlsLocked}
+                />
+              </label>
+              <label>
+                MoQ fingerprint URL (optional)
+                <input
+                  type="url"
+                  value={endpoint.moqFingerprintUrl ?? ""}
+                  onChange={(e) => onChange(endpoint.id, { moqFingerprintUrl: e.target.value })}
+                  placeholder="https://relay.example.com:4433/fingerprint"
+                  disabled={controlsLocked}
+                />
+              </label>
+            </>
+          )}
+        </details>
       )}
     </div>
   );

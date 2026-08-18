@@ -151,6 +151,28 @@ class MediaMtxMergeTests(unittest.TestCase):
         self.assertEqual(merged["net_send_mbps"], 3.0)
         self.assertEqual(merged["net_recv_mbps"], 3.0)
 
+    def test_whip_encoded_bitrate_uses_mtx_ingest_recv(self):
+        mtx = MediaMtxStatsSnapshot(net_recv_mbps=3.1)
+        merged = UploadService._merge_mediamtx_transport(
+            mtx=mtx,
+            net_rtt_ms=0.0,
+            net_jitter_ms=0.0,
+            net_send_mbps=0.0,
+            net_recv_mbps=0.0,
+        )
+        encoded = UploadService._encoded_bitrate_kbps(
+            ffmpeg_kbps=0.0,
+            merged_send_mbps=merged["net_send_mbps"],
+        )
+        self.assertAlmostEqual(encoded, 3100.0)
+
+    def test_encoded_bitrate_prefers_ffmpeg(self):
+        encoded = UploadService._encoded_bitrate_kbps(
+            ffmpeg_kbps=2800.0,
+            merged_send_mbps=3.1,
+        )
+        self.assertAlmostEqual(encoded, 2800.0)
+
 
 class MediaMtxPlaybackUrlTests(unittest.TestCase):
     def test_hls_url(self):

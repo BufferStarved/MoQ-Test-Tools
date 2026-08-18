@@ -36,9 +36,37 @@ class RemoteVmafResult:
     error: Optional[str] = None
 
 
-def resolve_agent_token(explicit_token: str = "") -> str:
+def _east_ingest_hosts() -> set[str]:
+    hosts = {
+        os.environ.get("GCP_EAST_ZIXI_IP", "").strip(),
+        os.environ.get("GCP_EAST_WEB_IP", "").strip(),
+        os.environ.get("GCP_EAST_RELAY_IP", "").strip(),
+    }
+    hosts.discard("")
+    return hosts
+
+
+def _linode_ingest_hosts() -> set[str]:
+    hosts = {
+        os.environ.get("LINODE_ZIXI_IP", "").strip(),
+        os.environ.get("LINODE_WEB_IP", "").strip(),
+        os.environ.get("LINODE_RELAY_IP", "").strip(),
+    }
+    hosts.discard("")
+    return hosts
+
+
+def resolve_agent_token(explicit_token: str = "", *, host: str = "") -> str:
     if explicit_token.strip():
         return explicit_token.strip()
+    if host and host in _east_ingest_hosts():
+        east_token = os.environ.get("GCP_EAST_INGEST_AGENT_TOKEN", "").strip()
+        if east_token:
+            return east_token
+    if host and host in _linode_ingest_hosts():
+        linode_token = os.environ.get("LINODE_INGEST_AGENT_TOKEN", "").strip()
+        if linode_token:
+            return linode_token
     return os.environ.get("INGEST_AGENT_TOKEN", "").strip()
 
 
@@ -50,10 +78,6 @@ def resolve_ingest_agent(
     agent_port: int = DEFAULT_AGENT_PORT,
     agent_token: str = "",
 ) -> Optional[IngestAgentConfig]:
-    token = resolve_agent_token(agent_token)
-    if not token:
-        return None
-
     explicit_base = (agent_url or os.environ.get("INGEST_AGENT_BASE_URL", "")).strip().rstrip("/")
     if explicit_base:
         base_url = explicit_base
@@ -68,6 +92,10 @@ def resolve_ingest_agent(
             else "http"
         )
         base_url = f"{scheme}://{host}:{agent_port}"
+
+    token = resolve_agent_token(agent_token, host=host)
+    if not token:
+        return None
 
     return IngestAgentConfig(
         base_url=base_url,
@@ -157,17 +185,19 @@ class IngestAgentClient:
         return self._request("GET", "/api/v1/host/metrics", timeout=2)
 
     def upload_reference(self, job_id: str, media_path: str) -> None:
-        boundary = f"----moqboundary{int(time.time() * 1000)}"
         filename = Path(media_path).name
-        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
         with open(media_path, "rb") as handle:
-            file_bytes = handle.read()
+            self.upload_reference_bytes(job_id, handle.read(), filename)
+
+    def upload_reference_bytes(self, job_id: str, file_bytes: bytes, filename: str) -> None:
+        boundary = f"----moqboundary{int(time.time() * 1000)}"
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        safe_name = Path(filename).name or "reference.bin"
 
         body = b"".join([
             f"--{boundary}\r\n".encode(),
             (
-                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
                 f"Content-Type: {content_type}\r\n\r\n"
             ).encode(),
             file_bytes,
@@ -248,6 +278,8 @@ class IngestAgentClient:
         namespace: str,
         duration_sec: int,
         relay_url: str = "",
+        cert_sha256: str = "",
+        video_track: str = "",
     ) -> dict:
         return self._request(
             "POST",
@@ -257,6 +289,8 @@ class IngestAgentClient:
                 "duration_sec": duration_sec,
                 "relay_url": relay_url,
                 "recording_dir": self._config.recording_dir,
+                "cert_sha256": cert_sha256,
+                "video_track": video_track,
             },
             timeout=30,
         )

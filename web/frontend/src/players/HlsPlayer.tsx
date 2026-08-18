@@ -15,6 +15,12 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
+import {
+  hlsSyncDurationForPlaylist,
+  isStaleHlsFragmentLoop,
+  playlistDepth,
+  playlistTargetDurationSec,
+} from "../hlsPlaylist";
 
 interface HlsPlayerProps {
   url: string;
@@ -44,6 +50,8 @@ interface HlsPlayerProps {
   packagerTransitMs?: number | null;
   /** Zixi Fast HLS: encode-media seconds corresponding to buffer time 0. */
   deliveryMediaOriginSec?: number | null;
+  /** Zixi SRT/RTMP: switch the card to MPEG-TS when Fast HLS cannot recover. */
+  onUnrecoverableHls?: () => void;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -55,7 +63,8 @@ const MANIFEST_POLL_MAX = 120;
  */
 const MANIFEST_START_POLLS = 2;
 const MANIFEST_STUCK_POLLS = 60;
-const STALE_FRAG_FAIL_AFTER = 8;
+/** Faster give-up when MPEG-TS fallback is available (~10s vs ~24s). */
+const MANIFEST_STUCK_POLLS_FALLBACK = 25;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
@@ -87,47 +96,6 @@ function segmentUri(body: string): string | null {
   return line ?? null;
 }
 
-function playlistDepth(body: string): number {
-  return body.split("\n").filter((row) => {
-    const line = row.trim();
-    return Boolean(line) && !line.startsWith("#");
-  }).length;
-}
-
-/** Zixi with large -output_ts_offset has advertised TARGETDURATION=292 while
- *  EXTINF stays 2s — never trust an unbounded TARGETDURATION for liveSync. */
-const HLS_TARGET_DURATION_CAP_SEC = 6;
-
-function playlistExtinfMaxSec(body: string): number | null {
-  let max = 0;
-  for (const match of body.matchAll(/#EXTINF:(\d+(?:\.\d+)?)/g)) {
-    const value = Number(match[1]);
-    if (Number.isFinite(value) && value > max) {
-      max = value;
-    }
-  }
-  return max > 0 ? max : null;
-}
-
-function playlistTargetDurationSec(body: string): number {
-  const match = body.match(/#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)/);
-  const declared = match ? Number(match[1]) : NaN;
-  const extinf = playlistExtinfMaxSec(body);
-  // Prefer real segment duration when the declared TARGETDURATION is absurd.
-  if (
-    extinf != null &&
-    (!Number.isFinite(declared) || declared > HLS_TARGET_DURATION_CAP_SEC * 2)
-  ) {
-    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, Math.ceil(extinf)));
-  }
-  if (Number.isFinite(declared) && declared > 0) {
-    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, declared));
-  }
-  if (extinf != null) {
-    return Math.max(1, Math.min(HLS_TARGET_DURATION_CAP_SEC, Math.ceil(extinf)));
-  }
-  return 2;
-}
 
 /**
  * MediaMTX Apple LL-HLS serves a multivariant *master* playlist at
@@ -199,18 +167,6 @@ async function segmentFetchable(manifestRemoteUrl: string, segmentLine: string):
   }
 }
 
-/** Live sync in seconds, never below one TARGETDURATION on non-LL Zixi packs. */
-function hlsSyncDurationForPlaylist(body: string, requestedSec: number): number {
-  const depth = playlistDepth(body);
-  const targetDuration = playlistTargetDurationSec(body);
-  const requested = Math.max(targetDuration, Math.min(20, requestedSec || 4));
-  if (depth <= 1) {
-    // Shallow playlists can only hold ~one segment — sync to that floor.
-    return targetDuration;
-  }
-  const maxHold = Math.max(targetDuration, (depth - 1) * targetDuration);
-  return Math.max(targetDuration, Math.min(requested, maxHold));
-}
 
 async function fetchManifestBody(fetchUrl: string): Promise<string | null> {
   try {
@@ -230,6 +186,7 @@ async function waitForManifest(
   shouldContinue: () => boolean,
   onAttempt: (attempt: number, detail: string) => void,
   onStuck?: (sequence: string) => void,
+  stuckPolls: number = MANIFEST_STUCK_POLLS,
 ): Promise<string | null> {
   const manifestUrl = proxiedPlaybackUrl(url);
   let previousSequence: string | null = null;
@@ -308,7 +265,7 @@ async function waitForManifest(
           (segment && previousSegment && segment === previousSegment)
         ) {
           unchangedPolls += 1;
-          if (unchangedPolls >= MANIFEST_STUCK_POLLS) {
+          if (unchangedPolls >= stuckPolls) {
             onStuck?.(sequence ?? "unknown");
             return null;
           }
@@ -345,6 +302,7 @@ export default function HlsPlayer({
   encoderLagMs = 0,
   packagerTransitMs = null,
   deliveryMediaOriginSec = null,
+  onUnrecoverableHls,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -354,8 +312,11 @@ export default function HlsPlayer({
   const [isMuted, setIsMuted] = useState(true);
   const [elapsedSec, setElapsedSec] = useState(0);
   const lastErrorRef = useRef<string | null>(null);
+  const onUnrecoverableHlsRef = useRef(onUnrecoverableHls);
+  onUnrecoverableHlsRef.current = onUnrecoverableHls;
   const sessionRef = useRef({
     fragmentLoads: 0,
+    fragmentLoadsAtRestart: 0,
     videoBuffers: 0,
     audioBuffers: 0,
     manifestParsed: false,
@@ -619,6 +580,7 @@ export default function HlsPlayer({
     let stuckWatchdog: ReturnType<typeof window.setInterval> | null = null;
     sessionRef.current = {
       fragmentLoads: 0,
+      fragmentLoadsAtRestart: 0,
       videoBuffers: 0,
       audioBuffers: 0,
       manifestParsed: false,
@@ -661,8 +623,24 @@ export default function HlsPlayer({
       }
     }
 
-    function fail(message: string) {
+    let fallbackRequested = false;
+    function requestMpegTsFallback(reason: string): boolean {
+      const fallback = onUnrecoverableHlsRef.current;
+      if (fallbackRequested || !fallback) {
+        return false;
+      }
+      fallbackRequested = true;
+      pushDiag(`hls_fallback_mpegts reason=${reason}`);
+      fallback();
+      return true;
+    }
+
+    function fail(message: string, allowFallback = false) {
       lastErrorRef.current = message;
+      if (allowFallback && requestMpegTsFallback(message)) {
+        setStatus("Switching to MPEG-TS…");
+        return;
+      }
       setError(message);
       setStatus("Failed");
       diagReporter.push(`FAIL ${message}`);
@@ -732,9 +710,11 @@ export default function HlsPlayer({
             pushDiag(`manifest_stuck=sequence_${sequence}`);
             fail(
               `Zixi HLS never served a readable MPEG-TS segment while the playlist listed chunk N (HTTP 400). For SRT, confirm the shared "SRT Test" input was reset and that media_sequence advances — check diagnostics for segment_ready=yes.`,
+              Boolean(onUnrecoverableHlsRef.current),
             );
           }
         },
+        onUnrecoverableHlsRef.current ? MANIFEST_STUCK_POLLS_FALLBACK : MANIFEST_STUCK_POLLS,
       );
 
       if (destroyed) {
@@ -743,6 +723,7 @@ export default function HlsPlayer({
       if (!manifestBody) {
         fail(
           "HLS never became playable during the encode (playlist appeared but segments stayed HTTP 400). Zixi needs a few seconds after the first SRT packets before chunk N is readable — check diagnostics for segment_ready=yes.",
+          Boolean(onUnrecoverableHlsRef.current),
         );
         return;
       }
@@ -874,11 +855,14 @@ export default function HlsPlayer({
           pushDiag(`hls_restart_budget_exhausted reason=${reason}`);
           fail(
             `HLS playback wedged and ${MAX_HLS_RESTARTS} full player restarts did not recover it (${reason}).`,
+            Boolean(onUnrecoverableHlsRef.current) && !hlsPlaybackOk(sessionRef.current),
           );
           return false;
         }
         hlsRestarts += 1;
         mediaErrorRecoveries = 0;
+        sessionRef.current.uniqueFragUrls = new Set();
+        sessionRef.current.fragmentLoadsAtRestart = sessionRef.current.fragmentLoads;
         pushDiag(`hls_full_restart=${hlsRestarts}/${MAX_HLS_RESTARTS} reason=${reason}`);
         try {
           hls.destroy();
@@ -1030,20 +1014,28 @@ export default function HlsPlayer({
           );
           sessionRef.current.uniqueFragUrls.add(lastRequestUrl);
           const uniqueCount = sessionRef.current.uniqueFragUrls.size;
-          // Only treat as stale after several loads of the *same* URL; clear once
-          // the playlist advances (unique > 1). Early live HLS often repeats the
-          // first chunk once before rolling — that must not poison the end verdict.
-          const isStale =
-            uniqueCount === 1 && sessionRef.current.fragmentLoads >= STALE_FRAG_FAIL_AFTER;
+          const sameUrlLoads =
+            sessionRef.current.fragmentLoads - sessionRef.current.fragmentLoadsAtRestart;
+          // 1-deep Zixi playlists reload the current chunk until the next IDR.
+          // That is healthy — only treat as stale when video never advanced.
+          const isStale = isStaleHlsFragmentLoop({
+            uniqueUrlCount: uniqueCount,
+            sameUrlLoads,
+            videoAdvanced: sessionRef.current.maxVideoTime > 0.25,
+          });
           sessionRef.current.sawStaleFrag = isStale;
           const stale = isStale ? " stale=yes" : "";
           pushDiag(
             `frag_loaded=${sessionRef.current.fragmentLoads} unique=${uniqueCount}${stale} last=${lastRequestUrl}`,
           );
           if (isStale && !destroyed) {
+            if (restartHls("stale_fragment_loop")) {
+              return;
+            }
             fail(
               "Zixi HLS is looping a single stale segment (playlist not advancing). " +
                 "The web host needs ZIXI_API_BASE/ZIXI_API_PASSWORD so each SRT push can reset the input.",
+              Boolean(onUnrecoverableHlsRef.current),
             );
             instance.destroy();
           }

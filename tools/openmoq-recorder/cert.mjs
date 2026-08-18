@@ -1,9 +1,15 @@
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 
-/** Known relay leaf cert SHA-256 fingerprints (hex, no colons). */
+/**
+ * Known relay leaf cert SHA-256 fingerprints (hex, no colons).
+ * Keep in sync with src/moq_relay_certs.py — openssl TCP to :4433 usually
+ * fails because moqx is QUIC-only on that port.
+ */
 const DEFAULT_CERT_SHA256 = {
-  '34-28-164-90.sslip.io': '7115b12274dcf092c3e77d763111f0a2088a0f2029efc8e1f223a9584b1f5b54',
+  '34-28-164-90.sslip.io': '3cfec20ab9f6905b1765037d0a37e198cc9e07245f008570f11d566e853f1cf6',
+  '34-138-137-211.sslip.io': '13e87aa62f8996119ade0612fbae33426598d50c5125847d301a9d13ac269c9a',
+  '45-79-177-85.sslip.io': 'abc0b4b2b484449bb91d8a9a2c76d1f4cf382a631fb158266f67b23459168bc6',
 };
 
 function hexToUint8Array(hex) {
@@ -20,7 +26,8 @@ function hexToUint8Array(hex) {
 
 /**
  * Resolve relay TLS certificate SHA-256 for WebTransport pinning.
- * moqx serves QUIC only on UDP :4433 — openssl s_client over TCP often fails.
+ * A non-empty MOQ_RELAY_CERT_SHA256 env overrides the hostname map — only
+ * set it for a single-relay worker, never as a stale catch-all.
  */
 export function resolveCertSha256(hostname, port) {
   const envHex = process.env.MOQ_RELAY_CERT_SHA256?.trim();

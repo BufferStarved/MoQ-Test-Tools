@@ -37,7 +37,7 @@ fi
   echo "MOQ_PUBLISHER_BACKEND=openmoq"
   echo "OPENMOQ_PUBLISHER_BIN=${ROOT_DIR}/tools/openmoq-publisher/bin/openmoq-publisher"
   echo "SRT_USE_LIVE_TRANSMIT=0"
-  echo "# MoQ stack: run ./scripts/install-playa.sh (Playa 0.5.x) and ./scripts/install-openmoq-publisher.sh (v0.3.4+)"
+  echo "# MoQ stack: ./scripts/install-playa.sh + ./scripts/install-openmoq-publisher.sh (default v0.3.2; see smoke-openmoq-publisher.sh before bumping)"
   for line in "${preserved[@]+"${preserved[@]}"}"; do
     key="${line%%=*}"
     # Skip keys we already wrote with go-live defaults

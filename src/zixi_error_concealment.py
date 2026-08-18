@@ -31,6 +31,7 @@ import base64
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode
@@ -119,7 +120,9 @@ def ensure_error_concealed_stream(
         return None
     ec_stream_id = (ec_stream_id or zixi_error_concealed_stream_id(source_stream_id)).strip()
 
-    base_url = (base_url or os.environ.get("ZIXI_API_BASE", "")).rstrip("/")
+    from zixi_stats import zixi_api_base_for_endpoint
+
+    base_url = (base_url or zixi_api_base_for_endpoint()).rstrip("/")
     user = user or os.environ.get("ZIXI_API_USER", "admin")
     password = password or os.environ.get("ZIXI_API_PASSWORD", "")
     if not base_url or not password:
@@ -175,3 +178,71 @@ def ensure_error_concealed_stream(
 
     logger.info("Zixi error-concealed stream '%s' ready.", ec_stream_id)
     return ec_stream_id
+
+
+def recreate_error_concealed_stream(
+    source_stream_id: str,
+    *,
+    ec_stream_id: str = "",
+    delay_ms: int | None = None,
+    smoothing_ms: int | None = None,
+    base_url: str = "",
+    user: str = "",
+    password: str = "",
+) -> str | None:
+    """Delete+recreate the EC derivative so Fast HLS gets a fresh packager.
+
+    Leaves the SRT source input (and the live push) intact. Use this when the
+    EC playlist is frozen but HTTP-TS on the same stream is still live — a
+    full SRT input reset would tear down a working publish.
+    """
+    if not error_concealment_enabled():
+        return None
+
+    source_stream_id = (source_stream_id or "").strip()
+    if not source_stream_id:
+        return None
+    ec_stream_id = (ec_stream_id or zixi_error_concealed_stream_id(source_stream_id)).strip()
+
+    from zixi_stats import zixi_api_base_for_endpoint
+
+    base_url = (base_url or zixi_api_base_for_endpoint()).rstrip("/")
+    user = user or os.environ.get("ZIXI_API_USER", "admin")
+    password = password or os.environ.get("ZIXI_API_PASSWORD", "")
+    if not base_url or not password:
+        return None
+
+    present = _stream_present(base_url, user, password, ec_stream_id)
+    if present:
+        logger.warning(
+            "Recreating Zixi error-concealed stream '%s' (Fast HLS packager wedged).",
+            ec_stream_id,
+        )
+        _call(
+            base_url,
+            f"zixi/remove_stream.json?id={quote(ec_stream_id, safe='')}",
+            user,
+            password,
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            gone = _stream_present(base_url, user, password, ec_stream_id)
+            if gone is False:
+                break
+            time.sleep(0.2)
+    elif present is None:
+        logger.warning(
+            "Zixi error concealment recreate skipped: API unreachable for '%s'.",
+            ec_stream_id,
+        )
+        return None
+
+    return ensure_error_concealed_stream(
+        source_stream_id,
+        ec_stream_id=ec_stream_id,
+        delay_ms=delay_ms,
+        smoothing_ms=smoothing_ms,
+        base_url=base_url,
+        user=user,
+        password=password,
+    )

@@ -17,7 +17,7 @@ EOF
 fi
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TF_DIR="$ROOT_DIR/terraform/gcp"
+TF_DIR="${ZIXI_TF_DIR:-$ROOT_DIR/terraform/gcp}"
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1"; exit 1; }

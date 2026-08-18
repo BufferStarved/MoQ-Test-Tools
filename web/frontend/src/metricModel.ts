@@ -73,16 +73,16 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   encoder_send_rate_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Normalized transport
-  net_rtt_ms: ["srt", "rtmp", "moq"],
+  net_rtt_ms: ["srt", "rtmp", "webrtc", "moq"],
   net_jitter_ms: ["srt", "rtmp", "moq"],
   net_send_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  net_recv_mbps: ["srt"],
+  net_recv_mbps: ["srt", "webrtc"],
   net_loss_pct: ["srt", "moq"],
   net_retrans_pct: ["srt", "moq"],
   net_fec_pct: ["srt"],
 
   // Legacy aliases (same support as normalized)
-  transport_rtt_ms: ["srt", "rtmp", "moq"],
+  transport_rtt_ms: ["srt", "rtmp", "webrtc", "moq"],
   transport_rtt_jitter_ms: ["srt", "rtmp", "moq"],
   transport_recv_rate_mbps: ["srt"],
   quic_rtt_ms: ["moq"],
@@ -117,12 +117,12 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   vmaf_score: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   psnr_db: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   ssim: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  vmaf_score_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  psnr_db_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  ssim_encoder: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  vmaf_score_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  psnr_db_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
-  ssim_ingest: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  vmaf_score_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  psnr_db_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  ssim_encoder: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  vmaf_score_ingest: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  psnr_db_ingest: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  ssim_ingest: ["srt", "rtmp", "http", "hls", "dash", "moq"],
 
   // Playback (normalized)
   playback_ttff_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
@@ -242,9 +242,14 @@ export function deriveEncodeAnchorEpoch(
   const firstLive = samples.find(
     (sample) => (sample.encoded_bitrate_kbps ?? 0) > 0 || (sample.fps ?? 0) > 0,
   );
-  const firstOut = samples.find((sample) => parseOutTimeSec(sample.out_time) > 0);
-  if (!firstLive || !firstOut) {
+  if (!firstLive) {
     return null;
+  }
+  const firstOut = samples.find((sample) => parseOutTimeSec(sample.out_time) > 0);
+  if (!firstOut) {
+    // Browser publishers have no ffmpeg out_time. First live sample minus
+    // its elapsed_sec is when the in-tab encoder started.
+    return firstSampleEpoch - firstLive.elapsed_sec;
   }
   const wallOfFirstOut = firstSampleEpoch + (firstOut.elapsed_sec - firstLive.elapsed_sec);
   return wallOfFirstOut - parseOutTimeSec(firstOut.out_time);
@@ -257,3 +262,26 @@ export function deriveEncodeAnchorEpoch(
 // + bridge lag — inside its captureAnchoredE2eMs(). See clockSkew.ts and the
 // join-offset plumbing in vendor/moq-playa for the pieces that made a single
 // formula possible across HTTP-TS, LL-HLS, and MoQ MSE timelines.
+
+/** Shown on the encode bitrate chart when a WHIP/WebRTC publish has no bitrate. */
+export const WHIP_ENCODE_BITRATE_NOTE =
+  "ffmpeg's WHIP muxer does not report encode bitrate (progress bitrate=N/A). This chart uses MediaMTX ingest receive rate when available; otherwise the WHIP series stays at 0.";
+
+export function webrtcEncodeBitrateUnreported(
+  protocol: string | undefined,
+  samples?: Array<{ encoded_bitrate_kbps?: number; fps?: number }> | null,
+  averages?: { encoded_bitrate_kbps?: number; fps?: number } | null,
+): boolean {
+  if ((protocol || "").toLowerCase() !== "webrtc") {
+    return false;
+  }
+  const list = samples ?? [];
+  if (list.length > 0) {
+    const ran = list.some((sample) => (sample.fps ?? 0) > 0 || (sample.encoded_bitrate_kbps ?? 0) > 0);
+    if (!ran) {
+      return false;
+    }
+    return list.every((sample) => (sample.encoded_bitrate_kbps ?? 0) <= 0);
+  }
+  return (averages?.fps ?? 0) > 0 && (averages?.encoded_bitrate_kbps ?? 0) <= 0;
+}

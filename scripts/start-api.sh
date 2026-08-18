@@ -16,12 +16,8 @@ pip install -q -r requirements.txt
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/web/api"
 
-# Load .env (preset credentials, ingest agent config) — same as scripts/dev.sh.
-if [[ -f "$ROOT_DIR/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$ROOT_DIR/.env"
-  set +a
-fi
+# Load .env (preset credentials, ingest agent config) plus East/Linode stacks.
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/load-dev-env.sh"
 
 uvicorn main:app --reload --host 127.0.0.1 --port 8000 --app-dir web/api

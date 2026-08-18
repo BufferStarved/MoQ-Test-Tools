@@ -218,7 +218,8 @@ MoQ relay recordings land in `/var/lib/moq-relay-recordings/<job_id>.mp4` on thi
 | Problem | Fix |
 |---------|-----|
 | `gcloud auth` errors | Re-run `gcloud auth login` and `gcloud auth application-default login` |
-| SSH timeout | Your IP may have changed — update `allowed_ssh_cidr` in `terraform/gcp/terraform.tfvars` and `terraform apply` |
+| SSH timeout | Your IP may have changed — update `allowed_ssh_cidr` in `terraform/gcp/terraform.tfvars` and `terraform apply`. Prefer IAP: `gcloud compute ssh ubuntu@moq-zixi-gcp --zone=us-central1-a --tunnel-through-iap` |
+| IAP SSH `4003 failed to connect to backend` | Firewall `moq-zixi-allow-iap-ssh` must be on **`moq-zixi-vpc`** (not `default`) with source `35.235.240.0/20`. Web/relay/Zixi are separate VPCs — identical private IPs across VMs are expected and not a collision. |
 | License activation fails | Check VM outbound internet; confirm ports 80/443 open egress |
 | SRT push rejected | Input must be **ONLINE**; use port `10080` not `2088`; open UDP/TCP in GCP firewall + VM `ufw` |
 | Fast HLS stuck after republish | Confirm `-output_ts_offset` is in the publish recipe (`/api/debug/zixi-srt`); or reset input / use HTTP-TS |

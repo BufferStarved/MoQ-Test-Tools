@@ -1,5 +1,5 @@
 import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles";
-import { ingestEndpointLabel } from "./ingestEndpoints";
+import { ingestEndpointLabel, isCustomIngestEndpoint } from "./ingestEndpoints";
 import type { PlaybackMode } from "./playbackTypes";
 import type { EndpointConfig } from "./types";
 
@@ -14,6 +14,83 @@ export interface ConfigDetailSection {
   title: string;
   subtitle?: string;
   rows: ConfigDetailRow[];
+}
+
+export interface PipelineDiagramStream {
+  id: string;
+  label: string;
+  protocol: string;
+  publish: string;
+  ingest: string;
+  packager: string;
+  player: string;
+  accentColor: string;
+}
+
+export interface PipelineDiagramSpec {
+  sourceTitle: string;
+  sourceDetail: string;
+  encodeTitle: string;
+  encodeDetail: string;
+  streams: PipelineDiagramStream[];
+}
+
+function playbackShortLabel(mode?: string | null, protocol = ""): string {
+  switch ((mode || "").toLowerCase()) {
+    case "hls":
+      return "HLS";
+    case "ll-hls":
+      return "LL-HLS";
+    case "ll-dash":
+      return "LL-DASH";
+    case "dash":
+      return "DASH";
+    case "whep":
+      return "WHEP";
+    case "mpegts":
+      return "MPEG-TS";
+    case "moq":
+    case "playa":
+      return "MoQ";
+    case "auto":
+    case "":
+    case undefined:
+    case null:
+      return protocol.toLowerCase() === "moq" ? "MoQ" : "Default";
+    default:
+      return mode || "Default";
+  }
+}
+
+export function diagramHopsForStream(
+  stream: StreamConfigInput,
+  summary: EncodeProfileSummary,
+): Pick<PipelineDiagramStream, "publish" | "ingest" | "packager" | "player"> {
+  const protocol = stream.protocol.toLowerCase();
+  const ingest = stream.ingestEndpointId;
+  const mode = (stream.playbackMode || "auto").toLowerCase();
+  let packager = "Origin";
+  if (protocol === "moq") {
+    packager = "Objects";
+  } else if (ingest.includes("zixi")) {
+    packager = mode === "mpegts" ? "HTTP-TS" : `Fast HLS ${summary.hls_segment_sec}s`;
+  } else if (ingest.includes("mediamtx")) {
+    if (mode === "whep") {
+      packager = "None";
+    } else if (mode === "ll-dash" || mode === "dash") {
+      packager = "LL-DASH";
+    } else {
+      packager = "LL-HLS";
+    }
+  } else if (isCustomIngestEndpoint(ingest)) {
+    packager = "Custom origin";
+  }
+  return {
+    publish: protocol === "moq" ? "MoQ" : protocol.toUpperCase(),
+    ingest: ingestEndpointLabel(ingest),
+    packager,
+    player: playbackShortLabel(stream.playbackMode, protocol),
+  };
 }
 
 export interface StreamConfigInput {
@@ -60,11 +137,15 @@ function encoderSection(summary: EncodeProfileSummary): ConfigDetailSection {
     subtitle: "Shared ffmpeg / libx264 settings for every stream in the recipe",
     rows: [
       { label: "Ladder", value: summary.encode_ladder_label },
-      { label: "Target latency", value: `${summary.target_latency_ms} ms` },
       {
         label: "GOP / keyint",
         value: `${summary.gop_frames} frames (~${summary.keyframe_interval_sec}s @ 30 fps)`,
-        note: "Floored at 2s so HLS segments land on IDR boundaries",
+        note: "HLS/SRT only — packagers cut segments on IDRs (2s floor)",
+      },
+      {
+        label: "MoQ GOP",
+        value: `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
+        note: `MoQ does not use the 2s HLS floor — player target ${summary.moq_target_latency_ms} ms`,
       },
       {
         label: "VBV bufsize",

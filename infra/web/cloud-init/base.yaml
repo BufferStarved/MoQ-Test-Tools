@@ -1,0 +1,28 @@
+#cloud-config
+# Baseline for the Linode web / MediaMTX / encode host.
+# Install MediaMTX + ingest-agent after first boot (see LINODE-STACK-RUNBOOK.md).
+
+package_update: true
+package_upgrade: true
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+packages:
+  - curl
+  - wget
+  - jq
+  - htop
+  - ca-certificates
+  - gnupg
+  - python3
+  - python3-pip
+
+runcmd:
+  - timedatectl set-timezone UTC || true
+  - echo "MoQ web host ready. Install MediaMTX + ingest-agent next." > /var/log/moq-web-bootstrap.log

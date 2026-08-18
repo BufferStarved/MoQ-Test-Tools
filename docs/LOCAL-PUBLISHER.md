@@ -97,7 +97,7 @@ choice anymore, since Webcam is the only Source option that runs on your machine
 | ffmpeg with libx264 | yes | `brew install ffmpeg-full` (macOS) |
 | Camera / mic permission | for webcam | macOS: allow Terminal/ffmpeg in Privacy → Camera & Microphone |
 | srt-live-transmit | recommended for SRT stats | `brew install srt` |
-| openmoq-publisher | for MoQ legs | `./scripts/install-openmoq-publisher.sh` |
+| openmoq-publisher | for MoQ legs | `./scripts/install-openmoq-publisher.sh` (default **v0.3.2**; candidate **v0.3.11** still fails CONNECT against prod `329b98b` and canary `5611457` — keep the default until `scripts/smoke-openmoq-publisher.sh` PASSes) |
 
 `./scripts/ensure-publisher-tools.sh` (called from `run-local-publisher.sh`) tries to install the optional pieces.
 

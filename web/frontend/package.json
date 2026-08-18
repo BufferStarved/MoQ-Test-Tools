@@ -10,6 +10,10 @@
   },
   "dependencies": {
     "@eyevinn/webrtc-player": "^0.13.0",
+    "@moqt/loc": "file:vendor/moq-playa/packages/loc",
+    "@moqt/msf": "file:vendor/moq-playa/packages/msf",
+    "@moqt/transport": "file:vendor/moq-playa/packages/transport",
+    "@moqt/webtransport": "file:vendor/moq-playa/packages/webtransport",
     "@playa/player": "file:vendor/moq-playa/packages/playa",
     "dashjs": "^4.7.4",
     "hls.js": "^1.5.18",

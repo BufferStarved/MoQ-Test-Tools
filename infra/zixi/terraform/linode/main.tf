@@ -19,7 +19,7 @@ data "linode_image" "ubuntu" {
 
 resource "linode_sshkey" "zixi" {
   label   = "${var.project_name}-ssh"
-  ssh_key = chomp(file(pathexpand(var.ssh_public_key_path)))
+  ssh_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
 }
 
 resource "linode_instance" "zixi" {
@@ -50,7 +50,8 @@ resource "linode_firewall" "zixi" {
     action   = "ACCEPT"
     protocol = "TCP"
     ports    = "22"
-    ipv4     = [var.allowed_ssh_cidr]
+    ipv4     = concat([var.allowed_ssh_cidr], var.extra_ssh_ipv4_cidrs)
+    ipv6     = var.allowed_ssh_ipv6_cidrs
   }
 
   inbound {

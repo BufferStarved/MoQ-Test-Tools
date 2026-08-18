@@ -16,7 +16,7 @@ DEFAULT_MOQ_FORWARD = 1
 # media objects). forward=1 proactively streams GOPs regardless of subscriber
 # presence, which is the only mode that has produced actual rendered frames
 # against this relay. Keep forward=1 unless moqx adds SUBSCRIBE forwarding.
-OPENMOQ_PUBLISHER_VERSION = "v0.3.4"
+OPENMOQ_PUBLISHER_VERSION = "v0.3.2"  # keep in sync with scripts/install-openmoq-publisher.sh default
 DEFAULT_MOQ_PUBLISHER_BACKEND = "auto"  # auto | moq5 | openmoq
 
 # Default H.264 Main + yuv420p ladder (720p). Prefer build_video_encode_args()
@@ -111,15 +111,35 @@ class MoqPublishTarget:
     insecure_tls: bool = False
 
 
+_ZIXI_SRT_PRESET_IDS = {
+    "moq_zixi_gcp",
+    "moq_zixi_gcp_east",
+    "moq_zixi_linode",
+}
+_ZIXI_RTMP_PRESET_IDS = {
+    "moq_zixi_gcp_rtmp",
+    "moq_zixi_gcp_east_rtmp",
+    "moq_zixi_linode_rtmp",
+}
+_ZIXI_HTTP_PUSH_PRESET_IDS = {
+    "moq_zixi_gcp_hls",
+    "moq_zixi_gcp_dash",
+    "moq_zixi_gcp_east_hls",
+    "moq_zixi_gcp_east_dash",
+    "moq_zixi_linode_hls",
+    "moq_zixi_linode_dash",
+}
+
+
 def zixi_srt_stream_id_for_preset(preset_id: str) -> Optional[str]:
-    if preset_id == "moq_zixi_gcp":
+    if preset_id in _ZIXI_SRT_PRESET_IDS:
         return "SRT Test"
     return None
 
 
 def zixi_rtmp_stream_id_for_preset(preset_id: str) -> Optional[str]:
     """Zixi Fast HLS / HTTP-TS stream id for managed RTMP presets."""
-    if preset_id == "moq_zixi_gcp_rtmp":
+    if preset_id in _ZIXI_RTMP_PRESET_IDS:
         return "benchmark"
     return None
 
@@ -138,7 +158,7 @@ def zixi_stream_id_from_rtmp_url(url: str) -> Optional[str]:
 
 def zixi_http_push_stream_id_for_preset(preset_id: str) -> Optional[str]:
     """Stream ID for Zixi TS-over-HTTP push presets (HLS/DASH ingest buttons)."""
-    if preset_id in {"moq_zixi_gcp_hls", "moq_zixi_gcp_dash"}:
+    if preset_id in _ZIXI_HTTP_PUSH_PRESET_IDS:
         return "benchmark"
     return None
 
@@ -334,11 +354,18 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
 
 # Local publisher agent captures the machine camera/mic (not a repo VOD asset).
 DEVICE_WEBCAM_MEDIA = "device:webcam"
+# In-browser WebCodecs + WebTransport publisher (no laptop ffmpeg agent).
+DEVICE_BROWSER_MEDIA = "device:browser"
 
 
 def is_device_webcam_source(media_path: str) -> bool:
     value = (media_path or "").strip().lower()
     return value == DEVICE_WEBCAM_MEDIA or value.startswith("device:webcam")
+
+
+def is_device_browser_source(media_path: str) -> bool:
+    value = (media_path or "").strip().lower()
+    return value == DEVICE_BROWSER_MEDIA or value.startswith("device:browser")
 
 
 def device_webcam_index(media_path: str) -> Optional[int]:
@@ -363,7 +390,7 @@ def is_live_media_source(media_path: str) -> bool:
     value = (media_path or "").strip().lower()
     return value.startswith(("udp://", "tcp://", "rtsp://", "srt://")) or is_device_webcam_source(
         media_path
-    )
+    ) or is_device_browser_source(media_path)
 
 
 def build_device_webcam_input_args(

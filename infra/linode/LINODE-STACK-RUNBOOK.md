@@ -32,24 +32,28 @@ ZIXI_HOST=<linode-zixi-ip> bash infra/zixi/scripts/configure-zixi-rtmp-input.sh
 # SRT input on :10080 — mirror GCP runbook steps in infra/zixi/GCP-ZIXI-RUNBOOK.md
 ```
 
-## 2. Web + MediaMTX (manual today)
-
-Until dedicated Linode web terraform lands, use a **g6-standard-4** (or larger) in the same region:
+## 2. Web + MediaMTX
 
 ```bash
+export LINODE_TOKEN=…
+cd infra/web/terraform/linode
+cp terraform.tfvars.example terraform.tfvars   # set allowed_ssh_cidr
+terraform init && terraform apply
 PUBLIC_IP=<linode-web-ip> bash infra/mediamtx/scripts/install-mediamtx.sh
-bash infra/web/scripts/install-web-app.sh <linode-web-ip> <domain-or-ip>
-bash infra/zixi/scripts/install-ingest-agent.sh   # on the web host for MediaMTX metrics
+# ingest-agent on the web host for MediaMTX metrics
+bash infra/zixi/scripts/install-ingest-agent.sh
 ```
 
-Open firewall: `22,80,443,1935,8554,8888,8889,8890,8891,8090` (TCP) and `8890,8189` (UDP) as needed.
+SSH as **ubuntu** (cloud-init creates the user). Do not install the public UI here —
+the orchestrator stays on GCP us-central1.
 
 ## 3. MoQ relay
 
-Copy `infra/moqx/terraform/gcp/` to a Linode module (planned) or install manually:
-
 ```bash
-bash infra/moqx/scripts/gcp-install-moqx.sh   # parameterize RELAY_DOMAIN / IP
+cd infra/moqx/terraform/linode
+cp terraform.tfvars.example terraform.tfvars   # set allowed_ssh_cidr + certbot_email
+terraform init && terraform apply
+bash infra/moqx/scripts/gcp-install-moqx.sh <linode-relay-ip> you@example.com
 bash infra/moqx/scripts/install-ingest-agent.sh
 ```
 

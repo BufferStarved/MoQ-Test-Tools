@@ -31,7 +31,9 @@ tools/deps/
 tools/moq5-publisher/bin/
 tools/moq5-recorder/bin/
 tools/openmoq-publisher/bin/
+tools/openmoq-publisher/VERSION
 tools/openmoq-publisher/openmoq-publisher-*-macOS/
+tools/openmoq-publisher-smoke/
 tools/*/node_modules/
 tools/openmoq-recorder/node_modules/
 
@@ -44,6 +46,14 @@ web/frontend/vendor/**/node_modules/
 .DS_Store
 *.log
 *.tsbuildinfo
+
+# Large Creative Commons cloud-playout copy (scripts/fetch-bbb.sh)
+bbb.mp4
+bbb.mov
+media/bbb.mp4
+media/bbb.mov
+big_buck_bunny.mp4
+BigBuckBunny.mp4
 
 # Terraform plugin cache / local plans / secrets
 **/.terraform/

@@ -166,17 +166,24 @@ export function buildComparisonVerdict(
     }
   }
 
-  const vmaf = pickHighest(
-    streams,
-    (r) => r.quality?.ingest?.vmaf_score ?? r.averages.vmaf_score ?? r.quality?.encoder?.vmaf_score,
-  );
-  if (vmaf) {
-    const name = streamName(streams[vmaf.index], vmaf.index, labels);
+  const encoderVmaf = pickHighest(streams, (r) => r.quality?.encoder?.vmaf_score);
+  if (encoderVmaf) {
+    const name = streamName(streams[encoderVmaf.index], encoderVmaf.index, labels);
     highlights.push({
-      label: "Best VMAF",
+      label: "Best encoder VMAF",
       winner: name,
-      value: vmaf.value.toFixed(1),
-      protocol: streams[vmaf.index].protocol,
+      value: encoderVmaf.value.toFixed(1),
+      protocol: streams[encoderVmaf.index].protocol,
+    });
+  }
+  const ingestVmaf = pickHighest(streams, (r) => r.quality?.ingest?.vmaf_score);
+  if (ingestVmaf) {
+    const name = streamName(streams[ingestVmaf.index], ingestVmaf.index, labels);
+    highlights.push({
+      label: "Best ingest VMAF",
+      winner: name,
+      value: ingestVmaf.value.toFixed(1),
+      protocol: streams[ingestVmaf.index].protocol,
     });
   }
 

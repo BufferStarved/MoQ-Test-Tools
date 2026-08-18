@@ -2,39 +2,87 @@ import { fetchResultDetail, fetchResults } from "./api";
 import type { ResultFile, ResultSummary } from "./types";
 
 export interface SessionGroup {
-  /** comparison_id when present, else the filename (singleton legacy runs). */
+  /** comparison_id when present, else a clustered/single key. */
   key: string;
   modifiedAt: string;
   files: ResultFile[];
 }
 
-/** Group saved result files into sessions by comparison_id (falling back to a
- * singleton group per file for older runs saved before that field existed),
- * newest first. */
+const CLUSTER_WINDOW_MS = 180_000;
+
+function fileTimeMs(file: ResultFile): number {
+  const parsed = Date.parse(file.modified_at);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** Group saved result files into sessions by comparison_id, then by start time
+ * for older browser jobs that never wrote extra.comparison_id. Newest first. */
 export function groupResultsIntoSessions(files: ResultFile[]): SessionGroup[] {
-  const groups = new Map<string, ResultFile[]>();
+  const groupedByComparison = new Map<string, ResultFile[]>();
+  const ungrouped: ResultFile[] = [];
   for (const file of files) {
-    const key = file.comparison_id?.trim() || `single:${file.filename}`;
-    const existing = groups.get(key);
-    if (existing) {
-      existing.push(file);
-    } else {
-      groups.set(key, [file]);
+    const comparisonId = file.comparison_id?.trim();
+    if (comparisonId) {
+      const existing = groupedByComparison.get(comparisonId);
+      if (existing) {
+        existing.push(file);
+      } else {
+        groupedByComparison.set(comparisonId, [file]);
+      }
+      continue;
     }
+    ungrouped.push(file);
   }
 
   const sessions: SessionGroup[] = [];
-  for (const [key, groupFiles] of groups) {
+  for (const [key, groupFiles] of groupedByComparison.entries()) {
     groupFiles.sort((a, b) => (a.stream_index ?? 0) - (b.stream_index ?? 0));
-    const modifiedAt = groupFiles.reduce(
-      (latest, file) => (file.modified_at > latest ? file.modified_at : latest),
-      groupFiles[0].modified_at,
-    );
-    sessions.push({ key, modifiedAt, files: groupFiles });
+    sessions.push(makeSession(key, groupFiles));
   }
+
+  ungrouped.sort((a, b) => fileTimeMs(b) - fileTimeMs(a));
+  let bucket: ResultFile[] = [];
+  let bucketKey = 0;
+  const flush = () => {
+    if (bucket.length === 0) {
+      return;
+    }
+    const key =
+      bucket.length === 1
+        ? `single:${bucket[0].filename}`
+        : `cluster:${bucket.map((file) => file.filename).join("|")}`;
+    sessions.push(makeSession(key, bucket));
+    bucket = [];
+  };
+  for (const file of ungrouped) {
+    const ts = fileTimeMs(file);
+    if (bucket.length === 0) {
+      bucket = [file];
+      bucketKey = ts;
+      continue;
+    }
+    if (Math.abs(bucketKey - ts) <= CLUSTER_WINDOW_MS) {
+      bucket.push(file);
+      bucketKey = Math.max(bucketKey, ts);
+      continue;
+    }
+    flush();
+    bucket = [file];
+    bucketKey = ts;
+  }
+  flush();
 
   sessions.sort((a, b) => (a.modifiedAt < b.modifiedAt ? 1 : -1));
   return sessions;
+}
+
+function makeSession(key: string, files: ResultFile[]): SessionGroup {
+  const ordered = [...files].sort((a, b) => (a.stream_index ?? 0) - (b.stream_index ?? 0));
+  const modifiedAt = ordered.reduce(
+    (latest, file) => (file.modified_at > latest ? file.modified_at : latest),
+    ordered[0].modified_at,
+  );
+  return { key, modifiedAt, files: ordered };
 }
 
 export async function loadSessionHistory(): Promise<SessionGroup[]> {

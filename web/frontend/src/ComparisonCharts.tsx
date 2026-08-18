@@ -10,8 +10,8 @@ import {
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
-import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
-import { protocolColor } from "./protocolTheme";
+import { metricUnavailableMessage, metricSupportedForProtocol, WHIP_ENCODE_BITRATE_NOTE, webrtcEncodeBitrateUnreported } from "./metricModel";
+import { assignStreamColors } from "./protocolTheme";
 
 interface ComparisonChartsProps {
   legs: ComparisonLegData[];
@@ -67,6 +67,25 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
   const hasSrtOrRtmpLeg = activeLegs.some(
     (leg) => leg.protocol === "srt" || leg.protocol === "rtmp",
   );
+  const whipBitrateMissing = activeLegs.some((leg) =>
+    webrtcEncodeBitrateUnreported(
+      leg.protocol,
+      leg.samples,
+      leg.result?.averages,
+    ),
+  );
+  const streamColors = useMemo(
+    () =>
+      assignStreamColors(
+        activeLegs.map((leg) => ({
+          protocol: leg.protocol,
+          ingestEndpointId: leg.ingestEndpointId,
+          playbackMode: leg.playbackMode,
+          endpoint: leg.endpoint,
+        })),
+      ),
+    [activeLegs],
+  );
 
   if (activeLegs.length < minLegs) {
     return (
@@ -100,10 +119,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
       <div className="comparison-legend">
         {activeLegs.map((leg, index) => (
           <span key={leg.id} className="comparison-legend-item">
-            <span
-              className="comparison-swatch"
-              style={{ background: protocolColor(leg.protocol, index) }}
-            />
+            <span className="comparison-swatch" style={{ background: streamColors[index] }} />
             {leg.label}
           </span>
         ))}
@@ -119,7 +135,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Send rate is outbound publish throughput.",
                 "Client memory is ffmpeg / publisher RSS on this machine.",
                 "Client network jitter is RTT variation on the publisher side of the path.",
-                "Encode lag, speed, and FPS stability come from ffmpeg progress while publishing.",
+                "Encode lag, encode speed, and FPS stability come from ffmpeg progress while publishing.",
                 "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
               ]}
             />
@@ -129,6 +145,9 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               data={points}
               series={comparisonSeries(activeLegs, "encoded_bitrate_kbps", "kbps")}
             />
+            {whipBitrateMissing ? (
+              <p className="hint chart-availability-note">{WHIP_ENCODE_BITRATE_NOTE}</p>
+            ) : null}
             <MetricChart
               title="Frame rate"
               metricKey="fps"
@@ -174,28 +193,37 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             )}
             {comparisonHasMetric(points, "speed", activeLegs.length) && (
               <MetricChart
-                title="Speed"
+                title="Encode speed"
                 metricKey="speed"
                 data={points}
                 series={comparisonSeries(activeLegs, "speed", "x")}
               />
             )}
+            {comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) && (
             <MetricChart
-              title="VMAF"
+              title="VMAF (encoder)"
               metricKey="vmaf_score_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "vmaf_score_encoder", "score")}
 
               yDomain={[0, 100]}
-              keepZeroSeries
             />
+            )}
+            {!comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) &&
+              activeLegs.some((leg) => leg.encoderQualityPending) && (
+                <p className="hint chart-availability-note">
+                  Encoder VMAF / PSNR / SSIM appear here when scoring finishes (after the encode).
+                </p>
+              )}
+            {comparisonHasMetric(points, "psnr_db_encoder", activeLegs.length) && (
             <MetricChart
               title="PSNR"
               metricKey="psnr_db_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "psnr_db_encoder", "dB")}
-              keepZeroSeries
             />
+            )}
+            {comparisonHasMetric(points, "ssim_encoder", activeLegs.length) && (
             <MetricChart
               title="SSIM"
               metricKey="ssim_encoder"
@@ -203,8 +231,8 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "ssim_encoder", "score")}
 
               yDomain={[0, 1]}
-              keepZeroSeries
             />
+            )}
           </>
         )}
 
@@ -233,7 +261,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
                 "SRT RTT: libsrt / Zixi receiver.",
                 "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
-                "MoQ RTT: QUIC qlog when available; otherwise a TCP probe to the relay (same host as WebTransport).",
+                "ICE RTT from WHIP when publishing from the browser.",
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}
             />
@@ -303,6 +331,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 keepZeroSeries
               />
             )}
+            {comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) && (
             <MetricChart
               title="VMAF (ingest)"
               metricKey="vmaf_score_ingest"
@@ -310,15 +339,23 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "vmaf_score_ingest", "score")}
 
               yDomain={[0, 100]}
-              keepZeroSeries
             />
+            )}
+            {!comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) &&
+              activeLegs.some((leg) => leg.ingestQualityPending) && (
+                <p className="hint chart-availability-note">
+                  Ingest VMAF / PSNR / SSIM appear here after the remote recorder finishes scoring.
+                </p>
+              )}
+            {comparisonHasMetric(points, "psnr_db_ingest", activeLegs.length) && (
             <MetricChart
               title="PSNR (ingest)"
               metricKey="psnr_db_ingest"
               data={points}
               series={comparisonSeries(activeLegs, "psnr_db_ingest", "dB")}
-              keepZeroSeries
             />
+            )}
+            {comparisonHasMetric(points, "ssim_ingest", activeLegs.length) && (
             <MetricChart
               title="SSIM (ingest)"
               metricKey="ssim_ingest"
@@ -326,8 +363,8 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "ssim_ingest", "score")}
 
               yDomain={[0, 1]}
-              keepZeroSeries
             />
+            )}
           </>
         )}
 

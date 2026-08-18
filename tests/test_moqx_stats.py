@@ -116,7 +116,21 @@ class MoqxStatsPollerTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=False):
             poller = MoqxStatsPoller("not-a-url")
         self.assertFalse(poller.enabled)
+        self.assertFalse(poller.observing)
         self.assertEqual(poller.publish_namespace_success_delta(), 0)
+
+    def test_observing_is_false_until_metrics_succeed(self):
+        poller = MoqxStatsPoller("https://relay.example.com:4433/moq")
+        self.assertTrue(poller.enabled)
+        self.assertFalse(poller.observing)
+
+        with patch("moqx_stats.urllib.request.urlopen", side_effect=OSError("down")):
+            poller.poll()
+        self.assertFalse(poller.observing)
+
+        live = self._poller_with_responses([_metrics_body(1)])
+        live.poll()
+        self.assertTrue(live.observing)
 
 
 if __name__ == "__main__":

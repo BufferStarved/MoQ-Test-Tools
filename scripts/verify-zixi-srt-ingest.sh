@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 
 ZIXI_HOST="${ZIXI_HOST:-35.222.33.58}"
 ZIXI_SRT_STREAM="${ZIXI_SRT_STREAM:-SRT Test}"
+# Browser playback uses the error-concealed derivative, not the raw input.
+ZIXI_HLS_STREAM="${ZIXI_HLS_STREAM:-SRT Test EC}"
 MEDIA="${MEDIA:-dummy.mp4}"
 # Zixi HLS often needs ~25–30s of stable ingest before media_sequence rolls.
 DURATION="${DURATION:-35}"
@@ -24,7 +26,7 @@ print(with_srt_stream_id("srt://35.222.33.58:10080?mode=caller&latency=200000", 
 PY
 SRT_URL="$(tr -d '\n' < /tmp/zixi-srt-url.txt)"
 STREAMID_MODE="${ZIXI_SRT_STREAMID_MODE:-access}"
-HLS_URL="http://${ZIXI_HOST}:7777/playback.m3u8?stream=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${ZIXI_SRT_STREAM}'))")"
+HLS_URL="http://${ZIXI_HOST}:7777/playback.m3u8?stream=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${ZIXI_HLS_STREAM}'))")"
 MPEGTS_BSF="$(PYTHONPATH=src python3 -c 'from moq_publish import MPEGTS_VIDEO_BSF; print(MPEGTS_VIDEO_BSF)')"
 
 echo "streamid mode: ${STREAMID_MODE}"

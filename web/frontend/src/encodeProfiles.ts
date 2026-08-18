@@ -2,7 +2,10 @@ export const MIN_TARGET_LATENCY_MS = 100;
 /** SRT jobs are floored server-side at 2000 ms for stable libsrt / LL-HLS delivery. */
 export const SRT_MIN_TARGET_LATENCY_MS = 2000;
 export const MAX_TARGET_LATENCY_MS = 10_000;
-export const DEFAULT_TARGET_LATENCY_MS = 4000;
+/** HLS / SRT / Zixi: 2s is the lowest stable segmented-delivery budget. */
+export const DEFAULT_TARGET_LATENCY_MS = 2000;
+/** MoQ has no segments — player hold and GOP use this, not the HLS 2s floor. */
+export const DEFAULT_MOQ_TARGET_LATENCY_MS = 400;
 export const DEFAULT_ENCODE_LADDER_ID = "720p";
 export const ASSUMED_FPS = 30;
 
@@ -11,6 +14,8 @@ export const HLS_SEGMENT_SEC_MIN = 2;
 export const HLS_SEGMENT_SEC_MAX = 6;
 export const HLS_LIVE_SYNC_SEGMENTS_DEFAULT = 2;
 export const HLS_LIVE_SYNC_DURATION_SEC_MIN = 1;
+export const MOQ_GOP_SEC_MIN = 0.5;
+export const MOQ_GOP_SEC_MAX = 1.0;
 
 export interface EncodeLadderOption {
   id: string;
@@ -90,12 +95,14 @@ export function srtLatencyUs(targetLatencyMs: number): number {
   return clampTargetLatencyMs(targetLatencyMs) * 1000;
 }
 
-/** Recommended Zixi hls_chunk_time (seconds). Min 2s; grows with latency budget. */
+/** Recommended Zixi hls_chunk_time (seconds). Min 2s; grows with latency budget.
+ *  Floor (not round) so 5s target stays on 2s chunks — matches Python
+ *  encode_profile.hls_segment_sec and Zixi's default hls_chunk_time. */
 export function hlsSegmentSec(targetLatencyMs: number): number {
   const ms = clampTargetLatencyMs(targetLatencyMs);
   return Math.max(
     HLS_SEGMENT_SEC_MIN,
-    Math.min(HLS_SEGMENT_SEC_MAX, Math.round(ms / 2000) || HLS_SEGMENT_SEC_MIN),
+    Math.min(HLS_SEGMENT_SEC_MAX, Math.floor(ms / 2000) || HLS_SEGMENT_SEC_MIN),
   );
 }
 
@@ -121,8 +128,18 @@ export function hlsLiveSyncCount(targetLatencyMs: number): number {
   return Math.max(1, Math.min(5, Math.round(duration / segment) || 1));
 }
 
-export function moqPlayerTargetLatencyMs(targetLatencyMs: number): number {
-  return clampTargetLatencyMs(targetLatencyMs);
+export function moqGopFramesForLatency(targetLatencyMs: number, fps = ASSUMED_FPS): number {
+  const ms = clampTargetLatencyMs(targetLatencyMs);
+  const seconds = Math.min(MOQ_GOP_SEC_MAX, Math.max(MOQ_GOP_SEC_MIN, ms / 2000));
+  return Math.max(1, Math.round(seconds * fps));
+}
+
+export function moqPlayerTargetLatencyMs(targetLatencyMs?: number): number {
+  const ms = clampTargetLatencyMs(targetLatencyMs ?? DEFAULT_MOQ_TARGET_LATENCY_MS);
+  if (ms >= SRT_MIN_TARGET_LATENCY_MS) {
+    return DEFAULT_MOQ_TARGET_LATENCY_MS;
+  }
+  return ms;
 }
 
 /**
@@ -133,13 +150,13 @@ export function moqPlayerTargetLatencyMs(targetLatencyMs: number): number {
  * think latency is huge and warps A/V — reported as "half speed" / rubber-banding.
  * Keep rate at 1.0; live-edge is handled by buffer seek in MoqPlayer.
  */
-export function moqCatchUpConfig(targetLatencyMs: number): {
+export function moqCatchUpConfig(targetLatencyMs?: number): {
   targetLatencyMs: number;
   maxCatchUpRate: number;
   catchUpThresholdMs: number;
   catchUpRecoveryMs: number;
 } {
-  const target = clampTargetLatencyMs(targetLatencyMs);
+  const target = moqPlayerTargetLatencyMs(targetLatencyMs);
   return {
     targetLatencyMs: target,
     maxCatchUpRate: 1.0,
@@ -165,6 +182,7 @@ export interface EncodeProfileSummary {
   hls_live_sync_duration_sec: number;
   hls_live_sync_count: number;
   moq_target_latency_ms: number;
+  moq_gop_frames: number;
   moq_catch_up: ReturnType<typeof moqCatchUpConfig>;
 }
 
@@ -176,6 +194,7 @@ export function encodeProfileSummary(
   const ladder = resolveEncodeLadder(ladderId);
   const latencyMs = clampTargetLatencyMs(targetLatencyMs ?? DEFAULT_TARGET_LATENCY_MS);
   const gop = gopFramesForLatency(latencyMs);
+  const moqMs = moqPlayerTargetLatencyMs(latencyMs);
   return {
     encode_ladder: ladder.id,
     encode_ladder_label: ladder.label,
@@ -192,7 +211,8 @@ export function encodeProfileSummary(
     hls_segment_sec: hlsSegmentSec(latencyMs),
     hls_live_sync_duration_sec: hlsLiveSyncDurationSec(latencyMs),
     hls_live_sync_count: hlsLiveSyncCount(latencyMs),
-    moq_target_latency_ms: moqPlayerTargetLatencyMs(latencyMs),
-    moq_catch_up: moqCatchUpConfig(latencyMs),
+    moq_target_latency_ms: moqMs,
+    moq_gop_frames: moqGopFramesForLatency(moqMs),
+    moq_catch_up: moqCatchUpConfig(moqMs),
   };
 }

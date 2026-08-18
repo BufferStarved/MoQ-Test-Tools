@@ -44,23 +44,30 @@ sudo cp "$MTX_DIR/nginx-lldash.conf" "$INSTALL_DIR/nginx-lldash.conf"
 sudo cp "$MTX_DIR/scripts/lldash-packager.sh" "$INSTALL_DIR/scripts/lldash-packager.sh"
 sudo chmod +x "$INSTALL_DIR/scripts/lldash-packager.sh"
 
-# Pin ICE host to the public IP.
+# Pin ICE host to the public IP. Do not advertise interface IPs — ffmpeg WHIP
+# will otherwise try 127.0.0.1 and exit 69 (Conversion failed).
 sudo python3 - <<PY
 from pathlib import Path
 path = Path("${INSTALL_DIR}/mediamtx.yml")
-text = path.read_text()
 lines = []
-replaced = False
-for line in text.splitlines():
-    if line.strip().startswith("webrtcAdditionalHosts:"):
+saw_hosts = False
+saw_ifaces = False
+for line in path.read_text().splitlines():
+    stripped = line.strip()
+    if stripped.startswith("webrtcAdditionalHosts:"):
         lines.append(f'webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
-        replaced = True
+        saw_hosts = True
+    elif stripped.startswith("webrtcIPsFromInterfaces:"):
+        lines.append("webrtcIPsFromInterfaces: no")
+        saw_ifaces = True
     else:
         lines.append(line)
-if not replaced:
+if not saw_hosts:
     lines.append(f'webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
+if not saw_ifaces:
+    lines.append("webrtcIPsFromInterfaces: no")
 path.write_text("\n".join(lines) + "\n")
-print("webrtcAdditionalHosts -> ${PUBLIC_IP}")
+print("webrtcAdditionalHosts -> ${PUBLIC_IP}; webrtcIPsFromInterfaces -> no")
 PY
 
 cd "$INSTALL_DIR"

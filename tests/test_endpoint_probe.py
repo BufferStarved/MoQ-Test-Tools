@@ -52,10 +52,18 @@ class EndpointProbeTests(unittest.TestCase):
 
 class RtmpStreamIdTests(unittest.TestCase):
     def test_preset_and_url_helpers(self):
-        from moq_publish import zixi_rtmp_stream_id_for_preset, zixi_stream_id_from_rtmp_url
+        from moq_publish import (
+            zixi_http_push_stream_id_for_preset,
+            zixi_rtmp_stream_id_for_preset,
+            zixi_srt_stream_id_for_preset,
+            zixi_stream_id_from_rtmp_url,
+        )
 
         self.assertEqual(zixi_rtmp_stream_id_for_preset("moq_zixi_gcp_rtmp"), "benchmark")
+        self.assertEqual(zixi_rtmp_stream_id_for_preset("moq_zixi_gcp_east_rtmp"), "benchmark")
         self.assertIsNone(zixi_rtmp_stream_id_for_preset("moq_zixi_gcp"))
+        self.assertEqual(zixi_srt_stream_id_for_preset("moq_zixi_gcp_east"), "SRT Test")
+        self.assertEqual(zixi_http_push_stream_id_for_preset("moq_zixi_gcp_east_hls"), "benchmark")
         self.assertEqual(
             zixi_stream_id_from_rtmp_url("rtmp://host:1935/live/benchmark"),
             "benchmark",

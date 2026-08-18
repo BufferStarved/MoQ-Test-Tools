@@ -27,4 +27,6 @@ mkdir -p "$OUTPUT_DIR"
 docker run --rm --network host \
   -e MOQ_RELAY_CERT_SHA256="${MOQ_RELAY_CERT_SHA256:-}" \
   -v "$OUTPUT_DIR:/out" \
+  -v "$RECORDER_DIR/record.mjs:/app/tools/openmoq-recorder/record.mjs:ro" \
+  -v "$RECORDER_DIR/cert.mjs:/app/tools/openmoq-recorder/cert.mjs:ro" \
   "$IMAGE" "$RELAY_URL" "$NAMESPACE" "/out/$OUTPUT_BASE" "$@"

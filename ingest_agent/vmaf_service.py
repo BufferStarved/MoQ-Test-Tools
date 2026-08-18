@@ -113,6 +113,26 @@ def distorted_recording_path(job_id: str, recording_dir: str = "") -> Path:
     return root / f"{job_id}.mp4"
 
 
+def _looks_like_annex_b(path: Path) -> bool:
+    name = path.name.lower()
+    if name.endswith((".h264", ".264", ".annexb")):
+        return True
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(8)
+    except OSError:
+        return False
+    if len(head) < 4:
+        return False
+    return head[:4] == b"\x00\x00\x00\x01" or head[:3] == b"\x00\x00\x01"
+
+
+def _ffmpeg_input_args(path: str) -> list[str]:
+    if _looks_like_annex_b(Path(path)):
+        return ["-f", "h264", "-framerate", "30", "-i", path]
+    return ["-i", path]
+
+
 def find_distorted_recording(
     start_epoch: float,
     end_epoch: float,
@@ -156,7 +176,7 @@ def compute_vmaf(
 ) -> VmafJobState:
     state = VmafJobState(job_id=job_id, status="computing")
 
-    from recording_service import get_recording_state
+    from recording_service import get_recording_state, recording_has_media
 
     recording = get_recording_state(job_id)
     if recording is not None:
@@ -166,9 +186,11 @@ def compute_vmaf(
                 break
             time.sleep(2)
         if recording and recording.status == "failed" and recording.error:
-            state.status = "failed"
-            state.error = recording.error
-            return state
+            distorted_guess = distorted_recording_path(job_id, recording_dir)
+            if not recording_has_media(distorted_guess):
+                state.status = "failed"
+                state.error = recording.error
+                return state
 
     reference = None
     for candidate in job_dir(job_id).glob("reference*"):
@@ -259,13 +281,14 @@ def compute_vmaf(
         "-loglevel",
         "error",
         "-y",
-        "-i",
-        distorted,
-        "-i",
-        str(reference),
+        *_ffmpeg_input_args(distorted),
+        *_ffmpeg_input_args(str(reference)),
         "-lavfi",
         (
-            f"libvmaf=log_fmt=json:log_path={log_path}:n_threads=4:"
+            "[0:v]setpts=PTS-STARTPTS[dis];"
+            "[1:v]setpts=PTS-STARTPTS[ref];"
+            "[dis][ref]scale2ref[dis2][ref2];"
+            f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads=4:"
             "feature=name=psnr|name=float_ssim"
         ),
         "-f",

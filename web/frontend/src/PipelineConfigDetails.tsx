@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
-import type { ConfigDetailSection } from "./pipelineConfig";
+import type { ConfigDetailSection, PipelineDiagramSpec } from "./pipelineConfig";
+import { WorkflowVisualization } from "./WorkflowVisualization";
 
 interface PipelineConfigDetailsProps {
   sections: ConfigDetailSection[];
+  diagram?: PipelineDiagramSpec | null;
   /** Compact trigger label for the recipe / results toggle. */
   buttonLabel?: string;
   /** Start open (e.g. deep-link). Default false — opt-in details. */
@@ -29,6 +31,7 @@ function sectionsToText(sections: ConfigDetailSection[]): string {
 
 export function PipelineConfigDetails({
   sections,
+  diagram = null,
   buttonLabel = "Pipeline config details",
   defaultOpen = false,
   className = "",
@@ -38,7 +41,7 @@ export function PipelineConfigDetails({
 
   const text = useMemo(() => sectionsToText(sections), [sections]);
 
-  if (sections.length === 0) {
+  if (sections.length === 0 && !diagram) {
     return null;
   }
 
@@ -75,9 +78,9 @@ export function PipelineConfigDetails({
 
       {open && (
         <div className="pipeline-config-body">
+          {diagram && diagram.streams.length > 0 && <WorkflowVisualization {...diagram} />}
           <p className="hint">
-            Derived from the current encode ladder and target latency — what the encoder, publisher,
-            ingest host, packager, and player will use for this recipe.
+            Encode, publish, ingest, packager, and player settings derived from this recipe.
           </p>
           <div className="pipeline-config-grid">
             {sections.map((section) => (

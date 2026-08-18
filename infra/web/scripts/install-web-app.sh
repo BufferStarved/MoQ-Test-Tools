@@ -148,6 +148,7 @@ rsync -az --delete \
   --exclude 'tools/moq5' \
   --exclude 'tools/openmoq-publisher' \
   --exclude 'tools/*/node_modules' \
+  --exclude 'MoQ-Test-Tools' \
   --exclude 'infra/**/.terraform' \
   --exclude 'infra/**/tfplan' \
   --exclude 'infra/**/terraform.tfvars' \
@@ -243,6 +244,11 @@ chown -R ubuntu:ubuntu "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads" || true
 chown -R ubuntu:ubuntu "\$INSTALL_ROOT/src" "\$INSTALL_ROOT/web" "\$INSTALL_ROOT/.venv" 2>/dev/null || true
 
 PUB_BIN="\$INSTALL_ROOT/tools/openmoq-publisher/bin"
+# Keep extra keys (GCP East / Linode stacks, ingest tokens, …) across redeploys.
+# A full rewrite used to drop them and hide those destinations as "coming soon".
+if [[ -f "\$ENV_FILE" ]]; then
+  cp "\$ENV_FILE" "\${ENV_FILE}.previous"
+fi
 cat > "\$ENV_FILE" <<ENVEOF
 INGEST_AGENT_TOKEN=\${INGEST_TOKEN}
 INGEST_AGENT_PORT=8090
@@ -258,10 +264,28 @@ FFMPEG=\${FFMPEG_BIN}
 PATH=\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
 PYTHONPATH=\${INSTALL_ROOT}/src:\${INSTALL_ROOT}/web/api
 MEDIAMTX_LOOPBACK_PUBLISH=1
+MOQ_RECORDER_AGENT_URL=http://35.222.33.58:8090
 # Local publisher agent is a laptop/dev feature — keep off on the hosted web VM.
 LOCAL_PUBLISHER_ENABLED=1
 LOCAL_PUBLISHER_TOKEN=dev-local-publisher
 ENVEOF
+append_missing_env() {
+  local src="\$1"
+  [[ -f "\$src" ]] || return 0
+  while IFS= read -r line || [[ -n "\$line" ]]; do
+    case "\$line" in
+      ''|\#*) continue ;;
+    esac
+    local key="\${line%%=*}"
+    [[ -z "\$key" ]] && continue
+    if ! grep -q "^\$key=" "\$ENV_FILE"; then
+      printf '%s\n' "\$line" >> "\$ENV_FILE"
+    fi
+  done < "\$src"
+}
+append_missing_env "\${ENV_FILE}.previous"
+append_missing_env "\$INSTALL_ROOT/infra/web/scripts/gcp-east-stack.env.example"
+append_missing_env "\$INSTALL_ROOT/infra/web/scripts/linode-stack.env.example"
 chmod 600 "\$ENV_FILE"
 
 cat >/etc/systemd/system/\${SERVICE_NAME}.service <<UNITEOF
@@ -292,6 +316,7 @@ CADDYEOF
 
 systemctl daemon-reload
 systemctl enable --now \${SERVICE_NAME}.service
+systemctl restart \${SERVICE_NAME}.service
 systemctl enable --now caddy
 systemctl reload caddy || systemctl restart caddy
 

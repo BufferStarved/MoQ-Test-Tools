@@ -1,0 +1,35 @@
+#cloud-config
+# Baseline for the Linode OpenMOQ moqx relay host.
+
+package_update: true
+package_upgrade: true
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+packages:
+  - curl
+  - wget
+  - jq
+  - htop
+  - ca-certificates
+  - gnupg
+
+write_files:
+  - path: /opt/moq-test-tools/moqx.env
+    content: |
+      MOQX_PORT=${moqx_port}
+      MOQX_PICO_PORT=${moqx_pico_port}
+      MOQX_ADMIN_PORT=${moqx_admin_port}
+      CERTBOT_EMAIL=${certbot_email}
+      MOQX_ENDPOINT=/moq-relay
+      MOQX_NAMESPACE=benchmark
+
+runcmd:
+  - timedatectl set-timezone UTC || true
+  - echo "MoQ relay host ready. Run gcp-install-moqx.sh next." > /var/log/moq-relay-bootstrap.log

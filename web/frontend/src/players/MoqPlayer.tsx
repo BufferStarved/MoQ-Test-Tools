@@ -3,7 +3,9 @@ import { Player } from "@playa/player";
 import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
 import { playbackGateLabel } from "../playbackGate";
-import { openmoqBenchmarkCatalog } from "../moqOpenmoqCatalog";
+import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
+import { createStrictMoqtTransport } from "../browserMoq/webTransport";
+import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
 import {
   markMoqCatalogReady,
@@ -51,22 +53,36 @@ interface MoqPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (ms). */
   encoderLagMs?: number;
+  /** MOQT draft to offer on WebTransport (16 for openmoq/ffmpeg, 18 for browser MOQ5). */
+  draftVersion?: 16 | 18;
+  /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
+  mediaPackaging?: "cmaf" | "loc";
 }
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Was 6s — that alone pinned wall−vt E2E near ~7s after join. Publisher is
-// usually ready within ~1–2s of job start with injected catalog.
-const PUBLISHER_WARMUP_MS = 1_500;
-const SUBSCRIBE_RETRY_MS = 5_000;
-// 2 attempts (~10s total patience) was too tight under real contention —
-// ffmpeg+openmoq-publisher startup can lag past that when other comparison
-// legs are also encoding on the same host. 4 attempts (~20s) stays well
-// inside a typical job's duration.
-const MAX_CONNECT_ATTEMPTS = 4;
+// Was 6s — that alone pinned wall−vt E2E near ~7s after join. CMAF catalog is
+// a one-shot group-0 object on moqx; subscribe must start before it is sent.
+const PUBLISHER_WARMUP_MS = 250;
+const SUBSCRIBE_RETRY_MS = 1_500;
+/** Cover publisher startup (namespace 0x10) without waiting past catalog publish. */
+const MAX_CONNECT_ATTEMPTS = 12;
+/** If SUBSCRIBE_OK arrived after catalog group 0, tear down and resubscribe. */
+const CATALOG_RETRY_MS = 4_000;
 const MOQ_ALL_TRACKS_REFUSED = 4867;
+const MOQ_SUBSCRIPTION_REFUSED = 4866;
+const MOQ_LOAD_FAILED = 4865;
+
+function isPublisherNotReadyError(code: number): boolean {
+  return (
+    code === MOQ_ALL_TRACKS_REFUSED ||
+    code === MOQ_SUBSCRIPTION_REFUSED ||
+    code === MOQ_LOAD_FAILED
+  );
+}
+
 const LIVE_EDGE_TRIM_MS = 2_000;
 // Mid-play recovery: a session that dies after first frame used to be
 // silently swallowed (the error handler returned on firstFrame), leaving a
@@ -78,15 +94,10 @@ const SESSION_RESTART_DELAY_MS = 2_000;
 // Playhead frozen this long while the encode is live => the session is dead
 // even if playa never surfaced an error; tear down and resubscribe.
 const STALL_RESTART_MS = 8_000;
-// First-join starvation fast path: the moqx relay sometimes honors a
-// mid-stream NextGroupStart subscription for exactly ONE group and then never
-// attaches it to subsequent group announcements (observed live: webcam job
-// 7f116860 rendered ~0.85s at t≈6s, then silence while the publisher kept
-// sending all 32 groups; a plain resubscribe at group ~15 streamed fine).
-// Waiting for the 8s steady-state watchdog turned that into a ~12s freeze.
-// During the initial join window a playhead frozen ~2s (two 1s-GOP group
-// periods with nothing delivered) is already conclusive, so resubscribe
-// immediately. Steady-state keeps the more patient 8s threshold.
+// CMAF/NextGroupStart: moqx sometimes honors a mid-stream subscribe for
+// exactly one group then never attaches later groups — recover with a
+// fast resubscribe. LOC uses LargestObject; fan-out on the publisher means
+// a player resubscribe no longer steals the ingest recorder's alias.
 const EARLY_JOIN_WINDOW_MS = 15_000;
 const EARLY_STALL_RESTART_MS = 1_750;
 const EARLY_RESTART_DELAY_MS = 250;
@@ -122,6 +133,8 @@ export default function MoqPlayer({
   sourceHasAudio = true,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  draftVersion = 16,
+  mediaPackaging = "cmaf",
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -204,6 +217,26 @@ export default function MoqPlayer({
     const { bridgeMs, epoch } = lagRef.current;
     const video = videoRef.current;
 
+    if (mediaPackaging === "loc") {
+      // Playa timeupdate on canvas is playbackDuration (wall clock), not
+      // encoder media time — using it as the playhead made e2e 0. Prefer
+      // CaptureTimestamp latency when playa reports it; otherwise count
+      // rendered frames so a freeze shows up as rising latency.
+      if (session.playerLatencyMs > 10 && session.playerLatencyMs < 30_000) {
+        const total = session.playerLatencyMs + bridgeMs;
+        if (total > 0 && total < 120_000) {
+          return Math.round(total);
+        }
+      }
+      if (session.videoTimeSec > 0.05 && epoch > 0) {
+        const total =
+          Date.now() + clockSkewMs() - epoch * 1000 - session.videoTimeSec * 1000 + bridgeMs;
+        if (total > 0 && total < 120_000) {
+          return Math.round(total);
+        }
+      }
+    }
+
     const joinOffsetSec = playerRef.current?.joinMediaOffsetSec ?? null;
     if (joinOffsetSec != null && video && video.currentTime > 0.05) {
       // joinOffset + currentTime is the playhead on the encoder's media
@@ -244,10 +277,16 @@ export default function MoqPlayer({
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => {
       const session = sessionRef.current;
-      const frames = readVideoFrameStats(videoRef.current);
-      // Prefer browser decoded-frame counters; fall back to playa stats.
-      const framesRendered = frames.framesRendered || session.framesRendered;
-      const framesDropped = frames.framesDropped || session.framesDropped;
+      const htmlFrames = readVideoFrameStats(videoRef.current);
+      // LOC paints a <canvas> — the hidden <video> never advances, so HTML
+      // decoded-frame counters stay near zero and made playback look like 1–2 fps.
+      const loc = mediaPackaging === "loc";
+      const framesRendered = loc
+        ? session.framesRendered || htmlFrames.framesRendered
+        : htmlFrames.framesRendered || session.framesRendered;
+      const framesDropped = loc
+        ? session.framesDropped || htmlFrames.framesDropped
+        : htmlFrames.framesDropped || session.framesDropped;
       if (framesRendered > 0) {
         session.statsEvents = Math.max(session.statsEvents, 1);
       }
@@ -273,8 +312,7 @@ export default function MoqPlayer({
         e2e_latency_ms: captureAnchoredE2eMs(),
       };
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [jobId],
+    [jobId, mediaPackaging],
   );
 
   usePlaybackMetricsReporter({
@@ -336,12 +374,14 @@ export default function MoqPlayer({
     // eslint-disable-next-line no-console
     console.log(
       `[MoqPlayer] live-effect mount #${mountNumber} gate=${playbackGate} relay=${relayUrl} namespace=${namespace} ` +
-        `fingerprintUrl=${fingerprintUrl} pinTlsCert=${pinTlsCert} encodeDurationSec=${encodeDurationSec} jobStatus=${jobStatus} benchmarkLoading=${benchmarkLoading}`,
+        `fingerprintUrl=${fingerprintUrl} pinTlsCert=${pinTlsCert} draft=${draftVersion} encodeDurationSec=${encodeDurationSec} jobStatus=${jobStatus} benchmarkLoading=${benchmarkLoading}`,
     );
 
     let destroyed = false;
     let connectTimeout: ReturnType<typeof window.setTimeout> | undefined;
     let liveEdgeTimer: ReturnType<typeof window.setInterval> | undefined;
+    let playKickTimer: ReturnType<typeof window.setInterval> | undefined;
+    let decodeKickTimer: ReturnType<typeof window.setTimeout> | undefined;
     const priorOutcome = getMoqPlaybackOutcome(jobId);
     sessionRef.current = {
       catalogReady: Boolean(priorOutcome?.catalogReady),
@@ -359,16 +399,21 @@ export default function MoqPlayer({
     // Remounts used to wipe rebuffer to 0 mid-run — restore per-job accum.
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
-    // Monitor from gate-open so post-first-frame stalls during subscribe are counted.
-    const detachHtmlMonitors = attachHtmlPlaybackMonitors(video, {
-      rebuffer: rebufferRef.current,
-      hasPlayedOnce: () =>
-        sessionRef.current.firstFrame || sessionRef.current.ttffMs > 0,
-      onStallBegin: () => {
-        sessionRef.current.stallCount = rebufferRef.current.stallCount;
-        persistJobRebuffer(jobId, rebufferRef.current);
-      },
-    });
+    // LOC has no MSE <video> clock. The frozen-playhead monitor on a hidden
+    // element counted a stall every ~800ms and the watchdog resubscribed —
+    // that read as extreme chop, not as a bandwidth problem.
+    const detachHtmlMonitors =
+      mediaPackaging === "loc"
+        ? () => undefined
+        : attachHtmlPlaybackMonitors(video, {
+            rebuffer: rebufferRef.current,
+            hasPlayedOnce: () =>
+              sessionRef.current.firstFrame || sessionRef.current.ttffMs > 0,
+            onStallBegin: () => {
+              sessionRef.current.stallCount = rebufferRef.current.stallCount;
+              persistJobRebuffer(jobId, rebufferRef.current);
+            },
+          });
 
     const diagReporter = createPlaybackDiagReporter(jobId, "moq");
 
@@ -446,16 +491,25 @@ export default function MoqPlayer({
     // instead of fighting the catch-up back to 1.0 every timeupdate.
     let catchUpRate = 1;
 
+    function locHasMedia(): boolean {
+      return sessionRef.current.framesRendered > 0;
+    }
+
     function noteFirstFrame(source: string) {
-      if (destroyed || video.currentTime <= 0.25) {
+      if (destroyed) {
+        return;
+      }
+      const locReady = mediaPackaging === "loc" && locHasMedia();
+      if (!locReady && video.currentTime <= 0.25) {
         return;
       }
       const wasFirst = !sessionRef.current.firstFrame;
+      const mediaTimeSec =
+        mediaPackaging === "loc"
+          ? Math.max(sessionRef.current.videoTimeSec, sessionRef.current.framesRendered / 30)
+          : video.currentTime;
       sessionRef.current.firstFrame = true;
-      sessionRef.current.videoTimeSec = Math.max(
-        sessionRef.current.videoTimeSec,
-        video.currentTime,
-      );
+      sessionRef.current.videoTimeSec = Math.max(sessionRef.current.videoTimeSec, mediaTimeSec);
       markMoqFirstFrame(jobId, {
         ttffMs: sessionRef.current.ttffMs,
         videoTimeSec: sessionRef.current.videoTimeSec,
@@ -468,13 +522,14 @@ export default function MoqPlayer({
         window.clearTimeout(connectTimeout);
       }
       pushDiag(
-        `first_frame=ok via=${source} video_time=${video.currentTime.toFixed(2)} size=${video.videoWidth}x${video.videoHeight}`,
+        mediaPackaging === "loc"
+          ? `first_frame=ok via=${source} loc_time=${mediaTimeSec.toFixed(2)} sink=canvas`
+          : `first_frame=ok via=${source} video_time=${video.currentTime.toFixed(2)} size=${video.videoWidth}x${video.videoHeight}`,
       );
       setError(null);
       setIsPlaying(true);
       setStatus("Playing");
-      // Defend against player/engine leaving an unexpected rate behind.
-      if (Math.abs(video.playbackRate - catchUpRate) > 0.01) {
+      if (mediaPackaging !== "loc" && Math.abs(video.playbackRate - catchUpRate) > 0.01) {
         pushDiag(`playback_rate_reset from=${video.playbackRate}`);
         video.playbackRate = catchUpRate;
       }
@@ -505,7 +560,9 @@ export default function MoqPlayer({
       setStatus("Waiting for publisher...");
       pushDiag(`relay=${relayUrl} namespace=${namespace}`, true);
       pushDiag(
-        `catalog_mode=injected openmoq vide_1${sourceHasAudio ? "+soun_2" : " (video-only source)"}`,
+        mediaPackaging === "loc"
+          ? `catalog_mode=injected loc video${sourceHasAudio ? "+audio" : ""} draft=${draftVersion}`
+          : `catalog_mode=relay catalog then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (publisher initData) draft=${draftVersion}`,
         true,
       );
       pushDiag(`publisher_forward=1 warmup=${PUBLISHER_WARMUP_MS / 1000}s`, true);
@@ -594,26 +651,101 @@ export default function MoqPlayer({
         const player = new Player(null, {
           url: relayUrl,
           namespace,
-          draftVersion: 16,
+          draftVersion,
           certHash,
           canvas,
-          video,
+          ...(mediaPackaging === "loc" ? {} : { video }),
           muted: true,
-          autoplay: true,
+          autoplay: false,
           targetLatencyMs: catchUp.targetLatencyMs,
           // Catch-up + subscribe filter must go through moqtPlayerConfig —
           // @playa/player only forwards a subset of top-level options.
           moqtPlayerConfig: {
-            catalog: openmoqBenchmarkCatalog(sourceHasAudio),
-            // Catch-up disabled: openmoq CMAF has no LOC CaptureTimestamps.
+            // LOC: inject names (browser publisher has no MSF catalog track).
+            // CMAF: do NOT inject a canned catalog. NextGroupStart joins
+            // mid-stream, so MSE must initialize from the publisher's
+            // `--publish-catalog` initData for *this* encode. A baked
+            // 720p blob from another ffmpeg produced catalog-ready +
+            // zero frames on every relay.
+            createTransport: createStrictMoqtTransport({
+              ...(certHash ? { certHash } : {}),
+              draftVersion,
+            }),
+            ...(mediaPackaging === "loc"
+              ? { catalog: browserLocCatalogTracks({ includeAudio: sourceHasAudio }) }
+              : {}),
+            // LOC carries CaptureTimestamps; CMAF from openmoq does not.
             maxCatchUpRate: catchUp.maxCatchUpRate,
             catchUpThresholdMs: catchUp.catchUpThresholdMs,
             catchUpRecoveryMs: catchUp.catchUpRecoveryMs,
-            // Next keyframe boundary — safer than LargestObject for fMP4 GOPs.
-            subscriptionFilter: { type: "NextGroupStart" },
+            // Default lateFrameThresholdMs is 100ms. Live MoQ e2e is hundreds
+            // of ms, so Playa skipped every frame after the join cushion
+            // (observed: ~36 rendered frames then a freeze while 2.2 Mbps
+            // still arrived). Show a late frame rather than a black canvas.
+            lateFrameThresholdMs: mediaPackaging === "loc" ? 5_000 : 400,
+            // LOC: LargestObject + warm-start of the current GOP. NextGroupStart
+            // on moqx delivered one group then froze (~1–2 fps with the
+            // resubscribe watchdog). CMAF still joins on the next fragment.
+            ...(mediaPackaging === "loc"
+              ? {
+                  subscriptionFilter: { type: "LargestObject" as const },
+                  warmStartCurrentGroup: true,
+                }
+              : { subscriptionFilter: { type: "NextGroupStart" as const } }),
           },
         });
         playerRef.current = player;
+
+        const retrySubscribe = (reason: string, delayMs: number): boolean => {
+          if (destroyed || retrying || attempt >= MAX_CONNECT_ATTEMPTS) {
+            return false;
+          }
+          retrying = true;
+          void (async () => {
+            pushDiag(`${reason} attempt=${attempt} delay_ms=${delayMs}`, true);
+            if (connectTimeout) {
+              window.clearTimeout(connectTimeout);
+            }
+            player.destroy();
+            if (playerRef.current === player) {
+              playerRef.current = null;
+            }
+            sessionRef.current = {
+              catalogReady: false,
+              firstFrame: false,
+              statsEvents: 0,
+              stallCount: 0,
+              framesRendered: 0,
+              framesDropped: 0,
+              bitrateBps: 0,
+              ttffMs: 0,
+              videoTimeSec: 0,
+              playerLatencyMs: 0,
+              moqTimelineMs: 0,
+            };
+            setIsReady(false);
+            await sleep(delayMs);
+            retrying = false;
+            if (destroyed) {
+              return;
+            }
+            try {
+              await connectAndLoad(attempt + 1, certHash);
+            } catch (err) {
+              playerRef.current?.destroy();
+              playerRef.current = null;
+              setIsReady(false);
+              if (!destroyed) {
+                const message =
+                  err instanceof Error
+                    ? err.message
+                    : "MoQ connection failed after subscribe retry.";
+                fail(message);
+              }
+            }
+          })();
+          return true;
+        };
 
         player.on("statechange", ({ state }) => {
           if (destroyed) {
@@ -623,6 +755,9 @@ export default function MoqPlayer({
           if (state === "loading") {
             setIsPlaying(false);
             setStatus(attempt === 1 ? "Connecting..." : "Retrying subscribe...");
+          } else if (state === "playing") {
+            setIsPlaying(true);
+            setStatus("Playing");
           } else if (state === "paused") {
             setIsPlaying(false);
             setStatus("Paused");
@@ -653,7 +788,7 @@ export default function MoqPlayer({
           if (destroyed) {
             return;
           }
-          if (video.videoWidth > 0) {
+          if (mediaPackaging === "loc" || video.videoWidth > 0) {
             noteFirstFrame("player.playing");
           }
         });
@@ -672,8 +807,15 @@ export default function MoqPlayer({
           }
           if (currentTime > 0) {
             sessionRef.current.moqTimelineMs = currentTime;
+            // Don't advance LOC glass time from capture-clock ticks alone —
+            // dropped-late frames still emit timeupdate and made e2e/stall
+            // look healthy while the canvas was frozen.
           }
-          if (video.currentTime > 0.25 && video.videoWidth > 0) {
+          if (mediaPackaging === "loc") {
+            if (sessionRef.current.framesRendered > 0) {
+              noteFirstFrame("player.timeupdate");
+            }
+          } else if (video.currentTime > 0.25 && video.videoWidth > 0) {
             noteFirstFrame("player.timeupdate");
           } else if (currentTime > 0 && !sessionRef.current.catalogReady) {
             const bucket = Math.floor(currentTime / 5000);
@@ -692,16 +834,25 @@ export default function MoqPlayer({
           sessionRef.current.bitrateBps = stats.bitrate;
           sessionRef.current.stallCount = Math.max(sessionRef.current.stallCount, stats.stallCount);
           sessionRef.current.ttffMs = stats.timeToFirstFrameMs ?? sessionRef.current.ttffMs;
-          sessionRef.current.videoTimeSec = Math.max(
-            sessionRef.current.videoTimeSec,
-            video.currentTime,
-          );
+          if (mediaPackaging === "loc") {
+            if (stats.framesRendered > 0) {
+              sessionRef.current.videoTimeSec = Math.max(
+                sessionRef.current.videoTimeSec,
+                stats.framesRendered / 30,
+              );
+            }
+          } else {
+            sessionRef.current.videoTimeSec = Math.max(
+              sessionRef.current.videoTimeSec,
+              video.currentTime,
+            );
+          }
           if (typeof stats.latencyMs === "number" && stats.latencyMs > 0) {
             sessionRef.current.playerLatencyMs = stats.latencyMs;
           }
           if (stats.framesRendered > 0) {
             sessionRef.current.statsEvents += 1;
-            if (video.currentTime > 0.25) {
+            if (mediaPackaging === "loc" || video.currentTime > 0.25) {
               noteFirstFrame("player.stats");
             } else if (!sessionRef.current.firstFrame) {
               // MSE can report rendered frames slightly before currentTime moves.
@@ -757,54 +908,9 @@ export default function MoqPlayer({
           }
           if (
             severity === "fatal" &&
-            code === MOQ_ALL_TRACKS_REFUSED &&
-            attempt < MAX_CONNECT_ATTEMPTS &&
-            !retrying
+            isPublisherNotReadyError(code) &&
+            retrySubscribe("subscribe_retry=publisher_not_ready", SUBSCRIBE_RETRY_MS)
           ) {
-            retrying = true;
-            void (async () => {
-              pushDiag(`subscribe_retry=wait_${SUBSCRIBE_RETRY_MS / 1000}s publisher_not_ready`, true);
-              if (connectTimeout) {
-                window.clearTimeout(connectTimeout);
-              }
-              player.destroy();
-              if (playerRef.current === player) {
-                playerRef.current = null;
-              }
-              sessionRef.current = {
-                catalogReady: false,
-                firstFrame: false,
-                statsEvents: 0,
-                stallCount: 0,
-                framesRendered: 0,
-                framesDropped: 0,
-                bitrateBps: 0,
-                ttffMs: 0,
-                videoTimeSec: 0,
-                playerLatencyMs: 0,
-                moqTimelineMs: 0,
-              };
-              setIsReady(false);
-              await sleep(SUBSCRIBE_RETRY_MS);
-              retrying = false;
-              if (destroyed) {
-                return;
-              }
-              try {
-                await connectAndLoad(attempt + 1, certHash);
-              } catch (err) {
-                playerRef.current?.destroy();
-                playerRef.current = null;
-                setIsReady(false);
-                if (!destroyed) {
-                  const message =
-                    err instanceof Error
-                      ? err.message
-                      : "MoQ connection failed after subscribe retry.";
-                  fail(message);
-                }
-              }
-            })();
             return;
           }
           // Every other path that reaches fail() first destroys the player
@@ -830,18 +936,63 @@ export default function MoqPlayer({
           if (destroyed || sessionRef.current.catalogReady || sessionRef.current.firstFrame) {
             return;
           }
+          if (retrySubscribe("catalog_timeout_retry", 200)) {
+            return;
+          }
           fail(
             `MoQ catalog never loaded within ${catalogWaitSec}s after connect. Use Chrome (not Safari/Cursor). Publisher must be live on namespace ${namespace}.`,
           );
-        }, catalogWaitMs);
+        }, attempt < MAX_CONNECT_ATTEMPTS ? CATALOG_RETRY_MS : catalogWaitMs);
         updateMediaVisibility(player);
-        if (player.state !== "playing") {
-          try {
-            await player.play();
-          } catch {
-            // autoplay may already be active
+        // Do not autoplay from the constructor: play() before the video
+        // pipeline exists starts the 16ms tick as a no-op, then later
+        // play() is ignored because the interval is already running.
+        // Pause before first frame sends REQUEST_UPDATE forward:0 and
+        // freezes the live subscribe at the relay.
+        const startDecode = (reason: string) => {
+          if (destroyed || sessionRef.current.firstFrame) {
+            return;
           }
+          pushDiag(`play=${reason}`, true);
+          try {
+            player.play();
+          } catch {
+            // ignore
+          }
+          if (video) {
+            void video.play().catch(() => undefined);
+          }
+        };
+        startDecode("post-load");
+        if (mediaPackaging === "loc") {
+          decodeKickTimer = window.setTimeout(() => {
+            if (destroyed || sessionRef.current.firstFrame || playerRef.current !== player) {
+              return;
+            }
+            // Play again only — pause+play used to send REQUEST_UPDATE forward:0
+            // and freeze the live objects at the relay.
+            pushDiag("decode_kick=play", true);
+            try {
+              player.play();
+            } catch {
+              // ignore
+            }
+          }, 700);
         }
+        const kickPlay = () => {
+          if (destroyed || sessionRef.current.firstFrame) {
+            if (playKickTimer) {
+              window.clearInterval(playKickTimer);
+              playKickTimer = undefined;
+            }
+            return;
+          }
+          startDecode("kick");
+        };
+        if (playKickTimer) {
+          window.clearInterval(playKickTimer);
+        }
+        playKickTimer = window.setInterval(kickPlay, 800);
       }
 
       try {
@@ -871,7 +1022,7 @@ export default function MoqPlayer({
         //     as freezes + skips.
         //  2. HARD SEEK stays only as a gross-drift backstop (relay burst
         //     after a long stall) on the original 2s cadence.
-        const holdBehindSec = Math.max(0.4, (targetLatencyMs || 800) / 1000);
+        const holdBehindSec = Math.max(0.15, (targetLatencyMs || 400) / 1000);
         const seekThresholdSec = Math.max(holdBehindSec * 2, holdBehindSec + 1);
         const rateOnSec = holdBehindSec + 0.75; // start chasing above this lead
         const rateOffSec = holdBehindSec + 0.25; // stop chasing below this lead
@@ -879,6 +1030,7 @@ export default function MoqPlayer({
         let watchdogVt = -1;
         let watchdogAtMs = Date.now();
         let watchdogGaveUp = false;
+        let lastLocFrames = 0;
         // Wall time the watchdog first saw rendered media this run. Anchors the
         // EARLY_JOIN_WINDOW_MS fast-restart window (survives session restarts:
         // the window is measured from the run's first media, not per session).
@@ -900,6 +1052,28 @@ export default function MoqPlayer({
           // hiccup into a ~12s freeze.
           const earlyWindow = Date.now() - firstMediaAtMs < EARLY_JOIN_WINDOW_MS;
           const stallLimitMs = earlyWindow ? EARLY_STALL_RESTART_MS : STALL_RESTART_MS;
+          if (mediaPackaging === "loc") {
+            const frames = sessionRef.current.framesRendered;
+            const locStallMs = earlyWindow ? 3_000 : STALL_RESTART_MS;
+            if (retrying) {
+              watchdogAtMs = Date.now();
+            } else if (frames > lastLocFrames) {
+              lastLocFrames = frames;
+              watchdogAtMs = Date.now();
+            } else if (Date.now() - watchdogAtMs > locStallMs) {
+              if (sessionRestarts < MAX_SESSION_RESTARTS) {
+                watchdogAtMs = Date.now();
+                scheduleSessionRestart(
+                  `loc_frames_frozen_${frames}${earlyWindow ? "_early_join" : ""}`,
+                  SESSION_RESTART_DELAY_MS,
+                );
+              } else if (!watchdogGaveUp) {
+                watchdogGaveUp = true;
+                pushDiag(`loc_stalled_frames=${frames} (gave up reconnects)`);
+              }
+            }
+            return;
+          }
           if (retrying || video.paused) {
             // Reconnect in flight / user pause: don't count frozen time.
             watchdogVt = -1;
@@ -1016,6 +1190,12 @@ export default function MoqPlayer({
       if (liveEdgeTimer) {
         window.clearInterval(liveEdgeTimer);
       }
+      if (playKickTimer) {
+        window.clearInterval(playKickTimer);
+      }
+      if (decodeKickTimer) {
+        window.clearTimeout(decodeKickTimer);
+      }
       setIsReady(false);
       const active = playerRef.current;
       playerRef.current = null;
@@ -1023,20 +1203,22 @@ export default function MoqPlayer({
     };
     // encodeDurationSec is read once at start for catalog timeout — keep it out of
     // deps so a late duration update does not tear down a healthy Player/MediaSource.
-  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs, sourceHasAudio]);
+  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs, sourceHasAudio, draftVersion, mediaPackaging]);
 
   async function togglePlayPause() {
     const player = playerRef.current;
     if (!player || !isReady) {
       return;
     }
-    if (player.state === "playing") {
+    // Pause before the first frame sends forward:0 at the relay and the
+    // live objects stop. Until then, Play only starts decode.
+    if (isPlaying && sessionRef.current.firstFrame) {
       player.pause();
       setIsPlaying(false);
       setStatus("Paused");
       return;
     }
-    await player.play();
+    player.play();
     setIsPlaying(true);
     setStatus("Playing");
   }
@@ -1047,7 +1229,7 @@ export default function MoqPlayer({
   return (
     <div className="player-surface">
       <canvas ref={canvasRef} className="player-canvas" />
-      <video ref={videoRef} className="player-video" controls playsInline muted autoPlay hidden />
+      <video ref={videoRef} className="player-video" playsInline muted autoPlay hidden />
       <div className="player-controls">
         <button
           type="button"
@@ -1055,7 +1237,7 @@ export default function MoqPlayer({
           disabled={playbackGate !== "live" || !isReady}
           onClick={() => void togglePlayPause()}
         >
-          {isPlaying ? "Pause" : "Play"}
+          {isPlaying && sessionRef.current.firstFrame ? "Pause" : "Play"}
         </button>
       </div>
       <div className="player-meta">

@@ -96,6 +96,17 @@ See [GCP-WEB-RUNBOOK.md](../web/GCP-WEB-RUNBOOK.md).
 When ready, point e.g. `relay.sean-mccarthy.net` at this relay IP, re-issue certs, and update
 the `moq_gcp_relay` preset URL. Keep the web app on `moq.sean-mccarthy.net`.
 
+## Networking note
+
+Web, relay, and Zixi each sit on **separate VPCs** (`moq-web-vpc`, `moq-relay-vpc`,
+`moq-zixi-vpc`) that all use the auto-mode range `10.128.0.0/20`. Seeing the same
+private IP (e.g. `10.128.0.2`) on web and relay is normal — they are not in one VPC.
+Jobs talk over **public IPs**; there is no VPC peering. Prefer IAP SSH:
+
+```bash
+gcloud compute ssh ubuntu@moq-relay-gcp --zone=us-central1-a --tunnel-through-iap
+```
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -104,6 +115,7 @@ the `moq_gcp_relay` preset URL. Keep the web app on `moq.sean-mccarthy.net`.
 | Player cannot connect | UDP 4433 open; browser supports WebTransport (Chrome/Edge). Relay must use an ECDSA cert ≤14 days with fingerprint pinning — run `configure-webtransport-cert.sh` on the VM. |
 | `curl :8000/info` fails | `docker ps` on VM; `journalctl -u moqx` |
 | No video | Relay needs an active MOQ publisher on namespace `benchmark` |
+| IAP SSH `4003 failed to connect to backend` | Firewall `moq-relay-allow-iap-ssh` must be on **`moq-relay-vpc`** (not `default`) with source `35.235.240.0/20` |
 
 ## Files
 

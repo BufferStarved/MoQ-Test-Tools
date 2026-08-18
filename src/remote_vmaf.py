@@ -82,6 +82,60 @@ def prepare_reference_via_agent(
     return None
 
 
+def prepare_reference_bytes_via_agent(
+    endpoint_url: str,
+    job_id: str,
+    file_bytes: bytes,
+    filename: str,
+    *,
+    agent_url: str = "",
+    recording_dir: str = "",
+    agent_token: str = "",
+) -> Optional[str]:
+    config = resolve_ingest_agent(
+        endpoint_url,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
+    if config is None:
+        return "Ingest agent is not configured (set ingest agent token for this endpoint)"
+
+    client = IngestAgentClient(config)
+    try:
+        health = client.health()
+        if not health.get("libvmaf_available"):
+            return "Ingest agent is up but ffmpeg libvmaf is not available on the host"
+        client.upload_reference_bytes(job_id, file_bytes, filename)
+    except RuntimeError as exc:
+        return str(exc)
+    return None
+
+
+def stop_moq_recording_via_agent(
+    endpoint_url: str,
+    job_id: str,
+    *,
+    agent_url: str = "",
+    recording_dir: str = "",
+    agent_token: str = "",
+) -> None:
+    """Stop a still-running recorder so ingest VMAF can score a short/stopped job."""
+    config = resolve_ingest_agent(
+        endpoint_url,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
+    if config is None:
+        return
+    client = IngestAgentClient(config)
+    try:
+        client.stop_moq_recording(job_id)
+    except RuntimeError as exc:
+        logger.info("Stop MoQ recording job=%s: %s", job_id, exc)
+
+
 def wait_for_moq_recording_via_agent(
     endpoint_url: str,
     job_id: str,
@@ -102,6 +156,13 @@ def wait_for_moq_recording_via_agent(
         return "Ingest agent is not configured"
 
     client = IngestAgentClient(config)
+    stop_moq_recording_via_agent(
+        endpoint_url,
+        job_id,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
     deadline = time.time() + timeout_sec
     last_status = ""
     while time.time() < deadline:
@@ -199,6 +260,8 @@ def start_moq_recording_via_agent(
     recording_dir: str = "",
     agent_token: str = "",
     relay_url: str = "",
+    cert_sha256: str = "",
+    video_track: str = "",
 ) -> Optional[str]:
     config = resolve_ingest_agent(
         endpoint_url,
@@ -222,6 +285,8 @@ def start_moq_recording_via_agent(
             namespace=namespace,
             duration_sec=duration_sec,
             relay_url=relay_url,
+            cert_sha256=cert_sha256,
+            video_track=video_track,
         )
     except RuntimeError as exc:
         return str(exc)

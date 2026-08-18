@@ -4,11 +4,16 @@ export type IngestEndpointId =
   | "gcp_zixi"
   | "gcp_mediamtx"
   | "gcp_moq_relay"
+  | "gcp_east_zixi"
+  | "gcp_east_mediamtx"
+  | "gcp_east_moq_relay"
   | "linode_zixi"
   | "linode_mediamtx"
   | "linode_moq_relay"
   | "aws_zixi"
   | "custom";
+
+export type CloudEncodeHostId = "gcp" | "gcp_east" | "linode" | "aws";
 
 export interface IngestEndpointOption {
   id: IngestEndpointId;
@@ -31,6 +36,21 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   {
     id: "gcp_moq_relay",
     label: "OpenMOQ · GCP us-central1",
+    detail: "MoQ relay (WebTransport)",
+  },
+  {
+    id: "gcp_east_zixi",
+    label: "Zixi · GCP us-east1",
+    detail: "Broadcaster Fast HLS / MPEG-TS",
+  },
+  {
+    id: "gcp_east_mediamtx",
+    label: "MediaMTX · GCP us-east1",
+    detail: "LL-HLS / LL-DASH / WHEP",
+  },
+  {
+    id: "gcp_east_moq_relay",
+    label: "OpenMOQ · GCP us-east1",
     detail: "MoQ relay (WebTransport)",
   },
   {
@@ -71,6 +91,9 @@ const ENDPOINT_PROVIDER: Record<IngestEndpointId, string | ""> = {
   gcp_zixi: "gcp_zixi",
   gcp_mediamtx: "gcp_mediamtx",
   gcp_moq_relay: "gcp_moq_relay",
+  gcp_east_zixi: "gcp_east_zixi",
+  gcp_east_mediamtx: "gcp_east_mediamtx",
+  gcp_east_moq_relay: "gcp_east_moq_relay",
   linode_zixi: "linode_zixi",
   linode_mediamtx: "linode_mediamtx",
   linode_moq_relay: "linode_moq_relay",
@@ -92,6 +115,20 @@ const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, st
   },
   gcp_moq_relay: {
     moq: "moq_gcp_relay",
+  },
+  gcp_east_zixi: {
+    srt: "moq_zixi_gcp_east",
+    rtmp: "moq_zixi_gcp_east_rtmp",
+    hls: "moq_zixi_gcp_east_hls",
+    dash: "moq_zixi_gcp_east_dash",
+  },
+  gcp_east_mediamtx: {
+    srt: "moq_mediamtx_gcp_east_srt",
+    rtmp: "moq_mediamtx_gcp_east_rtmp",
+    webrtc: "moq_mediamtx_gcp_east_whip",
+  },
+  gcp_east_moq_relay: {
+    moq: "moq_gcp_east_relay",
   },
   linode_zixi: {
     srt: "moq_zixi_linode",
@@ -116,11 +153,14 @@ const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, st
   custom: {},
 };
 
-function linodeRegionLabel(presets: Preset[]): string {
-  const linode = presets.find(
-    (preset) => preset.cloud_provider === "linode" && preset.cloud_region && preset.web_available,
+function regionLabelForProvider(presets: Preset[], ingestPrefix: string): string {
+  const match = presets.find(
+    (preset) =>
+      (preset.ingest_provider || "").startsWith(`${ingestPrefix}_`) &&
+      preset.cloud_region &&
+      preset.web_available,
   );
-  return linode?.cloud_region ? ` · ${linode.cloud_region}` : "";
+  return match?.cloud_region ? ` · ${match.cloud_region}` : "";
 }
 
 function endpointAvailable(endpointId: IngestEndpointId, presets: Preset[]): boolean {
@@ -143,13 +183,37 @@ function endpointAvailable(endpointId: IngestEndpointId, presets: Preset[]): boo
   );
 }
 
+/** True when this host+protocol maps to a live preset (or presets are not loaded yet). */
+export function isIngestEndpointIdAvailable(
+  ingestEndpointId: string,
+  protocol: string,
+  presets: Preset[],
+): boolean {
+  if (isCustomIngestEndpoint(ingestEndpointId)) {
+    return true;
+  }
+  const presetId = presetIdForIngest(ingestEndpointId, protocol);
+  if (!presetId) {
+    return false;
+  }
+  if (presets.length === 0) {
+    return true;
+  }
+  const preset = presets.find((item) => item.id === presetId);
+  return preset?.web_available !== false && Boolean(preset);
+}
+
 export function ingestEndpointsFromPresets(presets: Preset[]): IngestEndpointOption[] {
-  const linodeSuffix = linodeRegionLabel(presets);
+  const linodeSuffix = regionLabelForProvider(presets, "linode");
+  const eastSuffix = regionLabelForProvider(presets, "gcp_east");
   return INGEST_ENDPOINT_DEFS.map((item) => {
     const available = endpointAvailable(item.id, presets);
     let label = item.label;
     if (item.id.startsWith("linode_") && linodeSuffix) {
       label = label.replace(" · Linode", ` · Linode${linodeSuffix}`);
+    }
+    if (item.id.startsWith("gcp_east_") && eastSuffix) {
+      label = label.replace(" · GCP us-east1", ` · GCP${eastSuffix}`);
     }
     return {
       ...item,
@@ -217,41 +281,177 @@ export function ingestCollisionKey(ingestEndpointId: string, protocol: string): 
   if (protocol === "moq" || isCustomIngestEndpoint(ingestEndpointId)) {
     return null;
   }
-  if (ingestEndpointId === "gcp_mediamtx" || ingestEndpointId === "linode_mediamtx") {
+  if (ingestEndpointId.endsWith("_mediamtx")) {
     return ingestEndpointId;
   }
-  if (ingestEndpointId === "gcp_zixi" || ingestEndpointId === "linode_zixi" || ingestEndpointId === "aws_zixi") {
+  if (ingestEndpointId.endsWith("_zixi")) {
     return `${ingestEndpointId}:${protocol === "srt" ? "srt" : "benchmark"}`;
   }
   return `${ingestEndpointId}:${protocol}`;
 }
 
+export function cloudHostFromIngest(ingestEndpointId: string): CloudEncodeHostId {
+  if (ingestEndpointId.startsWith("gcp_east_")) {
+    return "gcp_east";
+  }
+  if (ingestEndpointId.startsWith("linode_")) {
+    return "linode";
+  }
+  if (ingestEndpointId.startsWith("aws_")) {
+    return "aws";
+  }
+  return "gcp";
+}
+
+export function ingestPrefixForCloudHost(host: CloudEncodeHostId): string {
+  if (host === "gcp_east") {
+    return "gcp_east";
+  }
+  if (host === "linode" || host === "aws") {
+    return host;
+  }
+  return "gcp";
+}
+
+export function ingestRole(ingestEndpointId: string): "zixi" | "mediamtx" | "moq_relay" | null {
+  if (ingestEndpointId.endsWith("_moq_relay")) {
+    return "moq_relay";
+  }
+  if (ingestEndpointId.endsWith("_mediamtx")) {
+    return "mediamtx";
+  }
+  if (ingestEndpointId.endsWith("_zixi")) {
+    return "zixi";
+  }
+  return null;
+}
+
+export function remapIngestToCloudHost(
+  ingestEndpointId: string,
+  host: CloudEncodeHostId,
+): IngestEndpointId {
+  if (isCustomIngestEndpoint(ingestEndpointId)) {
+    return "custom";
+  }
+  const role = ingestRole(ingestEndpointId);
+  if (!role) {
+    return ingestEndpointId as IngestEndpointId;
+  }
+  return `${ingestPrefixForCloudHost(host)}_${role}` as IngestEndpointId;
+}
+
 /** Default host for a freshly chosen upload protocol. */
-export function defaultIngestForProtocol(protocol: string): IngestEndpointId {
+export function defaultIngestForProtocol(
+  protocol: string,
+  host: CloudEncodeHostId = "gcp",
+): IngestEndpointId {
+  const prefix = ingestPrefixForCloudHost(host);
   if (protocol === "moq") {
-    return "gcp_moq_relay";
+    return `${prefix}_moq_relay` as IngestEndpointId;
   }
-  if (protocol === "srt") {
-    return "gcp_mediamtx";
+  if (protocol === "srt" || protocol === "webrtc") {
+    return `${prefix}_mediamtx` as IngestEndpointId;
   }
-  if (protocol === "webrtc") {
-    return "gcp_mediamtx";
-  }
-  return "gcp_zixi";
+  return `${prefix}_zixi` as IngestEndpointId;
 }
 
 /** Host options that make sense for the selected upload protocol. */
 export function ingestEndpointsForProtocol(protocol: string, presets: Preset[] = []) {
   const options = presets.length > 0 ? ingestEndpointsFromPresets(presets) : INGEST_ENDPOINTS;
-  if (protocol === "moq") {
-    return options.filter(
-      (item) =>
-        item.id === "gcp_moq_relay" || item.id === "linode_moq_relay" || item.id === "custom",
-    );
+  const forProtocol =
+    protocol === "moq"
+      ? options.filter((item) => item.id.endsWith("_moq_relay") || item.id === "custom")
+      : protocol === "webrtc"
+        ? options.filter((item) => item.id.endsWith("_mediamtx") || item.id === "custom")
+        : options.filter((item) => !item.id.endsWith("_moq_relay"));
+  // Hide unconfigured / roadmap hosts (AWS, etc.) instead of greying them out.
+  return forProtocol.filter((item) => item.available || item.id === "custom");
+}
+
+function browserPublishIngestId(endpoint: {
+  protocol: string;
+  ingestEndpointId: string;
+}): IngestEndpointId {
+  if (isCustomIngestEndpoint(endpoint.ingestEndpointId) && (endpoint.protocol === "moq" || endpoint.protocol === "webrtc")) {
+    return "custom";
   }
-  return options.filter(
-    (item) => item.id !== "gcp_moq_relay" && item.id !== "linode_moq_relay",
-  );
+  if (endpoint.protocol === "webrtc") {
+    return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
+  }
+  return defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
+}
+
+/**
+ * Browser encode publishes MoQ and/or WebRTC. Convert leftover SRT/RTMP
+ * cards: first unused → MoQ, next → WebRTC on that cloud's MediaMTX.
+ */
+export function collapseOutputsForBrowserMoq<
+  T extends {
+    protocol: string;
+    ingestEndpointId: string;
+    endpointUrl?: string;
+    moqRelayUrl?: string;
+    playbackMode?: string;
+  },
+>(endpoints: T[]): T[] {
+  const result: T[] = [];
+  const seen = new Set<string>();
+  let changed = false;
+  let assignedMoq = false;
+  for (const endpoint of endpoints) {
+    let protocol = endpoint.protocol;
+    let ingest = endpoint.ingestEndpointId;
+    let playbackMode = endpoint.playbackMode;
+    if (protocol !== "moq" && protocol !== "webrtc") {
+      if (!assignedMoq) {
+        protocol = "moq";
+        ingest = defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
+        playbackMode = "moq";
+      } else {
+        protocol = "webrtc";
+        ingest = defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
+        playbackMode = "whep";
+      }
+      changed = true;
+    } else {
+      ingest = browserPublishIngestId({ protocol, ingestEndpointId: ingest });
+      if (endpoint.ingestEndpointId !== ingest) {
+        changed = true;
+      }
+      if (protocol === "moq") {
+        playbackMode = "moq";
+      } else if (!playbackMode || playbackMode === "moq") {
+        playbackMode = "whep";
+      }
+    }
+    const key = isCustomIngestEndpoint(ingest)
+      ? `${protocol}:custom:${(endpoint.moqRelayUrl || endpoint.endpointUrl || "").trim()}`
+      : `${protocol}:${ingest}`;
+    if (seen.has(key)) {
+      changed = true;
+      continue;
+    }
+    seen.add(key);
+    if (protocol === "moq") {
+      assignedMoq = true;
+    }
+    if (
+      endpoint.protocol === protocol &&
+      endpoint.ingestEndpointId === ingest &&
+      endpoint.playbackMode === playbackMode
+    ) {
+      result.push(endpoint);
+      continue;
+    }
+    changed = true;
+    result.push({
+      ...endpoint,
+      protocol,
+      ingestEndpointId: ingest,
+      playbackMode,
+    });
+  }
+  return changed ? result : endpoints;
 }
 
 export function cloudRegionForIngest(

@@ -60,6 +60,22 @@ class MoqGopLatencyTests(unittest.TestCase):
     def test_gop_cap_for_very_high_targets(self):
         self.assertEqual(moq_gop_frames_for_latency(10_000), 30)
 
+    def test_moq_player_does_not_inherit_hls_floor(self):
+        from encode_profile import DEFAULT_MOQ_TARGET_LATENCY_MS, moq_player_target_latency_ms
+
+        self.assertEqual(moq_player_target_latency_ms(2000), DEFAULT_MOQ_TARGET_LATENCY_MS)
+        self.assertEqual(moq_player_target_latency_ms(400), 400)
+        self.assertEqual(moq_player_target_latency_ms(100), 100)
+
+    def test_summary_splits_hls_and_moq_budgets(self):
+        from encode_profile import DEFAULT_MOQ_TARGET_LATENCY_MS, encode_profile_summary
+
+        summary = encode_profile_summary("720p", 2000)
+        self.assertEqual(summary["hls_segment_sec"], 2)
+        self.assertEqual(summary["gop_frames"], 60)
+        self.assertEqual(summary["moq_target_latency_ms"], DEFAULT_MOQ_TARGET_LATENCY_MS)
+        self.assertEqual(summary["moq_gop_frames"], 15)
+
     def test_build_ffmpeg_moq_cmd_uses_moq_gop(self):
         cmd = build_ffmpeg_moq_cmd(
             "clip.mp4",

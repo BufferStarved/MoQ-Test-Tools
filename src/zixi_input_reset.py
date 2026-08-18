@@ -181,7 +181,9 @@ def reset_zixi_srt_input(
     Returns True only when the new stream object is confirmed present and idle.
     Callers that need reliable HLS must treat False as fatal (retry, then fail).
     """
-    base_url = (base_url or os.environ.get("ZIXI_API_BASE", "")).rstrip("/")
+    from zixi_stats import zixi_api_base_for_endpoint
+
+    base_url = (base_url or zixi_api_base_for_endpoint()).rstrip("/")
     user = user or os.environ.get("ZIXI_API_USER", "admin")
     password = password or os.environ.get("ZIXI_API_PASSWORD", "")
 
@@ -329,6 +331,7 @@ def reset_zixi_srt_input_with_retry(
     attempts: int = 2,
     srt_latency_ms: int | None = None,
     max_bitrate_kbps: int | None = None,
+    base_url: str = "",
 ) -> bool:
     """Run delete+recreate up to `attempts` times; return True on first verified success."""
     for attempt in range(1, max(1, attempts) + 1):
@@ -341,6 +344,7 @@ def reset_zixi_srt_input_with_retry(
         if reset_zixi_srt_input(
             stream_id,
             port=port,
+            base_url=base_url,
             srt_latency_ms=srt_latency_ms,
             max_bitrate_kbps=max_bitrate_kbps,
         ):
@@ -364,7 +368,9 @@ def remove_zixi_srt_input(
     something deletes it afterwards. Best-effort — callers should not fail
     the job over a cleanup error.
     """
-    base_url = (base_url or os.environ.get("ZIXI_API_BASE", "")).rstrip("/")
+    from zixi_stats import zixi_api_base_for_endpoint
+
+    base_url = (base_url or zixi_api_base_for_endpoint()).rstrip("/")
     user = user or os.environ.get("ZIXI_API_USER", "admin")
     password = password or os.environ.get("ZIXI_API_PASSWORD", "")
 

@@ -48,6 +48,7 @@ from ingest_agent_client import IngestAgentClient, resolve_ingest_agent, vmaf_av
 from vmaf_score import libvmaf_available  # noqa: E402
 from encode_profile import (  # noqa: E402
     DEFAULT_ENCODE_LADDER_ID,
+    DEFAULT_MOQ_TARGET_LATENCY_MS,
     DEFAULT_TARGET_LATENCY_MS,
     MAX_TARGET_LATENCY_MS,
     MIN_TARGET_LATENCY_MS,
@@ -62,10 +63,12 @@ from encode_profile import (  # noqa: E402
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
     MPEGTS_VIDEO_BSF,
+    is_device_browser_source,
     is_device_webcam_source,
     with_srt_stream_id,
     zixi_srt_streamid_value,
 )
+from vod_assets import media_source_catalog, resolve_bundled_vod  # noqa: E402
 from upload_service import UploadJob  # noqa: E402
 from job_manager import (  # noqa: E402
     JobManager,
@@ -92,6 +95,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Location"],
 )
 
 
@@ -113,7 +117,8 @@ class CreateUploadRequest(BaseModel):
     comparison_id: Optional[str] = None
     stream_index: int = Field(default=0, ge=0, le=9)
     stream_label: str = ""
-    # "cloud" = encode on API host (default). "local" = laptop publisher agent.
+    # "cloud" = encode on API host. "local" = laptop ffmpeg agent.
+    # "browser" = in-page WebCodecs + WebTransport (no terminal agent).
     publisher_host: str = "cloud"
 
 
@@ -235,10 +240,14 @@ def server_time():
 def features():
     """Feature flags for the UI. Local publisher stays off unless explicitly enabled."""
     hub = publisher_hub.status()
+    from cloud_placement import encode_hosts_for_api
+
     return {
         "local_publisher": bool(hub.get("enabled")),
         "local_publisher_connected": bool(hub.get("connected")),
         "local_publisher_agents": hub.get("agents") or [],
+        "encode_hosts": encode_hosts_for_api(),
+        "media_sources": media_source_catalog(ROOT_DIR),
     }
 
 
@@ -273,14 +282,16 @@ def encode_profiles():
         "ladders": list_encode_ladders(),
         "default_ladder": DEFAULT_ENCODE_LADDER_ID,
         "default_target_latency_ms": DEFAULT_TARGET_LATENCY_MS,
+        "default_moq_target_latency_ms": DEFAULT_MOQ_TARGET_LATENCY_MS,
         "min_target_latency_ms": MIN_TARGET_LATENCY_MS,
         "srt_min_target_latency_ms": SRT_MIN_TARGET_LATENCY_MS,
         "max_target_latency_ms": MAX_TARGET_LATENCY_MS,
         "example": encode_profile_summary(DEFAULT_ENCODE_LADDER_ID, DEFAULT_TARGET_LATENCY_MS),
         "notes": {
             "latency": (
-                "Target latency is a glass-to-glass budget: encoder GOP/bufsize, "
-                "SRT/Zixi latency, MoQ player targetLatencyMs, and HLS liveSync depth."
+                "HLS/SRT/Zixi keep a 2s segmented-delivery floor. MoQ does not inherit "
+                "that floor — encode GOP and the player target stay at the MoQ budget "
+                f"({DEFAULT_MOQ_TARGET_LATENCY_MS} ms)."
             ),
             "srt_rtmp_playback": (
                 "Browsers cannot open srt:// or rtmp:// natively. Use Zixi HLS/MPEG-TS, "
@@ -624,13 +635,15 @@ def presets(protocol: Optional[str] = None):
 def create_upload(request: CreateUploadRequest):
     media_path = request.media_path.strip()
     device_webcam = is_device_webcam_source(media_path)
-    # The only live source left after removing the browser webcam bridge is
-    # the local publisher agent opening a machine camera directly.
-    is_live = device_webcam
+    device_browser = is_device_browser_source(media_path)
+    is_live = device_webcam or device_browser
 
     publisher_host = (request.publisher_host or "cloud").strip().lower()
-    if publisher_host not in {"cloud", "local"}:
-        raise HTTPException(status_code=400, detail="publisher_host must be 'cloud' or 'local'")
+    if publisher_host not in {"cloud", "local", "browser"}:
+        raise HTTPException(
+            status_code=400,
+            detail="publisher_host must be 'cloud', 'local', or 'browser'",
+        )
 
     if publisher_host == "local":
         if not local_publisher_enabled():
@@ -660,6 +673,11 @@ def create_upload(request: CreateUploadRequest):
                 ),
             )
         if not device_webcam:
+            if media_path.lower().startswith("udp://"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="UDP loopback sources are internal (webcam broker). Use device:webcam or a local file.",
+                )
             if not os.path.isabs(media_path):
                 media_path = str(ROOT_DIR / media_path)
             if not os.path.exists(media_path):
@@ -673,12 +691,37 @@ def create_upload(request: CreateUploadRequest):
             # Normalize case but keep the optional camera index from the UI
             # picker (device:webcam:N) so the agent opens the chosen device.
             media_path = lower
+    elif publisher_host == "browser":
+        if not device_browser:
+            raise HTTPException(
+                status_code=400,
+                detail="publisher_host=browser requires media_path device:browser.",
+            )
+        media_path = "device:browser"
+    elif device_browser:
+        raise HTTPException(
+            status_code=400,
+            detail="media_path device:browser requires publisher_host=browser.",
+        )
     else:
         if not is_live:
-            if not os.path.isabs(media_path):
-                media_path = str(ROOT_DIR / media_path)
-            if not os.path.exists(media_path):
-                raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
+            bundled = resolve_bundled_vod(ROOT_DIR, media_path)
+            if bundled is not None:
+                media_path = str(bundled)
+            else:
+                lower_name = Path(media_path).name.lower()
+                if lower_name in {"bbb.mp4", "bbb", "bbb.mov", "big_buck_bunny.mp4", "bigbuckbunny.mp4"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Big Buck Bunny is not on this host. Place bbb.mp4 next to dummy.mp4 "
+                            "or run scripts/fetch-bbb.sh."
+                        ),
+                    )
+                if not os.path.isabs(media_path):
+                    media_path = str(ROOT_DIR / media_path)
+                if not os.path.exists(media_path):
+                    raise HTTPException(status_code=400, detail=f"Media file not found: {media_path}")
 
     try:
         destination = resolve_destination_request(
@@ -689,11 +732,25 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Ingest VMAF stays disabled for live sources (no reference on the ingest
-    # host), and device webcams stay disabled entirely (raw video input
-    # cannot be stream-copied as a reference).
-    compute_vmaf_on_ingest = request.compute_vmaf_on_ingest and not is_live
-    compute_vmaf_encoder = request.compute_vmaf_encoder and not device_webcam
+    if publisher_host == "browser" and destination.protocol not in {"moq", "webrtc"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Browser publish supports MoQ and WebRTC (WHIP). Use a MoQ relay or MediaMTX WHIP destination.",
+        )
+
+    # Ingest VMAF: file sources upload the original media as reference.
+    # Browser publish has no file — the tab uploads the encoded bitstream
+    # during the run, so ingest scoring is allowed. Device webcams still
+    # cannot (raw capture cannot be stream-copied as a reference).
+    # Encoder VMAF stays off for both live device sources (no ffmpeg capture
+    # on the API for browser; raw webcam cannot mux a copy).
+    compute_vmaf_on_ingest = request.compute_vmaf_on_ingest and (not is_live or device_browser)
+    compute_vmaf_encoder = (
+        request.compute_vmaf_encoder
+        and not device_webcam
+        and not device_browser
+        and destination.protocol != "webrtc"
+    )
 
     if compute_vmaf_on_ingest:
         preset = PRESET_BY_ID.get(request.preset_id or destination.preset_id)
@@ -775,6 +832,70 @@ def post_playback_sample(job_id: str, request: PlaybackSampleRequest):
     accepted = job_manager.record_playback_sample(job_id, request.model_dump())
     if not accepted:
         raise HTTPException(status_code=400, detail="Invalid playback sample")
+    return {"ok": True}
+
+
+class EncodeSampleRequest(BaseModel):
+    # WHIP posts performance.now()/1000 floats; MoQ rounds. Accept both.
+    elapsed_sec: float = Field(ge=0)
+    encoded_bitrate_kbps: float = 0.0
+    fps: float = 0.0
+    encoder_send_rate_mbps: float = 0.0
+    encode_lag_ms: float = 0.0
+    transport_rtt_ms: float = 0.0
+    progress: str = "continue"
+
+
+@app.post("/api/uploads/{job_id}/encode-sample")
+def post_encode_sample(job_id: str, request: EncodeSampleRequest):
+    """Browser WASM publisher encode telemetry (no ffmpeg -progress)."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="Upload is not active")
+    if getattr(job, "publisher_host", "") != "browser":
+        raise HTTPException(status_code=400, detail="encode-sample is for browser publishers")
+    payload = request.model_dump()
+    payload["elapsed_sec"] = int(round(float(payload.get("elapsed_sec") or 0)))
+    accepted = job_manager.record_browser_encode_sample(job_id, payload)
+    if not accepted:
+        raise HTTPException(status_code=400, detail="Invalid encode sample")
+    return {"ok": True}
+
+
+@app.post("/api/uploads/{job_id}/publisher-ready")
+def post_publisher_ready(job_id: str):
+    """Browser publisher finished WebTransport + PUBLISH_NAMESPACE."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="Upload is not active")
+    if getattr(job, "publisher_host", "") != "browser":
+        raise HTTPException(status_code=400, detail="publisher-ready is for browser publishers")
+    if not job_manager.mark_browser_publisher_ready(job_id):
+        raise HTTPException(status_code=400, detail="Could not mark publisher ready")
+    return {"ok": True}
+
+
+@app.post("/api/uploads/{job_id}/vmaf-reference")
+async def post_browser_vmaf_reference(job_id: str, file: UploadFile = File(...)):
+    """In-tab encoder bitstream used as the ingest VMAF reference (not encoder VMAF)."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="Upload is not active")
+    if getattr(job, "publisher_host", "") != "browser":
+        raise HTTPException(status_code=400, detail="vmaf-reference is for browser publishers")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Empty reference payload")
+    filename = file.filename or "reference.h264"
+    error = job_manager.attach_browser_vmaf_reference(job_id, payload, filename)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
     return {"ok": True}
 
 
@@ -876,13 +997,17 @@ async def upload_events(job_id: str):
             if current.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
                 if current.status == JobStatus.FAILED:
                     break
-                if not current.compute_vmaf_on_ingest:
-                    break
-                if current.vmaf_status in {
+                encoder_pending = current.compute_vmaf_encoder and current.encoder_vmaf_status not in {
                     VmafStatus.COMPLETED.value,
                     VmafStatus.FAILED.value,
                     VmafStatus.DISABLED.value,
-                }:
+                }
+                ingest_pending = current.compute_vmaf_on_ingest and current.vmaf_status not in {
+                    VmafStatus.COMPLETED.value,
+                    VmafStatus.FAILED.value,
+                    VmafStatus.DISABLED.value,
+                }
+                if not encoder_pending and not ingest_pending:
                     break
 
             await asyncio.sleep(1)
@@ -1046,6 +1171,45 @@ def _get_playback_client() -> httpx.AsyncClient:
             timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=10.0),
         )
     return _playback_client
+
+
+def _is_webrtc_signaling_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    path = (parsed.path or "").lower()
+    return "whip" in path or "whep" in path
+
+
+@app.api_route("/api/webrtc/sdp", methods=["POST", "PATCH", "DELETE"])
+async def webrtc_sdp_proxy(request: Request, url: str):
+    """Forward WHIP/WHEP SDP so the HTTPS UI can talk to http://host:8889."""
+    if not _is_webrtc_signaling_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="URL must be an http(s) WHIP or WHEP signaling endpoint.",
+        )
+    body = await request.body()
+    content_type = request.headers.get("content-type") or "application/sdp"
+    headers = {"Content-Type": content_type, "Accept-Encoding": "identity"}
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+            upstream = await client.request(request.method, url, content=body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"WebRTC signaling failed: {exc}") from exc
+    out_headers = {"Cache-Control": "no-store", "Access-Control-Expose-Headers": "Location"}
+    location = upstream.headers.get("location")
+    if location:
+        absolute = urljoin(url, location)
+        out_headers["Location"] = f"/api/webrtc/sdp?url={quote(absolute, safe='')}"
+    media_type = upstream.headers.get("content-type") or "application/sdp"
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=out_headers,
+        media_type=media_type,
+    )
 
 
 @app.get("/api/playback/fetch")
@@ -1371,15 +1535,7 @@ def _probe_segment_decodable(segment: bytes) -> dict:
     return {"decodable": True, "video": stdout}
 
 
-# SHA-256 hashes of relay TLS leaf certs (hex, no colons).
-# moqx serves QUIC/WebTransport only on UDP :4433 — browsers cannot fetch
-# https://relay:4433/fingerprint over TCP. Serve hashes from our API instead.
-MOQ_RELAY_CERT_SHA256: dict[str, str] = {
-    # ECDSA self-signed cert (14-day) for WebTransport browser pinning — see
-    # infra/moqx/scripts/configure-webtransport-cert.sh
-    # Rotated 2026-07-31 (14-day WebTransport ECDSA pin; renew before Aug 14)
-    "34-28-164-90.sslip.io": "2f970ef055830e421d1060f53ab9d1388b3ca8196a44aab1c723438801facf7d",
-}
+from moq_relay_certs import fingerprint_for_host
 
 
 @app.get("/api/moq/probe")
@@ -1456,7 +1612,7 @@ def moq_fingerprint(relay: str):
     if not host:
         raise HTTPException(status_code=400, detail="Invalid relay URL")
 
-    fingerprint = MOQ_RELAY_CERT_SHA256.get(host)
+    fingerprint = fingerprint_for_host(host)
     if not fingerprint:
         raise HTTPException(
             status_code=404,

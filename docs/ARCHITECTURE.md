@@ -23,9 +23,11 @@ file / webcam  →  ffmpeg on moq-web VM  →  Zixi (SRT/RTMP → HLS :7777)  �
                                       Ingest agent :8090
                                       (server-side VMAF / CMAF)
 
-Demo hosts are GCP us-central1 today; a **Linode mirror stack** activates when
-`LINODE_STACK_ENABLED=1` and `LINODE_ZIXI_IP` / `LINODE_WEB_IP` / `LINODE_RELAY_IP`
-are set on the web VM (see `infra/linode/LINODE-STACK-RUNBOOK.md`). AWS Zixi presets remain planned.
+Demo hosts are GCP us-central1 today. Extra stacks activate on the same UI when
+their env is set on the orchestrator: **Linode** (`LINODE_STACK_ENABLED=1` + IPs,
+see `infra/linode/LINODE-STACK-RUNBOOK.md`) and **GCP us-east1**
+(`GCP_EAST_STACK_ENABLED=1` + IPs, see `infra/gcp/GCP-MULTIREGION-RUNBOOK.md`).
+AWS Zixi presets remain planned.
 ```
 
 Typical GCP layout (us-central1):

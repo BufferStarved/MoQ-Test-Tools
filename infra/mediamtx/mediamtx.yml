@@ -55,9 +55,13 @@ webrtcAddress: :8889
 webrtcEncryption: no
 webrtcAllowOrigin: "*"
 webrtcLocalUDPAddress: :8189
-# Public IP / hostname for ICE — install script rewrites this.
+# Only advertise the public IP. webrtcIPsFromInterfaces would add
+# 127.0.0.1 / RFC1918 NIC addresses; ffmpeg's WHIP muxer picks those,
+# ICE fails in the same second, and the UI shows "ffmpeg exited with
+# code 69: Conversion failed!" (reproduced laptop→us-east1 2026-08-18).
+# Browser WHIP still works because Chrome gathers srflx/prflx.
 webrtcAdditionalHosts: ["34.9.217.178"]
-webrtcIPsFromInterfaces: yes
+webrtcIPsFromInterfaces: no
 
 srt: yes
 srtAddress: :8890

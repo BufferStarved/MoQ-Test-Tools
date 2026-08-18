@@ -18,6 +18,12 @@ MOQ_RECORDER_BIN = _env(
 )
 MOQ_RELAY_URL = _env("MOQ_RELAY_URL", "https://127.0.0.1:4433/moq-relay")
 MOQ_RELAY_CERT_SHA256 = _env("MOQ_RELAY_CERT_SHA256", "")
+# Drop a catch-all pin so dockerized openmoq-recorder can use its hostname
+# map (and so recording_service can inject the per-relay hash). A stale
+# central pin here made east/Linode VMAF fail with "Opening handshake failed".
+if MOQ_RELAY_CERT_SHA256:
+    os.environ.pop("MOQ_RELAY_CERT_SHA256", None)
+    MOQ_RELAY_CERT_SHA256 = ""
 
 if not API_TOKEN:
     API_TOKEN = secrets.token_urlsafe(32)

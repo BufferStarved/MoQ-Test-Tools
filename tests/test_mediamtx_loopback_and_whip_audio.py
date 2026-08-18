@@ -17,7 +17,7 @@ from moq_publish import (  # noqa: E402
     mediamtx_loopback_enabled,
     mediamtx_loopback_publish_url,
 )
-from upload_service import UploadJob  # noqa: E402
+from upload_service import UploadJob, UploadService  # noqa: E402
 from zixi_hls_health import mediamtx_hls_probe_url  # noqa: E402
 
 
@@ -56,6 +56,42 @@ class MediaMtxProbeUrlTests(unittest.TestCase):
     def test_probe_uses_loopback(self) -> None:
         self.assertEqual(
             mediamtx_hls_probe_url("benchmark"),
+            "http://127.0.0.1:8888/benchmark/index.m3u8",
+        )
+
+    def test_remote_mediamtx_preview_uses_public_hls(self) -> None:
+        service = UploadService()
+        job = UploadJob(
+            media_path="/tmp/x.mp4",
+            destination=DestinationProfile(
+                protocol="srt",
+                url="srt://66.175.213.81:8890?mode=caller&streamid=publish:benchmark",
+                preset_id="moq_mediamtx_linode_srt",
+                ingest_provider="linode_mediamtx",
+            ),
+            duration_sec=5,
+        )
+        self.assertTrue(service._is_remote_mediamtx_publish(job))
+        self.assertEqual(
+            service._managed_hls_manifest_url(job),
+            "http://66.175.213.81:8888/benchmark/index.m3u8",
+        )
+
+    def test_colocated_mediamtx_preview_uses_loopback(self) -> None:
+        service = UploadService()
+        job = UploadJob(
+            media_path="/tmp/x.mp4",
+            destination=DestinationProfile(
+                protocol="srt",
+                url="srt://34.9.217.178:8890?mode=caller&streamid=publish:benchmark",
+                preset_id="moq_mediamtx_gcp_srt",
+                ingest_provider="gcp_mediamtx",
+            ),
+            duration_sec=5,
+        )
+        self.assertFalse(service._is_remote_mediamtx_publish(job))
+        self.assertEqual(
+            service._managed_hls_manifest_url(job),
             "http://127.0.0.1:8888/benchmark/index.m3u8",
         )
 

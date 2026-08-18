@@ -1,11 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { downloadCombinedCsv, downloadCombinedJsonFromSummaries } from "./combinedDownload";
 import { buildComparisonVerdict } from "./comparisonVerdict";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
 import { PipelineConfigDetails } from "./PipelineConfigDetails";
-import { buildSessionPipelineSections } from "./pipelineConfig";
+import { buildSessionPipelineSections, type PipelineDiagramSpec } from "./pipelineConfig";
 import { protocolColor } from "./protocolTheme";
 import type { ResultSummary } from "./types";
 
@@ -83,19 +83,61 @@ function ScoreCell({
 }
 
 export function SessionMetrics({ streams, labels, fromHistory = false }: SessionMetricsProps) {
+  const [outputTab, setOutputTab] = useState<"all" | number>("all");
+  const displayIndex = typeof outputTab === "number" ? outputTab : -1;
+  const displayStreams =
+    displayIndex >= 0 && streams[displayIndex] ? [streams[displayIndex]] : streams;
+  const displayLabels =
+    displayIndex >= 0
+      ? [streamLabel(streams[displayIndex], displayIndex, labels)]
+      : streams.map((result, index) => streamLabel(result, index, labels));
+
   const chartLegs = useMemo(() => {
-    const saved = streams.map((result, index) => {
-      const stream = resultToSavedStream(result, index);
+    const saved = displayStreams.map((result, index) => {
+      const stream = resultToSavedStream(result, displayIndex >= 0 ? displayIndex : index);
       return {
         ...stream,
-        label: streamLabel(result, index, labels),
+        label: displayLabels[index],
       };
     });
     return savedStreamsToLegs(saved);
-  }, [streams, labels]);
+  }, [displayIndex, displayLabels, displayStreams]);
 
   const verdict = useMemo(() => buildComparisonVerdict(streams, labels), [streams, labels]);
-  const pipelineSections = useMemo(() => buildSessionPipelineSections(streams), [streams]);
+  const pipelineSections = useMemo(
+    () => buildSessionPipelineSections(displayIndex >= 0 ? [streams[displayIndex]] : streams),
+    [displayIndex, streams],
+  );
+  const pipelineDiagram = useMemo((): PipelineDiagramSpec | null => {
+    if (streams.length === 0) {
+      return null;
+    }
+    const extra = streams[0].summary_extra;
+    return {
+      sourceTitle: fromHistory ? "Saved session" : "This comparison",
+      sourceDetail: `${streams.length} output${streams.length === 1 ? "" : "s"} · same encode`,
+      encodeTitle: extra?.encode_ladder_label || extra?.encode_ladder || "Shared encoder",
+      encodeDetail:
+        extra?.target_latency_ms != null
+          ? `HLS/SRT ${extra.target_latency_ms} ms · MoQ uses its own budget`
+          : "Shared encode profile",
+      streams: streams.map((result, index) => ({
+        id: result.filename,
+        label: `Output ${index + 1}`,
+        protocol: result.protocol,
+        publish: result.protocol.toLowerCase() === "moq" ? "MoQ" : result.protocol.toUpperCase(),
+        ingest: streamLabel(result, index, labels),
+        packager:
+          result.protocol.toLowerCase() === "moq"
+            ? "Objects"
+            : result.summary_extra?.hls_segment_sec
+              ? `HLS ${result.summary_extra.hls_segment_sec}s`
+              : "Packager",
+        player: result.protocol.toLowerCase() === "moq" ? "MoQ" : "HLS",
+        accentColor: protocolColor(result.protocol),
+      })),
+    };
+  }, [fromHistory, labels, streams]);
 
   if (streams.length === 0) {
     return (
@@ -180,9 +222,36 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         </div>
       </div>
 
+      {streams.length > 1 && (
+        <div className="results-output-tabs" role="tablist" aria-label="Comparison outputs">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={outputTab === "all"}
+            className={outputTab === "all" ? "active" : ""}
+            onClick={() => setOutputTab("all")}
+          >
+            Comparison
+          </button>
+          {streams.map((result, index) => (
+            <button
+              key={result.filename}
+              type="button"
+              role="tab"
+              aria-selected={outputTab === index}
+              className={outputTab === index ? "active" : ""}
+              onClick={() => setOutputTab(index)}
+            >
+              {streamLabel(result, index, labels)}
+            </button>
+          ))}
+        </div>
+      )}
+
       {pipelineSections.length > 0 && (
         <PipelineConfigDetails
           sections={pipelineSections}
+          diagram={pipelineDiagram}
           buttonLabel="Session pipeline config"
           className="session-pipeline-config"
         />
@@ -201,12 +270,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       <section className="scorecard-section">
         <h4>Latency & join</h4>
-        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${streams.length}, minmax(0, 1fr))` }}>
-          {streams.map((result, index) => {
+        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
+          {displayStreams.map((result, index) => {
             const avg = result.averages;
             return (
               <div key={`lat-${result.filename}`} className="scorecard-column">
-                <p className="scorecard-column-title">{streamLabel(result, index, labels)}</p>
+                <p className="scorecard-column-title">{displayLabels[index]}</p>
                 <ScoreCell
                   metricKey="e2e_latency_ms"
                   label="E2E avg"
@@ -245,12 +314,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       <section className="scorecard-section">
         <h4>Throughput</h4>
-        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${streams.length}, minmax(0, 1fr))` }}>
-          {streams.map((result, index) => {
+        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
+          {displayStreams.map((result, index) => {
             const tp = result.throughput;
             return (
               <div key={`tp-${result.filename}`} className="scorecard-column">
-                <p className="scorecard-column-title">{streamLabel(result, index, labels)}</p>
+                <p className="scorecard-column-title">{displayLabels[index]}</p>
                 <ScoreCell
                   metricKey="total_bytes_sent"
                   label="Bytes sent"
@@ -287,14 +356,14 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       <section className="scorecard-section">
         <h4>Video quality</h4>
-        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${streams.length}, minmax(0, 1fr))` }}>
-          {streams.map((result, index) => {
+        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
+          {displayStreams.map((result, index) => {
             const encoder = result.quality?.encoder;
             const ingest = result.quality?.ingest;
             const avg = result.averages;
             return (
               <div key={`q-${result.filename}`} className="scorecard-column">
-                <p className="scorecard-column-title">{streamLabel(result, index, labels)}</p>
+                <p className="scorecard-column-title">{displayLabels[index]}</p>
                 <ScoreCell
                   metricKey="vmaf_score"
                   label="VMAF (encoder)"
@@ -303,7 +372,15 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                 <ScoreCell
                   metricKey="vmaf_score"
                   label="VMAF (ingest)"
-                  value={formatNum(ingest?.vmaf_score ?? avg.vmaf_score ?? null, 1)}
+                  value={
+                    (result.protocol || "").toLowerCase() === "webrtc"
+                      ? "n/a"
+                      : ingest?.status === "failed"
+                        ? "failed"
+                        : ingest?.status === "pending"
+                          ? "pending"
+                          : formatNum(ingest?.vmaf_score ?? avg.vmaf_score ?? null, 1)
+                  }
                 />
                 <ScoreCell
                   metricKey="psnr_db"
@@ -341,10 +418,15 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                     Ingest quality: {ingest.error ?? ingest.status}
                   </p>
                 )}
-                {!encoder && !ingest && (
+                {!encoder && !ingest && (result.protocol || "").toLowerCase() === "webrtc" && (
                   <p className="hint">
-                    No VMAF/PSNR/SSIM in this session — enable the checkbox with the color-bar
-                    asset (not webcam) before Start.
+                    WHIP has no encoder capture tee and no ingest recorder. Quality scores do not apply.
+                  </p>
+                )}
+                {!encoder && !ingest && (result.protocol || "").toLowerCase() !== "webrtc" && (
+                  <p className="hint">
+                    No quality scores for this output. Enable Calculate quality — ingest scoring needs Zixi or a MoQ
+                    recorder (not MediaMTX).
                   </p>
                 )}
               </div>
@@ -355,13 +437,13 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       <section className="scorecard-section">
         <h4>Media health (end state)</h4>
-        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${streams.length}, minmax(0, 1fr))` }}>
-          {streams.map((result, index) => {
+        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
+          {displayStreams.map((result, index) => {
             const avg = result.averages;
             const isMoq = result.protocol === "moq";
             return (
               <div key={`mh-${result.filename}`} className="scorecard-column">
-                <p className="scorecard-column-title">{streamLabel(result, index, labels)}</p>
+                <p className="scorecard-column-title">{displayLabels[index]}</p>
                 {!isMoq && (
                   <ScoreCell
                     metricKey="ts_continuity_counter_errors"
@@ -406,12 +488,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       <section className="scorecard-section">
         <h4>Encode health</h4>
-        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${streams.length}, minmax(0, 1fr))` }}>
-          {streams.map((result, index) => {
+        <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
+          {displayStreams.map((result, index) => {
             const avg = result.averages;
             return (
               <div key={`enc-${result.filename}`} className="scorecard-column">
-                <p className="scorecard-column-title">{streamLabel(result, index, labels)}</p>
+                <p className="scorecard-column-title">{displayLabels[index]}</p>
                 <ScoreCell
                   metricKey="encode_lag_ms"
                   label="Avg encode lag"
@@ -424,7 +506,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                 />
                 <ScoreCell
                   metricKey="speed"
-                  label="Avg speed"
+                  label="Avg encode speed"
                   value={avg.speed != null ? `${avg.speed.toFixed(2)}x` : "—"}
                 />
                 <ScoreCell

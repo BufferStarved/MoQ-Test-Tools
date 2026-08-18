@@ -20,8 +20,7 @@ rm -f "$ROOT/.dockerignore"
 install -d "$RECORDER_DIR/bin"
 install -m 0755 "$RECORDER_DIR/bin/openmoq-fmp4-record-docker" "$BIN"
 
-if ! MOQ_RELAY_CERT_SHA256="${MOQ_RELAY_CERT_SHA256:-7115b12274dcf092c3e77d763111f0a2088a0f2029efc8e1f223a9584b1f5b54}" \
-  "$BIN" --probe; then
+if ! "$BIN" --probe; then
   echo "openmoq-recorder docker probe failed" >&2
   exit 1
 fi

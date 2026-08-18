@@ -128,6 +128,30 @@ def snapshot_from_zixi_payload(data: Dict[str, Any]) -> ZixiStatsSnapshot:
     )
 
 
+def zixi_api_base_for_endpoint(endpoint_url: str = "") -> str:
+    """Zixi UI/API origin for a publish URL.
+
+    Multi-region stacks share one admin password but each Broadcaster has its
+    own :4444. Prefer the destination host so east/Linode jobs do not hit
+    us-central1 just because ``ZIXI_API_BASE`` is set on the orchestrator.
+    """
+    host = urlparse(endpoint_url or "").hostname
+    if host:
+        return f"http://{host}:4444"
+    return os.environ.get("ZIXI_API_BASE", "").rstrip("/")
+
+
+def _managed_zixi_hosts() -> set[str]:
+    hosts = {
+        "35.222.33.58",
+        os.environ.get("GCP_ZIXI_IP", "").strip(),
+        os.environ.get("GCP_EAST_ZIXI_IP", "").strip(),
+        os.environ.get("LINODE_ZIXI_IP", "").strip(),
+    }
+    hosts.discard("")
+    return hosts
+
+
 class ZixiStatsPoller:
     """
     Optional receiver-side stats from Zixi Broadcaster REST API.
@@ -147,7 +171,7 @@ class ZixiStatsPoller:
         enabled: Optional[bool] = None,
     ):
         self._enabled = False
-        self._base_url = os.environ.get("ZIXI_API_BASE", "").rstrip("/")
+        self._base_url = zixi_api_base_for_endpoint(endpoint_url)
         self._user = os.environ.get("ZIXI_API_USER", "admin")
         self._password = os.environ.get("ZIXI_API_PASSWORD", "")
         env_input = os.environ.get("ZIXI_INPUT_ID", "").strip()
@@ -161,11 +185,6 @@ class ZixiStatsPoller:
             self._input_id = "SRT Test"
         self._latest = ZixiStatsSnapshot()
 
-        if not self._base_url:
-            host = urlparse(endpoint_url).hostname
-            if host:
-                self._base_url = f"http://{host}:4444"
-
         if enabled is False:
             self._enabled = False
         elif self._password:
@@ -174,7 +193,11 @@ class ZixiStatsPoller:
     @staticmethod
     def _looks_like_gcp_zixi_srt(endpoint_url: str) -> bool:
         parsed = urlparse(endpoint_url)
-        return parsed.scheme == "srt" and parsed.hostname == "35.222.33.58"
+        if parsed.scheme != "srt" or not parsed.hostname:
+            return False
+        if parsed.hostname in _managed_zixi_hosts():
+            return True
+        return (parsed.port or 0) == 10080
 
     @staticmethod
     def _stream_id_from_url(endpoint_url: str) -> str:

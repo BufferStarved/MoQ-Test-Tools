@@ -1,30 +1,13 @@
 import { Suspense, lazy, useEffect, useMemo } from "react";
 import type { PlaybackMetricsSnapshot } from "./api";
 import {
-  defaultPlaybackModeForProtocol,
-  defaultWhepPlaybackUrl,
   isPlaybackModeCompatible,
-  playbackModeLabelForSelection,
-  playbackModesForSelection,
   resolvePlaybackTarget,
+  resolvedPlaybackMode,
 } from "./playbackUrls";
-
-function parseHostSafe(endpointUrl: string): string | null {
-  try {
-    if (endpointUrl.startsWith("srt://") || endpointUrl.startsWith("rtmp://")) {
-      const withoutScheme = endpointUrl.split("://")[1] ?? "";
-      const hostPart = withoutScheme.split(/[/?]/)[0] ?? "";
-      return hostPart.split(":")[0] || null;
-    }
-    return new URL(endpointUrl).hostname || null;
-  } catch {
-    return null;
-  }
-}
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
-import { IconMonitor } from "./Icons";
 
 const HlsPlayer = lazy(() => import("./players/HlsPlayer"));
 const DashPlayer = lazy(() => import("./players/DashPlayer"));
@@ -72,6 +55,10 @@ interface StreamPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (from -progress samples). */
   encoderLagMs?: number;
+  /** MOQT draft the in-page publisher negotiated; ffmpeg/openmoq legs stay 16. */
+  moqDraftVersion?: 16 | 18;
+  /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
+  moqMediaPackaging?: "cmaf" | "loc";
 }
 
 function PlayerFallback() {
@@ -104,18 +91,17 @@ export function StreamPlayer({
   encodeLadder,
   hlsLiveSyncCount = 2,
   hlsLiveSyncDurationSec = 4,
-  controlsLocked = false,
+  controlsLocked: _controlsLocked = false,
   onPlaybackModeChange,
-  onWhepPlaybackUrlChange,
+  onWhepPlaybackUrlChange: _onWhepPlaybackUrlChange,
   compactHeader = false,
   sourceHasAudio = true,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  moqDraftVersion = 16,
+  moqMediaPackaging = "cmaf",
 }: StreamPlayerProps) {
-  const resolvedMode =
-    playbackMode && isPlaybackModeCompatible(playbackMode, protocol, ingestEndpointId)
-      ? playbackMode
-      : defaultPlaybackModeForProtocol(protocol, ingestEndpointId);
+  const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);
 
   useEffect(() => {
     if (!onPlaybackModeChange) {
@@ -156,12 +142,6 @@ export function StreamPlayer({
     ],
   );
 
-  const showWhepField = resolvedMode === "whep";
-  const whepPlaceholder = defaultWhepPlaybackUrl(
-    parseHostSafe(endpointUrl) ?? "34.9.217.178",
-    "benchmark",
-  );
-  const playerModes = playbackModesForSelection(protocol, ingestEndpointId);
   const hlsLowLatency =
     target.note === "lowLatencyMode" || resolvedMode === "ll-hls";
   const dashLowLatency =
@@ -182,50 +162,13 @@ export function StreamPlayer({
           <span className="pill">{target.label}</span>
         </div>
       )}
-      {compactHeader && (
-        <div className="stream-player-engine">
-          <span className="pill">{target.label}</span>
-        </div>
-      )}
-
-      {onPlaybackModeChange && (
-        <div className="player-playback-controls">
-          <label>
-            <span className="field-label-with-icon">
-              <IconMonitor size={14} /> Player
-            </span>
-            <select
-              value={resolvedMode}
-              onChange={(e) => onPlaybackModeChange(e.target.value as PlaybackMode)}
-              disabled={controlsLocked || playerModes.length <= 1}
-            >
-              {playerModes.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {playbackModeLabelForSelection(item.id, protocol, ingestEndpointId)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {showWhepField && onWhepPlaybackUrlChange && (
-            <label>
-              WHEP Playback URL
-              <input
-                type="url"
-                value={whepPlaybackUrl}
-                onChange={(e) => onWhepPlaybackUrlChange(e.target.value)}
-                placeholder={whepPlaceholder}
-                disabled={controlsLocked}
-              />
-            </label>
-          )}
-        </div>
-      )}
-
       {target.url && target.engine !== "unsupported" && (
-        <p className="hint player-url">
-          <span className="url-field-label">Playback URL</span>
-          <code>{target.url}</code>
-        </p>
+        <details className="output-advanced">
+          <summary>Playback URL</summary>
+          <p className="hint player-url">
+            <code>{target.url}</code>
+          </p>
+        </details>
       )}
 
       <PlayerErrorBoundary engine={target.engine}>
@@ -251,6 +194,13 @@ export function StreamPlayer({
               lowLatencyMode={hlsLowLatency}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              onUnrecoverableHls={
+                resolvedMode === "hls" &&
+                onPlaybackModeChange &&
+                isPlaybackModeCompatible("mpegts", protocol, ingestEndpointId)
+                  ? () => onPlaybackModeChange("mpegts")
+                  : undefined
+              }
             />
           )}
           {target.engine === "dash" && (
@@ -298,7 +248,7 @@ export function StreamPlayer({
           )}
           {target.engine === "moq" && moqReadyNamespace && (
             <MoqPlayer
-              key={`${target.url}:${moqReadyNamespace}`}
+              key={`${target.url}:${moqReadyNamespace}:d${moqDraftVersion}:${moqMediaPackaging}`}
               relayUrl={target.url}
               namespace={moqReadyNamespace}
               fingerprintUrl={target.moqFingerprintUrl}
@@ -315,6 +265,8 @@ export function StreamPlayer({
               sourceHasAudio={sourceHasAudio}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              draftVersion={moqDraftVersion}
+              mediaPackaging={moqMediaPackaging}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

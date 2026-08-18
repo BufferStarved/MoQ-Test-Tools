@@ -1,10 +1,8 @@
 """Shared encode ladder + target-latency mapping for benchmark uploads.
 
-Target latency is treated as a glass-to-glass *budget* (ms). It scales:
-  - encoder GOP / bufsize / zerolatency tune
-  - SRT caller `latency` (µs) and Zixi SRT input latency
-  - MoQ player `targetLatencyMs`
-  - HLS segment duration (Zixi hls_chunk_time, min 2s) and player live buffer
+Target latency is a glass-to-glass *budget* (ms), but it is **not** shared
+across protocols. HLS/SRT/Zixi need a ~2s floor because packagers cut
+segments on IDRs; MoQ has no playlist and must not inherit that floor.
 """
 
 from __future__ import annotations
@@ -16,7 +14,11 @@ from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 MIN_TARGET_LATENCY_MS = 100
 MAX_TARGET_LATENCY_MS = 10_000
-DEFAULT_TARGET_LATENCY_MS = 4000
+# Lowest stable budget for segmented delivery (HLS / SRT / Zixi Fast HLS).
+# SRT + Zixi Fast HLS starve below 2s; HLS chunks floor at 2s.
+DEFAULT_TARGET_LATENCY_MS = 2000
+# MoQ has no segments. Player hold + GOP use this — never the HLS 2s floor.
+DEFAULT_MOQ_TARGET_LATENCY_MS = 400
 # SRT (libsrt + Zixi Fast HLS / MediaMTX LL-HLS) needs receiver buffer headroom.
 # Targets below 2s starve retransmits and make playback look "unusable".
 SRT_MIN_TARGET_LATENCY_MS = 2000
@@ -128,11 +130,16 @@ def hls_segment_sec(target_latency_ms: int) -> int:
 
     Minimum 2s (1s packs stutter). Grows when the latency budget allows a
     ~2-segment player buffer at the target (segment ≈ target/2).
+
+    Floor — not round. Python's banker's ``round(2.5) == 2`` but JS
+    ``Math.round(2.5) == 3``, which desynced encoder GOP from the player's
+    liveSync at the common 5s target. Floor keeps 2s chunks through 5999ms,
+    matching Zixi's default ``hls_chunk_time``.
     """
     ms = clamp_target_latency_ms(target_latency_ms)
     return max(
         HLS_SEGMENT_SEC_MIN,
-        min(HLS_SEGMENT_SEC_MAX, int(round(ms / 2000.0)) or HLS_SEGMENT_SEC_MIN),
+        min(HLS_SEGMENT_SEC_MAX, ms // 2000 or HLS_SEGMENT_SEC_MIN),
     )
 
 
@@ -211,8 +218,14 @@ def hls_live_sync_count(target_latency_ms: int) -> int:
     return max(1, min(5, int(round(duration / segment)) or 1))
 
 
-def moq_player_target_latency_ms(target_latency_ms: int) -> int:
-    return clamp_target_latency_ms(target_latency_ms)
+def moq_player_target_latency_ms(target_latency_ms: int | float | None) -> int:
+    """MoQ player hold budget. Does not inherit the HLS/SRT 2s segment floor."""
+    ms = clamp_target_latency_ms(
+        target_latency_ms if target_latency_ms is not None else DEFAULT_MOQ_TARGET_LATENCY_MS
+    )
+    if ms >= SRT_MIN_TARGET_LATENCY_MS:
+        return DEFAULT_MOQ_TARGET_LATENCY_MS
+    return ms
 
 
 def with_srt_latency(url: str, target_latency_ms: int) -> str:
@@ -345,6 +358,7 @@ def encode_profile_summary(
 ) -> dict:
     ladder = resolve_encode_ladder(ladder_id)
     latency_ms = clamp_target_latency_ms(target_latency_ms)
+    moq_ms = moq_player_target_latency_ms(latency_ms)
     return {
         "encode_ladder": ladder.id,
         "encode_ladder_label": ladder.label,
@@ -358,7 +372,8 @@ def encode_profile_summary(
         "hls_segment_sec": hls_segment_sec(latency_ms),
         "hls_live_sync_duration_sec": hls_live_sync_duration_sec(latency_ms),
         "hls_live_sync_count": hls_live_sync_count(latency_ms),
-        "moq_target_latency_ms": moq_player_target_latency_ms(latency_ms),
+        "moq_target_latency_ms": moq_ms,
+        "moq_gop_frames": moq_gop_frames_for_latency(moq_ms),
     }
 
 
@@ -375,6 +390,7 @@ def ensure_known_ladder(ladder_id: str) -> str:
 __all__ = [
     "ASSUMED_FPS",
     "DEFAULT_ENCODE_LADDER_ID",
+    "DEFAULT_MOQ_TARGET_LATENCY_MS",
     "DEFAULT_TARGET_LATENCY_MS",
     "ENCODE_LADDERS",
     "EncodeLadder",

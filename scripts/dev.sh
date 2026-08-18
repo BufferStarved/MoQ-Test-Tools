@@ -34,12 +34,8 @@ fi
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/web/api"
 
-if [[ -f "$ROOT_DIR/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$ROOT_DIR/.env"
-  set +a
-fi
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/load-dev-env.sh"
 
 # Local publisher agent (laptop ffmpeg) — enabled for dev only.
 # Local publisher: run ffmpeg on a laptop agent (UI: Publisher → This machine).

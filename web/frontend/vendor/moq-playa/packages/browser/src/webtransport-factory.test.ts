@@ -158,34 +158,33 @@ describe('createWebTransport protocol fallback', () => {
     expect(transport.protocol).toBe('moqt-16'); // negotiated value passes through
   });
 
-  it('retries once without protocols when the offering attempt fails', async () => {
+  it('does not retry without protocols when the offering attempt fails', async () => {
     stubWebTransport({ rejectWithProtocols: true });
-    const transport = await createWebTransport({ draftVersion: 16 })('https://r:4433');
+    await expect(createWebTransport({ draftVersion: 16 })('https://r:4433'))
+      .rejects.toThrow(/protocols=\[moqt-16\]/);
 
-    expect(constructed).toHaveLength(2);
+    expect(constructed).toHaveLength(1);
     expect(constructed[0]!.options.protocols).toEqual(['moqt-16']);
-    expect(constructed[1]!.options.protocols).toBeUndefined();
-    // No negotiated protocol on the fallback path — the adapter
-    // negotiates in-band via CLIENT_SETUP.
-    expect(transport.protocol).toBeUndefined();
   });
 
-  it('preserves the cert hash on the fallback attempt', async () => {
+  it('does not dial a protocol-less fallback for a cert-pinned session', async () => {
     stubWebTransport({ rejectWithProtocols: true });
     const hash = new Uint8Array([0xAB]).buffer;
-    await createWebTransport({ draftVersion: 16, certHash: hash })('https://r:4433');
+    await expect(createWebTransport({ draftVersion: 16, certHash: hash })('https://r:4433'))
+      .rejects.toThrow(/WebTransport connection failed/);
 
-    expect(constructed[1]!.options.serverCertificateHashes).toEqual([{
+    expect(constructed).toHaveLength(1);
+    expect(constructed[0]!.options.serverCertificateHashes).toEqual([{
       algorithm: 'sha-256',
       value: hash,
     }]);
   });
 
-  it('throws an error mentioning both attempts when the bare retry also fails', async () => {
+  it('throws without a protocol-less retry when the offering attempt fails', async () => {
     stubWebTransport({ rejectAlways: true });
     await expect(createWebTransport({ draftVersion: 16 })('https://r:4433'))
-      .rejects.toThrow(/protocols=\[moqt-16\][\s\S]*retry without protocols/);
-    expect(constructed).toHaveLength(2);
+      .rejects.toThrow(/protocols=\[moqt-16\]/);
+    expect(constructed).toHaveLength(1);
   });
 
   it('does not retry when no protocols were offered (draft-14 path)', async () => {
@@ -196,8 +195,9 @@ describe('createWebTransport protocol fallback', () => {
   });
 
   it('parks closed on every constructed transport (no unhandled rejection spam)', async () => {
-    stubWebTransport({ rejectWithProtocols: true });
-    await createWebTransport({ draftVersion: 16 })('https://r:4433');
+    stubWebTransport({ rejectAlways: true });
+    await expect(createWebTransport({ draftVersion: 16 })('https://r:4433'))
+      .rejects.toThrow(/WebTransport connection failed/);
     for (const rec of constructed) {
       expect(rec.closedCatches).toBeGreaterThan(0);
     }

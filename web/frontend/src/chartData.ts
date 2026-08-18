@@ -1,5 +1,5 @@
 import type { ResultSummary, UploadSample } from "./types";
-import { protocolColor } from "./protocolTheme";
+import { assignStreamColors, STREAM_COLORS } from "./protocolTheme";
 
 export interface ChartPoint {
   second: number;
@@ -31,7 +31,7 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "net_jitter_ms", label: "Client network jitter", color: "#fb923c", unit: "ms" },
       { key: "encode_lag_ms", label: "Encode lag", color: "#fbbf24", unit: "ms" },
       { key: "fps_stability", label: "FPS stability", color: "#a3e635", unit: "cv" },
-      { key: "speed", label: "Speed", color: "#38bdf8", unit: "x" },
+      { key: "speed", label: "Encode speed", color: "#38bdf8", unit: "x" },
       { key: "vmaf_score_encoder", label: "VMAF", color: "#34d399", unit: "score" },
       { key: "psnr_db_encoder", label: "PSNR", color: "#2dd4bf", unit: "dB" },
       { key: "ssim_encoder", label: "SSIM", color: "#22d3ee", unit: "score" },
@@ -620,6 +620,7 @@ export function savedStreamsToLegs(streams: SavedStreamData[]): ComparisonLegDat
     id: stream.id,
     label: stream.label,
     protocol: stream.protocol,
+    endpoint: stream.result.endpoint,
     samples: [],
     result: stream.result,
     vmafScore: stream.vmafScore,
@@ -634,7 +635,7 @@ export function savedStreamsToLegs(streams: SavedStreamData[]): ComparisonLegDat
   }));
 }
 
-export const LEG_COLORS = ["#22d3ee", "#fb923c", "#a78bfa", "#4ade80", "#f472b6"];
+export const LEG_COLORS = STREAM_COLORS;
 
 const COMPARISON_METRIC_KEYS = [
   "encoded_bitrate_kbps",
@@ -685,6 +686,9 @@ export interface ComparisonLegData {
   id: string;
   label: string;
   protocol: string;
+  ingestEndpointId?: string;
+  playbackMode?: string;
+  endpoint?: string;
   samples: UploadSample[];
   /** When samples are empty (saved session), charts are built from this summary. */
   result?: ResultSummary;
@@ -697,6 +701,8 @@ export interface ComparisonLegData {
   vmafScoreIngest?: number | null;
   psnrDbIngest?: number | null;
   ssimIngest?: number | null;
+  encoderQualityPending?: boolean;
+  ingestQualityPending?: boolean;
 }
 
 export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
@@ -769,10 +775,18 @@ export function comparisonSeries(
   metric: string,
   unit?: string,
 ): ChartSeries[] {
+  const colors = assignStreamColors(
+    legs.map((leg) => ({
+      protocol: leg.protocol,
+      ingestEndpointId: leg.ingestEndpointId,
+      playbackMode: leg.playbackMode,
+      endpoint: leg.endpoint,
+    })),
+  );
   return legs.map((leg, index) => ({
     key: `${metric}_${index}`,
     label: leg.label,
-    color: protocolColor(leg.protocol, index),
+    color: colors[index],
     unit,
   }));
 }

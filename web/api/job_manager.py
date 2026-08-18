@@ -13,12 +13,16 @@ from remote_vmaf import (
     compute_media_health_via_agent,
     compute_vmaf_via_agent,
     patch_summary_with_vmaf,
+    prepare_reference_bytes_via_agent,
     prepare_reference_via_agent,
     start_moq_recording_via_agent,
 )
 from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
 from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback
+from encode_profile import encode_profile_summary
+from moq_publish import is_device_browser_source
+from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
 from upload_service import UploadJob, UploadSample, UploadService
 
@@ -50,7 +54,8 @@ def needs_publish_preview(
     catch-up without LOC CaptureTimestamps (see moqCatchUpConfig) — a
     permanent latency floor for the rest of the session.
     """
-    return bool(zixi_stream_id) or ingest_provider == "gcp_mediamtx" or protocol == "moq"
+    provider = (ingest_provider or "").strip().lower()
+    return bool(zixi_stream_id) or provider.endswith("_mediamtx") or protocol == "moq"
 
 
 class JobStatus(str, Enum):
@@ -100,6 +105,8 @@ class UploadJobRecord:
     compute_vmaf_encoder: bool = False
     encode_ladder: str = ""
     target_latency_ms: Optional[int] = None
+    ingest_agent_url: str = ""
+    ingest_recording_dir: str = ""
     vmaf_status: str = VmafStatus.DISABLED.value
     vmaf_score: Optional[float] = None
     psnr_db: Optional[float] = None
@@ -191,8 +198,14 @@ class JobManager:
                 # Best-effort: fall back to the raw stream (today's behavior,
                 # still correct via -output_ts_offset + heal) if Zixi's API is
                 # unreachable or concealment isn't configured.
+                from zixi_stats import zixi_api_base_for_endpoint
+
                 zixi_playback_stream_id = (
-                    ensure_error_concealed_stream(zixi_stream_id) or zixi_stream_id
+                    ensure_error_concealed_stream(
+                        zixi_stream_id,
+                        base_url=zixi_api_base_for_endpoint(job.destination.url),
+                    )
+                    or zixi_stream_id
                 )
         elif job.destination.protocol == "rtmp":
             from moq_publish import (
@@ -231,7 +244,7 @@ class JobManager:
         )
 
         publisher_host = (getattr(job, "publisher_host", None) or "cloud").strip().lower()
-        if publisher_host not in {"cloud", "local"}:
+        if publisher_host not in {"cloud", "local", "browser"}:
             publisher_host = "cloud"
         job.publisher_host = publisher_host
 
@@ -251,6 +264,8 @@ class JobManager:
             compute_vmaf_encoder=job.compute_vmaf_encoder,
             encode_ladder=job.encode_ladder,
             target_latency_ms=job.target_latency_ms,
+            ingest_agent_url=job.ingest_agent_url,
+            ingest_recording_dir=job.ingest_recording_dir,
             publisher_host=publisher_host,
             vmaf_status=(
                 VmafStatus.WAITING_FOR_UPLOAD.value
@@ -361,7 +376,9 @@ class JobManager:
                     self._apply_playback_fields(payload, record.playback_samples)
                     record.samples.append(payload)
 
-        if job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
+        if job.publisher_host == "browser":
+            result = self._run_browser_publisher_job(job_id, job)
+        elif job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
             result = publisher_hub.run_remote(
                 job,
                 on_sample=on_sample,
@@ -462,16 +479,22 @@ class JobManager:
 
     def _prepare_remote_vmaf(self, job_id: str, job: UploadJob) -> None:
         self._update(job_id, vmaf_status=VmafStatus.UPLOADING_REFERENCE.value, vmaf_error=None)
-        upload_error = prepare_reference_via_agent(
-            job.destination.url,
-            job_id,
-            job.media_path,
-            agent_url=job.ingest_agent_url,
-            recording_dir=job.ingest_recording_dir,
-        )
-        if upload_error:
-            self._update(job_id, vmaf_status=VmafStatus.FAILED.value, vmaf_error=upload_error)
-            return
+        browser_source = is_device_browser_source(job.media_path)
+        if browser_source:
+            # The in-tab encoder uploads Annex-B during the run — there is no
+            # file at job.media_path. Still start the MoQ recorder now.
+            self._update(job_id, vmaf_status=VmafStatus.WAITING_FOR_UPLOAD.value, vmaf_error=None)
+        else:
+            upload_error = prepare_reference_via_agent(
+                job.destination.url,
+                job_id,
+                job.media_path,
+                agent_url=job.ingest_agent_url,
+                recording_dir=job.ingest_recording_dir,
+            )
+            if upload_error:
+                self._update(job_id, vmaf_status=VmafStatus.FAILED.value, vmaf_error=upload_error)
+                return
 
         if job.destination.protocol != "moq" or job.destination.moq_target is None:
             return
@@ -486,6 +509,8 @@ class JobManager:
             agent_url=job.ingest_agent_url,
             recording_dir=job.ingest_recording_dir,
             relay_url=relay_url,
+            cert_sha256=fingerprint_for_relay_url(relay_url) or "",
+            video_track="video" if browser_source else "vide_1",
         )
         if record_error:
             self._update(job_id, vmaf_status=VmafStatus.FAILED.value, vmaf_error=record_error)
@@ -504,14 +529,32 @@ class JobManager:
                 return
 
         self._update(job_id, vmaf_status=VmafStatus.COMPUTING.value, vmaf_error=None)
-        remote_result = compute_vmaf_via_agent(
-            job.destination.url,
-            job_id,
-            start_epoch,
-            end_epoch,
-            agent_url=job.ingest_agent_url,
-            recording_dir=job.ingest_recording_dir,
-        )
+        remote_result = None
+        for attempt in range(10):
+            remote_result = compute_vmaf_via_agent(
+                job.destination.url,
+                job_id,
+                start_epoch,
+                end_epoch,
+                agent_url=job.ingest_agent_url,
+                recording_dir=job.ingest_recording_dir,
+            )
+            waiting_on_reference = bool(
+                remote_result.error
+                and "not uploaded" in remote_result.error.lower()
+            )
+            if not waiting_on_reference:
+                break
+            time.sleep(2)
+        if remote_result is None:
+            remote_result = compute_vmaf_via_agent(
+                job.destination.url,
+                job_id,
+                start_epoch,
+                end_epoch,
+                agent_url=job.ingest_agent_url,
+                recording_dir=job.ingest_recording_dir,
+            )
 
         if remote_result.error or remote_result.vmaf_score is None:
             if summary_path:
@@ -650,6 +693,154 @@ class JobManager:
                 for name in PLAYBACK_FIELD_NAMES:
                     target[name] = payload[name]
         return True
+
+    def record_browser_encode_sample(self, job_id: str, sample: dict) -> bool:
+        try:
+            elapsed_sec = int(round(float(sample.get("elapsed_sec", -1))))
+        except (TypeError, ValueError):
+            return False
+        if elapsed_sec < 0:
+            return False
+        payload = {
+            "elapsed_sec": elapsed_sec,
+            "encoded_bitrate_kbps": float(sample.get("encoded_bitrate_kbps") or 0),
+            "fps": float(sample.get("fps") or 0),
+            "fps_stability": 1.0,
+            "speed": 1.0,
+            "out_time": "",
+            "cpu_percent": 0.0,
+            "memory_mb": 0.0,
+            "progress": str(sample.get("progress") or "continue"),
+            "encoder_send_rate_mbps": float(sample.get("encoder_send_rate_mbps") or 0),
+            "encode_lag_ms": float(sample.get("encode_lag_ms") or 0),
+            "transport_rtt_ms": float(sample.get("transport_rtt_ms") or 0),
+            "net_rtt_ms": float(sample.get("transport_rtt_ms") or sample.get("net_rtt_ms") or 0),
+        }
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if not record or record.publisher_host != "browser":
+                return False
+            if record.pipeline_start_epoch is None:
+                record.pipeline_start_epoch = time.time() - elapsed_sec
+            if record.media_zero_epoch is None:
+                record.media_zero_epoch = record.pipeline_start_epoch
+            if record.first_sample_at_epoch is None and (
+                payload["encoded_bitrate_kbps"] > 0 or payload["fps"] > 0
+            ):
+                record.first_sample_at_epoch = time.time()
+            self._apply_playback_fields(payload, record.playback_samples)
+            record.samples.append(payload)
+        return True
+
+    def mark_browser_publisher_ready(self, job_id: str) -> bool:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if not record or record.publisher_host != "browser":
+                return False
+        self._update(job_id, preview_ready=True)
+        return True
+
+    def attach_browser_vmaf_reference(self, job_id: str, file_bytes: bytes, filename: str) -> Optional[str]:
+        """Forward the in-tab encoder bitstream to the ingest worker as VMAF reference."""
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if not record or record.publisher_host != "browser":
+                return "Job is not a browser publisher"
+            if not record.compute_vmaf_on_ingest:
+                return "Ingest VMAF was not requested for this job"
+            endpoint_url = record.endpoint_url
+            agent_url = record.ingest_agent_url
+            recording_dir = record.ingest_recording_dir
+        upload_error = prepare_reference_bytes_via_agent(
+            endpoint_url,
+            job_id,
+            file_bytes,
+            filename or "reference.h264",
+            agent_url=agent_url,
+            recording_dir=recording_dir,
+        )
+        return upload_error
+
+    def _run_browser_publisher_job(self, job_id: str, job: UploadJob):
+        """Wait for the in-page WASM publisher; do not spawn ffmpeg."""
+        from upload_service import UploadResult
+
+        deadline = time.time() + max(5, int(job.duration_sec or 300))
+        record = None
+        with self._lock:
+            record = self._jobs.get(job_id)
+        cancel = record.cancel_event if record else threading.Event()
+        while time.time() < deadline and not cancel.is_set():
+            cancel.wait(0.5)
+
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "results")
+        os.makedirs(results_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        suffix = job_id.replace("-", "")[:8]
+        summary_path = os.path.join(results_dir, f"upload_{stamp}_{suffix}.summary.json")
+        csv_path = os.path.join(results_dir, f"upload_{stamp}_{suffix}.csv")
+        samples: List[dict] = []
+        with self._lock:
+            live = self._jobs.get(job_id)
+            if live:
+                samples = list(live.samples)
+        self._write_browser_metrics_csv(csv_path, job, samples)
+        quality = {}
+        if job.compute_vmaf_on_ingest:
+            quality["ingest"] = {"status": "pending", "computed_on": "ingest_agent"}
+        bitrate_vals = [float(s.get("encoded_bitrate_kbps") or 0) for s in samples]
+        fps_vals = [float(s.get("fps") or 0) for s in samples]
+        averages = {}
+        if bitrate_vals:
+            averages["encoded_bitrate_kbps"] = round(sum(bitrate_vals) / len(bitrate_vals), 1)
+        if fps_vals:
+            averages["fps"] = round(sum(fps_vals) / len(fps_vals), 2)
+        payload = {
+            "protocol": job.destination.protocol,
+            "endpoint": job.destination.url,
+            "samples": len(samples),
+            "averages": averages,
+            "extra": {
+                **encode_profile_summary(job.encode_ladder, job.target_latency_ms),
+                "comparison_id": getattr(job, "comparison_id", "") or "",
+                "stream_index": int(getattr(job, "stream_index", 0) or 0),
+                "stream_label": getattr(job, "stream_label", "") or "",
+            },
+            "quality": quality,
+        }
+        with open(summary_path, mode="w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        return UploadResult(success=True, csv_path=csv_path, summary_path=summary_path)
+
+    @staticmethod
+    def _write_browser_metrics_csv(csv_path: str, job: UploadJob, samples: List[dict]) -> None:
+        from metrics import CSV_COLUMNS
+
+        with open(csv_path, mode="w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            for sample in samples:
+                row = {col: "" for col in CSV_COLUMNS}
+                row["timestamp"] = str(sample.get("elapsed_sec", ""))
+                row["protocol"] = job.destination.protocol
+                row["endpoint"] = job.destination.url
+                for key in (
+                    "encoded_bitrate_kbps",
+                    "fps",
+                    "fps_stability",
+                    "speed",
+                    "cpu_percent",
+                    "memory_mb",
+                    "encoder_send_rate_mbps",
+                    "encode_lag_ms",
+                    "transport_rtt_ms",
+                    "net_rtt_ms",
+                    *PLAYBACK_FIELD_NAMES,
+                ):
+                    if key in CSV_COLUMNS:
+                        value = sample.get(key, 0)
+                        row[key] = "" if value is None else value
+                writer.writerow(row)
 
     @staticmethod
     def _apply_playback_fields(payload: dict, playback_samples: List[dict]) -> None:

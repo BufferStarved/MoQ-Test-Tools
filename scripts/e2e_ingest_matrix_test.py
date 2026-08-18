@@ -143,6 +143,47 @@ CASES = [
     },
 ]
 
+# GCP us-east1 four-protocol matrix (local ffmpeg → east ingest, 2026-08-18).
+# STACK=east python3 scripts/e2e_ingest_matrix_test.py
+EAST_ZIXI = os.environ.get("GCP_EAST_ZIXI_IP", "35.196.215.179")
+EAST_WEB = os.environ.get("GCP_EAST_WEB_IP", "35.196.97.22")
+EAST_RELAY = os.environ.get("GCP_EAST_RELAY_DOMAIN", "34-138-137-211.sslip.io")
+EAST_CASES = [
+    {
+        "id": "east_mediamtx_whip_whep",
+        "preset_id": "moq_mediamtx_gcp_east_whip",
+        "playback": "whep",
+        "url": f"http://{EAST_WEB}:8889/benchmark/whep",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_recv_mbps", "net_send_mbps"),
+        "fail_if_error_contains": "exited with code 69",
+    },
+    {
+        "id": "east_moq_relay_playa",
+        "preset_id": "moq_gcp_east_relay",
+        "playback": "moq",
+        "url": f"https://{EAST_RELAY}:4433/moq-relay",
+        "expect_preview": False,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+    {
+        "id": "east_zixi_srt_mpegts",
+        "preset_id": "moq_zixi_gcp_east",
+        "playback": "mpegts",
+        "url": f"http://{EAST_ZIXI}:7777/SRT%20Test.ts",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+    {
+        "id": "east_zixi_rtmp_mpegts",
+        "preset_id": "moq_zixi_gcp_east_rtmp",
+        "playback": "mpegts",
+        "url": f"http://{EAST_ZIXI}:7777/benchmark.ts",
+        "expect_preview": True,
+        "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+    },
+]
+
 
 @dataclass
 class CaseResult:
@@ -320,7 +361,13 @@ async function main() {
       player.on(dashjs.MediaPlayer.events.ERROR, (e) => { state.error = 'dash:'+JSON.stringify(e); });
     } else if (mode === 'mpegts') {
       if (!mpegts.getFeatureList().mseLivePlayback) { state.error = 'mpegts unsupported'; return; }
-      const p = mpegts.createPlayer({ type: 'mse', isLive: true, url }, { enableWorker: true, liveBufferLatencyChasing: true });
+      const p = mpegts.createPlayer({ type: 'mse', isLive: true, url }, {
+        enableWorker: true,
+        liveBufferLatencyChasing: true,
+        liveBufferLatencyMaxLatency: 3.5,
+        liveBufferLatencyMinRemain: 0.8,
+        enableStashBuffer: true,
+      });
       p.attachMediaElement(video); p.load(); p.play();
       p.on(mpegts.Events.ERROR, () => { state.error = 'mpegts error'; });
     } else if (mode === 'whep') {
@@ -488,6 +535,9 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     if job.get("status") == "failed":
         result.errors.append(job.get("error") or "job_failed_early")
         result.ingest = f"FAIL {job.get('error')}"
+        needle = str(case.get("fail_if_error_contains") or "")
+        if needle and needle in str(job.get("error") or ""):
+            result.errors.append(f"forbidden_error:{needle}")
         return result
 
     # Let encode produce samples, then Chrome while still running.
@@ -529,10 +579,11 @@ def run_case(case: dict, media_path: str) -> CaseResult:
             str(job_now.get("zixi_playback_stream_id") or job_now.get("zixi_stream_id") or "")
             .strip()
         )
-        if case["playback"] == "hls" and "35.222.33.58:7777" in play_url and zixi_play:
-            play_url = f"http://35.222.33.58:7777/playback.m3u8?stream={urllib.parse.quote(zixi_play)}"
-        if case["playback"] == "mpegts" and zixi_play:
-            play_url = f"http://35.222.33.58:7777/{urllib.parse.quote(zixi_play)}.ts"
+        zixi_host = urllib.parse.urlparse(play_url).hostname or ""
+        if case["playback"] == "hls" and zixi_play and zixi_host and ":7777" in play_url:
+            play_url = f"http://{zixi_host}:7777/playback.m3u8?stream={urllib.parse.quote(zixi_play)}"
+        if case["playback"] == "mpegts" and zixi_play and zixi_host:
+            play_url = f"http://{zixi_host}:7777/{urllib.parse.quote(zixi_play)}.ts"
         chrome_ok, chrome_msg = run_chrome_playback(case["playback"], play_url, seconds=14)
         if not chrome_ok and job_now.get("status") == "running":
             time.sleep(3)
@@ -571,6 +622,9 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     }
     if final.get("status") == "failed":
         result.errors.append(final.get("error") or "job_failed")
+        needle = str(case.get("fail_if_error_contains") or "")
+        if needle and needle in str(final.get("error") or ""):
+            result.errors.append(f"forbidden_error:{needle}")
 
     # Refresh metrics from final samples (clear early false negatives).
     metrics_ok, metrics_msg, _ = summarize_metrics(final.get("samples") or samples, tuple(case["metric_keys"]))
@@ -584,7 +638,7 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     # WHIP muxer often omits ffmpeg -progress bitrate; Chrome + preview is the signal.
     chrome_ok = result.chrome.startswith("playing")
     if (
-        case["id"].startswith("mediamtx_whip")
+        case["id"].startswith("mediamtx_whip") or case["id"].startswith("east_mediamtx_whip")
         and chrome_ok
         and (final.get("preview_ready") or preview)
         and "metrics_stale_or_zero" in result.errors
@@ -598,8 +652,18 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     return result
 
 
+def selected_cases() -> List[dict]:
+    stack = os.environ.get("STACK", "central").strip().lower()
+    if stack in {"east", "gcp-east", "gcp_east"}:
+        return EAST_CASES
+    if stack in {"all", "both"}:
+        return CASES + EAST_CASES
+    return CASES
+
+
 def main() -> int:
-    print(f"BASE_URL={BASE_URL} DURATION={DURATION} MEDIA={MEDIA}")
+    cases = selected_cases()
+    print(f"BASE_URL={BASE_URL} DURATION={DURATION} MEDIA={MEDIA} STACK={os.environ.get('STACK', 'central')} cases={len(cases)}")
     if not MEDIA.is_file():
         print("missing media", MEDIA)
         return 2
@@ -613,7 +677,7 @@ def main() -> int:
     }
 
     results: List[CaseResult] = []
-    for case in CASES:
+    for case in cases:
         if case.get("skip"):
             print(f"\n== {case['id']} SKIP ==")
             continue

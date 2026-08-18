@@ -60,6 +60,16 @@ export function IconLaptop(props: IconProps) {
   );
 }
 
+export function IconCpu(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="6" y="6" width="12" height="12" rx="1.6" />
+      <rect x="9" y="9" width="6" height="6" rx="0.8" />
+      <path d="M9 3.5v2.5M15 3.5v2.5M9 18v2.5M15 18v2.5M3.5 9H6M3.5 15H6M18 9h2.5M18 15h2.5" />
+    </svg>
+  );
+}
+
 export function IconServer(props: IconProps) {
   return (
     <svg {...base(props)}>

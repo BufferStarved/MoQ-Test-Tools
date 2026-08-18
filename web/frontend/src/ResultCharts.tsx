@@ -9,7 +9,7 @@ import {
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
-import { metricUnavailableMessage, metricSupportedForProtocol } from "./metricModel";
+import { metricUnavailableMessage, metricSupportedForProtocol, WHIP_ENCODE_BITRATE_NOTE, webrtcEncodeBitrateUnreported } from "./metricModel";
 import type { ResultSummary, UploadSample } from "./types";
 
 interface ResultChartsProps {
@@ -62,6 +62,11 @@ export function ResultCharts({
   const playbackGroup = chartGroupById("playback");
   const isMoq = resolvedProtocol === "moq";
   const isSrtOrRtmp = resolvedProtocol === "srt" || resolvedProtocol === "rtmp";
+  const whipBitrateMissing = webrtcEncodeBitrateUnreported(
+    resolvedProtocol,
+    liveSamples,
+    result?.averages,
+  );
 
   if (points.length === 0) {
     return (
@@ -102,7 +107,7 @@ export function ResultCharts({
                 "Send rate is outbound publish throughput.",
                 "Client memory is ffmpeg / publisher RSS on this machine.",
                 "Client network jitter is RTT variation on the publisher side of the path.",
-                "Encode lag, speed, and FPS stability come from ffmpeg progress while publishing.",
+                "Encode lag, encode speed, and FPS stability come from ffmpeg progress while publishing.",
                 "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
               ]}
             />
@@ -112,6 +117,9 @@ export function ResultCharts({
               data={points}
               series={encodeGroup.series.filter((series) => series.key === "encoded_bitrate_kbps")}
             />
+            {whipBitrateMissing ? (
+              <p className="hint chart-availability-note">{WHIP_ENCODE_BITRATE_NOTE}</p>
+            ) : null}
             <MetricChart
               title="Frame rate"
               metricKey="fps"
@@ -143,7 +151,7 @@ export function ResultCharts({
               hasData(points, "fps_stability") ||
               hasData(points, "speed")) && (
               <MetricChart
-                title="Encode lag / speed / FPS stability"
+                title="Encode lag / encode speed / FPS stability"
                 metricKey="encode_lag_ms"
                 data={points}
                 series={encodeGroup.series.filter(

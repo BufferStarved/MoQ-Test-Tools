@@ -45,6 +45,9 @@ class RecordingStartRequest(BaseModel):
     duration_sec: int = Field(default=60, ge=5, le=3600)
     relay_url: str = ""
     recording_dir: str = ""
+    cert_sha256: str = ""
+    # Browser LOC advertises `video`; cloud openmoq CMAF advertises `vide_1`.
+    video_track: str = ""
 
 
 class RecordingResponse(BaseModel):
@@ -188,6 +191,8 @@ def start_recording(job_id: str, request: RecordingStartRequest) -> RecordingRes
             duration_sec=request.duration_sec,
             relay_url=request.relay_url,
             recording_dir=request.recording_dir,
+            cert_sha256=request.cert_sha256,
+            video_track=request.video_track,
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

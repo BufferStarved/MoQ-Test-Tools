@@ -1,0 +1,10 @@
+project_name = "moq-web-east"
+project_id   = "your-gcp-project-id"
+region       = "us-east1"
+zone         = "us-east1-b"
+machine_type = "e2-standard-4"
+disk_size_gb = 50
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+allowed_ssh_cidr  = "YOUR.PUBLIC.IP/32"
+allowed_http_cidr = "0.0.0.0/0"
+web_domain = "unused-orchestrator-stays-us-central1"

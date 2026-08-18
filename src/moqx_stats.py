@@ -69,6 +69,17 @@ class MoqxStatsPoller:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def observing(self) -> bool:
+        """True once /metrics has been scraped at least once this job.
+
+        `enabled` is just "we know which URL to hit". An east/Linode relay
+        whose admin port is firewalled from the encode host used to look
+        identical to a live poller, so a no-timeout preview gate would stall
+        forever. Treat unreachable metrics as "no poller".
+        """
+        return self._enabled and self._baseline is not None
+
     def poll(self) -> MoqxStatsSnapshot:
         if not self._enabled:
             return self._latest

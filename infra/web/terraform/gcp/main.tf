@@ -71,15 +71,20 @@ resource "google_compute_firewall" "mediamtx_ingest" {
 
   allow {
     protocol = "udp"
-    ports    = ["8890"] # SRT ingest
+    ports    = [
+      "8890", # SRT ingest
+      "8189", # WebRTC ICE
+    ]
   }
 
   allow {
     protocol = "tcp"
     ports = [
       "1935", # RTMP ingest
+      "8090", # ingest-agent host metrics / VMAF
       "8888", # HLS playback
       "8889", # WHIP ingest / WHEP playback
+      "8891", # LL-DASH origin
     ]
   }
 
@@ -95,7 +100,7 @@ resource "google_compute_address" "web" {
 data "google_compute_image" "ubuntu" {
   # openmoq-publisher Linux releases need GLIBC ≥ 2.38 (24.04+).
   # Existing VMs on 22.04 use a Docker wrapper via install-openmoq-publisher.sh.
-  family  = "ubuntu-2404-lts"
+  family  = "ubuntu-2404-lts-amd64"
   project = "ubuntu-os-cloud"
 }
 

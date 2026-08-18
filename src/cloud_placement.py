@@ -21,10 +21,33 @@ class CloudPlacement:
         return self.cloud_provider or ""
 
 
+def _env_flag_enabled(name: str) -> Optional[bool]:
+    flag = os.environ.get(name, "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    return None
+
+
+def _stack_configured(flag_name: str, *ip_getters) -> bool:
+    flag = _env_flag_enabled(flag_name)
+    has_ips = all(bool(getter()) for getter in ip_getters)
+    if flag is False:
+        return False
+    if flag is True:
+        return has_ips
+    return has_ips
+
+
 def placement_from_ingest_provider(ingest_provider: str = "") -> CloudPlacement:
     provider = (ingest_provider or "").strip().lower()
     if not provider:
         return CloudPlacement()
+
+    # gcp_east_* must win over gcp_* (prefix overlap).
+    if provider.startswith("gcp_east_"):
+        return CloudPlacement(cloud_provider="gcp", cloud_region=gcp_east_region())
 
     if provider.startswith("gcp_"):
         region = os.environ.get("GCP_CLOUD_REGION", "us-central1").strip() or "us-central1"
@@ -54,13 +77,39 @@ def merge_placement(
 
 
 def linode_stack_configured() -> bool:
-    flag = os.environ.get("LINODE_STACK_ENABLED", "").strip().lower()
-    if flag in {"0", "false", "no", "off"}:
-        return False
-    has_ips = bool(linode_zixi_ip()) and bool(linode_web_ip()) and bool(linode_relay_ip())
-    if flag in {"1", "true", "yes", "on"}:
-        return has_ips
-    return has_ips
+    return _stack_configured("LINODE_STACK_ENABLED", linode_zixi_ip, linode_web_ip, linode_relay_ip)
+
+
+def gcp_east_stack_configured() -> bool:
+    return _stack_configured(
+        "GCP_EAST_STACK_ENABLED", gcp_east_zixi_ip, gcp_east_web_ip, gcp_east_relay_ip
+    )
+
+
+def gcp_east_region() -> str:
+    return os.environ.get("GCP_EAST_REGION", "us-east1").strip() or "us-east1"
+
+
+def gcp_east_zixi_ip() -> str:
+    return os.environ.get("GCP_EAST_ZIXI_IP", "").strip()
+
+
+def gcp_east_web_ip() -> str:
+    return os.environ.get("GCP_EAST_WEB_IP", "").strip()
+
+
+def gcp_east_relay_ip() -> str:
+    return os.environ.get("GCP_EAST_RELAY_IP", "").strip()
+
+
+def gcp_east_relay_domain(relay_ip: str = "") -> str:
+    explicit = os.environ.get("GCP_EAST_RELAY_DOMAIN", "").strip()
+    if explicit:
+        return explicit
+    ip = (relay_ip or gcp_east_relay_ip()).strip()
+    if not ip:
+        return ""
+    return sslip_domain(ip)
 
 
 def linode_region() -> str:
@@ -101,6 +150,12 @@ def ingest_endpoint_id_for_provider(ingest_provider: str) -> str:
         return "gcp_mediamtx"
     if provider == "gcp_moq_relay":
         return "gcp_moq_relay"
+    if provider == "gcp_east_zixi":
+        return "gcp_east_zixi"
+    if provider == "gcp_east_mediamtx":
+        return "gcp_east_mediamtx"
+    if provider == "gcp_east_moq_relay":
+        return "gcp_east_moq_relay"
     if provider == "linode_zixi":
         return "linode_zixi"
     if provider == "linode_mediamtx":
@@ -124,3 +179,37 @@ def resolve_placement_for_preset(
         ingest_provider=ingest_provider,
     )
     return placement.cloud_provider, placement.cloud_region
+
+
+def encode_hosts_for_api() -> list[dict]:
+    """UI picker: which clouds can host ingest (and later, encode)."""
+    return [
+        {
+            "id": "gcp",
+            "label": "GCP us-central1",
+            "available": True,
+            "cloud_provider": "gcp",
+            "cloud_region": os.environ.get("GCP_CLOUD_REGION", "us-central1").strip() or "us-central1",
+        },
+        {
+            "id": "gcp_east",
+            "label": f"GCP {gcp_east_region()}",
+            "available": gcp_east_stack_configured(),
+            "cloud_provider": "gcp",
+            "cloud_region": gcp_east_region(),
+        },
+        {
+            "id": "linode",
+            "label": f"Linode {linode_region()}",
+            "available": linode_stack_configured(),
+            "cloud_provider": "linode",
+            "cloud_region": linode_region(),
+        },
+        {
+            "id": "aws",
+            "label": "AWS",
+            "available": False,
+            "cloud_provider": "aws",
+            "cloud_region": os.environ.get("AWS_CLOUD_REGION", "us-east-1").strip() or "us-east-1",
+        },
+    ]

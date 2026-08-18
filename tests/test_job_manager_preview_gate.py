@@ -34,6 +34,8 @@ class NeedsPublishPreviewTests(unittest.TestCase):
     def test_mediamtx_needs_preview_gate(self):
         self.assertTrue(needs_publish_preview("srt", ingest_provider="gcp_mediamtx"))
         self.assertTrue(needs_publish_preview("rtmp", ingest_provider="gcp_mediamtx"))
+        self.assertTrue(needs_publish_preview("srt", ingest_provider="linode_mediamtx"))
+        self.assertTrue(needs_publish_preview("rtmp", ingest_provider="gcp_east_mediamtx"))
 
     def test_plain_rtmp_and_http_do_not_gate(self):
         self.assertFalse(needs_publish_preview("rtmp"))

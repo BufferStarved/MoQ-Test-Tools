@@ -5,6 +5,12 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from cloud_placement import (
+    gcp_east_relay_domain,
+    gcp_east_region,
+    gcp_east_relay_ip,
+    gcp_east_stack_configured,
+    gcp_east_web_ip,
+    gcp_east_zixi_ip,
     linode_relay_domain,
     linode_region,
     linode_stack_configured,
@@ -14,6 +20,18 @@ from cloud_placement import (
     placement_from_ingest_provider,
 )
 from moq_publish import MoqPublishTarget, parse_moq_publish_url
+
+CENTRAL_MOQ_RECORDER_AGENT = "http://35.222.33.58:8090"
+
+
+def moq_recorder_agent_url(fallback: str = CENTRAL_MOQ_RECORDER_AGENT) -> str:
+    """VMAF recordings subscribe over WebTransport; run them on the worker
+    that has openmoq-recorder, not on regional Zixi boxes that often don't."""
+    explicit = os.environ.get("MOQ_RECORDER_AGENT_URL", "").strip()
+    if explicit:
+        return explicit
+    central = os.environ.get("INGEST_AGENT_URL", "").strip()
+    return central or fallback
 
 
 class DestinationConfigError(Exception):
@@ -37,7 +55,7 @@ PROTOCOL_LABELS = {
     "hls": "HLS",
     "dash": "DASH",
     "webrtc": "WebRTC (WHIP)",
-    "moq": "MOQ (MoQT)",
+    "moq": "MoQ",
 }
 
 
@@ -522,7 +540,7 @@ def _build_linode_presets() -> List[ServicePreset]:
             url=relay_publish,
             notes=f"OpenMOQ moqx relay on Linode ({relay_base}).",
             supports_vmaf=True,
-            ingest_agent_url=zixi_agent,
+            ingest_agent_url=moq_recorder_agent_url(),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="linode_moq_relay",
             **common,
@@ -566,12 +584,135 @@ def _build_linode_presets() -> List[ServicePreset]:
     ]
 
 
+def _build_gcp_east_presets() -> List[ServicePreset]:
+    zixi_ip = gcp_east_zixi_ip()
+    web_ip = gcp_east_web_ip()
+    relay_ip = gcp_east_relay_ip()
+    region = gcp_east_region()
+    region_label = f"gcp-{region}"
+    relay_domain = gcp_east_relay_domain(relay_ip)
+    relay_base = f"https://{relay_domain}:4433"
+    relay_publish = f"{relay_base}/moq-relay?namespace=benchmark"
+    zixi_agent = f"http://{zixi_ip}:8090"
+    web_agent = f"http://{web_ip}:8090"
+    common = dict(
+        cloud_provider="gcp",
+        cloud_region=region,
+        web_visible=True,
+        web_available=True,
+    )
+    return [
+        ServicePreset(
+            id="moq_zixi_gcp_east",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="srt",
+            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000",
+            notes=(
+                f"Managed Zixi SRT ingest on GCP {region}. Stream ID 'SRT Test'; "
+                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."
+            ),
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="gcp_east_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_gcp_east_rtmp",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="rtmp",
+            url=f"rtmp://{zixi_ip}:1935/live/benchmark",
+            notes=f"Managed Zixi RTMP ingest on GCP {region}.",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="gcp_east_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_gcp_east_hls",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="hls",
+            url=f"http://{zixi_ip}:7777/benchmark",
+            notes=f"TS over HTTP push ingest on GCP {region} Zixi.",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="gcp_east_zixi",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_zixi_gcp_east_dash",
+            name=f"Zixi Broadcaster {region_label}",
+            protocol="dash",
+            url=f"http://{zixi_ip}:7777/benchmark",
+            notes="TS over HTTP push ingest (same caveats as the us-central1 DASH preset).",
+            supports_vmaf=True,
+            ingest_agent_url=zixi_agent,
+            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
+            ingest_provider="gcp_east_zixi",
+            web_available=False,
+            cloud_provider="gcp",
+            cloud_region=region,
+            web_visible=True,
+        ),
+        ServicePreset(
+            id="moq_gcp_east_relay",
+            name=f"OpenMOQ MOQ-X {region_label}",
+            protocol="moq",
+            url=relay_publish,
+            notes=f"OpenMOQ moqx relay on GCP {region} ({relay_base}).",
+            supports_vmaf=True,
+            ingest_agent_url=moq_recorder_agent_url(),
+            ingest_recording_dir="/var/lib/moq-relay-recordings",
+            ingest_provider="gcp_east_moq_relay",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_gcp_east_srt",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="srt",
+            url=f"srt://{web_ip}:8890?mode=caller&latency=200000&streamid=publish:benchmark",
+            notes=f"MediaMTX SRT on GCP {region} web host. HLS: http://{web_ip}:8888/benchmark/index.m3u8.",
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="gcp_east_mediamtx",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_gcp_east_rtmp",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="rtmp",
+            url=f"rtmp://{web_ip}:1935/benchmark",
+            notes=f"MediaMTX RTMP on GCP {region} web host.",
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="gcp_east_mediamtx",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_mediamtx_gcp_east_whip",
+            name=f"MediaMTX {region_label} (LL delivery)",
+            protocol="webrtc",
+            url=f"http://{web_ip}:8889/benchmark/whip",
+            notes=f"ffmpeg WHIP publish into GCP {region} MediaMTX (Opus audio required).",
+            supports_vmaf=False,
+            ingest_agent_url=web_agent,
+            ingest_provider="gcp_east_mediamtx",
+            **common,
+        ),
+    ]
+
+
 def _finalize_service_presets(raw: List[ServicePreset]) -> List[ServicePreset]:
     tagged = _tag_cloud_presets(raw)
-    if not linode_stack_configured():
-        return tagged
-    kept = [preset for preset in tagged if preset.id not in LINODE_STUB_IDS]
-    return kept + _build_linode_presets()
+    extras: List[ServicePreset] = []
+    if linode_stack_configured():
+        tagged = [preset for preset in tagged if preset.id not in LINODE_STUB_IDS]
+        extras.extend(_build_linode_presets())
+    if gcp_east_stack_configured():
+        extras.extend(_build_gcp_east_presets())
+    return tagged + extras
 
 
 SERVICE_PRESETS: List[ServicePreset] = _finalize_service_presets(_SERVICE_PRESETS_RAW)

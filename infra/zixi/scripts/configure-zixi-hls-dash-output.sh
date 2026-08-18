@@ -26,8 +26,8 @@ set -euo pipefail
 
 ZIXI_HOST="${ZIXI_HOST:-127.0.0.1}"
 ZIXI_PORT="${ZIXI_PORT:-4444}"
-ZIXI_USER="${ZIXI_USER:-admin}"
-ZIXI_PASSWORD="${ZIXI_PASSWORD:-}"
+ZIXI_USER="${ZIXI_USER:-${ZIXI_API_USER:-admin}}"
+ZIXI_PASSWORD="${ZIXI_PASSWORD:-${ZIXI_API_PASSWORD:-}}"
 ZIXI_STREAM_ID="${ZIXI_STREAM_ID:-benchmark}"
 ZIXI_HTTP_PORT="${ZIXI_HTTP_PORT:-7777}"
 # 2s minimum — 1s packs stutter between segments. Raise (3–6) when the
@@ -121,6 +121,32 @@ enable_http_hls_dash_origin() {
   # SRT ingest is live on this Broadcaster build — keep it on.
 }
 
+restart_zixi_via_gcloud() {
+  local instance="$1"
+  local zone="$2"
+  echo "Restarting Zixi via gcloud compute ssh ${instance} (${zone})..."
+  gcloud compute ssh "$instance" --zone="$zone" --tunnel-through-iap --command='
+    sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service
+  '
+}
+
+restart_zixi_via_ssh() {
+  local host="$1"
+  echo "Restarting remote Zixi service on ${host} over SSH..."
+  local user
+  for user in ubuntu root; do
+    if ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no \
+      "${user}@${host}" \
+      'sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service'
+    then
+      return 0
+    fi
+  done
+  echo "Could not SSH to ${host} to restart zixibc. Restart it on that VM:" >&2
+  echo "  sudo systemctl restart zixibc.service" >&2
+  return 1
+}
+
 restart_zixi_if_needed() {
   if [[ "$ZIXI_SKIP_RESTART" == "1" ]]; then
     echo "Skipping Zixi restart (ZIXI_SKIP_RESTART=1)."
@@ -132,19 +158,19 @@ restart_zixi_if_needed() {
     sleep 5
     return 0
   fi
-  # Public :22 to the Zixi VM is often filtered; prefer gcloud IAP SSH when available.
-  if command -v gcloud >/dev/null 2>&1; then
-    local instance="${ZIXI_GCE_INSTANCE:-moq-zixi-gcp}"
-    local zone="${ZIXI_GCE_ZONE:-us-central1-a}"
-    echo "Restarting Zixi via gcloud compute ssh ${instance} (${zone})..."
-    gcloud compute ssh "$instance" --zone="$zone" --command='
-      sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service
-    '
-    return 0
+  # Ignore stale ZIXI_GCE_INSTANCE from the environment — it used to force
+  # us-central1 even when ZIXI_HOST was east/Linode.
+  local central_ip="${GCP_ZIXI_IP:-35.222.33.58}"
+  local east_ip="${GCP_EAST_ZIXI_IP:-35.196.215.179}"
+  if [[ "$ZIXI_HOST" == "$central_ip" ]] && command -v gcloud >/dev/null 2>&1; then
+    restart_zixi_via_gcloud "moq-zixi-gcp" "us-central1-a"
+    return $?
   fi
-  echo "Restarting remote Zixi service on ${ZIXI_HOST} over SSH..."
-  ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "ubuntu@${ZIXI_HOST}" \
-    'sudo systemctl restart zixibc.service && sleep 5 && systemctl is-active zixibc.service'
+  if [[ "$ZIXI_HOST" == "$east_ip" ]] && command -v gcloud >/dev/null 2>&1; then
+    restart_zixi_via_gcloud "moq-zixi-east-gcp" "${GCP_EAST_METRICS_ZONE:-us-east1-b}"
+    return $?
+  fi
+  restart_zixi_via_ssh "$ZIXI_HOST"
 }
 
 echo "Configuring Zixi HLS/DASH origin at ${BASE_URL}"
@@ -158,15 +184,29 @@ echo "Note: http_ts_auto_out requires a Broadcaster restart (performed below unl
 echo ""
 
 enable_http_hls_dash_origin
-restart_zixi_if_needed
+did_restart=0
+if [[ "$ZIXI_SKIP_RESTART" != "1" ]]; then
+  if restart_zixi_if_needed; then
+    did_restart=1
+  fi
+else
+  echo "Skipping Zixi restart (ZIXI_SKIP_RESTART=1)."
+fi
 
-# Live Protocols restart drops non-permanent SRT push inputs — recreate the
-# managed "SRT Test" listener so the next web encode does not 404 forever.
-if [[ -x "$REPO_ROOT/infra/zixi/scripts/reset-zixi-srt-input.sh" ]]; then
+# Live Protocols restart drops non-permanent SRT push inputs. Only recreate
+# them after a real restart — not when we only POSTed apply_settings.
+if [[ "$did_restart" == "1" && -x "$REPO_ROOT/infra/zixi/scripts/reset-zixi-srt-input.sh" ]]; then
   echo "Recreating managed SRT push input after Zixi restart..."
   ZIXI_HOST="$ZIXI_HOST" ZIXI_PORT="$ZIXI_PORT" ZIXI_USER="$ZIXI_USER" \
     ZIXI_PASSWORD="$ZIXI_PASSWORD" ZIXI_SRT_STREAM="SRT Test" \
     "$REPO_ROOT/infra/zixi/scripts/reset-zixi-srt-input.sh" || true
+fi
+
+if [[ "$did_restart" != "1" ]]; then
+  echo "HLS settings posted. Restart zixibc on ${ZIXI_HOST} before expecting playback.m3u8."
+  echo "Skipped live verify (no service restart, and this script's verify uses RTMP 'benchmark',"
+  echo "which 404s even on us-central1 unless that input is live)."
+  exit 0
 fi
 
 if stream_exists "$ZIXI_STREAM_ID"; then

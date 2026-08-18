@@ -11,6 +11,7 @@ import {
   persistJobRebuffer,
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
+import { proxiedWebrtcSignalingUrl } from "../webrtcSignaling";
 
 interface WhepPlayerProps {
   url: string;
@@ -140,6 +141,9 @@ export default function WhepPlayer({
     let destroyed = false;
     let detachHtmlMonitors: (() => void) | undefined;
     let statsTimer: number | null = null;
+    let restoreRtc: (() => void) | undefined;
+    let lastInboundBytes = 0;
+    let lastInboundAt = 0;
     sessionRef.current = {
       ttffMs: 0,
       liveStartedAtMs: Date.now(),
@@ -194,10 +198,21 @@ export default function WhepPlayer({
     });
 
     async function start() {
+      const OriginalPC = window.RTCPeerConnection;
+      class CapturePC extends OriginalPC {
+        constructor(...args: ConstructorParameters<typeof RTCPeerConnection>) {
+          super(...args);
+          pcRef.current = this;
+        }
+      }
+      window.RTCPeerConnection = CapturePC as typeof RTCPeerConnection;
+      restoreRtc = () => {
+        window.RTCPeerConnection = OriginalPC;
+      };
       try {
         setError(null);
         setStatus("Connecting...");
-        await player.load(new URL(url));
+        await player.load(new URL(proxiedWebrtcSignalingUrl(url) || url, window.location.href));
         if (destroyed) {
           return;
         }
@@ -222,16 +237,29 @@ export default function WhepPlayer({
             return;
           }
           void pc.getStats().then((report) => {
+            let bytes = 0;
             report.forEach((stat) => {
-              if (stat.type === "inbound-rtp" && (stat as { kind?: string }).kind === "video") {
-                const rate = (stat as { bytesReceived?: number }).bytesReceived;
-                // bitrate filled below via delta would need prior sample; use
-                // framesDecoded pace as a weak signal only when bytes grow.
-                if (typeof rate === "number" && rate > 0) {
-                  sessionRef.current.bitrateBps = sessionRef.current.bitrateBps; // keep prior
-                }
+              if (stat.type !== "inbound-rtp") {
+                return;
+              }
+              const inbound = stat as RTCInboundRtpStreamStats;
+              if (inbound.kind === "audio") {
+                return;
+              }
+              const received = inbound.bytesReceived ?? 0;
+              if (received >= bytes) {
+                bytes = received;
               }
             });
+            const now = performance.now();
+            if (lastInboundAt > 0 && bytes >= lastInboundBytes) {
+              const dt = (now - lastInboundAt) / 1000;
+              if (dt > 0) {
+                sessionRef.current.bitrateBps = ((bytes - lastInboundBytes) * 8) / dt;
+              }
+            }
+            lastInboundBytes = bytes;
+            lastInboundAt = now;
           });
         }, 1000);
       } catch (err) {
@@ -244,6 +272,9 @@ export default function WhepPlayer({
           );
           setStatus("Failed");
         }
+      } finally {
+        restoreRtc?.();
+        restoreRtc = undefined;
       }
     }
 
@@ -256,6 +287,7 @@ export default function WhepPlayer({
       if (statsTimer != null) {
         window.clearInterval(statsTimer);
       }
+      restoreRtc?.();
       video.removeEventListener("timeupdate", onTimeUpdate);
       player.destroy();
       playerRef.current = null;

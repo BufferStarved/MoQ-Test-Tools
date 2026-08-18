@@ -1,33 +1,21 @@
 import { useRef } from "react";
 import type { FeatureFlags, WebcamDeviceInfo } from "./api";
+import type { CloudEncodeHostId } from "./ingestEndpoints";
 import { LocalPublisherSetup } from "./LocalPublisherSetup";
-import { IconCamera, IconFilm } from "./Icons";
+import { detectBrowserMoqCapabilities } from "./browserMoq/capabilities";
+import { BrowserMoqPreview } from "./browserMoq/BrowserMoqPreview";
+import { IconCamera, IconCpu, IconFilm, IconLaptop } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
 import { WebcamLivePreview } from "./WebcamLivePreview";
 
-export type MediaSourceId = "dummy" | "bbb" | "upload" | "webcam";
-export type CloudEncodeHostId = "gcp" | "linode" | "aws";
+export type MediaSourceId = "dummy" | "bbb" | "upload" | "webcam" | "browser_moq";
+export const DEVICE_BROWSER_MEDIA = "device:browser";
+export type { CloudEncodeHostId };
 export type EncoderId = "ffmpeg" | "obs" | "wowza";
 
 export const LOCAL_DEVICE_WEBCAM = "device:webcam";
-
-/** Purely informational today — every cloud encode runs on the GCP API host.
- * Kept as a real picker (not a static label) so adding a second cloud encode
- * host later is a backend wiring change, not a UI rebuild. */
-const CLOUD_ENCODE_HOSTS: { id: CloudEncodeHostId; label: string; available: boolean }[] = [
-  { id: "gcp", label: "GCP us-central1 (this API host)", available: true },
-  { id: "linode", label: "Linode", available: false },
-  { id: "aws", label: "AWS", available: false },
-];
-
-/** ffmpeg is the only encoder actually wired up today — OBS/Wowza are real
- * picker entries (not just a label) so turning them on later is additive. */
-const ENCODERS: { id: EncoderId; label: string; available: boolean }[] = [
-  { id: "ffmpeg", label: "ffmpeg", available: true },
-  { id: "obs", label: "OBS Studio", available: false },
-  { id: "wowza", label: "Wowza", available: false },
-];
+export const BBB_MEDIA_PATH = "bbb.mp4";
 
 interface SourceSectionProps {
   mediaSource: MediaSourceId;
@@ -38,8 +26,6 @@ interface SourceSectionProps {
   onUploadFile: (file: File) => void;
   encoder: EncoderId;
   onEncoderChange: (encoder: EncoderId) => void;
-  encodeCloudHost: CloudEncodeHostId;
-  onEncodeCloudHostChange: (host: CloudEncodeHostId) => void;
   features: FeatureFlags;
   webcamDeviceIndex: string;
   onWebcamDeviceIndexChange: (index: string) => void;
@@ -49,6 +35,9 @@ interface SourceSectionProps {
   disabled: boolean;
   /** A run is currently in flight — the local agent needs the camera exclusively. */
   running: boolean;
+  browserPreviewStream?: MediaStream | null;
+  bbbAvailable?: boolean;
+  bbbHint?: string | null;
 }
 
 export function SourceSection({
@@ -58,10 +47,8 @@ export function SourceSection({
   mediaLabel,
   uploadingMedia,
   onUploadFile,
-  encoder,
-  onEncoderChange,
-  encodeCloudHost,
-  onEncodeCloudHostChange,
+  encoder: _encoder,
+  onEncoderChange: _onEncoderChange,
   features,
   webcamDeviceIndex,
   onWebcamDeviceIndexChange,
@@ -70,20 +57,34 @@ export function SourceSection({
   webcamStatus,
   disabled,
   running,
+  browserPreviewStream = null,
+  bbbAvailable = false,
+  bbbHint = null,
 }: SourceSectionProps) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const isWebcam = mediaSource === "webcam";
-  const isVod = !isWebcam;
-  const webcamAvailable = features.local_publisher;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isLocalWebcam = mediaSource === "webcam";
+  const isBrowserMoq = mediaSource === "browser_moq";
+  const isLiveCamera = isLocalWebcam || isBrowserMoq;
+  const isCloudPlayout = !isLiveCamera;
+  const browserCaps = detectBrowserMoqCapabilities();
+  const localAgentAvailable = features.local_publisher;
 
-  function selectVod() {
-    if (isWebcam) {
+  function selectCloudPlayout() {
+    if (!isCloudPlayout) {
       onMediaSourceChange("dummy");
     }
   }
 
   function selectWebcam() {
-    if (!webcamAvailable || isWebcam) {
+    if (isLiveCamera) {
+      return;
+    }
+    onMediaSourceChange(browserCaps.ok ? "browser_moq" : "webcam");
+  }
+
+  function selectLiveEncode(next: "browser" | "local") {
+    if (next === "browser") {
+      onMediaSourceChange("browser_moq");
       return;
     }
     onMediaSourceChange("webcam");
@@ -94,45 +95,89 @@ export function SourceSection({
       <StepHeading
         step={1}
         title="Source"
-        tip="Choose what every output will publish from — a live webcam via the local agent, or a VOD asset (color bars or your own file). Same source feeds all protocols below."
+        tip="Choose a live camera or a cloud playout (a file encoded live on the API host). A webcam then asks where to encode — Browser or this computer."
       />
-      <div className="source-mode-options" role="radiogroup" aria-label="Media source">
-        <label className={`source-mode-card${isWebcam ? " selected" : ""}`}>
+      <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
+        <label className={`source-mode-card${isLiveCamera ? " selected" : ""}`}>
           <input
             type="radio"
             name="source-mode"
-            checked={isWebcam}
-            disabled={disabled || !webcamAvailable}
+            checked={isLiveCamera}
+            disabled={disabled}
             onChange={selectWebcam}
           />
           <span className="source-mode-card-body">
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
-            {!webcamAvailable && (
-              <span className="field-hint source-mode-unavailable">
-                Needs the local publisher agent (not enabled here).
-              </span>
-            )}
+            <span className="field-hint">This machine’s camera</span>
           </span>
         </label>
-        <label className={`source-mode-card${isVod ? " selected" : ""}`}>
+        <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
           <input
             type="radio"
             name="source-mode"
-            checked={isVod}
+            checked={isCloudPlayout}
             disabled={disabled}
-            onChange={selectVod}
+            onChange={selectCloudPlayout}
           />
           <span className="source-mode-card-body">
             <strong>
-              <IconFilm size={15} /> VOD asset
+              <IconFilm size={15} /> Cloud playout
             </strong>
+            <span className="field-hint">File encoded live on the API host</span>
           </span>
         </label>
       </div>
 
-      {isVod && (
+      {isLiveCamera && (
+        <div className="encode-location-block">
+          <p className="encode-location-lede">Where should this camera encode?</p>
+          <div className="source-mode-options encode-location-options" role="radiogroup" aria-label="Encode location">
+            <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
+              <input
+                type="radio"
+                name="live-encode-location"
+                checked={isBrowserMoq}
+                disabled={disabled || !browserCaps.ok}
+                onChange={() => selectLiveEncode("browser")}
+              />
+              <span className="source-mode-card-body">
+                <strong>
+                  <IconCpu size={15} /> Browser
+                </strong>
+                <span className="field-hint">
+                  {browserCaps.ok
+                    ? "MoQ or WebRTC with WebCodecs"
+                    : browserCaps.reason}
+                </span>
+              </span>
+            </label>
+            <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
+              <input
+                type="radio"
+                name="live-encode-location"
+                checked={isLocalWebcam}
+                disabled={disabled || !localAgentAvailable}
+                onChange={() => selectLiveEncode("local")}
+              />
+              <span className="source-mode-card-body">
+                <strong>
+                  <IconLaptop size={15} /> This computer
+                </strong>
+                <span className="field-hint">
+                  {localAgentAvailable
+                    ? "FFMPEG - SRT, RTMP, MOQ, WebRTC"
+                    : "Needs the local publisher agent (not enabled here)."}
+                </span>
+              </span>
+            </label>
+          </div>
+          <p className="field-hint source-roadmap-hint">OBS, Wowza, and AWS ingest are next.</p>
+        </div>
+      )}
+
+      {isCloudPlayout && (
         <div className="source-mode-detail">
           <label>
             Asset
@@ -142,12 +187,17 @@ export function SourceSection({
               onChange={(e) => onMediaSourceChange(e.target.value as MediaSourceId)}
             >
               <option value="dummy">Default Color Bars</option>
-              <option value="bbb" disabled>
-                Big Buck Bunny (coming soon)
-              </option>
+              <option value="bbb">Big Buck Bunny</option>
               <option value="upload">Upload your own file…</option>
             </select>
             {mediaSource === "dummy" && <span className="field-hint">60s color bars with time counter</span>}
+            {mediaSource === "bbb" && (
+              <span className="field-hint">
+                {bbbAvailable
+                  ? "Blender Foundation short — encoded live on the API host"
+                  : bbbHint || "Place bbb.mp4 next to dummy.mp4, or run scripts/fetch-bbb.sh"}
+              </span>
+            )}
             {mediaSource === "upload" && (
               <span className="field-hint">{mediaPath ? `Using: ${mediaLabel}` : "Choose a file to upload"}</span>
             )}
@@ -177,41 +227,15 @@ export function SourceSection({
               </button>
             </div>
           )}
-          <label>
-            Encoder
-            <select
-              value={encoder}
-              disabled={disabled}
-              onChange={(e) => onEncoderChange(e.target.value as EncoderId)}
-            >
-              {ENCODERS.map((item) => (
-                <option key={item.id} value={item.id} disabled={!item.available}>
-                  {item.label}
-                  {!item.available ? " (coming soon)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Cloud encode host
-            <select
-              value={encodeCloudHost}
-              disabled={disabled}
-              onChange={(e) => onEncodeCloudHostChange(e.target.value as CloudEncodeHostId)}
-            >
-              {CLOUD_ENCODE_HOSTS.map((host) => (
-                <option key={host.id} value={host.id} disabled={!host.available}>
-                  {host.label}
-                  {!host.available ? " (coming soon)" : ""}
-                </option>
-              ))}
-            </select>
-            <span className="field-hint">GCP us-central1 only for now — more regions soon.</span>
-          </label>
+          <p className="field-hint">
+            Encoded with ffmpeg on the API host (GCP us-central1). Each output’s Destination
+            chooses the ingest independently.
+          </p>
+          <p className="field-hint source-roadmap-hint">OBS, Wowza, and AWS ingest are next.</p>
         </div>
       )}
 
-      {isWebcam && webcamAvailable && (
+      {isLocalWebcam && localAgentAvailable && (
         <div className="source-mode-detail webcam-detail">
           <div className="webcam-detail-main">
             <div className="webcam-detail-controls">
@@ -254,7 +278,28 @@ export function SourceSection({
                 </>
               )}
             </div>
-            <WebcamLivePreview active={isWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+            <WebcamLivePreview active={isLocalWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+          </div>
+        </div>
+      )}
+
+      {isBrowserMoq && (
+        <div className="source-mode-detail webcam-detail">
+          <div className={`webcam-detail-main${browserPreviewStream ? "" : " webcam-detail-main-compact"}`}>
+            <div className="webcam-detail-controls">
+              <StatusDot
+                tone={browserCaps.ok ? "ok" : "warn"}
+                label={
+                  browserCaps.ok
+                    ? `Ready — auto-stops after ${captureMinutes} min`
+                    : "Browser cannot publish yet"
+                }
+              />
+              {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
+            </div>
+            {browserPreviewStream ? (
+              <BrowserMoqPreview stream={browserPreviewStream} active={isBrowserMoq} />
+            ) : null}
           </div>
         </div>
       )}

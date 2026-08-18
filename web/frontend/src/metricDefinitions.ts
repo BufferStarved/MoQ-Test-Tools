@@ -15,7 +15,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   encoded_bitrate_kbps: {
     label: "Encoded bitrate",
     description:
-      "ffmpeg's reported encoder output bitrate for the source track. Measures encode load before the network path — not delivered network throughput.",
+      "ffmpeg's reported encoder output bitrate for the source track. Measures encode load before the network path — not delivered network throughput. ffmpeg's WHIP muxer does not emit bitrate in -progress; those jobs use MediaMTX ingest receive rate as a stand-in when available.",
   },
   fps: {
     label: "Frame rate",
@@ -26,7 +26,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description: "Coefficient of variation of frame rate over the run. Lower values mean a steadier, less jittery encode.",
   },
   speed: {
-    label: "Speed",
+    label: "Encode speed",
     description: "ffmpeg processing speed relative to real time. 1.0x means encoding and publishing keep pace with the live stream duration.",
   },
   transport_rtt_ms: {
@@ -42,7 +42,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   net_rtt_ms: {
     label: "Network RTT",
     description:
-      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; RTMP → Zixi receiver RTT when available, otherwise TCP connect probe to the RTMP host:port; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
+      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; RTMP → Zixi receiver RTT when available, otherwise TCP connect probe to the RTMP host:port; WebRTC → ICE candidate-pair currentRoundTripTime; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
   },
   net_jitter_ms: {
     label: "Network jitter",

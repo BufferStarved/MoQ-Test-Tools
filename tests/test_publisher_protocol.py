@@ -41,7 +41,7 @@ class PublisherProtocolTests(unittest.TestCase):
             stream_index=1,
             stream_label="A",
             encode_ladder="1080p",
-            target_latency_ms=1000,
+            target_latency_ms=2500,
             publisher_host="local",
         )
         payload = upload_job_to_dict(job)
@@ -54,7 +54,7 @@ class PublisherProtocolTests(unittest.TestCase):
         self.assertEqual(restored.job_id, "job-abc")
         self.assertEqual(restored.publisher_host, "local")
         self.assertEqual(restored.encode_ladder, "1080p")
-        self.assertEqual(restored.target_latency_ms, 1000)
+        self.assertEqual(restored.target_latency_ms, 2500)
         self.assertEqual(restored.destination.preset_id, "moq_mediamtx_gcp_srt")
         self.assertEqual(
             restored.destination.url,

@@ -50,10 +50,28 @@ export interface LocalPublisherAgentInfo {
   webcam_devices?: WebcamDeviceInfo[];
 }
 
+export interface EncodeHostInfo {
+  id: string;
+  label: string;
+  available: boolean;
+  cloud_provider?: string;
+  cloud_region?: string;
+}
+
+export interface BundledMediaSource {
+  id: string;
+  label: string;
+  media_path: string;
+  available: boolean;
+  hint?: string;
+}
+
 export interface FeatureFlags {
   local_publisher: boolean;
   local_publisher_connected: boolean;
   local_publisher_agents: LocalPublisherAgentInfo[];
+  encode_hosts?: EncodeHostInfo[];
+  media_sources?: BundledMediaSource[];
 }
 
 export function fetchFeatures(): Promise<FeatureFlags> {
@@ -130,7 +148,7 @@ export function createUpload(payload: {
   comparison_id?: string;
   stream_index?: number;
   stream_label?: string;
-  publisher_host?: "cloud" | "local";
+  publisher_host?: "cloud" | "local" | "browser";
 }): Promise<UploadJob> {
   return request("/uploads", {
     method: "POST",
@@ -157,6 +175,50 @@ export interface PlaybackMetricsSnapshot {
   playback_rebuffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
+}
+
+export function postEncodeSample(
+  jobId: string,
+  sample: {
+    elapsed_sec: number;
+    encoded_bitrate_kbps: number;
+    fps: number;
+    encoder_send_rate_mbps?: number;
+    encode_lag_ms?: number;
+    transport_rtt_ms?: number;
+    progress?: string;
+  },
+): Promise<{ ok: boolean }> {
+  return request(`/uploads/${jobId}/encode-sample`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(sample),
+  });
+}
+
+export function postPublisherReady(jobId: string): Promise<{ ok: boolean }> {
+  return request(`/uploads/${jobId}/publisher-ready`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+export async function uploadVmafReference(jobId: string, blob: Blob, filename = "reference.h264"): Promise<void> {
+  const body = new FormData();
+  body.append("file", blob, filename);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/uploads/${jobId}/vmaf-reference`, {
+      method: "POST",
+      body,
+    });
+  } catch {
+    throw new Error("Cannot reach the API to upload the VMAF reference.");
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(parseErrorDetail(payload.detail, response.statusText));
+  }
 }
 
 export function postPlaybackSample(

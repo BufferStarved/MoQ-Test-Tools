@@ -1,29 +1,11 @@
-import type { CSSProperties } from "react";
 import { ArchStage, FlowArrow, FlowNode } from "./FlowDiagram";
-import { IconBroadcast, IconCamera, IconCloud, IconFilm, IconLaptop, IconMonitor, IconTarget } from "./Icons";
-
-export interface WorkflowStreamBranch {
-  id: string;
-  label: string;
-  protocol: string;
-  ingestLabel: string;
-  playerLabel: string;
-  accentColor: string;
-}
-
-interface WorkflowVisualizationProps {
-  sourceTitle: string;
-  sourceDetail: string;
-  encodeTitle: string;
-  encodeDetail: string;
-  streams: WorkflowStreamBranch[];
-}
+import { IconCamera, IconCloud, IconCpu, IconFilm, IconLaptop } from "./Icons";
+import type { PipelineDiagramSpec } from "./pipelineConfig";
+import { protocolLabel } from "./protocolTheme";
 
 /**
- * Live version of the About page's static architecture diagram — reflects
- * the run recipe currently selected (source, encode location, and each
- * stream's protocol/ingest/player) instead of a fixed example, so the
- * pipeline shape is visible before pressing Start.
+ * Recipe-driven end-to-end map, using the same stage/arrow language as About.
+ * Source and encode are shared; ingest and playback stack one card per output.
  */
 export function WorkflowVisualization({
   sourceTitle,
@@ -31,53 +13,53 @@ export function WorkflowVisualization({
   encodeTitle,
   encodeDetail,
   streams,
-}: WorkflowVisualizationProps) {
-  const sourceIcon = sourceTitle.toLowerCase().includes("webcam") ? <IconCamera size={14} /> : <IconFilm size={14} />;
-  const encodeIcon = encodeTitle.toLowerCase().includes("machine") ? <IconLaptop size={14} /> : <IconCloud size={14} />;
+}: PipelineDiagramSpec) {
+  const sourceIcon = /webcam|camera|browser/i.test(`${sourceTitle} ${sourceDetail}`) ? (
+    <IconCamera size={15} />
+  ) : (
+    <IconFilm size={15} />
+  );
+  const encodeIcon = /browser/i.test(encodeTitle) ? (
+    <IconCpu size={15} />
+  ) : /computer|laptop|machine|agent/i.test(encodeTitle) ? (
+    <IconLaptop size={15} />
+  ) : (
+    <IconCloud size={15} />
+  );
 
   return (
-    <div className="workflow-viz">
-      <div className="flow-diagram flow-diagram-compact workflow-viz-trunk">
-        <ArchStage step="1" label="Source" tone="client">
-          <FlowNode tone="client" title={sourceTitle} detail={sourceDetail} icon={sourceIcon} />
-        </ArchStage>
-        <FlowArrow />
-        <ArchStage step="2" label="Encode" tone="server">
-          <FlowNode tone="server" title={encodeTitle} detail={encodeDetail} icon={encodeIcon} />
-        </ArchStage>
-      </div>
-      <p className="workflow-viz-fanout-label">
-        Fans out to {streams.length} output{streams.length === 1 ? "" : "s"} →
-      </p>
-      <div className="workflow-branches">
+    <div className="flow-diagram flow-diagram-compact e2e-diagram" aria-label="End-to-end pipeline">
+      <ArchStage step="1" label="Source" tone="client">
+        <FlowNode tone="client" title={sourceTitle} detail={sourceDetail} icon={sourceIcon} />
+      </ArchStage>
+      <FlowArrow />
+      <ArchStage step="2" label="Encode" tone="server">
+        <FlowNode tone="server" title={encodeTitle} detail={encodeDetail} icon={encodeIcon} />
+      </ArchStage>
+      <FlowArrow />
+      <ArchStage step="3" label="Ingest" tone="transport">
         {streams.map((stream) => (
-          <div
-            key={stream.id}
-            className="workflow-branch"
-            style={{ "--protocol-accent": stream.accentColor } as CSSProperties}
-          >
-            <span className="workflow-branch-label">{stream.label}</span>
-            <span className="workflow-branch-chip">
-              <IconBroadcast size={12} />
-              {stream.protocol}
-            </span>
-            <span className="workflow-branch-arrow" aria-hidden="true">
-              →
-            </span>
-            <span className="workflow-branch-chip">
-              <IconTarget size={12} />
-              {stream.ingestLabel}
-            </span>
-            <span className="workflow-branch-arrow" aria-hidden="true">
-              →
-            </span>
-            <span className="workflow-branch-chip">
-              <IconMonitor size={12} />
-              {stream.playerLabel}
-            </span>
-          </div>
+          <FlowNode
+            key={`${stream.id}-ingest`}
+            tone="transport"
+            title={stream.ingest}
+            detail={`${stream.label} · ${protocolLabel(stream.protocol)}`}
+            accentColor={stream.accentColor}
+          />
         ))}
-      </div>
+      </ArchStage>
+      <FlowArrow />
+      <ArchStage step="4" label="Playback" tone="client">
+        {streams.map((stream) => (
+          <FlowNode
+            key={`${stream.id}-play`}
+            tone="client"
+            title={stream.player}
+            detail={stream.packager}
+            accentColor={stream.accentColor}
+          />
+        ))}
+      </ArchStage>
     </div>
   );
 }

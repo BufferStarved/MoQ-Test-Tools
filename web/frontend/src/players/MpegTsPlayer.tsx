@@ -362,7 +362,11 @@ export default function MpegTsPlayer({
           // blob: location, CSP, or an internal abort race).
           enableWorker: false,
           liveBufferLatencyChasing: true,
-          enableStashBuffer: false,
+          // WAN HTTP-TS (laptop → GCP East Zixi) underruns with stash off and
+          // a ~1.5s chase window — html_stall every few seconds after TTFF.
+          liveBufferLatencyMaxLatency: 3.5,
+          liveBufferLatencyMinRemain: 0.8,
+          enableStashBuffer: true,
           autoCleanupSourceBuffer: true,
         },
       );

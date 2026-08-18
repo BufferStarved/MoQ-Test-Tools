@@ -23,6 +23,16 @@ variable "allowed_ssh_cidr" {
   type = string
 }
 
+variable "extra_ssh_ipv4_cidrs" {
+  type    = list(string)
+  default = []
+}
+
+variable "allowed_ssh_ipv6_cidrs" {
+  type    = list(string)
+  default = []
+}
+
 variable "allowed_ingest_cidr" {
   type    = string
   default = "0.0.0.0/0"

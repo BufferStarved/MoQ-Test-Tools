@@ -1,5 +1,5 @@
 import { liveGlanceMetrics, type ComparisonVerdict } from "./comparisonVerdict";
-import { protocolColor, protocolLabel } from "./protocolTheme";
+import { assignStreamColors, protocolColor, protocolLabel } from "./protocolTheme";
 import type { UploadJob, UploadSample } from "./types";
 
 interface SummaryLeg {
@@ -70,9 +70,14 @@ export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSu
       {legs.length > 0 && (
         <div className="top-summary-legs">
           {running && <span className="top-summary-kicker">Live</span>}
-          {legs.map((leg, index) => {
+          {assignStreamColors(
+            legs.map((item) => ({
+              protocol: item.protocol,
+              endpoint: item.job.endpoint_url,
+            })),
+          ).map((color, index) => {
+            const leg = legs[index];
             const tone = statusTone(leg.job);
-            const color = protocolColor(leg.protocol, index);
             const glances = liveGlanceMetrics(leg.latestSample);
             return (
               <div
@@ -88,6 +93,13 @@ export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSu
                     {glance.label} {glance.value}
                   </span>
                 ))}
+                {leg.job.encoder_vmaf_score != null && Number.isFinite(leg.job.encoder_vmaf_score) ? (
+                  <span className="top-summary-metric">
+                    VMAF {leg.job.encoder_vmaf_score.toFixed(1)}
+                  </span>
+                ) : leg.job.vmaf_score != null && Number.isFinite(leg.job.vmaf_score) ? (
+                  <span className="top-summary-metric">VMAF {leg.job.vmaf_score.toFixed(1)}</span>
+                ) : null}
               </div>
             );
           })}

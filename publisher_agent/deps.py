@@ -53,7 +53,23 @@ def check_ffmpeg() -> DepStatus:
                         detail="found but missing libx264",
                         install_hint="brew install ffmpeg-full   # or set FFMPEG to an x264 build",
                     )
-                return DepStatus(name="ffmpeg", ok=True, path=path, detail="libx264 ok")
+                missing = []
+                if "libopus" not in out:
+                    missing.append("libopus")
+                formats = subprocess.run(
+                    [path, "-hide_banner", "-muxers"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                mux_out = (formats.stdout or "") + (formats.stderr or "")
+                if "whip" not in mux_out.lower():
+                    missing.append("whip muxer")
+                detail = "libx264 ok"
+                if missing:
+                    detail = f"libx264 ok; missing {', '.join(missing)} (WHIP publish will fail)"
+                return DepStatus(name="ffmpeg", ok=True, path=path, detail=detail)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 return DepStatus(
                     name="ffmpeg",
