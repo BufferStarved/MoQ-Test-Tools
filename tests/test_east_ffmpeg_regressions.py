@@ -118,6 +118,17 @@ class FrontendRegressionSourceTests(unittest.TestCase):
         self.assertIn("const MAX_CONNECT_ATTEMPTS = 12", text)
         self.assertIn("const CATALOG_RETRY_MS = 4_000", text)
         self.assertIn("catalog_timeout_retry", text)
+        self.assertIn("subscribe_0x10_keepalive", text)
+        self.assertIn("noMediaTimeoutMs", text)
+
+    def test_harness_does_not_wait_for_moq_preview_ready(self) -> None:
+        text = (ROOT / "web" / "frontend" / "src" / "HarnessPage.tsx").read_text()
+        self.assertNotIn("waiting for MoQ preview_ready", text)
+
+    def test_stream_player_does_not_invent_benchmark_namespace(self) -> None:
+        text = (ROOT / "web" / "frontend" / "src" / "StreamPlayer.tsx").read_text()
+        self.assertIn("const moqReadyNamespace = (moqNamespace || \"\").trim();", text)
+        self.assertNotIn("target.moqNamespace || moqNamespace", text)
 
     def test_mpegts_enables_stash_for_wan(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "players" / "MpegTsPlayer.tsx").read_text()

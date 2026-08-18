@@ -9,6 +9,13 @@ import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
 import { classifyLocFrameStall, locSubscribeOptions } from "../moqLocPlayback";
 import {
+  classifyMoqEndVerdict,
+  moqHasRenderedMedia,
+  noMediaFailMessage,
+  noMediaTimeoutMs,
+  shouldKeepSessionOnSubscribeError,
+} from "../moqCmafPlayback";
+import {
   markMoqCatalogReady,
   markMoqFirstFrame,
   moqPlaybackSucceeded,
@@ -27,7 +34,7 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { computeMoqE2eMs } from "../glassLatency";
-import { isGracefulMoqReset, playedMostOfEncode } from "../playbackEos";
+import { isGracefulMoqReset } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -72,22 +79,10 @@ async function sleep(ms: number): Promise<void> {
 // Was 6s — that alone pinned wall−vt E2E near ~7s after join. CMAF catalog is
 // a one-shot group-0 object on moqx; subscribe must start before it is sent.
 const PUBLISHER_WARMUP_MS = 250;
-const SUBSCRIBE_RETRY_MS = 1_500;
 /** Cover publisher startup (namespace 0x10) without waiting past catalog publish. */
 const MAX_CONNECT_ATTEMPTS = 12;
 /** If SUBSCRIBE_OK arrived after catalog group 0, tear down and resubscribe. */
 const CATALOG_RETRY_MS = 4_000;
-const MOQ_ALL_TRACKS_REFUSED = 4867;
-const MOQ_SUBSCRIPTION_REFUSED = 4866;
-const MOQ_LOAD_FAILED = 4865;
-
-function isPublisherNotReadyError(code: number): boolean {
-  return (
-    code === MOQ_ALL_TRACKS_REFUSED ||
-    code === MOQ_SUBSCRIPTION_REFUSED ||
-    code === MOQ_LOAD_FAILED
-  );
-}
 
 const LIVE_EDGE_TRIM_MS = 2_000;
 // Mid-play recovery: a session that dies after first frame used to be
@@ -224,6 +219,11 @@ export default function MoqPlayer({
    */
   function captureAnchoredE2eMs(): number | undefined {
     const session = sessionRef.current;
+    if (!session.firstFrame) {
+      // pathDelay / wall−0 playhead invented ~10s e2e on a black CMAF player
+      // (comparison CSV 2026-08-18: frames=0, ttff=0, e2e avg 10.7s).
+      return undefined;
+    }
     const { bridgeMs, epoch, encoderMs, rttMs } = lagRef.current;
     const video = videoRef.current;
     const videoTimeSec = Math.max(session.videoTimeSec, video?.currentTime ?? 0);
@@ -311,35 +311,36 @@ export default function MoqPlayer({
     if (playbackGate !== "live") {
       if (playbackGate === "ended") {
         const outcome = getMoqPlaybackOutcome(jobId);
-        const playedOk =
-          moqPlaybackSucceeded(jobId) ||
-          sessionRef.current.firstFrame ||
-          sessionRef.current.videoTimeSec > 0.25 ||
-          sessionRef.current.ttffMs > 0;
-        const catalogReady = Boolean(outcome?.catalogReady || sessionRef.current.catalogReady);
-        const coveredClip = playedMostOfEncode({
-          videoTimeSec: sessionRef.current.videoTimeSec,
+        const snapshotNow = getPlaybackSnapshot();
+        const verdict = classifyMoqEndVerdict({
+          firstFrame:
+            moqPlaybackSucceeded(jobId) ||
+            sessionRef.current.firstFrame ||
+            moqHasRenderedMedia({
+              framesRendered: snapshotNow.playback_frames_rendered,
+              videoTimeSec: sessionRef.current.videoTimeSec,
+            }),
+          framesRendered: snapshotNow.playback_frames_rendered,
+          videoTimeSec: Math.max(
+            sessionRef.current.videoTimeSec,
+            outcome?.videoTimeSec ?? 0,
+          ),
+          catalogReady: Boolean(outcome?.catalogReady || sessionRef.current.catalogReady),
           encodeDurationSec: encodeDurationRef.current,
+          sessionRestarts: sessionRef.current.sessionRestarts,
+          lastError: lastErrorRef.current,
+          namespace,
         });
-        if (playedOk && coveredClip) {
+        if (verdict.ok) {
           setError(null);
           lastErrorRef.current = null;
-          const restarts = sessionRef.current.sessionRestarts;
-          setStatus(
-            restarts > 0
-              ? `Playback ended (reconnected ${restarts}× after a freeze)`
-              : "Playback OK",
-          );
-        } else if (playedOk && !coveredClip) {
-          const vt = sessionRef.current.videoTimeSec;
-          const duration = encodeDurationRef.current;
-          const message =
-            `MoQ playback stalled at ${vt.toFixed(1)}s of a ${duration}s encode.`;
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
+          setStatus(verdict.status);
+        } else {
+          lastErrorRef.current = verdict.error;
+          setError(verdict.error);
+          setStatus(verdict.status);
           const snapshot = {
-            ...getPlaybackSnapshot(),
+            ...snapshotNow,
             playback_error_count: 1,
             elapsed_sec: elapsedSecFromStart(encodeStartedAtEpoch),
             engine: "moq" as const,
@@ -349,20 +350,6 @@ export default function MoqPlayer({
           if (jobId) {
             void postPlaybackSample(jobId, snapshot).catch(() => undefined);
           }
-        } else if (lastErrorRef.current) {
-          setError(lastErrorRef.current);
-          setStatus("Failed (see diagnostics)");
-        } else if (catalogReady) {
-          const message = "MoQ catalog loaded but no video frames rendered during the encode.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
-        } else {
-          const message =
-            "MoQ catalog never loaded during the encode. Check API terminal for a line starting with 'MoQ publish via openmoq' during the run.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
         }
       } else {
         setStatus(
@@ -657,6 +644,7 @@ export default function MoqPlayer({
         }
 
         let statsZeroLogged = false;
+        let keptPublisherNotReady = false;
         setStatus(attempt === 1 ? "Connecting..." : "Retrying subscribe...");
         if (attempt > 1) {
           pushDiag(`subscribe_retry=attempt${attempt}`, true);
@@ -784,8 +772,10 @@ export default function MoqPlayer({
             setIsPlaying(false);
             setStatus(attempt === 1 ? "Connecting..." : "Retrying subscribe...");
           } else if (state === "playing") {
-            setIsPlaying(true);
-            setStatus("Playing");
+            if (sessionRef.current.firstFrame) {
+              setIsPlaying(true);
+              setStatus("Playing");
+            }
           } else if (state === "paused") {
             setIsPlaying(false);
             setStatus("Paused");
@@ -962,9 +952,17 @@ export default function MoqPlayer({
           }
           if (
             severity === "fatal" &&
-            isPublisherNotReadyError(code) &&
-            retrySubscribe("subscribe_retry=publisher_not_ready", SUBSCRIBE_RETRY_MS)
+            shouldKeepSessionOnSubscribeError({
+              firstFrame: sessionRef.current.firstFrame,
+              code,
+            })
           ) {
+            // 0x10 / track-not-exist: do NOT destroy. Tearing down here is how
+            // the one-shot CMAF catalog is published to nobody (CSV 2026-08-18:
+            // moqx_subscribe_error=1, subscribe_success=0, frames=0, no UI error).
+            keptPublisherNotReady = true;
+            pushDiag("subscribe_0x10_keepalive (waiting for namespace/catalog)", true);
+            setStatus("Waiting for publisher namespace...");
             return;
           }
           // Every other path that reaches fail() first destroys the player
@@ -988,6 +986,12 @@ export default function MoqPlayer({
         }
         connectTimeout = window.setTimeout(() => {
           if (destroyed || sessionRef.current.catalogReady || sessionRef.current.firstFrame) {
+            return;
+          }
+          // A 0x10 keepalive is still subscribed — destroying here republishes
+          // the catalog-miss window. Wait for the no-media watchdog instead.
+          if (keptPublisherNotReady) {
+            pushDiag("catalog_timeout_skipped keepalive_0x10", true);
             return;
           }
           if (retrySubscribe("catalog_timeout_retry", 200)) {
@@ -1090,9 +1094,27 @@ export default function MoqPlayer({
         // the window is measured from the run's first media, not per session).
         let firstMediaAtMs = 0;
         let watchdogTick = 0;
+        const liveStartedAtMs = Date.now();
+        const mediaDeadlineMs = noMediaTimeoutMs(encodeDurationRef.current);
         const liveEdgeTickDivider = Math.max(1, Math.round(LIVE_EDGE_TRIM_MS / WATCHDOG_TICK_MS));
         liveEdgeTimer = window.setInterval(() => {
-          if (destroyed || !sessionRef.current.firstFrame) {
+          if (destroyed) {
+            return;
+          }
+          if (!sessionRef.current.firstFrame) {
+            const encodeOver =
+              jobStatusRef.current === "completed" || jobStatusRef.current === "failed";
+            if (
+              !lastErrorRef.current &&
+              (encodeOver || Date.now() - liveStartedAtMs >= mediaDeadlineMs)
+            ) {
+              fail(
+                noMediaFailMessage({
+                  catalogReady: sessionRef.current.catalogReady,
+                  namespace,
+                }),
+              );
+            }
             return;
           }
           if (firstMediaAtMs === 0) {

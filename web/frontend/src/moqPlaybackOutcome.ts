@@ -61,5 +61,7 @@ export function moqPlaybackSucceeded(jobId: string | undefined): boolean {
   if (!outcome) {
     return false;
   }
-  return outcome.firstFrame || outcome.videoTimeSec > 0.25 || outcome.ttffMs > 0;
+  // ttffMs alone is not playback — playa / path-delay can stamp a number
+  // while frames_rendered and video_time stay 0 (BBB CMAF 2026-08-18).
+  return outcome.firstFrame || outcome.videoTimeSec > 0.25;
 }

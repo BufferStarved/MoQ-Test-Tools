@@ -151,9 +151,10 @@ export function StreamPlayer({
     target.note === "lowLatencyMode" || resolvedMode === "ll-hls";
   const dashLowLatency =
     target.note === "lowLatencyDash" || resolvedMode === "ll-dash";
-  // Wait for the per-job MoQ namespace before going live — using the preset
-  // default ("benchmark") then flipping causes a Player/MediaSource remount.
-  const moqReadyNamespace = (target.moqNamespace || moqNamespace || "").trim();
+  // Wait for the per-job MoQ namespace before going live. resolvePlaybackTarget
+  // invents "benchmark" from the preset URL — that must not win over a missing
+  // job namespace or we SUBSCRIBE the wrong ns while ffmpeg publishes bench-*.
+  const moqReadyNamespace = (moqNamespace || "").trim();
   const moqPlaybackGate: PlaybackGate =
     target.engine === "moq" && playbackGate === "live" && !moqReadyNamespace
       ? "waiting"

@@ -73,16 +73,12 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
 
   const gate = playbackGateForJob(job ?? undefined, !job);
   const samples: UploadSample[] = job?.samples ?? [];
-  const waitingMoq = job?.protocol === "moq" && job.preview_ready === false && job.status === "running";
 
   if (error) {
     return <div className="player-surface">Harness: {error}</div>;
   }
   if (!job) {
     return <div className="player-surface">Harness: loading job…</div>;
-  }
-  if (waitingMoq) {
-    return <div className="player-surface">Harness: waiting for MoQ preview_ready…</div>;
   }
 
   const mode = (playback || (job.protocol === "moq" ? "moq" : job.protocol === "webrtc" ? "whep" : "hls")) as PlaybackMode;
