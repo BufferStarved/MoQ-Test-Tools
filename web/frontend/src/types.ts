@@ -106,7 +106,7 @@ export interface EndpointConfig {
 
 export interface UploadJob {
   id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "queued" | "running" | "completed" | "failed";
   protocol: string;
   endpoint_url: string;
   media_path: string;

@@ -263,6 +263,13 @@ export function SourceSection({
                     </label>
                   )}
                   {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
+                  {features.local_publisher_whip === false && (
+                    <p className="field-hint">
+                      WebRTC is hidden for this laptop — ffmpeg has no WHIP muxer.
+                      Stop the agent and re-run ./scripts/run-local-publisher.sh so it
+                      can install a capable ffmpeg.
+                    </p>
+                  )}
                 </>
               ) : (
                 <>

@@ -101,7 +101,8 @@ const STALL_RESTART_MS = 8_000;
 // Early-join window: used to fast-resubscribe CMAF after a 1.75s freeze.
 // That killed healthy live-edge holds (vt≈3s, ~0.5s buffered) and the
 // reconnect reset MSE to 0 — catalog is one-shot, so 2/3 and 3/3 never
-// recovered. CMAF now holds; LOC still uses the fast path.
+// recovered. Both CMAF and LOC now hold; a LOC resubscribe RESET_STREAMs
+// the live publisher (demo 2026-08-18: 4 frames then restart 1/3–3/3).
 const EARLY_JOIN_WINDOW_MS = 15_000;
 const EARLY_STALL_RESTART_MS = 1_750;
 // Watchdog needs sub-second ticks to catch early starvation promptly; the
@@ -1137,9 +1138,9 @@ export default function MoqPlayer({
             firstMediaAtMs = Date.now();
           }
           watchdogTick += 1;
-          // Early-join freeze: kick play / hold the CMAF session after
-          // EARLY_STALL_RESTART_MS. Do not tear down — reconnect resets
-          // vt to 0 and misses the one-shot catalog. LOC still restarts.
+          // Early-join freeze: kick play / hold the session. Do not tear
+          // down — LOC reconnect RESET_STREAMs the publisher; CMAF reconnect
+          // drops the one-shot catalog and resets vt to 0.
           const earlyWindow = Date.now() - firstMediaAtMs < EARLY_JOIN_WINDOW_MS;
           const stallLimitMs = earlyWindow ? EARLY_STALL_RESTART_MS : STALL_RESTART_MS;
           if (mediaPackaging === "loc") {
@@ -1156,7 +1157,20 @@ export default function MoqPlayer({
               sessionRestarts,
               stallLimitMs: locStallMs,
               retrying,
+              earlyWindow,
+              encodeFinished:
+                jobStatusRef.current === "completed" || jobStatusRef.current === "failed",
             });
+            if (locAction === "hold") {
+              pushDiag(`loc_frames_hold frames=${frames}${earlyWindow ? " early_join" : ""}`);
+              watchdogAtMs = Date.now();
+              try {
+                playerRef.current?.play();
+              } catch {
+                // ignore
+              }
+              return;
+            }
             if (locAction === "restart") {
               watchdogAtMs = Date.now();
               scheduleSessionRestart(

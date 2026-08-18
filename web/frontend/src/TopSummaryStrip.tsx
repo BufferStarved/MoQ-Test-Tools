@@ -25,6 +25,9 @@ function statusTone(job: UploadJob): "ok" | "warn" | "bad" | "idle" {
   if (job.status === "completed") {
     return "ok";
   }
+  if (job.status === "queued" || job.status === "pending") {
+    return "warn";
+  }
   if (job.status === "running") {
     return job.preview_ready === false ? "warn" : "ok";
   }
@@ -32,6 +35,9 @@ function statusTone(job: UploadJob): "ok" | "warn" | "bad" | "idle" {
 }
 
 function statusLabel(job: UploadJob): string {
+  if (job.status === "queued") {
+    return "queued";
+  }
   if (job.status === "running" && job.preview_ready === false) {
     return "buffering";
   }

@@ -59,6 +59,7 @@ class PublisherAgent:
         ffmpeg_path = next(
             (dep.path for dep in self._deps if dep.name == "ffmpeg" and dep.ok), ""
         )
+        self._ffmpeg_whip = any(dep.name == "ffmpeg-whip" and dep.ok for dep in self._deps)
         self._webcam_devices = list_webcam_devices(ffmpeg_path)
         # Never hairpin MediaMTX to loopback on a laptop agent — publish to the
         # public ingest IP over the real internet path under test.
@@ -82,6 +83,7 @@ class PublisherAgent:
                 for d in self._deps
             ],
             "webcam_devices": self._webcam_devices,
+            "ffmpeg_whip": self._ffmpeg_whip,
             "ready": required_ok(self._deps),
         }
 

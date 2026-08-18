@@ -40,8 +40,9 @@ class WhipEncoderVmafTests(unittest.TestCase):
             build_tee_output_args("webrtc", "http://203.0.113.10:8889/benchmark/whip", "/tmp/x.ts")
         self.assertIn("webrtc", str(ctx.exception).lower())
 
+    @patch("upload_service.ffmpeg_has_whip_muxer", return_value=True)
     @patch("upload_service.find_ffmpeg", return_value="ffmpeg")
-    def test_direct_ffmpeg_skips_capture_tee_for_webrtc_vmaf(self, _ffmpeg) -> None:
+    def test_direct_ffmpeg_skips_capture_tee_for_webrtc_vmaf(self, _ffmpeg, _whip) -> None:
         job = UploadJob(
             media_path="/tmp/x.mp4",
             destination=DestinationProfile(

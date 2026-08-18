@@ -48,6 +48,7 @@ export interface LocalPublisherAgentInfo {
   platform?: string;
   active_jobs?: number;
   webcam_devices?: WebcamDeviceInfo[];
+  ffmpeg_whip?: boolean;
 }
 
 export interface EncodeHostInfo {
@@ -70,6 +71,8 @@ export interface FeatureFlags {
   local_publisher: boolean;
   local_publisher_connected: boolean;
   local_publisher_agents: LocalPublisherAgentInfo[];
+  /** Connected laptop agent can mux `-f whip`. False until proven. */
+  local_publisher_whip?: boolean;
   encode_hosts?: EncodeHostInfo[];
   media_sources?: BundledMediaSource[];
 }

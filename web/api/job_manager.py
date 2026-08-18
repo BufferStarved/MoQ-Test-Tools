@@ -25,7 +25,11 @@ from moq_publish import is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
 from publisher_protocol import sample_to_dict
-from upload_service import UploadJob, UploadSample, UploadService
+from cloud_encode_slots import (
+    CloudEncodeSlotPool,
+    job_needs_cloud_encode_slot,
+)
+from upload_service import UploadJob, UploadResult, UploadSample, UploadService
 
 
 def live_sample_payload(sample: UploadSample) -> dict:
@@ -81,6 +85,7 @@ def needs_publish_preview(
 
 class JobStatus(str, Enum):
     PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -184,6 +189,7 @@ class JobManager:
         self._jobs: Dict[str, UploadJobRecord] = {}
         self._lock = threading.Lock()
         self._service = UploadService()
+        self._encode_slots = CloudEncodeSlotPool()
         self._path_probes: Dict[str, object] = {}
         self._moqx_pollers: Dict[str, object] = {}
         self._ingest_pollers: Dict[str, object] = {}
@@ -342,60 +348,71 @@ class JobManager:
             return True
 
     def _run_job(self, job_id: str, job: UploadJob) -> None:
+        needs_slot = job_needs_cloud_encode_slot(getattr(job, "publisher_host", "cloud") or "cloud")
+        if needs_slot:
+            self._update(job_id, status=JobStatus.QUEUED)
+            acquired = self._encode_slots.acquire(job_id, job.cancel_event)
+            if not acquired:
+                self._update(
+                    job_id,
+                    status=JobStatus.COMPLETED,
+                    error="Cancelled while waiting for a cloud encode slot",
+                )
+                return
         started_at_epoch = time.time()
         self._update(job_id, status=JobStatus.RUNNING, started_at_epoch=started_at_epoch)
         start_epoch = started_at_epoch
-
-        if job.compute_vmaf_on_ingest:
-            threading.Thread(
-                target=self._prepare_remote_vmaf,
-                args=(job_id, job),
-                daemon=True,
-                name=f"vmaf-prep-{job_id}",
-            ).start()
-
-        def on_sample(sample: UploadSample) -> None:
-            payload = live_sample_payload(sample)
-            with self._lock:
-                record = self._jobs.get(job_id)
-                if record:
-                    if record.pipeline_start_epoch is None:
-                        record.pipeline_start_epoch = time.time() - sample.elapsed_sec
-                    if record.first_sample_at_epoch is None and (
-                        sample.encoded_bitrate_kbps > 0 or sample.fps > 0
-                    ):
-                        record.first_sample_at_epoch = time.time()
-                    self._apply_playback_fields(payload, record.playback_samples)
-                    record.samples.append(payload)
-
-        if job.publisher_host == "browser":
-            result = self._run_browser_publisher_job(job_id, job)
-        elif job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
-            result = publisher_hub.run_remote(
-                job,
-                on_sample=on_sample,
-                on_preview_ready=job.on_preview_ready,
-                on_encoder_vmaf_status=job.on_encoder_vmaf_status,
-                on_media_zero=job.on_media_zero,
-                on_packager_transit=job.on_packager_transit,
-                on_delivery_media_origin=job.on_delivery_media_origin,
-            )
-        else:
-            if job.publisher_host == "local" and not local_publisher_enabled():
-                from upload_service import UploadResult as _UploadResult
-
-                result = _UploadResult(
-                    success=False,
-                    error=(
-                        "publisher_host=local requires LOCAL_PUBLISHER_ENABLED=1 "
-                        "(use ./scripts/dev.sh + ./scripts/run-local-publisher.sh)."
-                    ),
-                )
-            else:
-                result = self._service.run(job, on_sample=on_sample)
-        end_epoch = time.time()
+        result = None
 
         try:
+            if job.compute_vmaf_on_ingest:
+                threading.Thread(
+                    target=self._prepare_remote_vmaf,
+                    args=(job_id, job),
+                    daemon=True,
+                    name=f"vmaf-prep-{job_id}",
+                ).start()
+
+            def on_sample(sample: UploadSample) -> None:
+                payload = live_sample_payload(sample)
+                with self._lock:
+                    record = self._jobs.get(job_id)
+                    if record:
+                        if record.pipeline_start_epoch is None:
+                            record.pipeline_start_epoch = time.time() - sample.elapsed_sec
+                        if record.first_sample_at_epoch is None and (
+                            sample.encoded_bitrate_kbps > 0 or sample.fps > 0
+                        ):
+                            record.first_sample_at_epoch = time.time()
+                        self._apply_playback_fields(payload, record.playback_samples)
+                        record.samples.append(payload)
+
+            if job.publisher_host == "browser":
+                result = self._run_browser_publisher_job(job_id, job)
+            elif job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
+                result = publisher_hub.run_remote(
+                    job,
+                    on_sample=on_sample,
+                    on_preview_ready=job.on_preview_ready,
+                    on_encoder_vmaf_status=job.on_encoder_vmaf_status,
+                    on_media_zero=job.on_media_zero,
+                    on_packager_transit=job.on_packager_transit,
+                    on_delivery_media_origin=job.on_delivery_media_origin,
+                )
+            else:
+                if job.publisher_host == "local" and not local_publisher_enabled():
+                    result = UploadResult(
+                        success=False,
+                        error=(
+                            "publisher_host=local requires LOCAL_PUBLISHER_ENABLED=1 "
+                            "(use ./scripts/dev.sh + ./scripts/run-local-publisher.sh)."
+                        ),
+                    )
+                else:
+                    result = self._service.run(job, on_sample=on_sample)
+            end_epoch = time.time()
+            if result is None:
+                raise RuntimeError("Upload job produced no result")
             if result.success:
                 self._persist_playback_metrics(job_id, result.summary_path)
                 self._update(
@@ -448,7 +465,16 @@ class JobManager:
                     ),
                     encoder_vmaf_error=result.error if job.compute_vmaf_encoder else None,
                 )
+        except Exception as exc:
+            self._update(
+                job_id,
+                status=JobStatus.FAILED,
+                error=str(exc) or "Upload failed",
+            )
+            raise
         finally:
+            if needs_slot:
+                self._encode_slots.release(job_id)
             # Status is already COMPLETED/FAILED so the UI flips playbackGate→ended
             # and destroys HLS before we delete the Zixi input that backs the playlist.
             self._schedule_zixi_cleanup(job)

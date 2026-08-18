@@ -35,6 +35,22 @@ def local_publisher_token() -> str:
     return (os.environ.get("LOCAL_PUBLISHER_TOKEN") or "dev-local-publisher").strip()
 
 
+def capabilities_allow_whip(capabilities: Optional[Dict[str, Any]]) -> bool:
+    """True only when the agent has proven it can mux `-f whip`. Fail closed."""
+    caps = capabilities or {}
+    if "ffmpeg_whip" in caps:
+        return bool(caps.get("ffmpeg_whip"))
+    for dep in caps.get("deps") or []:
+        if not isinstance(dep, dict):
+            continue
+        if dep.get("name") == "ffmpeg-whip":
+            return bool(dep.get("ok"))
+        detail = str(dep.get("detail") or "").lower()
+        if dep.get("name") == "ffmpeg" and "whip" in detail and "missing" in detail:
+            return False
+    return False
+
+
 @dataclass
 class _PendingJob:
     sample_queue: "queue.Queue[Optional[dict]]" = field(default_factory=queue.Queue)
@@ -76,6 +92,7 @@ class PublisherHub:
                     "platform": (agent.capabilities or {}).get("platform"),
                     "deps": (agent.capabilities or {}).get("deps") or [],
                     "webcam_devices": (agent.capabilities or {}).get("webcam_devices") or [],
+                    "ffmpeg_whip": capabilities_allow_whip(agent.capabilities),
                     "connected_at": agent.connected_at,
                     "active_jobs": len(agent.pending),
                 }
@@ -84,8 +101,16 @@ class PublisherHub:
         return {
             "enabled": local_publisher_enabled(),
             "connected": len(agents) > 0,
+            "whip": any(bool(agent.get("ffmpeg_whip")) for agent in agents),
             "agents": agents,
         }
+
+    def can_publish_whip(self) -> bool:
+        agent = self.pick_agent()
+        if agent is not None:
+            return capabilities_allow_whip(agent.capabilities)
+        with self._lock:
+            return any(capabilities_allow_whip(item.capabilities) for item in self._agents.values())
 
     def pick_agent(self) -> Optional[AgentConnection]:
         with self._lock:

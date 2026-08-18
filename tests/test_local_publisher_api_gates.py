@@ -196,6 +196,37 @@ class LocalPublisherApiGateTests(unittest.TestCase):
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_local_webrtc_rejected_without_whip_muxer(self) -> None:
+        with patch.dict(os.environ, {"LOCAL_PUBLISHER_ENABLED": "1"}, clear=False):
+            with patch.object(
+                api_main.publisher_hub,
+                "status",
+                return_value={"enabled": True, "connected": True, "whip": False, "agents": [{"agent_id": "a"}]},
+            ):
+                with patch.object(api_main.publisher_hub, "can_publish_whip", return_value=False):
+                    resp = self.client.post(
+                        "/api/uploads",
+                        json={
+                            "media_path": "device:webcam",
+                            "preset_id": "moq_mediamtx_gcp_whip",
+                            "duration_sec": 5,
+                            "publisher_host": "local",
+                        },
+                    )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("whip", resp.json()["detail"].lower())
+
+    def test_features_exposes_local_publisher_whip(self) -> None:
+        with patch.object(
+            api_main.publisher_hub,
+            "status",
+            return_value={"enabled": True, "connected": True, "whip": False, "agents": []},
+        ):
+            resp = self.client.get("/api/features")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("local_publisher_whip", resp.json())
+        self.assertFalse(resp.json()["local_publisher_whip"])
+
     def test_media_upload_endpoint(self) -> None:
         files = {"file": ("clip.mp4", b"not-really-mp4", "video/mp4")}
         resp = self.client.post("/api/media/upload", files=files)

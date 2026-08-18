@@ -9,7 +9,7 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
   if (!job) {
     return "idle";
   }
-  if (job.status === "pending") {
+  if (job.status === "pending" || job.status === "queued") {
     return "waiting";
   }
   if (job.status === "running") {

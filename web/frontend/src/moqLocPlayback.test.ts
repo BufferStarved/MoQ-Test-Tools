@@ -41,10 +41,47 @@ describe("classifyLocFrameStall", () => {
     assert.equal(classifyLocFrameStall({ ...base, nowMs: 4_000 }), "ok");
   });
 
-  it("restarts after the stall limit, then gives up", () => {
-    assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000 }), "restart");
+  it("holds after the stall limit when frames already painted", () => {
+    assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000 }), "hold");
+  });
+
+  it("holds on early join even with only a handful of frames", () => {
     assert.equal(
-      classifyLocFrameStall({ ...base, nowMs: 10_000, sessionRestarts: 3 }),
+      classifyLocFrameStall({
+        ...base,
+        framesRendered: 4,
+        nowMs: 5_000,
+        earlyWindow: true,
+        stallLimitMs: 3_000,
+      }),
+      "hold",
+    );
+  });
+
+  it("holds when the encode has already finished", () => {
+    assert.equal(
+      classifyLocFrameStall({
+        ...base,
+        framesRendered: 4,
+        nowMs: 10_000,
+        encodeFinished: true,
+      }),
+      "hold",
+    );
+  });
+
+  it("restarts only when there is no media and the encode is still live", () => {
+    assert.equal(
+      classifyLocFrameStall({ ...base, framesRendered: 0, nowMs: 10_000 }),
+      "restart",
+    );
+    assert.equal(
+      classifyLocFrameStall({
+        ...base,
+        framesRendered: 0,
+        nowMs: 10_000,
+        sessionRestarts: 3,
+      }),
       "give_up",
     );
   });

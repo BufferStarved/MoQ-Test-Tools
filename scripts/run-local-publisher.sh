@@ -22,11 +22,6 @@ fi
 # Agent dependencies (websockets, psutil, …); no-op when already installed.
 python -m pip install -q -r requirements.txt
 
-# Match scripts/dev.sh tool discovery so ffmpeg/srt/moq are on PATH.
-if [[ -x "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" ]]; then
-  export PATH="/opt/homebrew/opt/ffmpeg-full/bin:$PATH"
-  export FFMPEG="/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
-fi
 if [[ -x "/opt/homebrew/bin/srt-live-transmit" ]]; then
   export PATH="/opt/homebrew/bin:$PATH"
 elif [[ -x "/usr/local/bin/srt-live-transmit" ]]; then
@@ -47,7 +42,14 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-# Ensure optional tools when missing (macOS Homebrew + repo installer).
-bash "$ROOT_DIR/scripts/ensure-publisher-tools.sh" || true
+# Must succeed: installs/upgrades a WHIP-capable ffmpeg and writes FFMPEG.
+if ! bash "$ROOT_DIR/scripts/ensure-publisher-tools.sh"; then
+  echo "Publisher tools are not ready. The agent will not start." >&2
+  exit 1
+fi
+if [[ -f "$ROOT_DIR/.publisher-tools.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.publisher-tools.env"
+fi
 
 python -m publisher_agent "$@"

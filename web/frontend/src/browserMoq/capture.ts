@@ -14,6 +14,15 @@ export async function startBrowserCapture(): Promise<BrowserCapture> {
     audio: true,
   });
   const hasAudio = stream.getAudioTracks().some((track) => track.readyState === "live");
+  for (const track of stream.getVideoTracks()) {
+    try {
+      // Prefer frequent IDRs so MoQ groups keep advancing. "motion" is the
+      // hint browsers honor for a live contribution encode.
+      track.contentHint = "motion";
+    } catch {
+      // contentHint is best-effort
+    }
+  }
   return {
     stream,
     hasAudio,

@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -54,6 +55,38 @@ WHIP_COMPAT_AUDIO_ARGS = [
 # MP4 → MPEG-TS for SRT/Zixi. repeat-headers=1 (above) injects SPS/PPS at IDR; annex-B converts AVCC.
 # Chained bsf syntax (dump_extra+…) is not supported on Homebrew ffmpeg-full.
 MPEGTS_VIDEO_BSF = "h264_mp4toannexb"
+
+
+WHIP_FFMPEG_HINT = (
+    "This ffmpeg has no WHIP muxer (`-f whip`), so MediaMTX WebRTC publish "
+    "cannot start. On the publisher Mac: brew upgrade ffmpeg && "
+    "ffmpeg -hide_banner -muxers | grep whip. If that prints nothing: "
+    "brew install ffmpeg-full. Then restart ./scripts/run-local-publisher.sh. "
+    "Do not use Ubuntu/stock ffmpeg 4.x/6.x."
+)
+
+
+def ffmpeg_has_whip_muxer(ffmpeg_bin: str) -> bool:
+    """True when this binary can mux `-f whip` (not just speak HTTP)."""
+    if not ffmpeg_bin:
+        return False
+    try:
+        probe = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-muxers"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    text = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+    return bool(re.search(r"(?m)^\s*E\s+whip\b", text))
+
+
+def whip_ffmpeg_missing_error(ffmpeg_bin: str) -> str:
+    path = ffmpeg_bin or "ffmpeg"
+    return f"{path}: {WHIP_FFMPEG_HINT}"
 
 
 def _ffmpeg_has_srt_output(ffmpeg_bin: str) -> bool:

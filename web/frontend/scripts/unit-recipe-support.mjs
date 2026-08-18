@@ -112,11 +112,12 @@ function ingestMatchesProtocol(protocol, ingest) {
   return false;
 }
 
-function isLegalCombo(source, protocol, ingest, player, caps) {
+function isLegalCombo(source, protocol, ingest, player, caps, publisher = { localFfmpegWhip: true }) {
   const sourceProtocols =
     source === "browser_moq" ? ["moq", "webrtc"] : ["srt", "rtmp", "webrtc", "moq"];
   if (!sourceProtocols.includes(protocol)) return false;
   if (!protocolAllowed(protocol, caps)) return false;
+  if (protocol === "webrtc" && source === "webcam" && !publisher.localFfmpegWhip) return false;
   if (ingestHidden(ingest)) return false;
   if (ingest === "custom" && source === "browser_moq") return false;
   if (!ingestMatchesProtocol(protocol, ingest)) return false;
@@ -182,6 +183,22 @@ for (const row of [
 ]) {
   assert.equal(isLegalCombo(...row, CHROME), false, row.join("/"));
 }
+
+assert.equal(
+  isLegalCombo("webcam", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: false }),
+  false,
+  "webcam webrtc without laptop WHIP muxer",
+);
+assert.equal(
+  isLegalCombo("webcam", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: true }),
+  true,
+  "webcam webrtc with laptop WHIP muxer",
+);
+assert.equal(
+  isLegalCombo("dummy", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: false }),
+  true,
+  "cloud dummy webrtc does not need laptop WHIP",
+);
 
 // Safari: no MoQ; Zixi SRT has no remaining player; HLS on MTX is ok
 assert.equal(isLegalCombo("dummy", "moq", "gcp_moq_relay", "moq", SAFARI), false);

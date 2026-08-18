@@ -254,6 +254,7 @@ def features():
     return {
         "local_publisher": bool(hub.get("enabled")),
         "local_publisher_connected": bool(hub.get("connected")),
+        "local_publisher_whip": bool(hub.get("whip")),
         "local_publisher_agents": hub.get("agents") or [],
         "encode_hosts": encode_hosts_for_api(),
         "media_sources": media_source_catalog(ROOT_DIR),
@@ -742,6 +743,17 @@ def create_upload(request: CreateUploadRequest):
             status_code=400,
             detail="Browser publish supports MoQ and WebRTC (WHIP). Use a MoQ relay or MediaMTX WHIP destination.",
         )
+
+    if publisher_host == "local" and destination.protocol == "webrtc":
+        if not publisher_hub.can_publish_whip():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This machine cannot publish WebRTC — its ffmpeg has no WHIP muxer. "
+                    "Re-run ./scripts/run-local-publisher.sh so it can install a capable "
+                    "ffmpeg, or use SRT, RTMP, or MoQ."
+                ),
+            )
 
     # Ingest VMAF: file sources upload the original media as reference.
     # Browser publish has no file — the tab uploads the encoded bitstream

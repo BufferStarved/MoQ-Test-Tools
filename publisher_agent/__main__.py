@@ -53,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     for dep in deps:
         mark = "OK " if dep.ok else "MISS"
         print(f"  [{mark}] {dep.name:18} {dep.path or dep.detail}")
+        if dep.path and dep.detail:
+            print(f"         {dep.detail}")
         if not dep.ok and dep.install_hint:
             print(f"         hint: {dep.install_hint}")
 
@@ -60,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if required_ok(deps) else 1
 
     if not required_ok(deps):
-        print("\nffmpeg with libx264 is required. Fix the MISS lines above, then retry.")
+        print("\nffmpeg with libx264 and a WHIP muxer is required. Re-run ./scripts/run-local-publisher.sh")
         return 1
 
     agent = PublisherAgent(

@@ -737,6 +737,7 @@ input:disabled {
 
 .pill.running,
 .pill.pending,
+.pill.queued,
 .pill.computing,
 .pill.uploading_reference,
 .pill.waiting_for_upload,

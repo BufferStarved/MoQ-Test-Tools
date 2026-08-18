@@ -41,7 +41,9 @@ from moq_publish import (
     build_ffmpeg_moq_cmd,
     build_moq_publisher_cmd,
     find_ffmpeg,
+    ffmpeg_has_whip_muxer,
     find_moq_publisher,
+    whip_ffmpeg_missing_error,
     is_device_webcam_source,
     is_live_media_source,
     mediamtx_loopback_publish_url,
@@ -609,6 +611,11 @@ class UploadService:
             )
             if not ok:
                 return UploadResult(success=False, error=probe_error)
+
+        if job.destination.protocol == "webrtc":
+            ffmpeg_bin = find_ffmpeg()
+            if not ffmpeg_has_whip_muxer(ffmpeg_bin):
+                return UploadResult(success=False, error=whip_ffmpeg_missing_error(ffmpeg_bin))
 
         process: Optional[subprocess.Popen] = None
         progress_reader: Optional[FfmpegProgressReader] = None

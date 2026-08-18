@@ -198,6 +198,9 @@ function outputStatusTone(
   if (leg.job.status === "completed") {
     return "ok";
   }
+  if (leg.job.status === "queued" || leg.job.status === "pending") {
+    return "warn";
+  }
   if (leg.job.status === "running") {
     return leg.job.preview_ready === false ? "warn" : "ok";
   }
@@ -252,19 +255,24 @@ function App() {
       rtcPeerConnection: detected.rtcPeerConnection,
     };
   }, []);
-  const recipeContext = useMemo(
-    (): RecipeContext => ({ source: mediaSource, presets, caps: recipeCaps }),
-    [mediaSource, presets, recipeCaps],
-  );
-  const recipeBlockReason = recipeIssue(endpoints, recipeContext);
-  const [encoder, setEncoder] = useState<EncoderId>("ffmpeg");
-  // Last-mile camera choice ("" = agent default device).
-  const [webcamDeviceIndex, setWebcamDeviceIndex] = useState("");
   const [features, setFeatures] = useState<FeatureFlags>({
     local_publisher: false,
     local_publisher_connected: false,
     local_publisher_agents: [],
   });
+  const recipeContext = useMemo(
+    (): RecipeContext => ({
+      source: mediaSource,
+      presets,
+      caps: recipeCaps,
+      publisher: { localFfmpegWhip: Boolean(features.local_publisher_whip) },
+    }),
+    [mediaSource, presets, recipeCaps, features.local_publisher_whip],
+  );
+  const recipeBlockReason = recipeIssue(endpoints, recipeContext);
+  const [encoder, setEncoder] = useState<EncoderId>("ffmpeg");
+  // Last-mile camera choice ("" = agent default device).
+  const [webcamDeviceIndex, setWebcamDeviceIndex] = useState("");
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
   const [encoderVmafUnavailableReason, setEncoderVmafUnavailableReason] = useState<string | null>(null);
   const [vmafUnavailableReason, setVmafUnavailableReason] = useState<string | null>(null);
@@ -423,6 +431,7 @@ function App() {
         fetchFeatures().catch(() => ({
           local_publisher: false,
           local_publisher_connected: false,
+          local_publisher_whip: false,
           local_publisher_agents: [],
         })),
       ]);
@@ -439,6 +448,7 @@ function App() {
             webTransport: detectBrowserMoqCapabilities().webTransport,
             rtcPeerConnection: detectBrowserMoqCapabilities().rtcPeerConnection,
           },
+          publisher: { localFfmpegWhip: Boolean(featureData.local_publisher_whip) },
         };
         const seed = current.length > 0 ? current : buildDefaultEndpoints(ctx);
         return coerceRecipe(seed, ctx);
@@ -1173,8 +1183,19 @@ function App() {
         if (mediaSource === "webcam") {
           setWebcamStatus("Live webcam run finished.");
         } else if (mediaSource === "browser_moq") {
-          stopBrowserMoqRun();
-          setWebcamStatus("Browser run finished.");
+          // Keep the camera publishing through the player drain window.
+          // Stopping on the job-complete tick left the relay idle while the
+          // player still thought it was live — 4 leftover LOC frames, then
+          // three RESET_STREAM reconnects (demo 2026-08-18).
+          const run = browserMoqRunRef.current;
+          window.setTimeout(() => {
+            if (browserMoqRunRef.current !== run) {
+              return;
+            }
+            stopBrowserMoqRun();
+            setWebcamStatus("Browser run finished.");
+          }, PLAYBACK_DRAIN_MS);
+          setWebcamStatus("Browser encode finished — draining playback…");
         }
       };
       jobs.forEach((job, index) => {

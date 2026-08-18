@@ -22,13 +22,14 @@ from cloud_placement import (
 from moq_publish import MoqPublishTarget, parse_moq_publish_url
 
 CENTRAL_WEB_INGEST_AGENT = "http://34.9.217.178:8090"
-# Unreachable from the cloud encoder; never use this as a default recorder.
-DEAD_CENTRAL_ZIXI_AGENT = "http://35.222.33.58:8090"
+# MoQ recorder lives on the web ingest agent. Do not fall back to the Zixi
+# worker URL even though that host is up again — its recorder path is optional.
+ZIXI_CENTRAL_AGENT = "http://35.222.33.58:8090"
 
 
 def _usable_recorder_url(url: str) -> str:
     cleaned = (url or "").strip().rstrip("/")
-    if not cleaned or DEAD_CENTRAL_ZIXI_AGENT.split("://", 1)[-1].split(":")[0] in cleaned:
+    if not cleaned or ZIXI_CENTRAL_AGENT.split("://", 1)[-1].split(":")[0] in cleaned:
         return ""
     return cleaned
 
@@ -36,9 +37,8 @@ def _usable_recorder_url(url: str) -> str:
 def moq_recorder_agent_url(regional_fallback: str = "") -> str:
     """MoQ VMAF recordings subscribe over WebTransport on an ingest agent.
 
-    Do not default to us-central1 Zixi (35.222.33.58) — that host is down and
-    a 10s health wait blocked encode start. Prefer an explicit
-    MOQ_RECORDER_AGENT_URL, else the regional web agent, else INGEST_AGENT_URL.
+    Prefer an explicit MOQ_RECORDER_AGENT_URL, else the regional web agent,
+    else INGEST_AGENT_URL. Do not default to the Zixi worker.
     """
     explicit = _usable_recorder_url(os.environ.get("MOQ_RECORDER_AGENT_URL", ""))
     if explicit:

@@ -38,10 +38,26 @@ export const RECIPE_CHROME_CAPS: RecipeBrowserCaps = {
 
 export type RecipeSourceId = "dummy" | "bbb" | "upload" | "webcam" | "browser_moq";
 
+export interface RecipePublisherCaps {
+  /**
+   * Laptop ffmpeg can mux `-f whip`. Webcam / This-machine recipes must
+   * not offer WebRTC without this — cloud and in-browser WHIP do not
+   * use the laptop muxer.
+   */
+  localFfmpegWhip: boolean;
+}
+
+export const RECIPE_CLOUD_PUBLISHER: RecipePublisherCaps = { localFfmpegWhip: true };
+
 export interface RecipeContext {
   source: RecipeSourceId;
   presets: Preset[];
   caps: RecipeBrowserCaps;
+  publisher?: RecipePublisherCaps;
+}
+
+export function recipePublisherCaps(ctx: Pick<RecipeContext, "publisher">): RecipePublisherCaps {
+  return ctx.publisher ?? RECIPE_CLOUD_PUBLISHER;
 }
 
 function isPublishProtocol(protocol: string): protocol is PublishProtocolId {
@@ -61,10 +77,20 @@ export function protocolAllowedInBrowser(protocol: string, caps: RecipeBrowserCa
 export function publishProtocolIdsForSource(
   source: RecipeSourceId,
   caps: RecipeBrowserCaps,
+  publisher: RecipePublisherCaps = RECIPE_CLOUD_PUBLISHER,
 ): PublishProtocolId[] {
   const live: PublishProtocolId[] =
     source === "browser_moq" ? ["moq", "webrtc"] : ["srt", "rtmp", "webrtc", "moq"];
-  return live.filter((protocol) => protocolAllowedInBrowser(protocol, caps));
+  return live.filter((protocol) => {
+    if (!protocolAllowedInBrowser(protocol, caps)) {
+      return false;
+    }
+    // Webcam encode is the local agent. No WHIP muxer → no WebRTC option.
+    if (protocol === "webrtc" && source === "webcam" && !publisher.localFfmpegWhip) {
+      return false;
+    }
+    return true;
+  });
 }
 
 export function playbackModeAllowedInBrowser(
@@ -189,7 +215,7 @@ export function coerceEndpoint(
   ctx: RecipeContext,
   occupiedCollisionKeys: ReadonlySet<string>,
 ): EndpointConfig {
-  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps);
+  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx));
   let protocol = endpoint.protocol;
   if (!allowed.includes(protocol as PublishProtocolId)) {
     protocol = allowed[0] ?? "srt";
@@ -262,7 +288,7 @@ function tryAddProtocol(
   ctx: RecipeContext,
   used: ReadonlySet<string>,
 ): Omit<EndpointConfig, "id"> | null {
-  if (!publishProtocolIdsForSource(ctx.source, ctx.caps).includes(protocol)) {
+  if (!publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx)).includes(protocol)) {
     return null;
   }
   const usedLegs = new Set(
@@ -353,10 +379,17 @@ export function canAddRecipeOutput(
 }
 
 export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): string | null {
-  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps);
+  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx));
   const used = new Set<string>();
   for (const endpoint of endpoints) {
     if (!allowed.includes(endpoint.protocol as PublishProtocolId)) {
+      if (
+        endpoint.protocol === "webrtc" &&
+        ctx.source === "webcam" &&
+        !recipePublisherCaps(ctx).localFfmpegWhip
+      ) {
+        return "WebRTC is unavailable on this machine — its ffmpeg has no WHIP muxer. Use SRT, RTMP, or MoQ, or upgrade ffmpeg.";
+      }
       return "This output uses a protocol that is not available here.";
     }
     if (!ingestAllowedForRecipe(endpoint.ingestEndpointId, endpoint.protocol, ctx)) {

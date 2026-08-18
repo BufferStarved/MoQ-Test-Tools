@@ -80,13 +80,8 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
 ];
 
-/**
- * Hosts that must never appear in a web recipe. us-central1 Zixi
- * (`35.222.33.58`) is unreachable from the cloud encoder; keep the preset
- * in the API for scripts, but do not let the UI target it. Use east/Linode
- * Zixi or a Custom URL instead.
- */
-export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set(["gcp_zixi"]);
+/** Hosts hidden from web recipes. Empty while all configured stacks are live. */
+export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set();
 
 /** Static list (legacy). Prefer `ingestEndpointsFromPresets` when presets are loaded. */
 export const INGEST_ENDPOINTS: IngestEndpointOption[] = INGEST_ENDPOINT_DEFS.map((item) => ({

@@ -262,3 +262,29 @@ sections in this repo’s Zixi / web runbooks.
 | Video Quality | ✓* | ✓* | ✓* | ✓* | ✓* |
 
 \* Requires optional wiring (Zixi API, GCP metrics, browser player open during encode, VMAF).
+
+---
+
+## Known gaps (why a column is empty when you expected a number)
+
+Empty / zero is often honest, not a CSV bug. After `100826e`, MoQ `e2e_latency_ms` is omitted unless a first frame rendered — path-delay fallbacks must not invent ~10s on a black player.
+
+| Metric | SRT | RTMP | WebRTC (WHIP/WHEP) | MoQ | Why it is missing when expected |
+|--------|-----|------|--------------------|-----|--------------------------------|
+| `e2e_latency_ms` / `playback_ttff_ms` / `playback_frames_*` | Site player | Site player | Site player | Site player | Glass metrics are posted by the browser player. API/harness-only runs stay 0. MoQ also needs a painted first frame; CMAF has no CaptureTimestamp so e2e is TTFF/path-delay after frames, never before. |
+| `quic_*` (rtt, cwnd, lost) | n/a | n/a | n/a | Empty on prod sidecar | `openmoq-publisher` has no qlog. Relay Prometheus fills `moqx_*` / receive-loss stand-ins, not publisher picoquic qlog. |
+| `net_rtt_ms` | libsrt / MTX / Zixi | Zixi or TCP probe | `getStats` RTT | Path probe / qlog | Remote WHIP used to be 0 when MTX metrics were loopback-only. East/Linode now scrape the agent. RTMP without Zixi REST is TCP connect RTT, not media RTT. |
+| `net_loss_pct` / `net_retrans_pct` | libsrt / MTX | Usually empty | RTP loss / NACK | moqx QUIC Δ | RTMP has no ARQ loss series. MoQ send-loss is relay-observed (`quic_packets_lost`), not publisher `pkt_snd_loss`. |
+| `encode_lag_ms` | ffmpeg `out_time` | same | same | same | 0 if `-progress` never parsed `out_time_us`/`out_time_ms` (fixed). Browser WebCodecs jobs have no ffmpeg out_time. |
+| `vmaf_score_encoder` | tee capture | tee capture | **QP 0–100 stand-in only** | stdout tee → mp4 | ffmpeg cannot tee the WHIP muxer. Webcam live has no file reference. |
+| `vmaf_score_ingest` | Zixi TS record | Zixi TS record | **none** | `openmoq-fmp4-record` | Central web (`34.9.217.178`) has no ingest-agent process; East/Linode do. Central Zixi recorder (`35.222.33.58:8090`) is on the dead host. WHIP has no post-ingest file. |
+| `ts_continuity_counter_errors` | Zixi TR101 | Zixi TR101 | n/a | n/a | Needs Zixi Analyze. MediaMTX SRT uses a weaker `paths_inbound_frames_in_error` stand-in. |
+| `cmaf_*` media health | n/a | n/a | n/a | encoder/ingest fMP4 | LOC (webcam) is not CMAF; those columns stay empty on LOC legs. |
+| `moqx_subscribe_*` | n/a | n/a | n/a | job-window Δ | Lifetime counters used to look like the current job failed. Charts now use the job window; historical `track_not_exist` is not a live playback failure. |
+
+**Stand-ins (same CSV name, different physics — do not treat as identical):**
+
+- WebRTC `vmaf_score` ≈ H.264 QP mapped to 0–100, not libvmaf.
+- MoQ CMAF `e2e_latency_ms` ≈ TTFF + playhead drift or `encode_lag + RTT/2 + buffer`, not CaptureTimestamp glass-to-glass.
+- WebRTC `e2e_latency_ms` ≈ encode lag + RTT/2 + jitter buffer (no capture clock on RTP).
+- RTMP `net_rtt_ms` without Zixi REST ≈ TCP connect probe.

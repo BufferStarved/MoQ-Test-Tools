@@ -26,63 +26,118 @@ def _which(name: str) -> Optional[str]:
     return shutil.which(name)
 
 
-def check_ffmpeg() -> DepStatus:
+def _ffmpeg_candidates() -> List[str]:
     env = (os.environ.get("FFMPEG") or "").strip()
-    candidates = [
+    seen: List[str] = []
+    for path in (
         env,
         "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
         "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
         _which("ffmpeg") or "",
-    ]
-    for path in candidates:
-        if path and Path(path).is_file() and os.access(path, os.X_OK):
-            try:
-                completed = subprocess.run(
-                    [path, "-hide_banner", "-encoders"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                out = (completed.stdout or "") + (completed.stderr or "")
-                if "libx264" not in out:
-                    return DepStatus(
-                        name="ffmpeg",
-                        ok=False,
-                        path=path,
-                        detail="found but missing libx264",
-                        install_hint="brew install ffmpeg-full   # or set FFMPEG to an x264 build",
-                    )
-                missing = []
-                if "libopus" not in out:
-                    missing.append("libopus")
-                formats = subprocess.run(
-                    [path, "-hide_banner", "-muxers"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                mux_out = (formats.stdout or "") + (formats.stderr or "")
-                if "whip" not in mux_out.lower():
-                    missing.append("whip muxer")
-                detail = "libx264 ok"
-                if missing:
-                    detail = f"libx264 ok; missing {', '.join(missing)} (WHIP publish will fail)"
-                return DepStatus(name="ffmpeg", ok=True, path=path, detail=detail)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                return DepStatus(
-                    name="ffmpeg",
-                    ok=False,
-                    path=path,
-                    detail=str(exc),
-                    install_hint="brew install ffmpeg-full",
-                )
+    ):
+        if path and path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _ffmpeg_feature_probe(path: str) -> tuple[bool, bool, bool, str]:
+    """Return (x264, opus, whip, error)."""
+    try:
+        enc = subprocess.run(
+            [path, "-hide_banner", "-encoders"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        enc_out = (enc.stdout or "") + (enc.stderr or "")
+        mux = subprocess.run(
+            [path, "-hide_banner", "-muxers"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        mux_out = (mux.stdout or "") + (mux.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, False, False, str(exc)
+    has_x264 = "libx264" in enc_out
+    has_opus = "libopus" in enc_out
+    has_whip = bool(re.search(r"(?m)^\s*E\s+whip\b", mux_out))
+    return has_x264, has_opus, has_whip, ""
+
+
+def check_ffmpeg() -> DepStatus:
+    last_error = ""
+    x264_only: Optional[DepStatus] = None
+    for path in _ffmpeg_candidates():
+        if not (path and Path(path).is_file() and os.access(path, os.X_OK)):
+            continue
+        has_x264, has_opus, has_whip, err = _ffmpeg_feature_probe(path)
+        if err:
+            last_error = err
+            continue
+        if not has_x264:
+            last_error = f"{path} is missing libx264"
+            continue
+        missing = []
+        if not has_opus:
+            missing.append("libopus")
+        if not has_whip:
+            missing.append("whip muxer")
+        detail = "libx264 + WHIP muxer" if not missing else (
+            f"libx264 ok; missing {', '.join(missing)}"
+        )
+        status = DepStatus(name="ffmpeg", ok=True, path=path, detail=detail)
+        if has_whip:
+            return status
+        if x264_only is None:
+            x264_only = status
+    if x264_only is not None:
+        return x264_only
+    if last_error:
+        return DepStatus(
+            name="ffmpeg",
+            ok=False,
+            detail=last_error,
+            install_hint="brew install ffmpeg-full   # or set FFMPEG to an x264 build",
+        )
     return DepStatus(
         name="ffmpeg",
         ok=False,
         detail="not found on PATH",
         install_hint="brew install ffmpeg-full   # macOS; Linux: install ffmpeg with libx264",
+    )
+
+
+def check_ffmpeg_whip(ffmpeg: DepStatus) -> DepStatus:
+    hint = (
+        "brew upgrade ffmpeg && ffmpeg -hide_banner -muxers | grep whip; "
+        "if empty: brew install ffmpeg-full. Restart the publisher agent."
+    )
+    if not ffmpeg.ok or not ffmpeg.path:
+        return DepStatus(
+            name="ffmpeg-whip",
+            ok=False,
+            detail="ffmpeg with libx264 is required first",
+            install_hint=hint,
+        )
+    _x264, _opus, has_whip, err = _ffmpeg_feature_probe(ffmpeg.path)
+    if err:
+        return DepStatus(name="ffmpeg-whip", ok=False, path=ffmpeg.path, detail=err, install_hint=hint)
+    if has_whip:
+        return DepStatus(
+            name="ffmpeg-whip",
+            ok=True,
+            path=ffmpeg.path,
+            detail="`-f whip` muxer present",
+        )
+    return DepStatus(
+        name="ffmpeg-whip",
+        ok=False,
+        path=ffmpeg.path,
+        detail="this ffmpeg cannot publish WebRTC/WHIP (`Requested output format 'whip' is not known`)",
+        install_hint=hint,
     )
 
 
@@ -131,8 +186,10 @@ def check_moq_publisher(repo_root: Path) -> DepStatus:
 
 
 def check_all(repo_root: Path) -> List[DepStatus]:
+    ffmpeg = check_ffmpeg()
     return [
-        check_ffmpeg(),
+        ffmpeg,
+        check_ffmpeg_whip(ffmpeg),
         check_srt_live_transmit(),
         check_moq_publisher(repo_root),
     ]
@@ -154,7 +211,8 @@ def ensure_tool_path(deps: List[DepStatus]) -> None:
 
 
 def required_ok(deps: List[DepStatus]) -> bool:
-    return all(dep.ok for dep in deps if dep.name == "ffmpeg")
+    needed = {"ffmpeg", "ffmpeg-whip"}
+    return all(dep.ok for dep in deps if dep.name in needed)
 
 
 def list_webcam_devices(ffmpeg_path: str = "") -> List[Dict[str, object]]:

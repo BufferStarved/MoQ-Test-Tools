@@ -46,7 +46,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test%20EC",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
-        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
+        "skip": False,
     },
     {
         "id": "zixi_srt_mpegts",
@@ -64,7 +64,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=benchmark",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
-        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
+        "skip": False,
     },
     {
         "id": "zixi_rtmp_mpegts",
@@ -73,7 +73,7 @@ CASES = [
         "url": "http://35.222.33.58:7777/benchmark.ts",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "skip": True,  # central Zixi 35.222.33.58 is retired; do not bounce
+        "skip": False,
     },
     {
         "id": "zixi_tsput_hls",
@@ -354,6 +354,7 @@ def wait_job_running(job_id: str, timeout: float = 45.0) -> dict:
         last = get_job(job_id)
         if last.get("status") in {"running", "completed", "failed", "error"}:
             return last
+        # queued = waiting for a cloud encode slot; keep polling.
         time.sleep(1.0)
     return last
 
@@ -589,7 +590,7 @@ const waitMs = {int(seconds * 1000)};
 const browser = await chromium.launch({{
   executablePath: chrome,
   headless: true,
-  args: ['--autoplay-policy=no-user-gesture-required', '--ignore-certificate-errors'],
+  args: ['--autoplay-policy=no-user-gesture-required', '--ignore-certificate-errors', '--disable-dev-shm-usage'],
 }});
 const context = await browser.newContext();
 const page = await context.newPage();
@@ -673,7 +674,11 @@ def run_case(case: dict, media_path: str) -> CaseResult:
 
     # Drive the real site player (same StreamPlayer reporter) while ingest is live.
     if job_now.get("status") == "running":
-        chrome_ok, chrome_msg = run_site_player(job_id, case["playback"], seconds=14)
+        chrome_ok, chrome_msg = run_site_player(
+            job_id,
+            case["playback"],
+            seconds=float(os.environ.get("SITE_PLAYER_SEC", "14")),
+        )
         if not chrome_ok and job_now.get("status") == "running":
             time.sleep(3)
             chrome_ok, chrome_msg = run_site_player(job_id, case["playback"], seconds=12)
@@ -689,7 +694,7 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     # Wait for completion (or stop)
     deadline = time.time() + DURATION + 40
     final = get_job(job_id)
-    while time.time() < deadline and final.get("status") in {"pending", "running"}:
+    while time.time() < deadline and final.get("status") in {"pending", "queued", "running"}:
         time.sleep(2)
         final = get_job(job_id)
     result.detail = {

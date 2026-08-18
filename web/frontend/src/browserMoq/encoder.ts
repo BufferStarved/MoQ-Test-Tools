@@ -74,6 +74,7 @@ export function createBrowserVideoEncoder(
   let frameCount = 0;
   let forceKeyframe = true;
   let awaitingIdr = false;
+  let lastIdrAt = 0;
   const settings = track.getSettings();
   const width = settings.width || 1280;
   const height = settings.height || 720;
@@ -92,7 +93,9 @@ export function createBrowserVideoEncoder(
         if (!encoder || encoder.state !== "configured") {
           continue;
         }
-        const key = forceKeyframe || awaitingIdr || frameCount % KEYFRAME_INTERVAL === 0;
+        const idrStale = lastIdrAt === 0 || performance.now() - lastIdrAt > 800;
+        const key =
+          forceKeyframe || awaitingIdr || idrStale || frameCount % KEYFRAME_INTERVAL === 0;
         forceKeyframe = false;
         pendingCaptureUs.push(Math.round(Date.now() * 1000));
         encoder.encode(frame, { keyFrame: key });
@@ -129,11 +132,15 @@ export function createBrowserVideoEncoder(
             }
           }
           const isKeyframe = chunk.type === "key" || avcChunkIsSyncPoint(data);
-          // Keep requesting until the bitstream actually has an IDR. Some
-          // hardware encoders ignore keyFrame after the first group.
-          awaitingIdr =
-            !isKeyframe &&
-            (awaitingIdr || frameCount <= 1 || frameCount % KEYFRAME_INTERVAL === 0);
+          if (isKeyframe) {
+            lastIdrAt = performance.now();
+            awaitingIdr = false;
+          } else {
+            // Keep requesting until the bitstream actually has an IDR. Some
+            // hardware encoders ignore keyFrame after the first group.
+            awaitingIdr =
+              awaitingIdr || frameCount <= 1 || frameCount % KEYFRAME_INTERVAL === 0;
+          }
           onChunk({
             data,
             isKeyframe,

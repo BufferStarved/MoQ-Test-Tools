@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+.publisher-tools.env
 
 __pycache__/
 *.pyc
