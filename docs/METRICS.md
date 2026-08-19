@@ -117,7 +117,19 @@ Legacy columns (`transport_rtt_ms`, `encoder_send_rate_mbps`, …) remain for co
 
 ### Encode lag
 
-`encode_lag_ms` = wall elapsed since run start − ffmpeg `out_time`. Large values mean the encoder is falling behind realtime (`-re` / live webcam).
+`encode_lag_ms` = growth of (wall elapsed − ffmpeg `out_time`) past the first positive-media sample. A flat **0** means the encoder stayed at its startup baseline (keeping up), or the path never reported lag — the UI hides an all-zero series instead of inventing numbers.
+
+### Encode overlay clock
+
+ffmpeg burns **`encode time HH:MM:SS.mmm`** for file / webcam (media timeline from encode start) or **`capture time …Z`** when the input already uses wall-clock PTS (`-use_wallclock_as_timestamps`). It is **not** Unix-epoch + PTS mashed together. The laptop webcam preview overlay is labeled **`wall clock`** and is not mirrored.
+
+### Client memory
+
+`memory_mb` is ffmpeg / publisher RSS from psutil. If the agent did not collect RSS, charts hide the series rather than plot a flat zero. `client_memory_percent` is host memory when available.
+
+### WebRTC / WHIP bitrate
+
+ffmpeg’s WHIP muxer often ramps bitrate for the first ~20–30s (muxer warmup). That ramp is expected; it is not a stall.
 
 ---
 

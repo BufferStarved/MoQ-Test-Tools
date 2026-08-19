@@ -6,9 +6,9 @@ import type { EndpointConfig, Protocol } from "./types";
 import type { PlaybackMode } from "./playbackTypes";
 import { IconBroadcast, IconMonitor, IconTarget } from "./Icons";
 import {
+  advancedUrlRows,
   defaultWhepPlaybackUrl,
   isManagedMoqRelay,
-  managedEndpointUrlLabel,
   moqDefaultsFromPublishUrl,
   playbackModeLabelForSelection,
   relayWebTransportUrl,
@@ -128,7 +128,16 @@ export function EndpointSection({
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
   const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
-  const managedLabel = managedEndpointUrlLabel(endpoint.protocol);
+  const urlRows = advancedUrlRows({
+    protocol: endpoint.protocol,
+    endpointUrl: managedUrl || endpoint.endpointUrl,
+    ingestEndpointId: endpoint.ingestEndpointId,
+    playbackMode: endpoint.playbackMode,
+    whepPlaybackUrl: endpoint.whepPlaybackUrl,
+    moqRelayUrl: endpoint.moqRelayUrl,
+    moqFingerprintUrl: endpoint.moqFingerprintUrl,
+    moqNamespace: endpoint.moqNamespace,
+  });
   const playerModes = selectablePlaybackModes(endpoint.protocol, endpoint.ingestEndpointId, caps);
   const resolvedMode = resolvedSelectablePlaybackMode(
     endpoint.playbackMode,
@@ -288,15 +297,15 @@ export function EndpointSection({
         </label>
       )}
 
-      {(managedUrl || showMoq) && (
+      {(urlRows.length > 0 || showMoq) && (
         <details className="output-advanced">
           <summary>Advanced</summary>
-          {managedUrl && (
-            <p className="hint managed-endpoint-url">
-              <span className="url-field-label">{managedLabel}</span>
-              <code>{managedUrl}</code>
+          {urlRows.map((row) => (
+            <p key={row.label} className="hint managed-endpoint-url">
+              <span className="url-field-label">{row.label}</span>
+              <code>{row.url}</code>
             </p>
-          )}
+          ))}
           {showMoq && (
             <>
               <label>

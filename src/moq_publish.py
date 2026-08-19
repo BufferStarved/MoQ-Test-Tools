@@ -58,11 +58,8 @@ MPEGTS_VIDEO_BSF = "h264_mp4toannexb"
 
 
 WHIP_FFMPEG_HINT = (
-    "This ffmpeg has no WHIP muxer (`-f whip`), so MediaMTX WebRTC publish "
-    "cannot start. On the publisher Mac: brew upgrade ffmpeg && "
-    "ffmpeg -hide_banner -muxers | grep whip. If that prints nothing: "
-    "brew install ffmpeg-full. Then restart ./scripts/run-local-publisher.sh. "
-    "Do not use Ubuntu/stock ffmpeg 4.x/6.x."
+    "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, "
+    "or Cloud playout / Browser."
 )
 
 
@@ -431,6 +428,7 @@ def build_device_webcam_input_args(
     duration_sec: Optional[int] = None,
     device_index: Optional[int] = None,
     video_size: Optional[str] = None,
+    framerate: Optional[str] = "30",
 ) -> List[str]:
     """ffmpeg input args for the laptop camera (local publisher agent).
 
@@ -439,15 +437,12 @@ def build_device_webcam_input_args(
     ``device_index`` (from the UI camera picker) overrides the video device;
     env vars keep working as the default when no index is given.
 
-    ``video_size`` (macOS only) requests an explicit AVFoundation capture
-    format instead of the device default. Some MacBook cameras default to a
-    *portrait* native mode (e.g. 1080x1920) when no size is requested —
-    confirmed 2026-08-06 on a MacBook Pro "MacBook Pro Camera" — producing
-    portrait video with no rotation applied. Optional (not forced
-    unconditionally here) because forcing one fixed size unconditionally has
-    previously failed on some Macs/cameras that don't support it; callers
-    that want the landscape default should pass a size and be ready to retry
-    without it if the capture fails to start (see webcam_broker.py).
+    ``video_size`` / ``framerate`` (macOS) request an explicit AVFoundation
+    capture mode. OBS Virtual Camera typically lists only ``1920x1080@60`` —
+    a rigid ``1280x720@30`` exits 251. Pass ``framerate=None`` (and omit
+    size) to let avfoundation negotiate; callers that probe the device
+    should pass a supported pair (see ``avfoundation_modes`` and
+    ``webcam_broker.py``).
     """
     import platform
     import shutil
@@ -465,13 +460,14 @@ def build_device_webcam_input_args(
             input_spec = f"{device_index}:{audio_part}"
         else:
             input_spec = default_spec
-        # framerate before -i is required by avfoundation for stable CFR.
+        # When a rate is given it must precede -i (avfoundation CFR).
+        # Omitting both flags lets the device pick its native mode (OBS 1080p60).
+        rate_args = ["-framerate", str(framerate)] if framerate else []
         size_args = ["-video_size", video_size] if video_size else []
         return [
             "-f",
             "avfoundation",
-            "-framerate",
-            "30",
+            *rate_args,
             *size_args,
             *duration_args,
             "-i",

@@ -316,10 +316,12 @@ export function AboutPage() {
             TTFF stays a separate join metric.
           </li>
           <li>
-            Every publish encode burns an <code>ENC …Z</code> UTC clock into the video via ffmpeg{" "}
-            <code>drawtext</code> from each frame&apos;s PTS (not a browser overlay, and not
-            wall-clock-at-filter-time). Players at different playheads show different stamps;
-            viewer UTC minus the stamp is glass-to-glass by eye.
+            Every publish encode burns a documented clock into the video via ffmpeg{" "}
+            <code>drawtext</code>: <code>encode time 00:01:23</code> is how far this frame is
+            into the encode (file / webcam), and <code>capture time …Z</code> is wall-clock when
+            the input already uses wall-clock PTS. It is not Unix-epoch + PTS mashed together.
+            The laptop webcam preview overlay is labeled <code>wall clock</code> and is not
+            mirrored.
           </li>
         </ul>
       </section>

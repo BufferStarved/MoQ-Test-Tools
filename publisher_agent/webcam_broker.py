@@ -39,7 +39,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # noqa: I001 — Tuple used by mode fallback
 
 import sys
 
@@ -48,6 +48,14 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from avfoundation_modes import (  # noqa: E402
+    PREFERRED_FPS,
+    VIRTUAL_CAM_FALLBACK_FPS,
+    VIRTUAL_CAM_FALLBACK_SIZE,
+    avfoundation_input_hints,
+    parse_avfoundation_supported_modes,
+    pick_avfoundation_mode,
+)
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
     build_device_webcam_input_args,
@@ -90,6 +98,7 @@ MASTER_GOP_FRAMES = 60
 # is a preference we retry away from (see _start_after_join_window), not an
 # unconditional requirement.
 PREFERRED_LANDSCAPE_VIDEO_SIZE = "1280x720"
+PREFERRED_LANDSCAPE_FPS = "30"
 
 
 def _pick_udp_port() -> int:
@@ -186,35 +195,102 @@ class WebcamBroker:
             session.started = True
             ports = list(session.ports)
             try:
-                session.process = self._spawn_capture(
-                    media_path, ports, video_size=PREFERRED_LANDSCAPE_VIDEO_SIZE
-                )
-                self._check_early_exit(session)
-                if session.error is not None:
-                    # This camera/driver may not support the requested size —
-                    # fall back to whatever format it defaults to rather than
-                    # failing the whole comparison over an aspect-ratio
-                    # preference.
-                    logger.warning(
-                        "Shared webcam capture failed with an explicit %s "
-                        "request (%s); retrying with the device default format",
-                        PREFERRED_LANDSCAPE_VIDEO_SIZE,
-                        session.error,
-                    )
-                    session.error = None
-                    session.process = self._spawn_capture(media_path, ports, video_size=None)
-                    self._check_early_exit(session)
+                self._start_capture_with_mode_fallback(session, media_path, ports)
             except Exception as exc:  # noqa: BLE001 — surfaced to acquire() callers
                 session.error = f"Failed to start shared webcam capture: {exc}"
         session.ready.set()
 
+    def _start_capture_with_mode_fallback(
+        self, session: _Session, media_path: str, ports: List[int]
+    ) -> None:
+        """Open the camera without assuming 720p30 — OBS Virtual Cam is 1080p60.
+
+        Retry order: preferred landscape → device-advertised mode from the
+        251 stderr dump → omit rigid -r/-s so avfoundation negotiates →
+        1080p60 virtual-cam last resort. One device that cannot do 30p720
+        must not fail the whole comparison.
+        """
+        attempts: List[Tuple[Optional[str], Optional[str], str]] = [
+            (PREFERRED_LANDSCAPE_VIDEO_SIZE, PREFERRED_LANDSCAPE_FPS, "preferred 720p30"),
+        ]
+        last_error = ""
+        tried: set[Tuple[Optional[str], Optional[str]]] = set()
+
+        for video_size, framerate, label in attempts:
+            key = (video_size, framerate)
+            if key in tried:
+                continue
+            tried.add(key)
+            session.error = None
+            session.process = self._spawn_capture(
+                media_path, ports, video_size=video_size, framerate=framerate
+            )
+            self._check_early_exit(session)
+            if session.error is None:
+                return
+            last_error = session.error
+            logger.warning("Shared webcam capture %s failed (%s)", label, session.error)
+
+            modes = parse_avfoundation_supported_modes(session.error)
+            picked = pick_avfoundation_mode(modes, prefer_fps=PREFERRED_FPS)
+            if picked is not None:
+                size, fps = avfoundation_input_hints(picked)
+                extra = (size, fps, f"probed {picked.size}@{picked.native_fps:g}")
+                if (extra[0], extra[1]) not in tried:
+                    attempts.append(extra)
+
+        # Let avfoundation pick its native mode (no -framerate / -video_size).
+        if (None, None) not in tried:
+            session.error = None
+            session.process = self._spawn_capture(
+                media_path, ports, video_size=None, framerate=None
+            )
+            self._check_early_exit(session)
+            if session.error is None:
+                return
+            last_error = session.error
+            logger.warning(
+                "Shared webcam capture with negotiated format failed (%s)", session.error
+            )
+            modes = parse_avfoundation_supported_modes(session.error)
+            picked = pick_avfoundation_mode(modes, prefer_fps=VIRTUAL_CAM_FALLBACK_FPS)
+            if picked is not None:
+                size, fps = avfoundation_input_hints(picked)
+                session.error = None
+                session.process = self._spawn_capture(
+                    media_path, ports, video_size=size, framerate=fps
+                )
+                self._check_early_exit(session)
+                if session.error is None:
+                    return
+                last_error = session.error
+
+        # Last resort: typical OBS Virtual Camera mode.
+        session.error = None
+        session.process = self._spawn_capture(
+            media_path,
+            ports,
+            video_size=VIRTUAL_CAM_FALLBACK_SIZE,
+            framerate=str(int(VIRTUAL_CAM_FALLBACK_FPS)),
+        )
+        self._check_early_exit(session)
+        if session.error is None:
+            return
+        session.error = last_error or session.error
+
     def _spawn_capture(
-        self, media_path: str, ports: List[int], *, video_size: Optional[str]
+        self,
+        media_path: str,
+        ports: List[int],
+        *,
+        video_size: Optional[str],
+        framerate: Optional[str] = "30",
     ) -> subprocess.Popen:
         input_args = build_device_webcam_input_args(
             duration_sec=MASTER_HARD_CAP_SEC,
             device_index=device_webcam_index(media_path),
             video_size=video_size,
+            framerate=framerate,
         )
         # ffmpeg's tee muxer cannot auto-select streams: without explicit
         # -map it opens with zero streams and exits ~1s in ("Output file

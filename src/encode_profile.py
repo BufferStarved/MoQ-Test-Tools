@@ -250,28 +250,28 @@ def utc_burnin_drawtext(
     wallclock_pts: bool = False,
     epoch_sec: int | None = None,
 ) -> str:
-    """ffmpeg drawtext that stamps each frame from its PTS (not %{gmtime}).
+    """ffmpeg drawtext that stamps a documented clock — never epoch+PTS mashed.
 
-    Why not %{gmtime}? That is wall-clock at filter *execution*. Parallel
-    protocol encodes, catch-up bursts, and mux timeline offsets can make
-    different playheads show the same second even when they display different
-    content. %{pts:gmtime…} is tied to the frame's media time, so players at
-    different positions necessarily show different stamps.
+    Testers compare this overlay to a wall clock or to "how far into the
+    encode is this frame". ``%{pts:gmtime:<epoch>}`` on zero-based PTS is
+    encode-start Unix + media time, which reads as a UTC date and is *not*
+    the media timeline. Do not use that mash.
 
-    - Live UDP/SRT/RTSP inputs use ``-use_wallclock_as_timestamps`` → PTS is
-      already unix time → ``%{pts\\:gmtime}``.
-    - File / device-webcam inputs have zero-based PTS → map with
-      ``%{pts\\:gmtime\\:<epoch>}`` where epoch is encode-start unix seconds.
+    - Live UDP/SRT/RTSP (``-use_wallclock_as_timestamps``): PTS is already
+      Unix time → ``capture time %{pts:gmtime}Z`` is capture wall-clock.
+    - File / device-webcam (zero-based PTS): ``encode time %{pts:hms}`` is the
+      media timeline from encode start (HH:MM:SS.mmm).
 
-    Compare the burned ``ENC …Z`` time to a viewer UTC clock for glass-to-glass.
+    ``epoch_sec`` is accepted for call-site compat and ignored — the overlay
+    is no longer epoch-anchored.
     """
     # Filtergraph escaping: pass as one argv element (no shell). Colons inside
     # %{pts:…} must be backslash-escaped for the filter parser.
+    del epoch_sec  # documented: not used; keep the keyword for callers
     if wallclock_pts:
-        text = "ENC %{pts\\:gmtime}Z"
+        text = "capture time %{pts\\:gmtime}Z"
     else:
-        epoch = int(time.time() if epoch_sec is None else epoch_sec)
-        text = f"ENC %{{pts\\:gmtime\\:{epoch}}}Z"
+        text = "encode time %{pts\\:hms}"
     return (
         "drawtext=fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=8:"
         f"x=24:y=24:text='{text}'"

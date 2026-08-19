@@ -108,7 +108,7 @@ export function ResultCharts({
                 "Client memory is ffmpeg / publisher RSS on this machine.",
                 "Client network jitter is RTT variation on the publisher side of the path.",
                 "Encode lag, encode speed, and FPS stability come from ffmpeg progress while publishing.",
-                "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
+                "Picture-quality scores appear when Score picture quality is on.",
               ]}
             />
             <MetricChart

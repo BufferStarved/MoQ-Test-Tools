@@ -4,7 +4,7 @@ import type { CloudEncodeHostId } from "./ingestEndpoints";
 import { LocalPublisherSetup } from "./LocalPublisherSetup";
 import { detectBrowserMoqCapabilities } from "./browserMoq/capabilities";
 import { BrowserMoqPreview } from "./browserMoq/BrowserMoqPreview";
-import { IconCamera, IconCpu, IconFilm, IconLaptop } from "./Icons";
+import { IconCamera, IconCpu, IconFilm } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
 import { WebcamLivePreview } from "./WebcamLivePreview";
@@ -18,6 +18,16 @@ export const LOCAL_DEVICE_WEBCAM = "device:webcam";
 export const BBB_MEDIA_PATH = "bbb.mp4";
 /** Cloud playout clip length — matches color bars and the API bundled cap. */
 export const CLOUD_PLAYOUT_DURATION_SEC = 60;
+
+export function sourceModeExplainer(mediaSource: MediaSourceId): string {
+  if (mediaSource === "webcam") {
+    return "Captures this laptop’s camera. Encodes here with a small helper app. Pick this for last-mile or OBS Virtual Camera.";
+  }
+  if (mediaSource === "browser_moq") {
+    return "Captures this laptop’s camera in this tab. Encodes in the browser. Pick this if you do not have a helper app — no special ffmpeg required.";
+  }
+  return "Plays color bars or Big Buck Bunny on the server. Encodes in the cloud. Pick this to compare protocols without a camera.";
+}
 
 interface SourceSectionProps {
   mediaSource: MediaSourceId;
@@ -66,8 +76,7 @@ export function SourceSection({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isLocalWebcam = mediaSource === "webcam";
   const isBrowserMoq = mediaSource === "browser_moq";
-  const isLiveCamera = isLocalWebcam || isBrowserMoq;
-  const isCloudPlayout = !isLiveCamera;
+  const isCloudPlayout = mediaSource === "dummy" || mediaSource === "bbb" || mediaSource === "upload";
   const browserCaps = detectBrowserMoqCapabilities();
   const localAgentAvailable = features.local_publisher;
 
@@ -77,41 +86,43 @@ export function SourceSection({
     }
   }
 
-  function selectWebcam() {
-    if (isLiveCamera) {
-      return;
-    }
-    onMediaSourceChange(browserCaps.ok ? "browser_moq" : "webcam");
-  }
-
-  function selectLiveEncode(next: "browser" | "local") {
-    if (next === "browser") {
-      onMediaSourceChange("browser_moq");
-      return;
-    }
-    onMediaSourceChange("webcam");
-  }
-
   return (
     <div className="source-media-section source-section">
       <StepHeading
         step={1}
         title="Source"
-        tip="Webcam encodes in this browser or with local ffmpeg. Cloud playout encodes a file on the API host."
+        tip="Webcam uses this laptop’s helper app. Browser captures in this tab. Cloud playout is dummy bars or BBB on the server."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
-        <label className={`source-mode-card${isLiveCamera ? " selected" : ""}`}>
+        <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
           <input
             type="radio"
             name="source-mode"
-            checked={isLiveCamera}
+            checked={isLocalWebcam}
             disabled={disabled}
-            onChange={selectWebcam}
+            onChange={() => onMediaSourceChange("webcam")}
           />
           <span className="source-mode-card-body">
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
+            <span className="source-mode-card-hint">This laptop + helper app</span>
+          </span>
+        </label>
+        <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
+          <input
+            type="radio"
+            name="source-mode"
+            checked={isBrowserMoq}
+            disabled={disabled || !browserCaps.ok}
+            onChange={() => onMediaSourceChange("browser_moq")}
+          />
+          <span className="source-mode-card-body">
+            <strong>
+              <IconCpu size={15} /> Browser
+            </strong>
+            <span className="source-mode-card-hint">This tab, no helper app</span>
+            {!browserCaps.ok && <span className="field-hint">{browserCaps.reason}</span>}
           </span>
         </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
@@ -126,56 +137,11 @@ export function SourceSection({
             <strong>
               <IconFilm size={15} /> Cloud playout
             </strong>
+            <span className="source-mode-card-hint">Dummy / BBB on the server</span>
           </span>
         </label>
       </div>
-
-      {isLiveCamera && (
-        <div className="encode-location-block">
-          <p className="encode-location-lede" id="encode-location-lede">
-            Publish from
-          </p>
-          <div
-            className="source-mode-options encode-location-options"
-            role="radiogroup"
-            aria-labelledby="encode-location-lede"
-          >
-            <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
-              <input
-                type="radio"
-                name="live-encode-location"
-                checked={isBrowserMoq}
-                disabled={disabled || !browserCaps.ok}
-                onChange={() => selectLiveEncode("browser")}
-              />
-              <span className="source-mode-card-body">
-                <strong>
-                  <IconCpu size={14} /> Browser
-                </strong>
-                <span className="source-mode-card-hint">Uses WebCodecs</span>
-                {!browserCaps.ok && <span className="field-hint">{browserCaps.reason}</span>}
-              </span>
-            </label>
-            <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
-              <input
-                type="radio"
-                name="live-encode-location"
-                checked={isLocalWebcam}
-                disabled={disabled || !localAgentAvailable}
-                onChange={() => selectLiveEncode("local")}
-              />
-              <span className="source-mode-card-body">
-                <strong>
-                  <IconLaptop size={14} /> Local ffmpeg
-                </strong>
-                {!localAgentAvailable && (
-                  <span className="field-hint">Needs the local publisher agent.</span>
-                )}
-              </span>
-            </label>
-          </div>
-        </div>
-      )}
+      <p className="source-mode-explainer">{sourceModeExplainer(mediaSource)}</p>
 
       {isCloudPlayout && (
         <div className="source-mode-detail source-cloud-detail">
@@ -234,15 +200,15 @@ export function SourceSection({
         </div>
       )}
 
-      {isLocalWebcam && localAgentAvailable && (
+      {isLocalWebcam && (
         <div className="source-mode-detail webcam-detail">
           <div className="webcam-detail-main">
             <div className="webcam-detail-controls">
-              {features.local_publisher_connected ? (
+              {localAgentAvailable && features.local_publisher_connected ? (
                 <>
                   <StatusDot
                     tone="ok"
-                    label="Agent connected"
+                    label="Helper app connected"
                     className="webcam-detail-connected"
                   />
                   {agentWebcamDevices.length > 0 && (
@@ -265,15 +231,18 @@ export function SourceSection({
                   {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
                   {features.local_publisher_whip === false && (
                     <p className="field-hint">
-                      WebRTC is hidden for this laptop — ffmpeg has no WHIP muxer.
-                      Stop the agent and re-run ./scripts/run-local-publisher.sh so it
-                      can install a capable ffmpeg.
+                      This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch
+                      to Cloud playout or Browser.
                     </p>
                   )}
                 </>
               ) : (
                 <>
-                  <StatusDot tone="warn" label="Agent not connected" />
+                  <StatusDot tone="warn" label="Webcam helper not running yet" />
+                  <p className="field-hint">
+                    The site is fine. Switch to Cloud playout or Browser to run a comparison
+                    now — those work in this page without a helper app.
+                  </p>
                   <LocalPublisherSetup
                     apiOrigin={window.location.origin}
                     connected={false}
@@ -283,7 +252,9 @@ export function SourceSection({
                 </>
               )}
             </div>
-            <WebcamLivePreview active={isLocalWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+            {localAgentAvailable && features.local_publisher_connected ? (
+              <WebcamLivePreview active={isLocalWebcam} running={running} deviceIndex={webcamDeviceIndex} />
+            ) : null}
           </div>
         </div>
       )}
@@ -294,7 +265,7 @@ export function SourceSection({
             <div className="webcam-detail-controls">
               <StatusDot
                 tone={browserCaps.ok ? "ok" : "warn"}
-                label={browserCaps.ok ? "Ready" : "Browser cannot publish"}
+                label={browserCaps.ok ? "This tab can publish" : "This browser cannot publish yet"}
               />
               {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
             </div>

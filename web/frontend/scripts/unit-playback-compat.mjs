@@ -26,10 +26,9 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   const mediamtx = isMediaMtxManaged(ingestEndpointId);
   const zixi = isZixiManagedIngest(ingestEndpointId);
   if (mediamtx) {
-    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep";
+    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
-    if (protocol === "srt" && mode === "hls") return false;
     return mode === "hls" || mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
@@ -38,10 +37,7 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   return false;
 }
 
-function playbackModeBlockedReason(mode, protocol, ingestEndpointId = "") {
-  if (mode === "hls" && protocol === "srt" && isZixiManagedIngest(ingestEndpointId)) {
-    return "Zixi Fast HLS wedges on SRT ingest (playlist TARGETDURATION stalls). Use MPEG-TS.";
-  }
+function playbackModeBlockedReason(_mode, _protocol, _ingestEndpointId = "") {
   return undefined;
 }
 
@@ -123,7 +119,7 @@ assert.equal(
 );
 assert.equal(
   playbackModeLabelForSelection("hls", "srt", "gcp_zixi"),
-  "HLS (hls.js) — unavailable with Zixi SRT",
+  "HLS (hls.js)",
 );
 
 // Legacy Auto is not selectable
@@ -140,21 +136,20 @@ for (const ingest of ["gcp_zixi", "gcp_east_zixi", "linode_zixi"]) {
     );
   }
   assert.equal(isPlaybackModeCompatible("hls", "rtmp", ingest), true, ingest);
-  assert.equal(isPlaybackModeCompatible("hls", "srt", ingest), false, ingest);
+  assert.equal(isPlaybackModeCompatible("hls", "srt", ingest), true, ingest);
   assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), true, ingest);
-  assert.equal(resolvedPlaybackMode("hls", "srt", ingest), "mpegts", ingest);
-  assert.ok(playbackModeBlockedReason("hls", "srt", ingest), ingest);
+  assert.equal(resolvedPlaybackMode("hls", "srt", ingest), "hls", ingest);
+  assert.equal(playbackModeBlockedReason("hls", "srt", ingest), undefined, ingest);
   assert.equal(playbackModeBlockedReason("hls", "rtmp", ingest), undefined, ingest);
-  assert.deepEqual(playbackModesForSelection("srt", ingest), ["mpegts"]);
+  assert.deepEqual(playbackModesForSelection("srt", ingest), ["hls", "mpegts"]);
   assert.deepEqual(playbackModesForSelection("rtmp", ingest), ["hls", "mpegts"]);
 }
 
 // MediaMTX matrix (every cloud, not just us-central1)
 for (const ingest of ["gcp_mediamtx", "gcp_east_mediamtx", "linode_mediamtx"]) {
-  for (const mode of ["ll-hls", "ll-dash", "hls", "whep"]) {
+  for (const mode of ["ll-hls", "ll-dash", "hls", "whep", "mpegts"]) {
     assert.equal(isPlaybackModeCompatible(mode, "srt", ingest), true, `${ingest} ${mode}`);
   }
-  assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), false, ingest);
 }
 
 // MoQ locked to Playa

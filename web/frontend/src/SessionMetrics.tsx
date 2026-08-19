@@ -149,7 +149,11 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
   if (streams.length === 0) {
     return (
       <div className="results-empty">
-        <p className="muted">Run a comparison, or pick a past session.</p>
+        <p className="muted">
+          No charts for this page yet. If a comparison just finished, wait a
+          moment or pick a past session above. A failed webcam run writes no
+          CSV — stay on Benchmark to read the job error.
+        </p>
       </div>
     );
   }

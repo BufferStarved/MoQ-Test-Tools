@@ -32,8 +32,7 @@ class FfmpegWhipMuxerTests(unittest.TestCase):
     def test_error_names_the_binary(self) -> None:
         text = whip_ffmpeg_missing_error("/opt/homebrew/bin/ffmpeg")
         self.assertIn("/opt/homebrew/bin/ffmpeg", text)
-        self.assertIn("WHIP muxer", text)
-        self.assertIn("run-local-publisher.sh", text)
+        self.assertIn("cannot publish WebRTC", text)
 
 
 class DirectWhipJobPreflightTests(unittest.TestCase):
@@ -56,7 +55,7 @@ class DirectWhipJobPreflightTests(unittest.TestCase):
             with mock.patch("upload_service.ffmpeg_has_whip_muxer", return_value=False):
                 result = UploadService()._run_direct_ffmpeg(job)
         self.assertFalse(result.success)
-        self.assertIn("WHIP muxer", result.error or "")
+        self.assertIn("cannot publish WebRTC", result.error or "")
         self.assertNotIn("exited with code 234", result.error or "")
 
 

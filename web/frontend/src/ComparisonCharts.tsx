@@ -136,7 +136,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Client memory is ffmpeg / publisher RSS on this machine.",
                 "Client network jitter is RTT variation on the publisher side of the path.",
                 "Encode lag, encode speed, and FPS stability come from ffmpeg progress while publishing.",
-                "VMAF / PSNR / SSIM score the encoder capture when quality metrics are enabled.",
+                "Picture-quality scores appear when Score picture quality is on.",
               ]}
             />
             <MetricChart
@@ -144,15 +144,28 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="encoded_bitrate_kbps"
               data={points}
               series={comparisonSeries(activeLegs, "encoded_bitrate_kbps", "kbps")}
+              caption="How many bits the encoder is producing each second."
             />
             {whipBitrateMissing ? (
               <p className="hint chart-availability-note">{WHIP_ENCODE_BITRATE_NOTE}</p>
-            ) : null}
+            ) : (
+              <p className="hint chart-availability-note">
+                WebRTC/WHIP bitrate often ramps for ~20–30s while the muxer
+                warms up — that is expected, not a stall.
+              </p>
+            )}
+            {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) ? null : (
+              <p className="hint chart-availability-note">
+                Encode lag is hidden when every sample is 0 (not collected, or
+                the encoder stayed at its startup baseline).
+              </p>
+            )}
             <MetricChart
               title="Frame rate"
               metricKey="fps"
               data={points}
               series={comparisonSeries(activeLegs, "fps", "fps")}
+              caption="Frames encoded per second — should sit near 30."
             />
             <MetricChart
               title="Send rate"
@@ -160,20 +173,28 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               data={points}
               series={comparisonSeries(activeLegs, "net_send_mbps", "Mbps")}
               keepZeroSeries
+              caption="How much this laptop is sending onto the network."
             />
-            <MetricChart
-              title="Client memory"
-              metricKey="memory_mb"
-              data={points}
-              series={comparisonSeries(activeLegs, "memory_mb", "MB")}
-              keepZeroSeries
-            />
+            {comparisonHasMetric(points, "memory_mb", activeLegs.length) ? (
+              <MetricChart
+                title="Client memory"
+                metricKey="memory_mb"
+                data={points}
+                series={comparisonSeries(activeLegs, "memory_mb", "MB")}
+                caption="Publisher process memory on this machine."
+              />
+            ) : (
+              <p className="hint chart-availability-note">
+                Client memory (ffmpeg RSS) was not collected for this run — the
+                series is hidden instead of plotting a flat zero.
+              </p>
+            )}
             <MetricChart
               title="Client network jitter"
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
-              keepZeroSeries
+              caption="How much the publisher-side RTT is bouncing around."
             />
             {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) && (
               <MetricChart
@@ -181,6 +202,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="encode_lag_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
+                caption="How far the encoder is behind realtime."
               />
             )}
             {comparisonHasMetric(points, "fps_stability", activeLegs.length) && (
@@ -212,7 +234,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             {!comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) &&
               activeLegs.some((leg) => leg.encoderQualityPending) && (
                 <p className="hint chart-availability-note">
-                  Encoder VMAF / PSNR / SSIM appear here when scoring finishes (after the encode).
+                  Picture-quality scores appear here when scoring finishes (after the encode).
                 </p>
               )}
             {comparisonHasMetric(points, "psnr_db_encoder", activeLegs.length) && (
@@ -344,7 +366,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             {!comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) &&
               activeLegs.some((leg) => leg.ingestQualityPending) && (
                 <p className="hint chart-availability-note">
-                  Ingest VMAF / PSNR / SSIM appear here after the remote recorder finishes scoring.
+                  Destination picture-quality scores appear here after the remote recorder finishes.
                 </p>
               )}
             {comparisonHasMetric(points, "psnr_db_ingest", activeLegs.length) && (

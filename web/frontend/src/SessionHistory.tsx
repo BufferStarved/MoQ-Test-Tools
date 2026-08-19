@@ -14,9 +14,11 @@ interface SessionHistoryProps {
   selectedKey?: string | null;
   /** Bump to force a re-fetch after a new comparison finishes. */
   refreshToken?: number;
+  /** Fetch the list as soon as Results is visible. */
+  eager?: boolean;
 }
 
-export function SessionHistory({ onSelect, selectedKey = null, refreshToken }: SessionHistoryProps) {
+export function SessionHistory({ onSelect, selectedKey = null, refreshToken, eager = false }: SessionHistoryProps) {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
@@ -47,10 +49,10 @@ export function SessionHistory({ onSelect, selectedKey = null, refreshToken }: S
   useEffect(() => {
     // Load quietly when a session is selected so the collapsed trigger can show
     // "Jul 19 · SRT · MoQ" without forcing the picker open.
-    if (selectedKey && !loaded) {
+    if ((eager || selectedKey) && !loaded) {
       void fetchSessions();
     }
-  }, [selectedKey, loaded, fetchSessions]);
+  }, [eager, selectedKey, loaded, fetchSessions]);
 
   const selectedGroup = selectedKey
     ? (sessions.find((group) => group.key === selectedKey) ?? null)

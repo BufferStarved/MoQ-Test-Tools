@@ -45,6 +45,22 @@ class DeviceWebcamTests(unittest.TestCase):
         self.assertEqual(args[args.index("-t") + 1], "8")
         self.assertEqual(args[args.index("-i") + 1], "1:0")
 
+    def test_macos_can_omit_rigid_rate_and_size(self) -> None:
+        with patch("platform.system", return_value="Darwin"):
+            args = build_device_webcam_input_args(framerate=None, video_size=None)
+        self.assertEqual(args[0:2], ["-f", "avfoundation"])
+        self.assertNotIn("-framerate", args)
+        self.assertNotIn("-video_size", args)
+
+    def test_macos_obs_1080p60_mode(self) -> None:
+        with patch("platform.system", return_value="Darwin"):
+            args = build_device_webcam_input_args(
+                device_index=1, video_size="1920x1080", framerate="60"
+            )
+        self.assertEqual(args[args.index("-framerate") + 1], "60")
+        self.assertEqual(args[args.index("-video_size") + 1], "1920x1080")
+        self.assertTrue(args[args.index("-i") + 1].startswith("1:"))
+
     def test_linux_v4l2_plus_anullsrc(self) -> None:
         with patch("platform.system", return_value="Linux"), patch.dict(
             os.environ, {"LOCAL_WEBCAM_DEVICE": "/dev/video2"}, clear=False

@@ -29,6 +29,8 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_live_sample_payload \
   tests.test_moqx_stats \
   tests.test_zixi_stats \
+  tests.test_http_ts_put_gate \
+  tests.test_e2e_ingest_matrix_gates \
   -q
 
 for script in "$ROOT"/web/frontend/scripts/unit-*.mjs; do

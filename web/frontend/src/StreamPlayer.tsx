@@ -40,6 +40,7 @@ interface StreamPlayerProps {
   deliveryMediaOriginSec?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
+  jobError?: string | null;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
   targetLatencyMs?: number;
@@ -89,6 +90,7 @@ export function StreamPlayer({
   deliveryMediaOriginSec = null,
   onPlaybackSample,
   jobStatus,
+  jobError = null,
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 800,
@@ -271,6 +273,7 @@ export function StreamPlayer({
               encodeStartedAtEpoch={encodeStartedAtEpoch}
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
+              jobError={jobError}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
               targetLatencyMs={targetLatencyMs}

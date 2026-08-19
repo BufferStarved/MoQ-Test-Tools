@@ -53,6 +53,20 @@ class DestinationConfigError(Exception):
 
 
 SUPPORTED_PROTOCOLS = ("srt", "rtmp", "hls", "dash", "webrtc", "moq")
+# HLS/DASH here mean Zixi TS-over-HTTP PUT ingest. That Broadcaster input
+# stops draining after ~2s — never offer it as a Start-able web recipe.
+WEB_RETIRED_PROTOCOLS = frozenset({"hls", "dash"})
+WEB_OFFERED_PROTOCOLS = tuple(
+    protocol for protocol in SUPPORTED_PROTOCOLS if protocol not in WEB_RETIRED_PROTOCOLS
+)
+
+HTTP_TS_PUT_UNAVAILABLE_REASON = (
+    "Zixi HTTP-TS PUT ingest stops draining after about 2 seconds on current "
+    "Broadcaster settings (reproduced with bare ffmpeg). This recipe is retired "
+    "— use SRT or RTMP ingest to Zixi for Fast HLS / HTTP-TS playback. Do not "
+    "run configure-zixi-hls-dash-output.sh; it restarts Broadcaster and can drop "
+    "live SRT inputs."
+)
 
 SYNTAX_BY_PROTOCOL = {
     "srt": "srt://<host>:<port>?mode=caller&latency=<microseconds>[&streamid=<id>]",
@@ -199,36 +213,26 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         name="Zixi Broadcaster gcp-us-central1",
         protocol="hls",
         url="http://35.222.33.58:7777/benchmark",
-        notes=(
-            "TS over HTTP push ingest to http://35.222.33.58:7777/benchmark. "
-            "Encode/upload metrics only on current Broadcaster settings — Fast HLS "
-            "and HTTP-TS playback for this PUT input stay unavailable (use SRT/RTMP "
-            "presets for Chrome playback). "
-            "Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
-        ),
+        notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
         ingest_recording_dir="/opt/zixi_broadcaster-linux64",
         ingest_provider="gcp_zixi",
+        web_visible=False,
+        web_available=False,
     ),
     ServicePreset(
         id="moq_zixi_gcp_dash",
         name="Zixi Broadcaster gcp-us-central1",
         protocol="dash",
         url="http://35.222.33.58:7777/benchmark",
-        notes=(
-            "RETIRED for now (hidden in the UI protocol picker, still reachable via API). "
-            "Zixi's TS-over-HTTP push input reproducibly stops draining the PUT socket a "
-            "couple seconds into a continuous live stream — reproduced independently of "
-            "this app with a bare ffmpeg PUT to the same endpoint. Encodes silently froze "
-            "while metrics kept ticking. Re-enable once Zixi support confirms sustained "
-            "live TS push support; use SRT/RTMP ingest to Zixi for DASH/HLS in the "
-            "meantime. Run configure-zixi-hls-dash-output.sh (includes Zixi restart)."
-        ),
+        notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
         ingest_recording_dir="/opt/zixi_broadcaster-linux64",
         ingest_provider="gcp_zixi",
+        web_visible=False,
+        web_available=False,
     ),
     ServicePreset(
         id="moq_gcp_relay",
@@ -525,27 +529,30 @@ def _build_linode_presets() -> List[ServicePreset]:
             name=f"Zixi Broadcaster {region_label}",
             protocol="hls",
             url=f"http://{zixi_ip}:7777/benchmark",
-            notes="TS over HTTP push ingest on Linode Zixi.",
+            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
             ingest_provider="linode_zixi",
-            **common,
+            cloud_provider="linode",
+            cloud_region=region,
+            web_visible=False,
+            web_available=False,
         ),
         ServicePreset(
             id="moq_zixi_linode_dash",
             name=f"Zixi Broadcaster {region_label}",
             protocol="dash",
             url=f"http://{zixi_ip}:7777/benchmark",
-            notes="TS over HTTP push ingest on Linode Zixi (same caveats as GCP DASH preset).",
+            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
             ingest_provider="linode_zixi",
-            web_available=False,
             cloud_provider="linode",
             cloud_region=region,
-            web_visible=True,
+            web_visible=False,
+            web_available=False,
         ),
         ServicePreset(
             id="moq_linode_relay",
@@ -648,27 +655,30 @@ def _build_gcp_east_presets() -> List[ServicePreset]:
             name=f"Zixi Broadcaster {region_label}",
             protocol="hls",
             url=f"http://{zixi_ip}:7777/benchmark",
-            notes=f"TS over HTTP push ingest on GCP {region} Zixi.",
+            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
             ingest_provider="gcp_east_zixi",
-            **common,
+            cloud_provider="gcp",
+            cloud_region=region,
+            web_visible=False,
+            web_available=False,
         ),
         ServicePreset(
             id="moq_zixi_gcp_east_dash",
             name=f"Zixi Broadcaster {region_label}",
             protocol="dash",
             url=f"http://{zixi_ip}:7777/benchmark",
-            notes="TS over HTTP push ingest (same caveats as the us-central1 DASH preset).",
+            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
             ingest_provider="gcp_east_zixi",
-            web_available=False,
             cloud_provider="gcp",
             cloud_region=region,
-            web_visible=True,
+            web_visible=False,
+            web_available=False,
         ),
         ServicePreset(
             id="moq_gcp_east_relay",
@@ -732,6 +742,26 @@ def _finalize_service_presets(raw: List[ServicePreset]) -> List[ServicePreset]:
 SERVICE_PRESETS: List[ServicePreset] = _finalize_service_presets(_SERVICE_PRESETS_RAW)
 
 PRESET_BY_ID: Dict[str, ServicePreset] = {preset.id: preset for preset in SERVICE_PRESETS}
+
+
+def http_ts_put_preset_blocked(preset_id: Optional[str]) -> Optional[str]:
+    """Fail-closed Start gate for retired Zixi HTTP-TS PUT recipes."""
+    preset = PRESET_BY_ID.get((preset_id or "").strip())
+    if preset is None:
+        return None
+    if preset.protocol not in WEB_RETIRED_PROTOCOLS:
+        return None
+    provider = (preset.ingest_provider or "").lower()
+    if "zixi" not in provider:
+        return None
+    if preset.web_available:
+        return None
+    if "coming soon" in (preset.notes or "").lower():
+        return (
+            f"Ingest endpoint '{preset.name}' is not configured yet for "
+            f"{preset.protocol.upper()}."
+        )
+    return HTTP_TS_PUT_UNAVAILABLE_REASON
 
 
 def recording_dir_for_preset(preset_id: str) -> str:

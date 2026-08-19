@@ -35,9 +35,10 @@ if str(SRC_DIR) not in sys.path:
 from destinations import (  # noqa: E402
     PROTOCOL_LABELS,
     SYNTAX_BY_PROTOCOL,
-    SUPPORTED_PROTOCOLS,
+    WEB_OFFERED_PROTOCOLS,
     PRESET_BY_ID,
     DestinationConfigError,
+    http_ts_put_preset_blocked,
     ingest_agent_url_for_preset,
     presets_for_api,
     recording_dir_for_preset,
@@ -624,7 +625,7 @@ def protocols():
                 "label": PROTOCOL_LABELS[protocol],
                 "syntax": SYNTAX_BY_PROTOCOL[protocol],
             }
-            for protocol in SUPPORTED_PROTOCOLS
+            for protocol in WEB_OFFERED_PROTOCOLS
         ]
     }
 
@@ -738,6 +739,10 @@ def create_upload(request: CreateUploadRequest):
     except DestinationConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    put_blocked = http_ts_put_preset_blocked(request.preset_id or destination.preset_id)
+    if put_blocked:
+        raise HTTPException(status_code=400, detail=put_blocked)
+
     if publisher_host == "browser" and destination.protocol not in {"moq", "webrtc"}:
         raise HTTPException(
             status_code=400,
@@ -749,9 +754,8 @@ def create_upload(request: CreateUploadRequest):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "This machine cannot publish WebRTC — its ffmpeg has no WHIP muxer. "
-                    "Re-run ./scripts/run-local-publisher.sh so it can install a capable "
-                    "ffmpeg, or use SRT, RTMP, or MoQ."
+                    "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, "
+                    "or switch to Cloud playout or Browser."
                 ),
             )
 
@@ -1383,6 +1387,66 @@ async def playback_fetch(url: str, request: Request):
             await upstream.aclose()
 
     return StreamingResponse(iter_chunks(), media_type=media_type, headers=no_store)
+
+
+@app.get("/api/playback/mpegts-remux")
+async def playback_mpegts_remux(url: str):
+    """Live remux MediaMTX HLS (the path that already plays) to MPEG-TS.
+
+    MediaMTX has no Zixi-style http_ts_auto_out. Testers who pick MPEG-TS
+    after LL-HLS works get a blank player unless we remux the same origin.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Only http(s) HLS URLs can be remuxed")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path_lower = (parsed.path or "").lower()
+    if port not in {8888, 8891} and not path_lower.endswith(".m3u8"):
+        raise HTTPException(
+            status_code=400,
+            detail="MPEG-TS remux is limited to MediaMTX HLS (port 8888) or an .m3u8 URL",
+        )
+    safe_url = _sanitize_fetch_url(url)
+    ffmpeg = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    if not os.path.isfile(ffmpeg):
+        raise HTTPException(status_code=503, detail="ffmpeg is not installed for MPEG-TS remux")
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        safe_url,
+        "-c",
+        "copy",
+        "-f",
+        "mpegts",
+        "pipe:1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def iter_ts():
+        try:
+            assert proc.stdout is not None
+            while True:
+                chunk = await proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+
+    return StreamingResponse(
+        iter_ts(),
+        media_type="video/mp2t",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 def _m3u8_capture_fields(manifest_text: str) -> dict:

@@ -56,7 +56,7 @@ export const PLAYBACK_MODE_OPTIONS: { id: PlaybackMode; label: string; hint: str
   {
     id: "mpegts",
     label: "MPEG-TS (mpegts.js)",
-    hint: "Raw Zixi HTTP-TS (http_ts_auto_out) via mpegts.js — bypasses Fast HLS. Requires a live SRT/RTMP input; offline .ts URLs return empty HTTP 200 and will keep reconnecting.",
+    hint: "MPEG-TS in the browser. Zixi uses HTTP-TS. MediaMTX remuxes the live HLS path that already works.",
   },
 ];
 
@@ -89,20 +89,24 @@ export function isPlaybackModeCompatible(
   const mediamtx = isMediaMtxManaged(ingest);
   const zixi = isZixiManagedIngest(ingest);
 
-  // MediaMTX origin: native LL-HLS, LL-DASH sidecar, HLS, and WHEP.
+  // MediaMTX origin: native LL-HLS, LL-DASH sidecar, HLS, WHEP, and MPEG-TS remux.
   if (mediamtx) {
-    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep";
+    return (
+      mode === "ll-hls" ||
+      mode === "ll-dash" ||
+      mode === "hls" ||
+      mode === "whep" ||
+      mode === "mpegts"
+    );
   }
 
   // Zixi Broadcaster: Fast HLS + MPEG-TS only for in-app playback.
   // - DASH per-input MPD is not served (player would silently fall back to HLS).
   // - WHEP is a MediaMTX endpoint shape, not available on Zixi :7777/:4444.
   // - Zixi WebRTC UI cannot be iframed (frame-ancestors 'self').
-  // - SRT Fast HLS wedges (TARGETDURATION balloons) — MPEG-TS only.
+  // - Primary ``SRT Test`` Fast HLS wedges; jobs play error-concealed
+  //   ``SRT Test EC`` (see zixiPlaybackStreamId). HLS is offered again.
   if (zixi) {
-    if (protocol === "srt" && mode === "hls") {
-      return false;
-    }
     return mode === "hls" || mode === "mpegts";
   }
 
@@ -132,11 +136,9 @@ export function defaultPlaybackModeForProtocol(
   if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
-  // HTTP-TS (mpegts.js). us-central1 Fast HLS on the raw "SRT Test" input
-  // advertises TARGETDURATION≈290 after -output_ts_offset (observed 2026-08-17:
-  // playlist live, player looks frozen). RTMP on this host already felt fine
-  // because the default card used MPEG-TS. Same default for SRT/RTMP on every
-  // Zixi ingest. Fast HLS is blocked for Zixi SRT (see playbackModeBlockedReason).
+  // HTTP-TS (mpegts.js) stays the default Zixi player — faster join than
+  // Fast HLS. HLS is selectable and uses the EC stream when jobs set
+  // zixi_playback_stream_id (primary ``SRT Test`` packager still wedges).
   if (isZixiManagedIngest(ingest)) {
     return "mpegts";
   }
@@ -168,13 +170,10 @@ export function resolvedPlaybackMode(
 
 /** Why a listed player is shown greyed-out instead of hidden. */
 export function playbackModeBlockedReason(
-  mode: PlaybackMode,
-  protocol: string,
-  ingestEndpointId?: string,
+  _mode: PlaybackMode,
+  _protocol: string,
+  _ingestEndpointId?: string,
 ): string | undefined {
-  if (mode === "hls" && protocol === "srt" && isZixiManagedIngest(ingestEndpointId ?? "")) {
-    return "Zixi Fast HLS wedges on SRT ingest (playlist TARGETDURATION stalls). Use MPEG-TS.";
-  }
   return undefined;
 }
 
@@ -195,8 +194,10 @@ export function playbackModeLabelForSelection(
   ingestEndpointId?: string,
 ): string {
   const base =
-    PLAYBACK_MODE_OPTIONS.find((item) => item.id === mode)?.label ??
-    (mode === "moq" ? "MoQ Playback (Playa)" : mode);
+    mode === "mpegts" && ingestEndpointId && isMediaMtxManaged(ingestEndpointId)
+      ? "MPEG-TS (remux from HLS)"
+      : (PLAYBACK_MODE_OPTIONS.find((item) => item.id === mode)?.label ??
+        (mode === "moq" ? "MoQ Playback (Playa)" : mode));
   const blocked = playbackModeBlockedReason(mode, protocol, ingestEndpointId);
   if (blocked) {
     return `${base} — unavailable with Zixi SRT`;
@@ -264,13 +265,67 @@ export function isMediaMtxManaged(ingestEndpointId: string): boolean {
 }
 
 export function managedEndpointUrlLabel(protocol: string): string {
-  if (protocol === "moq") return "MoQ Publish URL";
-  if (protocol === "srt") return "SRT Publish URL";
-  if (protocol === "rtmp") return "RTMP Publish URL";
-  if (protocol === "hls") return "HLS Publish URL";
-  if (protocol === "dash") return "DASH Publish URL";
-  if (protocol === "webrtc") return "WebRTC Publish URL";
+  if (protocol === "moq") return "Publish (MoQ)";
+  if (protocol === "srt") return "Publish (SRT)";
+  if (protocol === "rtmp") return "Publish (RTMP)";
+  if (protocol === "hls") return "Publish (HLS)";
+  if (protocol === "dash") return "Publish (DASH)";
+  if (protocol === "webrtc") return "Publish (WebRTC / WHIP)";
   return "Publish URL";
+}
+
+function publishSchemeLabel(protocol: string, url: string): string {
+  const value = url.trim().toLowerCase();
+  if (value.startsWith("srt://")) return "SRT";
+  if (value.startsWith("rtmp://")) return "RTMP";
+  if (value.includes("/whip") || value.startsWith("whip://")) return "WebRTC / WHIP";
+  if (value.includes("moq-relay") || protocol === "moq") return "MoQ";
+  return protocol.toUpperCase();
+}
+
+function playEngineLabel(engine: string, label: string): string {
+  if (engine === "whep") return "WebRTC / WHEP";
+  if (engine === "moq") return "MoQ";
+  if (engine === "mpegts") return "MPEG-TS";
+  if (engine === "hls") return label.includes("LL-HLS") ? "LL-HLS" : "HLS";
+  if (engine === "dash") return label.includes("LL-DASH") ? "LL-DASH" : "DASH";
+  return label;
+}
+
+/** Publish vs play URLs for Advanced — never label a WHEP player with an SRT URL. */
+export function advancedUrlRows(options: {
+  protocol: string;
+  endpointUrl: string;
+  ingestEndpointId: string;
+  playbackMode?: PlaybackMode;
+  whepPlaybackUrl?: string;
+  moqRelayUrl?: string;
+  moqFingerprintUrl?: string;
+  moqNamespace?: string;
+}): Array<{ label: string; url: string }> {
+  const publishUrl = options.endpointUrl.trim();
+  const target = resolvePlaybackTarget(options);
+  const rows: Array<{ label: string; url: string }> = [];
+  if (publishUrl) {
+    const scheme = publishSchemeLabel(options.protocol, publishUrl);
+    const mismatch =
+      options.protocol === "webrtc" && scheme === "SRT"
+        ? " — this is not a WebRTC URL"
+        : options.protocol === "srt" && scheme === "WebRTC / WHIP"
+          ? " — this is not an SRT URL"
+          : "";
+    rows.push({
+      label: `Publish (${scheme})${mismatch}`,
+      url: publishUrl,
+    });
+  }
+  if (target.url && target.url !== publishUrl) {
+    rows.push({
+      label: `Play (${playEngineLabel(target.engine, target.label)})`,
+      url: target.url,
+    });
+  }
+  return rows;
 }
 
 function parseHost(endpointUrl: string): string | null {
@@ -620,6 +675,16 @@ export function resolvePlaybackTarget(options: {
   }
 
   if (engine === "mpegts") {
+    if (mediamtx) {
+      const hlsUrl = mediaMtxHlsUrl(resolvedHost, pathId);
+      return {
+        engine: "mpegts",
+        url: mediaMtxMpegTsRemuxUrl(hlsUrl),
+        label: "MPEG-TS (MediaMTX remux)",
+        streamId: pathId,
+        host: mediaMtxPublicHost(resolvedHost),
+      };
+    }
     return {
       engine: "mpegts",
       url: zixiMpegTsUrl(resolvedHost, streamId),
@@ -680,8 +745,16 @@ export function resolvePlaybackTarget(options: {
   };
 }
 
+export function mediaMtxMpegTsRemuxUrl(hlsUrl: string): string {
+  return `/api/playback/mpegts-remux?url=${encodeURIComponent(hlsUrl)}`;
+}
+
 export function proxiedPlaybackUrl(remoteUrl: string): string {
-  return `/api/playback/fetch?url=${encodeURIComponent(remoteUrl)}`;
+  const trimmed = (remoteUrl || "").trim();
+  if (trimmed.startsWith("/") || trimmed.startsWith("blob:")) {
+    return trimmed;
+  }
+  return `/api/playback/fetch?url=${encodeURIComponent(trimmed)}`;
 }
 
 export function showWhepUrlField(

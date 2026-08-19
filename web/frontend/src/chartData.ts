@@ -456,9 +456,25 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
   };
 }
 
+export function dropProbeJitterSpike(points: ChartPoint[]): ChartPoint[] {
+  if (points.length < 3) {
+    return points;
+  }
+  const first = points[0]?.net_jitter_ms ?? 0;
+  const rest = points.slice(1, 6).map((point) => point.net_jitter_ms ?? 0);
+  const sorted = [...rest].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  // First-sample RTT probes often land as a 100ms+ spike then sit near 0.
+  if (first >= 40 && first > Math.max(8, median * 5)) {
+    const replacement = rest[0] ?? median;
+    return [{ ...points[0], net_jitter_ms: replacement }, ...points.slice(1)];
+  }
+  return points;
+}
+
 export function samplesToChartPoints(samples: UploadSample[]): ChartPoint[] {
   const base = samples[0] ?? null;
-  return samples.map((sample) => normalizeSamplePoint(sample, base));
+  return dropProbeJitterSpike(samples.map((sample) => normalizeSamplePoint(sample, base)));
 }
 
 export function hasSeriesData(points: ChartPoint[], key: string): boolean {

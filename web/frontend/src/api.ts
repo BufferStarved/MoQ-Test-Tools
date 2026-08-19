@@ -269,7 +269,14 @@ export function resultFilenameFromPath(csvPath?: string | null): string | null {
   }
   const parts = csvPath.replace(/\\/g, "/").split("/");
   const name = parts[parts.length - 1] || "";
-  return name.endsWith(".csv") ? name : null;
+  if (name.endsWith(".csv")) {
+    return name;
+  }
+  // Agent paths sometimes omit the suffix in status payloads.
+  if (/^upload_[\w-]+$/i.test(name)) {
+    return `${name}.csv`;
+  }
+  return null;
 }
 
 export function resultDownloadUrl(filename: string, kind: "csv" | "json" = "csv"): string {

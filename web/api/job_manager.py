@@ -415,10 +415,15 @@ class JobManager:
                 raise RuntimeError("Upload job produced no result")
             if result.success:
                 self._persist_playback_metrics(job_id, result.summary_path)
+                csv_path = result.csv_path
+                if not csv_path or not os.path.isfile(csv_path):
+                    # Local-agent CSVs live on the laptop; rewrite from samples
+                    # so /api/results/{filename} can serve the Results tab.
+                    csv_path = self._persist_collected_samples_csv(job_id, job) or csv_path
                 self._update(
                     job_id,
                     status=JobStatus.COMPLETED,
-                    csv_path=result.csv_path,
+                    csv_path=csv_path,
                     summary_path=result.summary_path,
                     encoder_vmaf_status=result.encoder_vmaf_status,
                     encoder_vmaf_score=result.encoder_vmaf_score,
@@ -454,10 +459,15 @@ class JobManager:
                         )
                         thread.start()
             else:
+                csv_path = result.csv_path
+                if not csv_path:
+                    csv_path = self._persist_collected_samples_csv(job_id, job)
                 self._update(
                     job_id,
                     status=JobStatus.FAILED,
                     error=result.error or "Upload failed",
+                    csv_path=csv_path,
+                    summary_path=result.summary_path,
                     vmaf_status=VmafStatus.FAILED.value if job.compute_vmaf_on_ingest else VmafStatus.DISABLED.value,
                     vmaf_error=result.error if job.compute_vmaf_on_ingest else None,
                     encoder_vmaf_status=(
@@ -1062,6 +1072,26 @@ class JobManager:
             encoder_vmaf_score=encoder_score,
             vmaf_score=encoder_score,
         )
+
+    def _persist_collected_samples_csv(self, job_id: str, job: "UploadJob") -> Optional[str]:
+        """Write SSE-collected samples to the API results/ dir.
+
+        Local publisher agents write CSV on the laptop; the Results tab reads
+        this host. Failed jobs previously left csv_path unset, so the tab
+        stayed empty after a 251/capture death.
+        """
+        with self._lock:
+            record = self._jobs.get(job_id)
+            samples = list(record.samples) if record else []
+        if not samples:
+            return None
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "results")
+        os.makedirs(results_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        suffix = job_id.replace("-", "")[:8]
+        csv_path = os.path.join(results_dir, f"upload_{stamp}_{suffix}.csv")
+        self._write_browser_metrics_csv(csv_path, job, samples)
+        return csv_path
 
     @staticmethod
     def _write_browser_metrics_csv(csv_path: str, job: UploadJob, samples: List[dict]) -> None:

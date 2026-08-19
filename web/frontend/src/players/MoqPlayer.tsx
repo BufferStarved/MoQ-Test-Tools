@@ -16,6 +16,7 @@ import {
   moqRenderSink,
   noMediaFailMessage,
   noMediaTimeoutMs,
+  playerErrorForFailedJob,
   shouldKeepSessionOnSubscribeError,
 } from "../moqCmafPlayback";
 import {
@@ -51,6 +52,8 @@ interface MoqPlayerProps {
   encodeStartedAtEpoch?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
+  /** Encode/publish error from the job record — prefer this over a catalog miss. */
+  jobError?: string | null;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
   /** Glass-to-glass budget from upload config (ms). */
@@ -131,6 +134,7 @@ export default function MoqPlayer({
   encodeStartedAtEpoch,
   onPlaybackSample,
   jobStatus,
+  jobError = null,
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 400,
@@ -186,6 +190,17 @@ export default function MoqPlayer({
   };
   const jobStatusRef = useRef(jobStatus);
   jobStatusRef.current = jobStatus;
+  const jobErrorRef = useRef(jobError);
+  jobErrorRef.current = jobError;
+  useEffect(() => {
+    const jobFail = playerErrorForFailedJob({ jobStatus, jobError });
+    if (!jobFail) {
+      return;
+    }
+    lastErrorRef.current = jobFail;
+    setError(jobFail);
+    setStatus("Failed");
+  }, [jobStatus, jobError]);
   const loadingRef = useRef(benchmarkLoading);
   loadingRef.current = benchmarkLoading;
   const encodeDurationRef = useRef(encodeDurationSec);
@@ -342,6 +357,8 @@ export default function MoqPlayer({
           sessionRestarts: sessionRef.current.sessionRestarts,
           lastError: lastErrorRef.current,
           namespace,
+          jobStatus: jobStatusRef.current,
+          jobError: jobErrorRef.current,
         });
         if (verdict.ok) {
           setError(null);
@@ -446,12 +463,17 @@ export default function MoqPlayer({
     }
 
     function fail(message: string) {
-      lastErrorRef.current = message;
-      setError(message);
+      const jobFail = playerErrorForFailedJob({
+        jobStatus: jobStatusRef.current,
+        jobError: jobErrorRef.current,
+      });
+      const shown = jobFail || message;
+      lastErrorRef.current = shown;
+      setError(shown);
       setStatus("Failed");
       setIsReady(false);
       setIsPlaying(false);
-      diagReporter.push(`FAIL ${message}`);
+      diagReporter.push(`FAIL ${shown}`);
     }
 
     function armFrameTimeout(label: string) {
@@ -1015,7 +1037,12 @@ export default function MoqPlayer({
             return;
           }
           fail(
-            `MoQ catalog never loaded within ${catalogWaitSec}s after connect. Use Chrome (not Safari/Cursor). Publisher must be live on namespace ${namespace}.`,
+            noMediaFailMessage({
+              catalogReady: false,
+              namespace,
+              jobStatus: jobStatusRef.current,
+              jobError: jobErrorRef.current,
+            }),
           );
         }, attempt < MAX_CONNECT_ATTEMPTS ? CATALOG_RETRY_MS : catalogWaitMs);
         updateMediaVisibility(player);
@@ -1129,6 +1156,8 @@ export default function MoqPlayer({
                 noMediaFailMessage({
                   catalogReady: sessionRef.current.catalogReady,
                   namespace,
+                  jobStatus: jobStatusRef.current,
+                  jobError: jobErrorRef.current,
                 }),
               );
             }

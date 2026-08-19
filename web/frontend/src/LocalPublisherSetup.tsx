@@ -45,9 +45,9 @@ export function LocalPublisherSetup({
       <p className="local-publisher-setup-lede">
         {variant === "webcam" ? (
           hosted ? (
-            <>Run this in a terminal and leave it open.</>
+            <>Optional: only if you want Webcam on this laptop. Cloud playout and Browser already work.</>
           ) : (
-            <>Start the local agent in another terminal.</>
+            <>Optional: start the local helper in another terminal for Webcam.</>
           )
         ) : hosted ? (
           <>

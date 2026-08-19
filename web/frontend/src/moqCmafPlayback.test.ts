@@ -4,11 +4,14 @@ import {
   classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
   cmafSubscribeOptions,
+  humanizeJobError,
+  isCaptureOrPublishError,
   isPublisherNotReadyError,
   moqHasRenderedMedia,
   moqRenderSink,
   noMediaFailMessage,
   noMediaTimeoutMs,
+  playerErrorForFailedJob,
   shouldKeepSessionOnSubscribeError,
   CMAF_LATE_FRAME_THRESHOLD_MS,
   MOQ_ALL_TRACKS_REFUSED,
@@ -111,6 +114,45 @@ describe("classifyMoqEndVerdict", () => {
 describe("noMediaFailMessage", () => {
   it("names the namespace so a 0x10 miss is diagnosable", () => {
     assert.match(noMediaFailMessage({ catalogReady: false, namespace: "bench-6a9355b9" }), /bench-6a9355b9/);
+  });
+});
+
+describe("capture error mapping", () => {
+  const capture251 =
+    "Shared webcam capture exited immediately (code 251): Selected framerate (30.000000) is not supported";
+
+  it("recognizes ffmpeg 251 / avfoundation as a capture error", () => {
+    assert.equal(isCaptureOrPublishError(capture251), true);
+    assert.equal(isCaptureOrPublishError("MoQ catalog never loaded"), false);
+  });
+
+  it("surfaces the encode error when the job failed, not a catalog miss", () => {
+    const shown = playerErrorForFailedJob({ jobStatus: "failed", jobError: capture251 });
+    assert.match(shown ?? "", /could not start/i);
+    assert.doesNotMatch(shown ?? "", /catalog never loaded/i);
+    assert.match(humanizeJobError(capture251) ?? "", /Cloud playout or Browser/);
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: false,
+      framesRendered: 0,
+      videoTimeSec: 0,
+      catalogReady: false,
+      encodeDurationSec: 60,
+      jobStatus: "failed",
+      jobError: capture251,
+      namespace: "bench-896442c0",
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.error ?? "", /could not start/i);
+    assert.doesNotMatch(verdict.error ?? "", /catalog never loaded/i);
+    assert.match(
+      noMediaFailMessage({
+        catalogReady: false,
+        namespace: "bench-896442c0",
+        jobStatus: "failed",
+        jobError: capture251,
+      }),
+      /could not start/i,
+    );
   });
 });
 

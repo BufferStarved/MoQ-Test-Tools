@@ -16,6 +16,7 @@ import type { UploadJob, UploadSample } from "./types";
 export function HarnessPage({ jobId, playback }: { jobId: string; playback: string }) {
   const [job, setJob] = useState<UploadJob | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [modeOverride, setModeOverride] = useState<PlaybackMode | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,7 +82,8 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
     return <div className="player-surface">Harness: loading job…</div>;
   }
 
-  const mode = (playback || (job.protocol === "moq" ? "moq" : job.protocol === "webrtc" ? "whep" : "hls")) as PlaybackMode;
+  const requested = (playback || (job.protocol === "moq" ? "moq" : job.protocol === "webrtc" ? "whep" : "hls")) as PlaybackMode;
+  const mode = modeOverride || requested;
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b1220", color: "#e5e7eb", padding: 16 }}>
@@ -92,6 +94,11 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         endpointUrl={job.endpoint_url}
         ingestEndpointId={ingestEndpointId}
         playbackMode={mode}
+        onPlaybackModeChange={(next) => {
+          if (next !== mode) {
+            setModeOverride(next);
+          }
+        }}
         moqRelayUrl={moq.relay}
         moqFingerprintUrl={moq.fingerprint}
         moqNamespace={moq.namespace}
@@ -103,6 +110,7 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         packagerTransitMs={job.packager_transit_ms ?? null}
         deliveryMediaOriginSec={job.delivery_media_origin_sec ?? null}
         jobStatus={job.status}
+        jobError={job.error}
         benchmarkLoading={job.status === "running"}
         encodeDurationSec={job.duration_sec}
         targetLatencyMs={job.target_latency_ms ?? 800}

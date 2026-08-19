@@ -20,6 +20,8 @@ interface MetricChartProps {
   yDomain?: [number, number];
   /** Keep all-zero series (e.g. MoQ stalls=0 next to HLS stalls>0). */
   keepZeroSeries?: boolean;
+  /** One-line caption under the chart — what testers are looking at. */
+  caption?: string;
 }
 
 function formatValue(value: number, unit?: string): string {
@@ -90,20 +92,16 @@ export function MetricChart({
   height = 180,
   yDomain,
   keepZeroSeries = false,
+  caption,
 }: MetricChartProps) {
-  // Prefer series with non-zero samples, but keep all-zero series visible when
-  // the chart has data (e.g. clean SRT paths with zero retransmits) or when
-  // keepZeroSeries is set (cross-protocol stalls / recovery counters).
+  // Hide all-zero series unless the caller asked to keep them (stalls / loss
+  // counters where a flat zero next to a real series is the finding).
   const nonzeroSeries = series.filter((item) => data.some((point) => (point[item.key] ?? 0) > 0));
   const activeSeries = keepZeroSeries
     ? data.length > 0
       ? series
       : []
-    : nonzeroSeries.length > 0
-      ? nonzeroSeries
-      : data.length > 0
-        ? series
-        : [];
+    : nonzeroSeries;
   const resolvedMetricKey = metricKey ?? (series.length === 1 ? series[0]?.key : undefined);
 
   if (activeSeries.length === 0) {
@@ -155,6 +153,7 @@ export function MetricChart({
           </LineChart>
         </ResponsiveContainer>
       </div>
+      {caption ? <p className="chart-caption">{caption}</p> : null}
     </div>
   );
 }

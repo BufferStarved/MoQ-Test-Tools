@@ -7,6 +7,7 @@ import {
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
+  fetchResults,
   fetchQualityAvailable,
   fetchUpload,
   fetchVmafAvailable,
@@ -32,6 +33,7 @@ import {
 } from "./qualityVmaf";
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
+import { humanizeJobError } from "./moqCmafPlayback";
 import { startClockSkewProbe } from "./clockSkew";
 import { assignStreamColors, protocolLabel } from "./protocolTheme";
 import { ToastStack, useToasts } from "./Toast";
@@ -364,23 +366,25 @@ function App() {
     const ladder = resolveEncodeLadder(encodeLadder);
     const isLive = mediaSource === "webcam" || mediaSource === "browser_moq";
     const sourceTitle = isLive
-      ? "Webcam"
+      ? mediaSource === "browser_moq"
+        ? "Browser camera"
+        : "Webcam"
       : mediaSource === "bbb"
         ? "Big Buck Bunny"
         : mediaSource === "upload"
           ? mediaLabel || "Upload"
           : "Color bars";
     const sourceDetail = mediaSource === "browser_moq"
-      ? "Captured in this browser"
+      ? "Captured and encoded in this tab"
       : mediaSource === "webcam"
-        ? "Local camera"
-        : "Cloud playout on the API host";
+        ? "This laptop’s camera, encoded by the helper app"
+        : "Cloud playout on the server";
     const encodeTitle =
       mediaSource === "browser_moq"
         ? "Browser encode"
         : mediaSource === "webcam"
-          ? "Local ffmpeg"
-          : "API host · ffmpeg";
+          ? "This laptop"
+          : "Server ffmpeg";
     const encodeDetail =
       mediaSource === "browser_moq"
         ? endpoints.some((endpoint) => endpoint.protocol === "webrtc") &&
@@ -528,7 +532,7 @@ function App() {
       setMediaPath(lastMileWebcamMediaPath());
       setComputeVmaf(false);
     } else if (next === "browser_moq") {
-      setMediaLabel("Webcam");
+      setMediaLabel("Browser camera");
       setMediaPath(DEVICE_BROWSER_MEDIA);
       setComputeVmaf(false);
       setEndpoints((current) =>
@@ -704,31 +708,31 @@ function App() {
       setComputeVmaf(false);
       setVmafUnavailableReason(
         encoderVmafUnavailableReason ??
-          "VMAF needs ffmpeg/libvmaf on this host and/or an ingest server with recording support.",
+          "Picture-quality scoring is not available on this host right now.",
       );
       return;
     }
     if (mediaSource === "webcam") {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Encoder VMAF runs on file publishes (not WHIP). Ingest VMAF is MoQ post-relay or Zixi TS — never WebRTC."
-          : "Live webcam quality scoring needs ffmpeg/libvmaf on the encode host.",
+          ? "Scores the file after encode. WebRTC is not scored."
+          : "This laptop cannot score picture quality yet.",
       );
       return;
     }
     if (mediaSource === "browser_moq") {
       setVmafUnavailableReason(
         anyIngestVmafAvailable
-          ? "MoQ ingest VMAF records after the relay. WebRTC cannot tee encoder VMAF — it reports a QP-mapped quality score instead."
-          : "MoQ ingest VMAF needs openmoq-fmp4-record on the ingest worker (post-relay subscribe). WebRTC uses a QP quality stand-in; it never uses that recorder.",
+          ? "MoQ can be scored after the relay. WebRTC is not scored."
+          : "Picture-quality scoring is not available for this Browser path.",
       );
       return;
     }
     if (!vmafBothAvailable) {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Ingest VMAF needs a Zixi TS recorder or MoQ post-relay recorder — encoder scores still run on file publishes except WHIP."
-          : "Encoder libvmaf is unavailable — ingest scores will still run where a recorder exists.",
+          ? "The encode can be scored. Some destinations cannot record a second score."
+          : "Encode scoring is unavailable — destination scores may still run.",
       );
       return;
     }
@@ -741,6 +745,37 @@ function App() {
     encoderVmafUnavailableReason,
     mediaSource,
   ]);
+
+  useEffect(() => {
+    if (tab !== "metrics" || sessionMetrics.length > 0 || loading) {
+      return;
+    }
+    let cancelled = false;
+    void fetchResults()
+      .then(async ({ results }) => {
+        if (cancelled || results.length === 0) {
+          return;
+        }
+        const newest = [...results].sort((a, b) =>
+          String(b.modified_at || "").localeCompare(String(a.modified_at || "")),
+        )[0];
+        if (!newest) {
+          return;
+        }
+        const detail = await fetchResultDetail(newest.filename);
+        if (cancelled) {
+          return;
+        }
+        setSessionMetrics([detail]);
+        setSessionMetricLabels([detail.summary_extra?.stream_label || newest.filename]);
+        setSelectedSessionKey(`single:${newest.filename}`);
+        setSessionFromHistory(true);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, sessionMetrics.length, loading]);
 
   function updateEndpoint(id: string, patch: Partial<EndpointConfig>) {
     setEndpoints((current) =>
@@ -933,8 +968,11 @@ function App() {
           const wasAllEncoded = current.every((leg) => isEncodeFinished(leg.job));
           if (allEncoded && !wasAllEncoded) {
             onAllFinished?.();
+            // Do not wait for VMAF — testers open Results as soon as encode ends.
+            void loadSessionMetricsFromLegs(next);
           }
           if (
+            allEncoded &&
             next.every((leg) =>
               isLegFinished(leg.job, leg.ingestVmafRequested, leg.encoderVmafRequested),
             )
@@ -956,6 +994,25 @@ function App() {
       .filter((entry): entry is { label: string; filename: string } => Boolean(entry.filename));
 
     if (entries.length === 0) {
+      // csv_path can be a laptop path the API cannot serve. Fall back to
+      // the newest listed results so the Results tab is not blank.
+      try {
+        const { results } = await fetchResults();
+        const newest = [...results]
+          .sort((a, b) => String(b.modified_at || "").localeCompare(String(a.modified_at || "")))
+          .slice(0, Math.max(1, legs.length));
+        if (newest.length === 0) {
+          return;
+        }
+        const details = await Promise.all(newest.map((file) => fetchResultDetail(file.filename)));
+        setSessionMetrics(details);
+        setSessionMetricLabels(newest.map((file, index) => legs[index]?.label || file.filename));
+        setSelectedSessionKey(`single:${newest[0].filename}`);
+        setSessionFromHistory(false);
+        setSessionHistoryRefreshToken((token) => token + 1);
+      } catch {
+        // Empty Results state still explains how to load history.
+      }
       return;
     }
 
@@ -973,6 +1030,23 @@ function App() {
       } catch {
         await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)));
       }
+    }
+    try {
+      const { results } = await fetchResults();
+      const newest = [...results]
+        .sort((a, b) => String(b.modified_at || "").localeCompare(String(a.modified_at || "")))
+        .slice(0, Math.max(1, legs.length));
+      if (newest.length === 0) {
+        return;
+      }
+      const details = await Promise.all(newest.map((file) => fetchResultDetail(file.filename)));
+      setSessionMetrics(details);
+      setSessionMetricLabels(newest.map((file, index) => legs[index]?.label || file.filename));
+      setSelectedSessionKey(`single:${newest[0].filename}`);
+      setSessionFromHistory(true);
+      setSessionHistoryRefreshToken((token) => token + 1);
+    } catch {
+      // Empty Results state still explains how to load history.
     }
   }
 
@@ -1352,11 +1426,12 @@ function App() {
                           }
                           onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
-                        <span>VMAF / PSNR / SSIM</span>
+                        <span>Score picture quality</span>
                       </label>
-                      {vmafUnavailableReason ? (
-                        <span className="field-hint">{vmafUnavailableReason}</span>
-                      ) : null}
+                      <span className="field-hint">
+                        {vmafUnavailableReason ??
+                          "Compares the encode to the original so you can see if the picture stays sharp. Skip this on a first run."}
+                      </span>
                     </div>
                   </div>
                 </section>
@@ -1477,6 +1552,7 @@ function App() {
                           );
                         }}
                         jobStatus={leg?.job.status}
+                        jobError={leg?.job.error}
                         benchmarkLoading={loading}
                         encodeDurationSec={leg?.job.duration_sec ?? 60}
                         targetLatencyMs={moqPlayerTargetLatencyMs(
@@ -1514,7 +1590,7 @@ function App() {
                             <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
                           </div>
                           {leg.job.status === "failed" && leg.job.error && (
-                            <p className="error">{leg.job.error}</p>
+                            <p className="error">{humanizeJobError(leg.job.error) || leg.job.error}</p>
                           )}
                           {leg.encoderVmafRequested ? (
                             <div className="status-row quality">
@@ -1711,6 +1787,7 @@ function App() {
               <SessionHistory
                 refreshToken={sessionHistoryRefreshToken}
                 selectedKey={selectedSessionKey}
+                eager
                 onSelect={(summaries, labels, key) => {
                   setSessionMetrics(summaries);
                   setSessionMetricLabels(labels);

@@ -131,10 +131,67 @@ export function noMediaTimeoutMs(encodeDurationSec: number): number {
   return MOQ_NO_MEDIA_TIMEOUT_MS;
 }
 
+export function isCaptureOrPublishError(error?: string | null): boolean {
+  if (!error) {
+    return false;
+  }
+  const text = error.toLowerCase();
+  return (
+    text.includes("ffmpeg exited") ||
+    text.includes("shared webcam capture") ||
+    text.includes("avfoundation") ||
+    text.includes("selected framerate") ||
+    text.includes("code 251") ||
+    text.includes("input/output error") ||
+    text.includes("conversion failed") ||
+    text.includes("opening input")
+  );
+}
+
+/** Tester-facing job error — capture failures must not read as a catalog miss. */
+export function humanizeJobError(error?: string | null): string | null {
+  const raw = (error || "").trim();
+  if (!raw) {
+    return null;
+  }
+  if (!isCaptureOrPublishError(raw)) {
+    return raw;
+  }
+  const first = raw.split("\n")[0].replace(/\s+/g, " ").trim();
+  const modeMatch =
+    raw.match(/supported modes?\s*(?:are\s*)?:?\s*[^\n.]+/i) ||
+    raw.match(/1920x1080@\d+fps/i);
+  const mode = modeMatch ? modeMatch[0].replace(/^supported modes?\s*(?:are\s*)?:?\s*/i, "").trim() : "";
+  if (/framerate|avfoundation|shared webcam/i.test(raw)) {
+    return [
+      "The camera on this laptop could not start, so nothing was published.",
+      mode ? `This device reported: ${mode}.` : first,
+      "This is not a player or catalog problem. Use Cloud playout or Browser, or a camera mode the device actually supports.",
+    ].join(" ");
+  }
+  return `The publisher never started (${first}). This is not a player or catalog problem.`;
+}
+
+export function playerErrorForFailedJob(options: {
+  jobStatus?: string;
+  jobError?: string | null;
+}): string | null {
+  if (options.jobStatus !== "failed") {
+    return null;
+  }
+  return humanizeJobError(options.jobError);
+}
+
 export function noMediaFailMessage(options: {
   catalogReady: boolean;
   namespace?: string;
+  jobStatus?: string;
+  jobError?: string | null;
 }): string {
+  const jobFail = playerErrorForFailedJob(options);
+  if (jobFail) {
+    return jobFail;
+  }
   if (options.catalogReady) {
     return "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.";
   }
@@ -157,7 +214,17 @@ export function classifyMoqEndVerdict(options: {
   sessionRestarts?: number;
   lastError?: string | null;
   namespace?: string;
+  jobStatus?: string;
+  jobError?: string | null;
 }): MoqEndVerdict {
+  const jobFail = playerErrorForFailedJob(options);
+  if (jobFail && !moqHasRenderedMedia(options)) {
+    return {
+      ok: false,
+      status: "Failed (see diagnostics)",
+      error: jobFail,
+    };
+  }
   const played = moqHasRenderedMedia(options);
   const duration = options.encodeDurationSec ?? 0;
   const vt = options.videoTimeSec ?? 0;
@@ -193,6 +260,8 @@ export function classifyMoqEndVerdict(options: {
     error: noMediaFailMessage({
       catalogReady: Boolean(options.catalogReady),
       namespace: options.namespace,
+      jobStatus: options.jobStatus,
+      jobError: options.jobError,
     }),
   };
 }

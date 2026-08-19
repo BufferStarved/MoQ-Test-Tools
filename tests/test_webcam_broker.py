@@ -41,10 +41,16 @@ class LandscapeRetryTests(unittest.TestCase):
         broker = WebcamBroker()
         calls = []
 
-        def fake_spawn(media_path, ports, *, video_size):
-            calls.append(video_size)
+        def fake_spawn(media_path, ports, *, video_size, framerate="30"):
+            calls.append((video_size, framerate))
             outcome = outcomes[len(calls) - 1]
-            proc = MakeFakeProcess(alive=(outcome == "ok"))
+            stderr = (
+                b"Selected framerate (30.000000) is not supported by the device. "
+                b"Supported modes: 1920x1080@[60.000000 60.000000]fps"
+                if outcome == "fail"
+                else b""
+            )
+            proc = MakeFakeProcess(alive=(outcome == "ok"), stderr=stderr)
             return proc
 
         broker._spawn_capture = fake_spawn  # type: ignore[method-assign]
@@ -53,33 +59,38 @@ class LandscapeRetryTests(unittest.TestCase):
     def test_prefers_landscape_and_succeeds_without_retry(self) -> None:
         broker, calls = self._broker_with_fake_spawn(["ok"])
         url, session = broker.acquire("device:webcam", duration_sec=10)
-        self.assertEqual(calls, [PREFERRED_LANDSCAPE_VIDEO_SIZE])
+        self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
+        self.assertEqual(len(calls), 1)
         self.assertIsNone(session.error)
         self.assertTrue(url.startswith("udp://127.0.0.1:"))
         broker.release(session)
 
-    def test_falls_back_to_device_default_when_landscape_size_rejected(self) -> None:
+    def test_falls_back_to_probed_obs_mode_when_720p30_rejected(self) -> None:
         broker, calls = self._broker_with_fake_spawn(["fail", "ok"])
         url, session = broker.acquire("device:webcam", duration_sec=10)
-        self.assertEqual(calls, [PREFERRED_LANDSCAPE_VIDEO_SIZE, None])
+        self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
+        self.assertEqual(calls[1], ("1920x1080", "60"))
         self.assertIsNone(session.error)
         self.assertTrue(url.startswith("udp://127.0.0.1:"))
         broker.release(session)
 
-    def test_propagates_error_when_both_attempts_fail(self) -> None:
-        broker, calls = self._broker_with_fake_spawn(["fail", "fail"])
+    def test_propagates_error_when_all_attempts_fail(self) -> None:
+        broker, calls = self._broker_with_fake_spawn(["fail"] * 6)
         with self.assertRaises(RuntimeError):
             broker.acquire("device:webcam", duration_sec=10)
-        self.assertEqual(calls, [PREFERRED_LANDSCAPE_VIDEO_SIZE, None])
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
 
 
 class MakeFakeProcess:
     """Minimal Popen-like stand-in for _check_early_exit()."""
 
-    def __init__(self, *, alive: bool) -> None:
+    def __init__(self, *, alive: bool, stderr: bytes | None = None) -> None:
         self._alive = alive
         self.returncode = None if alive else 1
-        self.stderr = _FakeStderr(b"" if alive else b"camera rejected requested size")
+        self.stderr = _FakeStderr(
+            b"" if alive else (stderr if stderr is not None else b"camera rejected requested size")
+        )
 
     def poll(self):
         return None if self._alive else self.returncode
@@ -100,6 +111,8 @@ class _FakeStderr:
         self._data = data
 
     def read(self):
+        if isinstance(self._data, bytes):
+            return self._data.decode("utf-8", errors="replace")
         return self._data
 
 
@@ -203,7 +216,7 @@ class SharedCaptureIntegrationTests(unittest.TestCase):
         self.broker = WebcamBroker()
 
     @staticmethod
-    def _fake_input_args(*, duration_sec=None, device_index=None, video_size=None):
+    def _fake_input_args(*, duration_sec=None, device_index=None, video_size=None, framerate="30"):
         # Mirrors the real Linux V4L2+Pulse shape (two -i's + explicit -map);
         # exercises the same code path as a real device without needing a
         # camera. video_size is accepted (matches the real signature) but

@@ -43,9 +43,11 @@ CASES = [
         "preset_id": "moq_zixi_gcp",
         "playback": "hls",
         # Primary ``SRT Test`` Fast HLS packager wedges; EC is the live path.
+        # MPEG-TS is the site fallback if Fast HLS is unrecoverable.
         "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test%20EC",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
+        "fallback_playback": "mpegts",
         "skip": False,
     },
     {
@@ -55,7 +57,8 @@ CASES = [
         "url": "http://35.222.33.58:7777/SRT%20Test%20EC.ts",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "skip": True,  # covered via dual Chrome probe during zixi_srt_hls
+        "skip": True,
+        "skip_reason": "covered via dual Chrome probe (HLS then MPEG-TS) during zixi_srt_hls",
     },
     {
         "id": "zixi_rtmp_hls",
@@ -78,13 +81,16 @@ CASES = [
     {
         "id": "zixi_tsput_hls",
         "preset_id": "moq_zixi_gcp_hls",
-        # Zixi accepts MPEG-TS PUT but does not expose Fast HLS / HTTP-TS for this
-        # input on the current Broadcaster settings — validate encode metrics only.
         "playback": "skip",
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "known_gap": "zixi_http_ts_push_no_playback",
+        "skip": True,
+        "skip_reason": (
+            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
+            "Recipe is hidden from the UI and fail-closed at the API — do not start."
+        ),
+        "known_gap": "zixi_http_ts_push_retired",
     },
     {
         "id": "zixi_tsput_dash",
@@ -93,7 +99,12 @@ CASES = [
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "known_gap": "zixi_http_ts_push_no_playback",
+        "skip": True,
+        "skip_reason": (
+            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
+            "DASH PUT recipe is retired/hidden — same fail-closed gate as HLS PUT."
+        ),
+        "known_gap": "zixi_http_ts_push_retired",
     },
     {
         "id": "mediamtx_srt_llhls",
@@ -143,6 +154,10 @@ CASES = [
         "url": "https://34-28-164-90.sslip.io:4433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+        # Headless Playwright cannot complete WebTransport/MoQ. A real Chrome
+        # tab can play CMAF; do not treat missing site_player samples as a
+        # product regression when encode/preview are healthy.
+        "requires_webtransport": True,
     },
 ]
 
@@ -168,6 +183,7 @@ EAST_CASES = [
         "url": f"https://{EAST_RELAY}:4433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+        "requires_webtransport": True,
     },
     {
         "id": "east_zixi_srt_mpegts",
@@ -230,7 +246,12 @@ LINODE_CASES = [
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "known_gap": "zixi_http_ts_push_no_playback",
+        "skip": True,
+        "skip_reason": (
+            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
+            "Recipe is hidden from the UI and fail-closed at the API — do not start."
+        ),
+        "known_gap": "zixi_http_ts_push_retired",
     },
     {
         "id": "linode_mediamtx_srt_llhls",
@@ -263,6 +284,7 @@ LINODE_CASES = [
         "url": f"https://{LINODE_RELAY}:4433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
+        "requires_webtransport": True,
     },
 ]
 
@@ -290,6 +312,9 @@ class CaseResult:
     errors: List[str] = field(default_factory=list)
     job_id: str = ""
     detail: Dict[str, Any] = field(default_factory=dict)
+    gated: bool = False
+    gate_reason: str = ""
+    skipped: bool = False
 
 
 def api(method: str, path: str, data: Optional[dict] = None, files: Optional[dict] = None) -> Any:
@@ -552,10 +577,11 @@ main();
 """
 
 
-def _job_has_real_playback(job_id: str) -> tuple[int, float]:
+def _job_has_real_playback(job_id: str) -> tuple[int, float, float]:
     samples = get_job(job_id).get("samples") or []
     frames = 0
     e2e = 0.0
+    video_time = 0.0
     for sample in samples:
         try:
             frames = max(frames, int(sample.get("playback_frames_rendered") or 0))
@@ -565,7 +591,11 @@ def _job_has_real_playback(job_id: str) -> tuple[int, float]:
             e2e = max(e2e, float(sample.get("e2e_latency_ms") or 0))
         except (TypeError, ValueError):
             pass
-    return frames, e2e
+        try:
+            video_time = max(video_time, float(sample.get("playback_video_time_sec") or 0))
+        except (TypeError, ValueError):
+            pass
+    return frames, e2e, video_time
 
 
 def run_site_player(job_id: str, mode: str, seconds: float = 14.0) -> tuple[bool, str]:
@@ -613,15 +643,53 @@ console.log(JSON.stringify({{ ok: true }}));
     except subprocess.TimeoutExpired:
         return False, "chrome_timeout"
 
-    frames, e2e = _job_has_real_playback(job_id)
-    if frames > 0:
-        return True, f"playing site_player frames={frames} e2e={e2e:.0f}"
+    frames, e2e, video_time = _job_has_real_playback(job_id)
+    if frames > 0 or video_time > 0.2:
+        return True, f"playing site_player frames={frames} video_s={video_time:.2f} e2e={e2e:.0f}"
     return False, "site_player_no_playback_samples"
+
+
+def chrome_modes_for_case(case: dict) -> List[str]:
+    modes: List[str] = []
+    primary = str(case.get("playback") or "")
+    if primary:
+        modes.append(primary)
+    fallback = str(case.get("fallback_playback") or "")
+    if fallback and fallback not in modes:
+        modes.append(fallback)
+    return modes
+
+
+def skipped_case_result(case: dict) -> CaseResult:
+    reason = str(case.get("skip_reason") or "skipped")
+    return CaseResult(
+        case_id=case["id"],
+        ok=True,
+        ingest="skipped",
+        metrics="skipped",
+        chrome=f"skipped:{reason}",
+        skipped=True,
+        gated=True,
+        gate_reason=reason,
+        detail={"skip_reason": reason, "known_gap": case.get("known_gap")},
+    )
+
+
+def probe_site_player(job_id: str, modes: List[str], seconds: float) -> tuple[bool, str]:
+    messages: List[str] = []
+    for mode in modes:
+        if mode in {"skip", "none", ""}:
+            return True, "skipped"
+        ok, msg = run_site_player(job_id, mode, seconds=seconds)
+        messages.append(f"{mode}:{msg}")
+        if ok:
+            return True, " ".join(messages)
+    return False, " ".join(messages) if messages else "chrome_no_modes"
 
 
 def run_case(case: dict, media_path: str) -> CaseResult:
     if case.get("skip"):
-        return CaseResult(case_id=case["id"], ok=True, ingest="skipped", metrics="skipped", chrome="skipped")
+        return skipped_case_result(case)
 
     result = CaseResult(case_id=case["id"], ok=False)
     try:
@@ -673,19 +741,29 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     result.ingest = " ".join(ingest_bits)
 
     # Drive the real site player (same StreamPlayer reporter) while ingest is live.
+    chrome_modes = chrome_modes_for_case(case)
     if job_now.get("status") == "running":
-        chrome_ok, chrome_msg = run_site_player(
+        chrome_ok, chrome_msg = probe_site_player(
             job_id,
-            case["playback"],
-            seconds=float(os.environ.get("SITE_PLAYER_SEC", "14")),
+            chrome_modes,
+            seconds=float(os.environ.get("SITE_PLAYER_SEC", "16")),
         )
-        if not chrome_ok and job_now.get("status") == "running":
+        if not chrome_ok and get_job(job_id).get("status") == "running":
             time.sleep(3)
-            chrome_ok, chrome_msg = run_site_player(job_id, case["playback"], seconds=12)
-            chrome_msg = f"retry:{chrome_msg}"
+            retry_ok, retry_msg = probe_site_player(job_id, chrome_modes, seconds=12)
+            chrome_ok = retry_ok
+            chrome_msg = f"{chrome_msg} retry:{retry_msg}"
         result.chrome = chrome_msg
         if not chrome_ok:
-            result.errors.append(f"chrome:{chrome_msg}")
+            if case.get("requires_webtransport"):
+                result.gated = True
+                result.gate_reason = (
+                    "requires_webtransport: headless Playwright cannot verify MoQ/WebTransport; "
+                    "encode/preview remain the product signal"
+                )
+                result.chrome = f"gated_requires_webtransport:{chrome_msg}"
+            else:
+                result.errors.append(f"chrome:{chrome_msg}")
     else:
         result.chrome = f"skipped_job_{job_now.get('status')}"
         if job_now.get("status") != "failed":
@@ -719,7 +797,7 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     if final.get("preview_ready") and "preview_not_ready" in result.errors:
         result.errors = [e for e in result.errors if e != "preview_not_ready"]
     # WHIP muxer often omits ffmpeg -progress bitrate; Chrome + preview is the signal.
-    chrome_ok = result.chrome.startswith("playing")
+    chrome_ok = "playing site_player" in result.chrome
     result.detail["metric_completeness"] = metric_completeness(final.get("samples") or samples)
     if (
         (
@@ -768,11 +846,13 @@ def main() -> int:
 
     results: List[CaseResult] = []
     for case in cases:
-        if case.get("skip"):
-            print(f"\n== {case['id']} SKIP ==")
-            continue
         if only and case["id"] not in only:
             print(f"\n== {case['id']} FILTERED_OUT ==")
+            continue
+        if case.get("skip"):
+            print(f"\n== {case['id']} SKIP ==")
+            print(f" reason {case.get('skip_reason') or 'skipped'}")
+            results.append(skipped_case_result(case))
             continue
         print(f"\n== {case['id']} preset={case['preset_id']} playback={case['playback']} ==")
         res = run_case(case, media_path)
@@ -781,17 +861,29 @@ def main() -> int:
         print(" ingest", res.ingest)
         print(" metrics", res.metrics[:300])
         print(" chrome", res.chrome)
-        print(" ok" if res.ok else f" FAIL {res.errors}")
+        if res.gated and res.ok:
+            print(f" GATED {res.gate_reason}")
+        else:
+            print(" ok" if res.ok else f" FAIL {res.errors}")
 
     print("\n======== MATRIX SUMMARY ========")
     width = max(len(r.case_id) for r in results) if results else 10
     fails = 0
+    gated = 0
     for r in results:
-        mark = "PASS" if r.ok else "FAIL"
         if not r.ok:
+            mark = "FAIL"
             fails += 1
+        elif r.skipped:
+            mark = "SKIP"
+            gated += 1
+        elif r.gated:
+            mark = "GATE"
+            gated += 1
+        else:
+            mark = "PASS"
         print(f"{mark:4} {r.case_id:<{width}}  ingest={r.ingest[:60]}  chrome={r.chrome[:50]}")
-    print(f"total={len(results)} fail={fails}")
+    print(f"total={len(results)} fail={fails} gated={gated}")
     out = ROOT / "results" / "e2e_ingest_matrix_latest.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(

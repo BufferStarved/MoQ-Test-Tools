@@ -388,7 +388,7 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
         ctx.source === "webcam" &&
         !recipePublisherCaps(ctx).localFfmpegWhip
       ) {
-        return "WebRTC is unavailable on this machine — its ffmpeg has no WHIP muxer. Use SRT, RTMP, or MoQ, or upgrade ffmpeg.";
+        return "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch to Cloud playout or Browser.";
       }
       return "This output uses a protocol that is not available here.";
     }

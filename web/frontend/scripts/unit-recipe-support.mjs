@@ -22,6 +22,8 @@ assert.match(appSrc, /Boolean\(recipeBlockReason\)/);
 assert.match(endpointSrc, /destinationsForProtocol/);
 assert.match(endpointSrc, /selectablePlaybackModes/);
 assert.doesNotMatch(endpointSrc, /playbackModeBlockedReason/);
+assert.match(endpointSrc, /UPLOAD_PROTOCOLS_COMING_SOON = new Set\(\["hls", "dash"\]\)/);
+assert.match(recipeSrc, /PUBLISH_PROTOCOL_IDS = \["srt", "rtmp", "webrtc", "moq"\]/);
 assert.match(playbackSrc, /Compatible players only/);
 assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS/);
 assert.match(recipeSrc, /publishProtocolIdsForSource/);
@@ -74,10 +76,9 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   const mediamtx = ingestRole(ingestEndpointId) === "mediamtx";
   const zixi = ingestRole(ingestEndpointId) === "zixi";
   if (mediamtx) {
-    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep";
+    return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
-    if (protocol === "srt" && mode === "hls") return false;
     return mode === "hls" || mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
@@ -152,7 +153,9 @@ assert.ok(chromeIllegal.length > chromeLegal.length, "most combos must be illega
 // Known-good Chrome ffmpeg recipes
 for (const row of [
   ["dummy", "srt", "gcp_mediamtx", "ll-hls"],
+  ["dummy", "srt", "gcp_mediamtx", "mpegts"],
   ["dummy", "srt", "gcp_east_zixi", "mpegts"],
+  ["dummy", "srt", "gcp_east_zixi", "hls"],
   ["dummy", "rtmp", "linode_zixi", "hls"],
   ["dummy", "rtmp", "gcp_mediamtx", "whep"],
   ["dummy", "webrtc", "gcp_east_mediamtx", "whep"],
@@ -168,14 +171,13 @@ for (const row of [
 // Known-illegal
 for (const row of [
   ["dummy", "srt", "gcp_zixi", "mpegts"],
-  ["dummy", "srt", "gcp_east_zixi", "hls"],
   ["dummy", "srt", "gcp_moq_relay", "moq"],
   ["dummy", "webrtc", "gcp_east_zixi", "whep"],
   ["dummy", "moq", "gcp_mediamtx", "moq"],
   ["dummy", "hls", "gcp_east_zixi", "mpegts"],
   ["dummy", "dash", "custom", "hls"],
   ["dummy", "srt", "aws_zixi", "mpegts"],
-  ["dummy", "rtmp", "gcp_mediamtx", "mpegts"],
+  ["dummy", "srt", "gcp_mediamtx", "dash"],
   ["dummy", "webrtc", "gcp_mediamtx", "ll-hls"],
   ["browser_moq", "srt", "gcp_mediamtx", "ll-hls"],
   ["browser_moq", "moq", "custom", "moq"],
@@ -200,9 +202,10 @@ assert.equal(
   "cloud dummy webrtc does not need laptop WHIP",
 );
 
-// Safari: no MoQ; Zixi SRT has no remaining player; HLS on MTX is ok
+// Safari: no MoQ / MPEG-TS; Zixi SRT can still use Fast HLS; HLS on MTX is ok
 assert.equal(isLegalCombo("dummy", "moq", "gcp_moq_relay", "moq", SAFARI), false);
 assert.equal(isLegalCombo("dummy", "srt", "gcp_east_zixi", "mpegts", SAFARI), false);
+assert.equal(isLegalCombo("dummy", "srt", "gcp_east_zixi", "hls", SAFARI), true);
 assert.equal(isLegalCombo("dummy", "srt", "gcp_mediamtx", "ll-hls", SAFARI), true);
 assert.equal(isLegalCombo("dummy", "rtmp", "gcp_east_zixi", "hls", SAFARI), true);
 assert.equal(isLegalCombo("dummy", "webrtc", "gcp_mediamtx", "whep", SAFARI), true);
