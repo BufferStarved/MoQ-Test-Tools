@@ -2105,6 +2105,35 @@ class UploadService:
                     daemon=True,
                 )
                 drain_thread.start()
+            # Feed ftyp immediately. openmoq-publisher often CONNECTs only
+            # after it sees init (west smoke: ftyp → discovered → connection_id).
+            # Waiting on an empty stdin (job 265e8f25) SIGKILL'd the publisher
+            # at code -9 while it was still sitting on "waiting for ftyp+moov".
+            ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if ffmpeg_proc.stdout is not None and publisher_proc.stdin is not None:
+                tee_proc = start_moq_capture_tee(
+                    ffmpeg_proc.stdout,
+                    job.encoder_capture_path,
+                )
+                ffmpeg_proc.stdout.close()
+                if tee_proc.stdout is not None:
+                    fanout_thread = threading.Thread(
+                        target=fanout_stdout,
+                        args=(tee_proc.stdout, [publisher_proc.stdin]),
+                        daemon=True,
+                    )
+                    fanout_thread.start()
+            if ffmpeg_proc.stderr is not None:
+                ffmpeg_drain_thread = threading.Thread(
+                    target=self._drain_stream_to_file,
+                    args=(ffmpeg_proc.stderr, ffmpeg_log_path),
+                    daemon=True,
+                )
+                ffmpeg_drain_thread.start()
             connected = wait_for_publisher_webtransport(
                 lambda: (
                     f"{self._tail_file(publisher_stdout_path, max_lines=50)}\n"
@@ -2118,6 +2147,7 @@ class UploadService:
                 if stdout_drain_thread is not None:
                     stdout_drain_thread.join(timeout=2)
                 self._terminate_process(publisher_proc)
+                self._terminate_process(ffmpeg_proc)
                 detail = self._tail_file(publisher_log_path) or "unknown error"
                 stdout_detail = self._tail_file(publisher_stdout_path, max_lines=10)
                 if stdout_detail:
@@ -2139,38 +2169,6 @@ class UploadService:
                         f"(WebTransport CONNECT failed). {detail}"
                     ),
                 )
-            ffmpeg_proc = subprocess.Popen(
-                ffmpeg_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if ffmpeg_proc.stdout is not None and publisher_proc.stdin is not None:
-                tee_proc = start_moq_capture_tee(
-                    ffmpeg_proc.stdout,
-                    job.encoder_capture_path,
-                )
-                ffmpeg_proc.stdout.close()
-                if tee_proc.stdout is not None:
-                    fanout_thread = threading.Thread(
-                        target=fanout_stdout,
-                        args=(tee_proc.stdout, [publisher_proc.stdin]),
-                        daemon=True,
-                    )
-                    fanout_thread.start()
-            # Same risk applies to ffmpeg's own stderr: default -loglevel is
-            # verbose, and a live UDP source with wallclock PTS regeneration
-            # can log "Non-monotonic DTS"/timestamp-discontinuity warnings
-            # fast enough to fill the pipe before a single frame is muxed —
-            # blocking ffmpeg's own logging (and therefore encoding) with
-            # nothing to show for it (0-byte capture, 0-byte progress file).
-            # Drain to a file so this is diagnosable instead of silently lost.
-            if ffmpeg_proc.stderr is not None:
-                ffmpeg_drain_thread = threading.Thread(
-                    target=self._drain_stream_to_file,
-                    args=(ffmpeg_proc.stderr, ffmpeg_log_path),
-                    daemon=True,
-                )
-                ffmpeg_drain_thread.start()
         except FileNotFoundError:
             self._terminate_process(publisher_proc)
             self._terminate_process(ffmpeg_proc)

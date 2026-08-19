@@ -119,18 +119,19 @@ class PublisherAnnounceContractTests(unittest.TestCase):
             )
         )
 
-    def test_upload_service_starts_publisher_before_ffmpeg_and_waits(self) -> None:
+    def test_upload_service_feeds_ftyp_before_waiting_for_connect(self) -> None:
         text = (ROOT / "src" / "upload_service.py").read_text()
         start = text.index("def _run_moq_pipeline")
         body = text[start : text.index("\n    def _finalize_result", start)]
         pub = body.index("publisher_proc = subprocess.Popen")
         wait = body.index("wait_for_publisher_webtransport")
         ffmpeg = body.index("ffmpeg_proc = subprocess.Popen")
-        self.assertLess(pub, wait)
-        self.assertLess(wait, ffmpeg)
+        self.assertLess(pub, ffmpeg)
+        self.assertLess(ffmpeg, wait)
         self.assertNotIn("stdout=subprocess.DEVNULL", body)
         self.assertIn("publisher never printed connection_id", body)
         self.assertIn("paced=should_pace_moq_publisher", body)
+        self.assertIn("waiting for ftyp+moov", body)
 
     def test_playback_gate_waits_for_namespace_before_moq_subscribe(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
