@@ -17,6 +17,9 @@ function playbackGateForJob(job, benchmarkStarting) {
       if (protocol === "webrtc" && !browser) {
         return "live";
       }
+      if (protocol === "srt" || protocol === "rtmp") {
+        return "live";
+      }
       return "waiting";
     }
     return "live";
@@ -62,7 +65,7 @@ assert.equal(
 );
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "srt", preview_ready: false }, false),
-  "waiting",
+  "live",
 );
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "srt", preview_ready: true }, false),
@@ -70,7 +73,7 @@ assert.equal(
 );
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "rtmp", preview_ready: false }, false),
-  "waiting",
+  "live",
 );
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "webrtc", preview_ready: false }, false),

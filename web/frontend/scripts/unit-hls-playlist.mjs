@@ -3,6 +3,9 @@
  * (mirrors web/frontend/src/hlsPlaylist.ts + encodeProfiles.hlsSegmentSec).
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HLS_TARGET_DURATION_CAP_SEC = 6;
 const STALE_FRAG_FAIL_AFTER = 12;
@@ -96,5 +99,13 @@ assert.equal(
 assert.equal(hlsSegmentSec(5000), 2);
 assert.equal(hlsSegmentSec(4000), 2);
 assert.equal(hlsSegmentSec(6000), 3);
+
+const hlsPlayer = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "../src/players/HlsPlayer.tsx"),
+  "utf8",
+);
+assert.match(hlsPlayer, /const MANIFEST_STUCK_POLLS_FALLBACK = 8;/);
+assert.match(hlsPlayer, /unreadablePolls/);
+assert.match(hlsPlayer, /Count unreadable segments separately/);
 
 console.log("unit-hls-playlist: PASS");

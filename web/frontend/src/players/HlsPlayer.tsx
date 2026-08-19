@@ -65,8 +65,8 @@ const MANIFEST_POLL_MAX = 120;
  */
 const MANIFEST_START_POLLS = 2;
 const MANIFEST_STUCK_POLLS = 60;
-/** Faster give-up when MPEG-TS fallback is available (~10s vs ~24s). */
-const MANIFEST_STUCK_POLLS_FALLBACK = 25;
+/** Faster give-up when MPEG-TS fallback is available (~3s vs ~24s). */
+const MANIFEST_STUCK_POLLS_FALLBACK = 8;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
@@ -194,6 +194,7 @@ async function waitForManifest(
   let previousSequence: string | null = null;
   let previousSegment: string | null = null;
   let unchangedPolls = 0;
+  let unreadablePolls = 0;
   for (let attempt = 1; attempt <= MANIFEST_POLL_MAX; attempt += 1) {
     if (!shouldContinue()) {
       return null;
@@ -260,6 +261,19 @@ async function waitForManifest(
 
         if (candidate && segmentReady) {
           return body;
+        }
+
+        // Zixi can advance MEDIA-SEQUENCE while every chunk stays HTTP 400.
+        // That resets unchangedPolls and used to burn the full 48s poll budget
+        // before MPEG-TS fallback. Count unreadable segments separately.
+        if (candidate && segment && !segmentReady) {
+          unreadablePolls += 1;
+          if (unreadablePolls >= stuckPolls) {
+            onStuck?.(sequence ?? "unknown");
+            return null;
+          }
+        } else if (segmentReady) {
+          unreadablePolls = 0;
         }
 
         if (

@@ -177,6 +177,7 @@ class FakeProcess:
         self.terminated = False
         self.killed = False
         self._stubborn = stubborn
+        self.stdin = None
 
     def poll(self):
         return None if not (self.terminated or self.killed) else 0
@@ -213,6 +214,35 @@ class TerminateProcessTests(unittest.TestCase):
 
     def test_none_is_a_noop(self):
         UploadService()._terminate_process(None)
+
+
+class StopMoqPublisherTests(unittest.TestCase):
+    """A publisher that is still sending must not be SIGKILL'd."""
+
+    def test_does_not_touch_publisher_while_encode_is_live(self):
+        service = UploadService()
+        proc = FakeProcess(stubborn=True)
+        service._stop_moq_publisher(proc, encode_live=True, was_publishing=True)
+        self.assertFalse(proc.terminated)
+        self.assertFalse(proc.killed)
+
+    def test_does_not_sigkill_after_connect(self):
+        service = UploadService()
+        proc = FakeProcess(stubborn=True)
+        service._stop_moq_publisher(
+            proc, encode_live=False, was_publishing=True, drain_sec=1.0
+        )
+        self.assertTrue(proc.terminated)
+        self.assertFalse(proc.killed)
+
+    def test_may_kill_stubborn_never_connected_publisher(self):
+        service = UploadService()
+        proc = FakeProcess(stubborn=True)
+        service._stop_moq_publisher(
+            proc, encode_live=False, was_publishing=False, drain_sec=1.0
+        )
+        self.assertTrue(proc.terminated)
+        self.assertTrue(proc.killed)
 
 
 if __name__ == "__main__":

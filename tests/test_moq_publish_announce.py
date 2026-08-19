@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from moq_publish import (  # noqa: E402
     MoqPublishTarget,
     build_openmoq_publisher_cmd,
+    publisher_exit_error,
     publisher_webtransport_connected,
     should_pace_moq_publisher,
     wait_for_publisher_webtransport,
@@ -57,14 +58,43 @@ class PublisherAnnounceContractTests(unittest.TestCase):
                 "[moqt-session] live: awaiting subscriptions, mode=forward\n"
             )
         )
+        self.assertTrue(
+            publisher_webtransport_connected(
+                "[moqt-session] live: sent track=vide_1 group=55 obj=0 "
+                "time_us=27521354 bytes=191598 sap=2\n"
+            )
+        )
         self.assertFalse(
             publisher_webtransport_connected(
                 "[moqt-session] live: waiting for ftyp+moov from stdin...\n"
-                "[moqt-session] live: sent track=vide_1 group=0\n"
                 "error: transport live publish failed: webtransport connection closed\n"
             )
         )
         self.assertFalse(publisher_webtransport_connected(""))
+
+    def test_sigkill_after_connection_id_is_not_before_connect(self) -> None:
+        # Prod bench-216482ff: waiter missed block-buffered stdout, SIGKILL'd
+        # the Docker wrapper, then dumped these lines into "before CONNECT".
+        log = (
+            "[moqt-session] live: sent track=vide_1 group=55 obj=0 "
+            "time_us=27521354 bytes=191598 sap=2\n"
+            "[moqt-session] live: sent track=soun_2 group=55 obj=0 "
+            "time_us=27541333 bytes=8049 sap=1\n"
+            "connection_id=wt-101632518200672\n"
+        )
+        msg = publisher_exit_error("openmoq", -9, log)
+        self.assertNotIn("before WebTransport CONNECT", msg)
+        self.assertIn("SIGKILL", msg)
+        self.assertIn("after WebTransport CONNECT", msg)
+        self.assertIn("connection_id=wt-101632518200672", msg)
+
+    def test_exit_without_session_may_say_before_connect(self) -> None:
+        msg = publisher_exit_error(
+            "openmoq",
+            -9,
+            "[moqt-session] live: waiting for ftyp+moov from stdin...\n",
+        )
+        self.assertIn("before WebTransport CONNECT", msg)
 
     def test_wait_returns_true_once_connection_id_appears(self) -> None:
         logs = ["waiting for ftyp+moov\n", "connection_id=wt-103173155163616\n"]
@@ -87,6 +117,17 @@ class PublisherAnnounceContractTests(unittest.TestCase):
             )
         )
         self.assertGreater(ticks["t"], 0.0)
+
+    def test_wait_treats_live_sent_track_as_connected(self) -> None:
+        self.assertTrue(
+            wait_for_publisher_webtransport(
+                lambda: "[moqt-session] live: sent track=vide_1 group=0 obj=0\n",
+                lambda: True,
+                timeout_sec=1.0,
+                clock=lambda: 0.0,
+                sleep=lambda _s: None,
+            )
+        )
 
     def test_wait_fails_if_publisher_dies_without_connection_id(self) -> None:
         self.assertFalse(
@@ -130,11 +171,18 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         self.assertNotIn("stdout=subprocess.DEVNULL", body)
         self.assertIn("paced=should_pace_moq_publisher", body)
         self.assertIn("waiting for ftyp+moov", body)
+        self.assertIn("publisher_exit_error", body)
+        self.assertIn("_stop_moq_publisher", body)
+        # Encode must die first; never SIGKILL a live publisher to "wait for CONNECT".
+        stop = body.index("self._terminate_process(ffmpeg_proc)")
+        pub_stop = body.index("self._stop_moq_publisher")
+        self.assertLess(stop, pub_stop)
 
     def test_playback_gate_waits_for_namespace_before_moq_subscribe(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
         self.assertIn('protocol === "webrtc" && !browser', text)
         self.assertIn("ffmpeg MoQ must wait for the relay namespace announce", text)
+        self.assertIn('protocol === "srt" || protocol === "rtmp"', text)
         self.assertNotIn('protocol !== "moq" && protocol !== "webrtc"', text)
 
 

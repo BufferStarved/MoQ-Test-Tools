@@ -40,6 +40,7 @@ from moq_preview import (
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
+    publisher_exit_error,
     publisher_webtransport_connected,
     should_pace_moq_publisher,
     MPEGTS_VIDEO_BSF,
@@ -1786,6 +1787,31 @@ class UploadService:
                                 exc_info=True,
                             )
 
+                # MPEG-TS (default Zixi player) is ready when HTTP-TS is, not
+                # when Fast HLS finally serves a readable chunk. Waiting on HLS
+                # here sat the gate on a wedged playlist and delayed TTFF.
+                if not preview_ready and not is_mediamtx:
+                    http_ts_id = self._managed_http_ts_stream_id(job)
+                    if http_ts_id:
+                        try:
+                            if probe_http_ts_ready(
+                                http_ts_id,
+                                endpoint_url=job.destination.url,
+                                timeout=1.5,
+                            ).ok:
+                                logger.info(
+                                    "HTTP-TS preview ready for job %s (skip HLS gate)",
+                                    job.job_id,
+                                )
+                                self._notify_preview_ready(job, True)
+                                preview_ready = True
+                        except Exception:
+                            logger.debug(
+                                "HTTP-TS preview probe failed for job %s",
+                                job.job_id,
+                                exc_info=True,
+                            )
+
                 # Zixi Fast HLS only: gate on segment readiness; auto-heal once if wedged.
                 if (
                     manifest_url
@@ -2246,11 +2272,11 @@ class UploadService:
                     if code not in (0, None):
                         return UploadResult(
                             success=False,
-                            error=f"{publisher_backend} publisher exited with code {code}: {detail}",
+                            error=publisher_exit_error(publisher_backend, code, detail),
                         )
                     return UploadResult(
                         success=False,
-                        error=f"{publisher_backend} publisher exited early ({detail})",
+                        error=publisher_exit_error(publisher_backend, code, detail),
                     )
 
                 status = progress_reader.get_status()
@@ -2386,8 +2412,19 @@ class UploadService:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
         finally:
-            self._terminate_process(publisher_proc)
+            # Stop encode first so the publisher sees stdin EOF and can
+            # finish in-flight groups. SIGKILL-ing the Docker wrapper while
+            # ffmpeg was still live is how bench-216482ff died at -9 mid-publish.
             self._terminate_process(ffmpeg_proc)
+            wt_log = (
+                f"{self._tail_file(publisher_stdout_path, max_lines=20)}\n"
+                f"{self._tail_file(publisher_log_path, max_lines=20)}"
+            )
+            self._stop_moq_publisher(
+                publisher_proc,
+                encode_live=False,
+                was_publishing=publisher_webtransport_connected(wt_log),
+            )
             if tee_proc is not None:
                 # tee can survive its neighbors (blocked write into the dead
                 # publisher's pipe). An uncaught TimeoutExpired here killed the
@@ -2802,6 +2839,63 @@ class UploadService:
                 self._proc_usage_cache.pop(pid, None)
                 continue
         return cpu_total, mem_total
+
+    def _stop_moq_publisher(
+        self,
+        process: Optional[subprocess.Popen],
+        *,
+        encode_live: bool = False,
+        was_publishing: bool = False,
+        drain_sec: float = 12.0,
+        wait: Optional[Callable[[subprocess.Popen, float], None]] = None,
+    ) -> None:
+        """Hold a live publisher through encode/playback drain — no SIGKILL.
+
+        ``encode_live`` means ffmpeg is still producing; killing the publisher
+        then is the bench-216482ff race (groups 55–57 in flight, wrapper -9).
+        After encode ends, close stdin and wait like LOC camera drain so the
+        last GOPs reach the relay. Never SIGKILL a session that already
+        CONNECTed — Docker ``docker run`` maps that to wrapper exit -9 while
+        the container is still publishing.
+        """
+        if process is None or process.poll() is not None:
+            return
+        if encode_live:
+            return
+
+        def _wait(proc: subprocess.Popen, timeout: float) -> None:
+            if wait is not None:
+                wait(proc, timeout)
+                return
+            proc.wait(timeout=timeout)
+
+        try:
+            if process.stdin is not None and not getattr(process.stdin, "closed", False):
+                process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            _wait(process, max(1.0, drain_sec))
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if process.poll() is None:
+            process.terminate()
+        try:
+            _wait(process, max(1.0, drain_sec) if was_publishing else 5.0)
+        except subprocess.TimeoutExpired:
+            if was_publishing:
+                logger.warning(
+                    "MoQ publisher %s still sending after SIGTERM; not SIGKILL-ing "
+                    "a live WebTransport session",
+                    process.pid,
+                )
+                return
+            process.kill()
+            try:
+                _wait(process, 2.0)
+            except subprocess.TimeoutExpired:
+                logger.warning("Process %s did not exit after kill", process.pid)
 
     def _terminate_process(self, process: Optional[subprocess.Popen]) -> None:
         # NOTE: this body was previously (mis-)indented under the None guard,

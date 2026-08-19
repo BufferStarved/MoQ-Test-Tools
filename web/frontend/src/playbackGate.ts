@@ -24,6 +24,12 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
       if (protocol === "webrtc" && !browser) {
         return "live";
       }
+      // SRT/RTMP MPEG-TS can attach while Fast HLS is still wedged. The HLS
+      // player keeps its own manifest wait; blocking the gate on HLS health
+      // delayed a working HTTP-TS path by tens of seconds.
+      if (protocol === "srt" || protocol === "rtmp") {
+        return "live";
+      }
       return "waiting";
     }
     return "live";

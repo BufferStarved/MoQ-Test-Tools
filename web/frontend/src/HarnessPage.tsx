@@ -4,7 +4,12 @@ import { StreamPlayer } from "./StreamPlayer";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { playbackGateForJob } from "./playbackGate";
 import { ingestEndpointIdForPreset } from "./ingestEndpoints";
-import { moqDefaultsFromPublishUrl, proxiedMoqFingerprintUrl, relayWebTransportUrl } from "./playbackUrls";
+import {
+  defaultPlaybackModeForProtocol,
+  moqDefaultsFromPublishUrl,
+  proxiedMoqFingerprintUrl,
+  relayWebTransportUrl,
+} from "./playbackUrls";
 import type { PlaybackMode } from "./playbackTypes";
 import type { UploadJob, UploadSample } from "./types";
 
@@ -82,7 +87,8 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
     return <div className="player-surface">Harness: loading job…</div>;
   }
 
-  const requested = (playback || (job.protocol === "moq" ? "moq" : job.protocol === "webrtc" ? "whep" : "hls")) as PlaybackMode;
+  const requested = (playback ||
+    defaultPlaybackModeForProtocol(job.protocol, ingestEndpointId)) as PlaybackMode;
   const mode = modeOverride || requested;
 
   return (

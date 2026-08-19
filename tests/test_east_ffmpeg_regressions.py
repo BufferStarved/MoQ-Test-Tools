@@ -127,11 +127,18 @@ class FrontendRegressionSourceTests(unittest.TestCase):
     def test_harness_does_not_wait_for_moq_preview_ready(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "HarnessPage.tsx").read_text()
         self.assertNotIn("waiting for MoQ preview_ready", text)
+        self.assertIn("defaultPlaybackModeForProtocol", text)
+        self.assertNotIn('job.protocol === "webrtc" ? "whep" : "hls"', text)
 
     def test_stream_player_does_not_invent_benchmark_namespace(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "StreamPlayer.tsx").read_text()
         self.assertIn("const moqReadyNamespace = (moqNamespace || \"\").trim();", text)
         self.assertNotIn("target.moqNamespace || moqNamespace", text)
+
+    def test_srt_preview_opens_on_http_ts_not_hls(self) -> None:
+        text = (ROOT / "src" / "upload_service.py").read_text()
+        self.assertIn("HTTP-TS preview ready for job", text)
+        self.assertIn("skip HLS gate", text)
 
     def test_mpegts_enables_stash_for_wan(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "players" / "MpegTsPlayer.tsx").read_text()

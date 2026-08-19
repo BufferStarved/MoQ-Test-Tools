@@ -106,10 +106,10 @@ install_docker_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 REAL="\$(cd "\$(dirname "\$0")" && pwd)/openmoq-publisher.real"
-exec docker run --rm -i --network host \\
+exec docker run --rm -i --init --network host \\
   -v "\$REAL:/usr/local/bin/openmoq-publisher:ro" \\
   ${DOCKER_IMAGE} \\
-  /usr/local/bin/openmoq-publisher "\$@"
+  stdbuf -oL -eL /usr/local/bin/openmoq-publisher "\$@"
 EOF
   chmod 0755 "$wrapper"
 

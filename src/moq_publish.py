@@ -655,12 +655,44 @@ def should_pace_moq_publisher(media_path: str = "") -> bool:
 def publisher_webtransport_connected(log_text: str) -> bool:
     """True when openmoq-publisher logged a live WebTransport session.
 
-    ``connection_id=wt-…`` goes to stdout. Production used to discard stdout,
-    so a publisher that never CONNECTed still looked "healthy" while it
-    drained fMP4 into a session the relay never registered.
+    ``connection_id=wt-…`` goes to stdout (libc-block-buffered inside Docker,
+    so it may land in the drain file only after exit). ``live: sent track=``
+    on stderr is the same fact: objects already went out on that session.
+    bench-216482ff had both, and the waiter still called it "before CONNECT"
+    because it only looked for ``connection_id=`` in a prefix of stdout.
     """
     text = log_text or ""
-    return "connection_id=" in text
+    return "connection_id=" in text or "live: sent track=" in text
+
+
+def publisher_exit_error(backend: str, code: Optional[int], log_text: str) -> str:
+    """Human error for a publisher that died. Never lie about CONNECT.
+
+    Exit -9 is SIGKILL of our Docker wrapper (or the OOM killer). If the
+    log already shows a session, that is a teardown/OOM of a live publish,
+    not a failed WebTransport CONNECT.
+    """
+    detail = (log_text or "").strip() or "unknown error"
+    connected = publisher_webtransport_connected(detail)
+    if connected:
+        if code in (-9, 137):
+            return (
+                f"{backend} publisher was SIGKILL'd after WebTransport CONNECT "
+                f"(exit {code}; Docker-wrapper teardown or OOM — not a failed "
+                f"CONNECT). {detail}"
+            )
+        return (
+            f"{backend} publisher exited with code {code} after "
+            f"WebTransport CONNECT: {detail}"
+        )
+    if code not in (0, None):
+        return (
+            f"{backend} publisher exited with code {code} "
+            f"before WebTransport CONNECT: {detail}"
+        )
+    return (
+        f"{backend} publisher exited early before WebTransport CONNECT: {detail}"
+    )
 
 
 # Docker-wrapped openmoq-publisher pays container startup before CONNECT.
@@ -677,11 +709,11 @@ def wait_for_publisher_webtransport(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Block until stdout/stderr shows ``connection_id=``, or give up.
+    """Block until stdout/stderr shows a live session, or give up.
 
-    Returns False if the publisher dies, the timeout elapses, or the log
-    never contains a WebTransport session id. Callers must fail the job
-    instead of starting ffmpeg.
+    A live session is ``connection_id=`` or ``live: sent track=``. Returns
+    False if the publisher dies or the timeout elapses. Do not SIGKILL a
+    publisher that already printed either line — that is mid-publish.
     """
     deadline = clock() + max(0.0, timeout_sec)
     while clock() < deadline:
