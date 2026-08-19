@@ -214,7 +214,9 @@ class LocalPublisherApiGateTests(unittest.TestCase):
                         },
                     )
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("whip", resp.json()["detail"].lower())
+        detail = resp.json()["detail"].lower()
+        self.assertIn("cannot publish webrtc", detail)
+        self.assertIn("this laptop", detail)
 
     def test_features_exposes_local_publisher_whip(self) -> None:
         with patch.object(

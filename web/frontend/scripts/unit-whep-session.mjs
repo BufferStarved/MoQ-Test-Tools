@@ -18,10 +18,14 @@ assert.match(src, /waitForWhepIceTerminal/);
 assert.match(src, /"Content-Type": "application\/sdp"/);
 assert.doesNotMatch(src, /method: "POST",\s*const headers/);
 assert.match(src, /a=ice-options:trickle/);
-assert.match(src, /HTTP 404/);
+assert.match(src, /status === 404/);
+assert.match(src, /Reuse one gathered offer/);
 assert.match(src, /UDP 8189/);
 assert.match(src, /addTransceiver\("video"/);
 assert.match(src, /status === 406/);
 assert.match(src, /event\.streams\[0\]/);
+assert.match(src, /waitForWhepMedia/);
+assert.match(src, /videoWidth >= 16/);
+assert.doesNotMatch(src, /const fallback = new MediaStream\(\);\s*video\.srcObject = fallback;/);
 
 console.log("unit-whep-session: PASS");

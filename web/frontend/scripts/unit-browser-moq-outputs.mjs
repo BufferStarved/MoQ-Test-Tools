@@ -116,6 +116,22 @@ assert.deepEqual(
 const identity = [{ id: "1", protocol: "moq", ingestEndpointId: "gcp_moq_relay", playbackMode: "moq" }];
 assert.equal(collapseOutputsForBrowserMoq(identity), identity);
 
+const browser4 = collapseOutputsForBrowserMoq([
+  { id: "1", protocol: "moq", ingestEndpointId: "linode_moq_relay", playbackMode: "moq" },
+  { id: "2", protocol: "webrtc", ingestEndpointId: "linode_mediamtx", playbackMode: "whep" },
+  { id: "3", protocol: "moq", ingestEndpointId: "gcp_east_moq_relay", playbackMode: "moq" },
+  { id: "4", protocol: "webrtc", ingestEndpointId: "gcp_east_mediamtx", playbackMode: "whep" },
+]);
+assert.deepEqual(
+  browser4.map((item) => [item.protocol, item.ingestEndpointId, item.playbackMode]),
+  [
+    ["moq", "linode_moq_relay", "moq"],
+    ["webrtc", "linode_mediamtx", "whep"],
+    ["moq", "gcp_east_moq_relay", "moq"],
+    ["webrtc", "gcp_east_mediamtx", "whep"],
+  ],
+);
+
 const custom = collapseOutputsForBrowserMoq([
   { id: "1", protocol: "moq", ingestEndpointId: "custom", playbackMode: "moq" },
 ]);

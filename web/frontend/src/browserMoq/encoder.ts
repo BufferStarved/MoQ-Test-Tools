@@ -62,6 +62,11 @@ export function createBrowserVideoEncoder(
   let encoder: VideoEncoder | null = null;
   let processor: MediaStreamTrackProcessor<VideoFrame> | null = null;
   let reader: ReadableStreamDefaultReader<VideoFrame> | null = null;
+  // MediaStreamTrackProcessor takes exclusive access of the given track in
+  // Chrome. Cloning keeps the live camera on RTCPeerConnection / <video>
+  // preview (comparison CSV: WHIP bitrate collapsed from ~600 kbps to ~30
+  // kbps the moment WebCodecs started, with 23–70s encode lag).
+  let encodeTrack: MediaStreamTrack | null = null;
   let running = false;
   let startedAt = 0;
   let bytesWindow = 0;
@@ -183,7 +188,8 @@ export function createBrowserVideoEncoder(
         avc: { format: "avc" },
         hardwareAcceleration: acceleration,
       });
-      processor = new MediaStreamTrackProcessor({ track });
+      encodeTrack = typeof track.clone === "function" ? track.clone() : track;
+      processor = new MediaStreamTrackProcessor({ track: encodeTrack });
       reader = processor.readable.getReader();
       running = true;
       startedAt = performance.now();
@@ -219,6 +225,14 @@ export function createBrowserVideoEncoder(
       void reader?.cancel();
       reader = null;
       processor = null;
+      if (encodeTrack && encodeTrack !== track) {
+        try {
+          encodeTrack.stop();
+        } catch {
+          // already ended
+        }
+      }
+      encodeTrack = null;
       if (encoder && encoder.state !== "closed") {
         try {
           encoder.close();

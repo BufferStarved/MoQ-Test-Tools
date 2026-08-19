@@ -41,6 +41,9 @@ interface StreamPlayerProps {
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
   jobError?: string | null;
+  waitingForEncodeSlot?: boolean;
+  encodeQueueAhead?: number;
+  previewReady?: boolean;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
   targetLatencyMs?: number;
@@ -54,6 +57,8 @@ interface StreamPlayerProps {
   compactHeader?: boolean;
   /** False when the publish source is video-only (e.g. webcam without a mic). */
   sourceHasAudio?: boolean;
+  /** Injected LOC catalog codec; must match the in-page encoder. */
+  moqVideoCodec?: string;
   /** Capture->bridge-output lag (live webcam runs); 0 for VOD sources. */
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (from -progress samples). */
@@ -91,6 +96,9 @@ export function StreamPlayer({
   onPlaybackSample,
   jobStatus,
   jobError = null,
+  waitingForEncodeSlot = false,
+  encodeQueueAhead = 0,
+  previewReady,
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 800,
@@ -102,6 +110,7 @@ export function StreamPlayer({
   onWhepPlaybackUrlChange: _onWhepPlaybackUrlChange,
   compactHeader = false,
   sourceHasAudio = true,
+  moqVideoCodec,
   bridgeLagMs = 0,
   encoderLagMs = 0,
   netRttMs = 0,
@@ -190,6 +199,8 @@ export function StreamPlayer({
               deliveryMediaOriginSec={deliveryMediaOriginSec}
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
+              waitingForEncodeSlot={waitingForEncodeSlot}
+              encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}
               liveSyncDurationCount={hlsLiveSyncCount}
               liveSyncDurationSec={hlsLiveSyncDurationSec}
@@ -274,10 +285,14 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
               jobError={jobError}
+              waitingForEncodeSlot={waitingForEncodeSlot}
+              encodeQueueAhead={encodeQueueAhead}
+              previewReady={previewReady}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
               targetLatencyMs={targetLatencyMs}
               sourceHasAudio={sourceHasAudio}
+              sourceVideoCodec={moqVideoCodec}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               netRttMs={netRttMs}

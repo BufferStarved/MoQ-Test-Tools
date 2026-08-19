@@ -68,7 +68,8 @@ async function postWhepOffer(
 
 function attachRemoteStream(video: HTMLVideoElement, pc: RTCPeerConnection): void {
   const fallback = new MediaStream();
-  video.srcObject = fallback;
+  // Do not assign an empty MediaStream — Chrome will autoplay it with
+  // videoWidth=2 and a moving currentTime, which looks like playback.
   pc.ontrack = (event) => {
     if (event.streams[0]) {
       video.srcObject = event.streams[0];
@@ -84,10 +85,17 @@ function isRetryableWhepStatus(status: number): boolean {
   return status === 400 || status === 404 || status === 425 || status === 502 || status === 503;
 }
 
+function whepHttpError(status: number, body: string): Error {
+  const detail = unwrapFastApiDetail(body.trim().slice(0, 240));
+  const prefix = `WHEP HTTP ${status}`;
+  return new Error(detail ? `${prefix}: ${detail}` : `${prefix}. Is MediaMTX WHIP live on this path?`);
+}
+
 async function negotiate(
   video: HTMLVideoElement,
   signalingUrl: string,
   videoOnly: boolean,
+  signal?: AbortSignal,
 ): Promise<WhepSession> {
   const pc = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -106,29 +114,44 @@ async function negotiate(
     pc.close();
     throw new Error("WHEP offer has no SDP.");
   }
-  const posted = await postWhepOffer(signalingUrl, disableTrickleIce(localSdp));
-  if (posted.status === 406 && !videoOnly) {
-    pc.close();
-    return negotiate(video, signalingUrl, true);
-  }
-  if (!posted.status || posted.status >= 400) {
-    pc.close();
-    const detail = unwrapFastApiDetail(posted.body.trim().slice(0, 240));
-    const prefix = `WHEP HTTP ${posted.status}`;
-    throw new Error(detail ? `${prefix}: ${detail}` : `${prefix}. Is MediaMTX WHIP live on this path?`);
-  }
-  await pc.setRemoteDescription({ type: "answer", sdp: posted.body });
-  const sessionUrl = posted.location;
-  return {
-    pc,
-    stop() {
+  const offerSdp = disableTrickleIce(localSdp);
+  let lastError: Error = new Error("WHEP connect failed.");
+  // Reuse one gathered offer across 404s. Re-gathering ICE (~4s) on every
+  // retry burned the DURATION=18 window on Linode before WHIP was visible.
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    if (signal?.aborted) {
       pc.close();
-      const href = signalingHref(sessionUrl);
-      if (href) {
-        void fetch(href, { method: "DELETE" }).catch(() => undefined);
+      throw new DOMException("WHEP connect aborted.", "AbortError");
+    }
+    const posted = await postWhepOffer(signalingUrl, offerSdp);
+    if (posted.status === 406 && !videoOnly) {
+      pc.close();
+      return negotiate(video, signalingUrl, true, signal);
+    }
+    if (!posted.status || posted.status >= 400) {
+      lastError = whepHttpError(posted.status, posted.body);
+      if (!isRetryableWhepStatus(posted.status) || attempt === 12) {
+        pc.close();
+        throw lastError;
       }
-    },
-  };
+      await new Promise((resolve) => window.setTimeout(resolve, 400 * Math.min(attempt, 6)));
+      continue;
+    }
+    await pc.setRemoteDescription({ type: "answer", sdp: posted.body });
+    const sessionUrl = posted.location;
+    return {
+      pc,
+      stop() {
+        pc.close();
+        const href = signalingHref(sessionUrl);
+        if (href) {
+          void fetch(href, { method: "DELETE" }).catch(() => undefined);
+        }
+      },
+    };
+  }
+  pc.close();
+  throw lastError;
 }
 
 export async function startWhepSession(options: {
@@ -140,29 +163,13 @@ export async function startWhepSession(options: {
   if (!signalingUrl) {
     throw new Error("WHEP playback URL is empty.");
   }
-  let lastError: Error = new Error("WHEP connect failed.");
-  for (let attempt = 1; attempt <= 12; attempt += 1) {
-    if (options.signal?.aborted) {
-      throw new DOMException("WHEP connect aborted.", "AbortError");
-    }
-    try {
-      return await negotiate(options.video, signalingUrl, false);
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      const retryable =
-        isRetryableWhepStatus(Number(lastError.message.match(/HTTP (\d+)/)?.[1])) ||
-        /HTTP 404|HTTP 400|HTTP 425|no stream|not ready|not found/i.test(lastError.message);
-      if (!retryable || attempt === 12) {
-        throw lastError;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 500 * Math.min(attempt, 6)));
-    }
-  }
-  throw lastError;
+  return negotiate(options.video, signalingUrl, false, options.signal);
 }
 
 function whepHasFrame(video: HTMLVideoElement): boolean {
-  return video.videoWidth > 0 || video.currentTime > 0.05;
+  // Recvonly transceivers / empty MediaStreams report videoWidth=2 and can
+  // advance currentTime with zero decoded frames. Require a real raster.
+  return video.videoWidth >= 16;
 }
 
 export function waitForWhepMedia(

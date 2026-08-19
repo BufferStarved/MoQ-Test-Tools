@@ -32,7 +32,11 @@ from encode_profile import (
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
 from metrics import EncodeLagTracker, MetricsCollector
-from moq_preview import should_mark_moq_preview_ready
+from moq_preview import (
+    moq_job_should_fail_without_namespace,
+    moq_publish_missing_error,
+    should_mark_moq_preview_ready,
+)
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
@@ -1758,15 +1762,16 @@ class UploadService:
                         )
                         self._notify_preview_ready(job, True)
                         preview_ready = True
-                    elif job.publisher_host == "local" and manifest_url:
-                        # Last-mile jobs run off-VM — the MediaMTX metrics API stays
-                        # on loopback (127.0.0.1:9997/9998), so mtx_stats never
-                        # populates here. Fall back to a short, bounded probe of the
-                        # public HLS origin instead (same one the browser hits).
+                    elif manifest_url:
+                        # Local agents and cloud encodes whose MediaMTX admin
+                        # API is not reachable from this VM (loopback on the
+                        # MTX host) used to sit on preview_ready=false forever
+                        # while the tile said "Waiting for readable HLS
+                        # segments...". Probe the same origin the browser uses.
                         try:
                             if probe_hls_segment_ready(manifest_url, timeout=2.0).ok:
                                 logger.info(
-                                    "MediaMTX preview ready for job %s (public HLS probe)",
+                                    "MediaMTX preview ready for job %s (HLS probe)",
                                     job.job_id,
                                 )
                                 self._notify_preview_ready(job, True)
@@ -2397,6 +2402,31 @@ class UploadService:
             ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
             if ffmpeg_tail:
                 print(f"MoQ ffmpeg log tail ({ffmpeg_log_path}):\n{ffmpeg_tail}", flush=True)
+
+        publish_confirmed = (
+            moqx_poller.observing and moqx_poller.publish_namespace_success_delta() >= 1
+        )
+        if moq_job_should_fail_without_namespace(
+            publish_confirmed=publish_confirmed,
+            poller_observing=moqx_poller.observing,
+        ):
+            namespace = ""
+            if job.destination.moq_target is not None:
+                namespace = job.destination.moq_target.namespace or ""
+            finalized = self._finalize_result(
+                job,
+                collector,
+                server_metrics_enabled=ingest_poller.enabled,
+                moqx_metrics_enabled=moqx_poller.enabled,
+                quic_qlog_enabled=bool(qlog_tailer and qlog_tailer.enabled),
+                quic_qlog_dir=qlog_dir,
+            )
+            finalized.success = False
+            finalized.error = moq_publish_missing_error(
+                namespace=namespace,
+                observing=True,
+            )
+            return finalized
 
         return self._finalize_result(
             job,

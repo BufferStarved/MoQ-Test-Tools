@@ -1,4 +1,4 @@
-import { postEncodeSample, postPublisherReady, uploadVmafReference } from "../api";
+import { postEncodeSample, postPublisherError, postPublisherReady, uploadVmafReference } from "../api";
 import { detectBrowserMoqCapabilities } from "./capabilities";
 import { startBrowserCapture, type BrowserCapture } from "./capture";
 import {
@@ -23,6 +23,7 @@ export interface BrowserMoqLeg {
 
 export interface BrowserMoqRun {
   hasAudio: boolean;
+  videoCodec: string;
   previewStream: MediaStream;
   draftByJobId: Record<string, MoqtDraftVersion>;
   stop: () => void;
@@ -90,16 +91,22 @@ export async function startBrowserMoqPublish(options: {
       if (!leg.whipUrl) {
         throw new Error("WebRTC output is missing a WHIP publish URL.");
       }
-      whipSessions.push(
-        await startWhipPublish({
-          stream: capture.stream,
-          whipUrl: leg.whipUrl,
-          jobId: leg.jobId,
-        }),
-      );
     }
-
-    const moqResults = await Promise.allSettled(
+    const whipStart = Promise.allSettled(
+      whipLegs.map(async (leg) => {
+        const session = await startWhipPublish({
+          stream: capture.stream,
+          whipUrl: leg.whipUrl || "",
+          jobId: leg.jobId,
+          includeAudio,
+          onFatalError: (message) => {
+            void postPublisherError(leg.jobId, message);
+          },
+        });
+        return { leg, session };
+      }),
+    );
+    const moqStart = Promise.allSettled(
       moqLegs.map(async (leg) => {
         const session = await connectMoq5WasmPublisher({
           relayUrl: leg.relayUrl || "",
@@ -111,18 +118,46 @@ export async function startBrowserMoqPublish(options: {
           videoCodec,
           onVideoSubscribed: () => requestKeyframe(),
         });
-        await postPublisherReady(leg.jobId);
         return { leg, session };
       }),
     );
+    const [whipResults, moqResults] = await Promise.all([whipStart, moqStart]);
+    const whipErrors: string[] = [];
+    for (const result of whipResults) {
+      if (result.status === "fulfilled") {
+        whipSessions.push(result.value.session);
+      } else {
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        whipErrors.push(reason);
+      }
+    }
+    for (const [index, result] of whipResults.entries()) {
+      if (result.status === "rejected") {
+        const leg = whipLegs[index];
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        if (leg) {
+          void postPublisherError(leg.jobId, reason);
+        }
+      }
+    }
+    if (whipLegs.length > 0 && whipSessions.length === 0 && moqLegs.length === 0) {
+      throw new Error(whipErrors[0] || "Browser WebRTC publish failed on every MediaMTX.");
+    }
+
+    const liveMoqLegs: BrowserMoqLeg[] = [];
     const moqErrors: string[] = [];
-    for (const result of moqResults) {
+    for (const [index, result] of moqResults.entries()) {
       if (result.status === "fulfilled") {
         sessions.push(result.value.session);
         draftByJobId[result.value.leg.jobId] = result.value.session.draftVersion;
+        liveMoqLegs.push(result.value.leg);
       } else {
         const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
         moqErrors.push(reason);
+        const leg = moqLegs[index];
+        if (leg) {
+          void postPublisherError(leg.jobId, reason);
+        }
       }
     }
     if (moqLegs.length > 0 && sessions.length === 0) {
@@ -132,6 +167,11 @@ export async function startBrowserMoqPublish(options: {
       console.warn("Some MoQ relays did not accept this publish:", moqErrors.join(" | "));
     }
 
+    let firstIdrPosted = false;
+    let resolveFirstIdr: (() => void) | null = null;
+    const firstIdr = new Promise<void>((resolve) => {
+      resolveFirstIdr = resolve;
+    });
 
     if (moqLegs.length > 0) {
       const encoder = createBrowserVideoEncoder(
@@ -144,12 +184,16 @@ export async function startBrowserMoqPublish(options: {
           for (const session of sessions) {
             session.publishVideo(chunk);
           }
+          if (chunk.isKeyframe && !firstIdrPosted) {
+            firstIdrPosted = true;
+            resolveFirstIdr?.();
+          }
         },
         (sample) => {
           if (stopped) {
             return;
           }
-          for (const leg of moqLegs) {
+          for (const leg of liveMoqLegs) {
             void postEncodeSample(leg.jobId, {
               elapsed_sec: sample.elapsedSec,
               encoded_bitrate_kbps: sample.encodedBitrateKbps,
@@ -164,6 +208,13 @@ export async function startBrowserMoqPublish(options: {
       encoders.push(encoder);
       requestKeyframe = () => encoder.requestKeyframe();
       await encoder.start();
+      await Promise.race([
+        firstIdr,
+        new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
+      ]);
+      await Promise.all(
+        liveMoqLegs.map((leg) => postPublisherReady(leg.jobId).catch(() => undefined)),
+      );
     }
     if (annexB) {
       // One mid-run upload is enough for ingest VMAF to have a reference;
@@ -186,6 +237,7 @@ export async function startBrowserMoqPublish(options: {
 
   return {
     hasAudio: includeAudio,
+    videoCodec,
     previewStream: capture.stream,
     draftByJobId,
     stop() {

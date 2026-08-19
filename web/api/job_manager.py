@@ -27,6 +27,7 @@ from quality_metrics import patch_summary_quality_leg
 from publisher_protocol import sample_to_dict
 from cloud_encode_slots import (
     CloudEncodeSlotPool,
+    encode_slot_fields,
     job_needs_cloud_encode_slot,
 )
 from upload_service import UploadJob, UploadResult, UploadSample, UploadService
@@ -126,6 +127,7 @@ class UploadJobRecord:
     csv_path: Optional[str] = None
     summary_path: Optional[str] = None
     error: Optional[str] = None
+    browser_error: Optional[str] = None
     samples: List[dict] = field(default_factory=list)
     compute_vmaf_on_ingest: bool = False
     compute_vmaf_encoder: bool = False
@@ -746,6 +748,8 @@ class JobManager:
                 live_elapsed = live_sample.get("elapsed_sec")
                 if isinstance(live_elapsed, (int, float)) and live_elapsed <= elapsed_sec:
                     target = live_sample
+            if target is None and record.samples:
+                target = record.samples[-1]
             if target is not None:
                 for name in PLAYBACK_FIELD_NAMES:
                     target[name] = payload[name]
@@ -975,6 +979,22 @@ class JobManager:
         self._update(job_id, preview_ready=True)
         return True
 
+    def fail_browser_publisher(self, job_id: str, error: str) -> bool:
+        """Fail one in-page publish leg without stopping the rest of a comparison."""
+        message = (error or "").strip()[:500]
+        if not message:
+            return False
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if not record or record.publisher_host != "browser":
+                return False
+            if record.status not in {JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING}:
+                return False
+            record.browser_error = message
+            record.error = message
+            record.cancel_event.set()
+        return True
+
     def attach_browser_vmaf_reference(self, job_id: str, file_bytes: bytes, filename: str) -> Optional[str]:
         """Forward the in-tab encoder bitstream to the ingest worker as VMAF reference."""
         with self._lock:
@@ -1019,7 +1039,13 @@ class JobManager:
             live = self._jobs.get(job_id)
             if live:
                 samples = list(live.samples)
+                browser_error = (live.browser_error or "").strip()
+            else:
+                samples = []
+                browser_error = ""
         self._write_browser_metrics_csv(csv_path, job, samples)
+        if browser_error:
+            return UploadResult(success=False, error=browser_error, csv_path=csv_path)
         quality = {}
         if job.compute_vmaf_on_ingest:
             quality["ingest"] = {"status": "pending", "computed_on": "ingest_agent"}
@@ -1162,6 +1188,16 @@ class JobManager:
             summary_path,
             playback_samples,
             playback_engine=playback_engine,
+        )
+
+    def encode_slot_fields(self, job) -> dict:
+        """Live encode-slot queue fields for API/SSE (not stored on the record)."""
+        status = job.status.value if hasattr(job.status, "value") else str(job.status)
+        return encode_slot_fields(
+            self._encode_slots,
+            job_id=getattr(job, "id", "") or "",
+            publisher_host=getattr(job, "publisher_host", "cloud") or "cloud",
+            status=status,
         )
 
     def _update(self, job_id: str, **fields) -> None:

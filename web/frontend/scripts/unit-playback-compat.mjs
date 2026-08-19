@@ -22,7 +22,12 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   if (mode === "auto") return false;
   if (protocol === "moq") return mode === "moq";
   if (mode === "moq") return false;
-  if (protocol === "webrtc") return mode === "whep";
+  if (protocol === "webrtc") {
+    if (ingestEndpointId && isMediaMtxManaged(ingestEndpointId)) {
+      return mode === "whep" || mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "mpegts";
+    }
+    return mode === "whep";
+  }
   const mediamtx = isMediaMtxManaged(ingestEndpointId);
   const zixi = isZixiManagedIngest(ingestEndpointId);
   if (mediamtx) {
@@ -157,7 +162,9 @@ assert.equal(isPlaybackModeCompatible("moq", "moq", "gcp_moq_relay"), true);
 assert.equal(isPlaybackModeCompatible("auto", "moq", "gcp_moq_relay"), false);
 assert.equal(isPlaybackModeCompatible("hls", "moq", "gcp_moq_relay"), false);
 assert.equal(isPlaybackModeCompatible("whep", "webrtc", "gcp_mediamtx"), true);
-assert.equal(isPlaybackModeCompatible("ll-hls", "webrtc", "gcp_mediamtx"), false);
+assert.equal(isPlaybackModeCompatible("ll-hls", "webrtc", "gcp_mediamtx"), true);
+assert.equal(isPlaybackModeCompatible("hls", "webrtc", "gcp_mediamtx"), true);
+assert.equal(isPlaybackModeCompatible("ll-hls", "webrtc", "custom"), false);
 
 const INGEST_MATRIX = [
   ["srt", "gcp_zixi"],

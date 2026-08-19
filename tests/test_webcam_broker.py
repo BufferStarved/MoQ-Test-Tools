@@ -36,20 +36,19 @@ class LandscapeRetryTests(unittest.TestCase):
     comparison) when a camera/driver rejects the requested size.
     """
 
-    def _broker_with_fake_spawn(self, outcomes):
+    def _broker_with_fake_spawn(self, outcomes, fail_stderr=None):
         """outcomes: list of "ok" | "fail", one per expected _spawn_capture call."""
         broker = WebcamBroker()
         calls = []
+        default_fail = (
+            b"Selected framerate (30.000000) is not supported by the device. "
+            b"Supported modes: 1920x1080@[60.000000 60.000000]fps"
+        )
 
         def fake_spawn(media_path, ports, *, video_size, framerate="30"):
             calls.append((video_size, framerate))
             outcome = outcomes[len(calls) - 1]
-            stderr = (
-                b"Selected framerate (30.000000) is not supported by the device. "
-                b"Supported modes: 1920x1080@[60.000000 60.000000]fps"
-                if outcome == "fail"
-                else b""
-            )
+            stderr = b"" if outcome == "ok" else (fail_stderr if fail_stderr is not None else default_fail)
             proc = MakeFakeProcess(alive=(outcome == "ok"), stderr=stderr)
             return proc
 
@@ -80,6 +79,19 @@ class LandscapeRetryTests(unittest.TestCase):
             broker.acquire("device:webcam", duration_sec=10)
         self.assertGreaterEqual(len(calls), 2)
         self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
+
+    def test_negotiate_then_1080p60_when_device_lists_no_modes(self) -> None:
+        broker, calls = self._broker_with_fake_spawn(
+            ["fail", "fail", "ok"],
+            fail_stderr=b"Error opening input: Input/output error",
+        )
+        url, session = broker.acquire("device:webcam", duration_sec=10)
+        self.assertEqual(calls[0], (PREFERRED_LANDSCAPE_VIDEO_SIZE, "30"))
+        self.assertEqual(calls[1], (None, None))
+        self.assertEqual(calls[2], ("1920x1080", "60"))
+        self.assertIsNone(session.error)
+        self.assertTrue(url.startswith("udp://127.0.0.1:"))
+        broker.release(session)
 
 
 class MakeFakeProcess:

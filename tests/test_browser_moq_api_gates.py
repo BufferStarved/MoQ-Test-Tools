@@ -298,6 +298,55 @@ class BrowserMoqApiGateTests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 200, accepted.text)
         self.assertTrue(accepted.json()["ok"])
 
+    def test_publisher_error_gated_to_browser_jobs(self) -> None:
+        cloud = MagicMock()
+        cloud.status = api_main.JobStatus.RUNNING
+        cloud.publisher_host = "local"
+        with patch.object(api_main.job_manager, "get_job", return_value=cloud):
+            rejected = self.client.post(
+                "/api/uploads/local-job/publisher-error",
+                json={"error": "WHIP ICE failed"},
+            )
+        self.assertEqual(rejected.status_code, 400)
+
+        browser = MagicMock()
+        browser.status = api_main.JobStatus.RUNNING
+        browser.publisher_host = "browser"
+        with patch.object(api_main.job_manager, "get_job", return_value=browser):
+            with patch.object(
+                api_main.job_manager,
+                "fail_browser_publisher",
+                return_value=True,
+            ) as fail:
+                accepted = self.client.post(
+                    "/api/uploads/browser-job/publisher-error",
+                    json={"error": "WHIP ICE failed. MediaMTX dropped the publish connection."},
+                )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        fail.assert_called_once()
+        self.assertIn("WHIP ICE failed", fail.call_args.args[1])
+
+    def test_fail_browser_publisher_sets_error_and_cancels(self) -> None:
+        from job_manager import JobManager, JobStatus, UploadJobRecord
+
+        manager = JobManager()
+        record = UploadJobRecord(
+            id="whip-job",
+            status=JobStatus.RUNNING,
+            protocol="webrtc",
+            endpoint_url="http://example/whip",
+            media_path="device:browser",
+            duration_sec=30,
+            publisher_host="browser",
+        )
+        manager._jobs[record.id] = record
+        self.assertTrue(manager.fail_browser_publisher(record.id, "WHIP ICE failed"))
+        self.assertEqual(record.error, "WHIP ICE failed")
+        self.assertEqual(record.browser_error, "WHIP ICE failed")
+        self.assertTrue(record.cancel_event.is_set())
+        snapshot = manager.get_job(record.id)
+        self.assertEqual(snapshot.error, "WHIP ICE failed")
+
 
 class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
     def test_stamps_media_zero_and_writes_rtt(self) -> None:

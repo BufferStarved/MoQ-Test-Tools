@@ -211,6 +211,7 @@ async function bindPublisherSession(args: {
           });
         } catch (err) {
           console.warn("browser MoQ open video subgroup", err);
+          options.onVideoSubscribed?.();
           continue;
         }
       }

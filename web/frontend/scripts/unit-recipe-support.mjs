@@ -72,7 +72,12 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
   if (mode === "auto") return false;
   if (protocol === "moq") return mode === "moq";
   if (mode === "moq") return false;
-  if (protocol === "webrtc") return mode === "whep";
+  if (protocol === "webrtc") {
+    if (ingestEndpointId && ingestRole(ingestEndpointId) === "mediamtx") {
+      return mode === "whep" || mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "mpegts";
+    }
+    return mode === "whep";
+  }
   const mediamtx = ingestRole(ingestEndpointId) === "mediamtx";
   const zixi = ingestRole(ingestEndpointId) === "zixi";
   if (mediamtx) {
@@ -101,7 +106,8 @@ function playerAllowed(mode, caps) {
 }
 
 function ingestHidden(id) {
-  return id === "gcp_zixi" || id === "aws_zixi";
+  // Product RECIPE_HIDDEN_INGEST_IDS is empty; only the AWS stub is unconfigured.
+  return id === "aws_zixi";
 }
 
 function ingestMatchesProtocol(protocol, ingest) {
@@ -154,11 +160,15 @@ assert.ok(chromeIllegal.length > chromeLegal.length, "most combos must be illega
 for (const row of [
   ["dummy", "srt", "gcp_mediamtx", "ll-hls"],
   ["dummy", "srt", "gcp_mediamtx", "mpegts"],
+  ["dummy", "srt", "gcp_zixi", "mpegts"],
+  ["dummy", "srt", "gcp_zixi", "hls"],
   ["dummy", "srt", "gcp_east_zixi", "mpegts"],
   ["dummy", "srt", "gcp_east_zixi", "hls"],
   ["dummy", "rtmp", "linode_zixi", "hls"],
   ["dummy", "rtmp", "gcp_mediamtx", "whep"],
   ["dummy", "webrtc", "gcp_east_mediamtx", "whep"],
+  ["dummy", "webrtc", "gcp_mediamtx", "ll-hls"],
+  ["dummy", "webrtc", "gcp_mediamtx", "hls"],
   ["dummy", "moq", "linode_moq_relay", "moq"],
   ["dummy", "srt", "custom", "hls"],
   ["webcam", "rtmp", "gcp_east_zixi", "mpegts"],
@@ -170,7 +180,6 @@ for (const row of [
 
 // Known-illegal
 for (const row of [
-  ["dummy", "srt", "gcp_zixi", "mpegts"],
   ["dummy", "srt", "gcp_moq_relay", "moq"],
   ["dummy", "webrtc", "gcp_east_zixi", "whep"],
   ["dummy", "moq", "gcp_mediamtx", "moq"],
@@ -178,7 +187,6 @@ for (const row of [
   ["dummy", "dash", "custom", "hls"],
   ["dummy", "srt", "aws_zixi", "mpegts"],
   ["dummy", "srt", "gcp_mediamtx", "dash"],
-  ["dummy", "webrtc", "gcp_mediamtx", "ll-hls"],
   ["browser_moq", "srt", "gcp_mediamtx", "ll-hls"],
   ["browser_moq", "moq", "custom", "moq"],
   ["browser_moq", "rtmp", "gcp_east_zixi", "hls"],

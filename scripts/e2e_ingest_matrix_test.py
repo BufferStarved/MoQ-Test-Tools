@@ -31,10 +31,12 @@ BASE_URL = os.environ.get("BASE_URL", "https://moq.sean-mccarthy.net").rstrip("/
 DURATION = int(os.environ.get("DURATION", "22"))
 MEDIA = Path(os.environ.get("MEDIA", str(ROOT / "dummy.mp4")))
 SKIP_CHROME = os.environ.get("SKIP_CHROME", "").strip().lower() in {"1", "true", "yes"}
+HEADED = os.environ.get("HEADED", "").strip().lower() in {"1", "true", "yes"}
 CHROME_BIN = os.environ.get(
     "CHROME_BIN",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 )
+MOQ_RECORDER = ROOT / "tools" / "openmoq-recorder" / "bin" / "openmoq-fmp4-record"
 
 # Live matrix rows: preset → expected playback engine + URL builder inputs.
 CASES = [
@@ -85,11 +87,7 @@ CASES = [
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "skip": True,
-        "skip_reason": (
-            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
-            "Recipe is hidden from the UI and fail-closed at the API — do not start."
-        ),
+        "assert_api_reject": True,
         "known_gap": "zixi_http_ts_push_retired",
     },
     {
@@ -99,11 +97,7 @@ CASES = [
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "skip": True,
-        "skip_reason": (
-            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
-            "DASH PUT recipe is retired/hidden — same fail-closed gate as HLS PUT."
-        ),
+        "assert_api_reject": True,
         "known_gap": "zixi_http_ts_push_retired",
     },
     {
@@ -246,11 +240,7 @@ LINODE_CASES = [
         "url": "",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps",),
-        "skip": True,
-        "skip_reason": (
-            "Zixi HTTP-TS PUT stops draining after ~2s (Broadcaster limitation). "
-            "Recipe is hidden from the UI and fail-closed at the API — do not start."
-        ),
+        "assert_api_reject": True,
         "known_gap": "zixi_http_ts_push_retired",
     },
     {
@@ -598,7 +588,61 @@ def _job_has_real_playback(job_id: str) -> tuple[int, float, float]:
     return frames, e2e, video_time
 
 
-def run_site_player(job_id: str, mode: str, seconds: float = 14.0) -> tuple[bool, str]:
+def run_put_gate_case(case: dict, media_path: str) -> CaseResult:
+    """Retired HTTP-TS PUT recipes must be hidden and fail-closed at Start."""
+    result = CaseResult(case_id=case["id"], ok=False)
+    preset_id = str(case["preset_id"])
+    try:
+        presets = api("GET", "/api/presets")
+        listed = {item.get("id") for item in (presets.get("presets") or [])}
+        if preset_id in listed:
+            result.errors.append("put_preset_still_listed")
+        protocols = api("GET", "/api/protocols")
+        proto_ids = {item.get("id") for item in (protocols.get("protocols") or [])}
+        if "hls" in proto_ids or "dash" in proto_ids:
+            result.errors.append("hls_dash_still_offered")
+        try:
+            api(
+                "POST",
+                "/api/uploads",
+                data={
+                    "media_path": media_path,
+                    "preset_id": preset_id,
+                    "duration_sec": min(DURATION, 8),
+                    "compute_vmaf_on_ingest": False,
+                    "compute_vmaf_encoder": False,
+                },
+            )
+            result.errors.append("put_start_not_rejected")
+            result.ingest = "FAIL start_accepted"
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "-> 400" in msg and ("PUT" in msg or "retired" in msg.lower()):
+                result.ingest = "OK api_reject_400"
+            else:
+                result.errors.append(f"unexpected_reject:{msg[:220]}")
+                result.ingest = f"FAIL {msg[:120]}"
+    except Exception as exc:
+        result.errors.append(f"gate:{exc}")
+        result.ingest = f"FAIL {exc}"
+    result.metrics = "product_gated"
+    result.chrome = "n/a_product_gated"
+    result.ok = not result.errors
+    result.detail = {
+        "known_gap": case.get("known_gap"),
+        "assert_api_reject": True,
+        "preset_id": preset_id,
+    }
+    return result
+
+
+def run_site_player(
+    job_id: str,
+    mode: str,
+    seconds: float = 14.0,
+    *,
+    headed: bool = False,
+) -> tuple[bool, str]:
     """Drive the real site StreamPlayer so playback_* / e2e are posted by the reporter."""
     if SKIP_CHROME or mode in {"skip", "none", ""}:
         return True, "skipped"
@@ -610,34 +654,68 @@ def run_site_player(job_id: str, mode: str, seconds: float = 14.0) -> tuple[bool
         f"&playback={urllib.parse.quote(mode)}"
     )
     cache = ensure_playwright()
-    runner = cache / "run_site_player.mjs"
+    runner = cache / ("run_site_player_headed.mjs" if headed else "run_site_player.mjs")
     runner.write_text(
         f"""
 import {{ chromium }} from 'playwright';
 const chrome = {json.dumps(CHROME_BIN)};
 const pageUrl = {json.dumps(page_url)};
 const waitMs = {int(seconds * 1000)};
+const logs = [];
 const browser = await chromium.launch({{
   executablePath: chrome,
-  headless: true,
-  args: ['--autoplay-policy=no-user-gesture-required', '--ignore-certificate-errors', '--disable-dev-shm-usage'],
+  headless: {json.dumps(not headed)},
+  args: [
+    '--autoplay-policy=no-user-gesture-required',
+    '--mute-audio',
+    '--ignore-certificate-errors',
+    '--disable-dev-shm-usage',
+  ],
 }});
 const context = await browser.newContext();
 const page = await context.newPage();
+page.on('console', (msg) => {{
+  if (logs.length < 20) logs.push(String(msg.type()) + ':' + String(msg.text()).slice(0, 160));
+}});
+page.on('pageerror', (err) => {{
+  if (logs.length < 20) logs.push('pageerror:' + String(err).slice(0, 160));
+}});
 await page.goto(pageUrl, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
-await page.waitForTimeout(waitMs);
+const started = Date.now();
+let state = {{}};
+while (Date.now() - started < waitMs) {{
+  state = await page.evaluate(() => {{
+    const v = document.querySelector('video');
+    const hint = document.querySelector('.player-meta .hint, .player-error');
+    return {{
+      currentTime: v ? v.currentTime || 0 : 0,
+      videoWidth: v ? v.videoWidth || 0 : 0,
+      paused: v ? v.paused : true,
+      readyState: v ? v.readyState : 0,
+      hint: hint ? String(hint.textContent || '').slice(0, 120) : '',
+    }};
+  }});
+  if (state.videoWidth >= 16 && state.readyState >= 2) {{
+    await page.waitForTimeout(2500);
+    break;
+  }}
+  await page.waitForTimeout(400);
+}}
 await browser.close();
-console.log(JSON.stringify({{ ok: true }}));
+console.log(JSON.stringify({{ state, logs }}));
 """,
         encoding="utf-8",
     )
+    chrome_note = ""
     try:
-        subprocess.check_output(
+        raw = subprocess.check_output(
             ["node", str(runner)],
             cwd=str(cache),
             text=True,
             timeout=int(seconds + 45),
         )
+        lines = [line for line in raw.splitlines() if line.strip()]
+        chrome_note = (lines[-1] if lines else "")[:240]
     except subprocess.CalledProcessError as exc:
         return False, f"chrome_failed:{exc.output or exc}"
     except subprocess.TimeoutExpired:
@@ -646,7 +724,8 @@ console.log(JSON.stringify({{ ok: true }}));
     frames, e2e, video_time = _job_has_real_playback(job_id)
     if frames > 0 or video_time > 0.2:
         return True, f"playing site_player frames={frames} video_s={video_time:.2f} e2e={e2e:.0f}"
-    return False, "site_player_no_playback_samples"
+    suffix = f" {chrome_note}" if chrome_note else ""
+    return False, f"site_player_no_playback_samples{suffix}"
 
 
 def chrome_modes_for_case(case: dict) -> List[str]:
@@ -675,13 +754,115 @@ def skipped_case_result(case: dict) -> CaseResult:
     )
 
 
-def probe_site_player(job_id: str, modes: List[str], seconds: float) -> tuple[bool, str]:
+def moq_admin_from_relay_url(url: str) -> str:
+    """Map a WebTransport relay URL to the moqx Prometheus admin base."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    if host.endswith(".sslip.io"):
+        dashed = host.split(".")[0]
+        parts = dashed.split("-")
+        if len(parts) == 4 and all(part.isdigit() for part in parts):
+            host = ".".join(parts)
+    return f"http://{host}:{os.environ.get('MOQX_ADMIN_PORT', '8000')}"
+
+
+def probe_moq_relay(relay_url: str) -> tuple[bool, str]:
+    """Non-WebTransport product signal: relay /metrics via the site probe."""
+    admin = moq_admin_from_relay_url(relay_url)
+    query = urllib.parse.urlencode({"relay_admin": admin})
+    try:
+        data = api("GET", f"/api/moq/probe?{query}")
+    except Exception as exc:
+        return False, f"probe_error:{exc}"
+    checks = [str(item) for item in (data.get("checks") or [])]
+    reachable = bool(data.get("reachable"))
+    received = int(data.get("publish_received") or 0)
+    namespace_ok = int(data.get("publish_namespace_success") or 0)
+    detail = (
+        f"reachable={int(reachable)} recv={received} ns={namespace_ok} "
+        f"checks={','.join(checks[:6])}"
+    )
+    if not reachable:
+        return False, f"metrics_unreachable {detail}"
+    if "relay_playback_broken" in checks:
+        return False, f"relay_playback_broken {detail}"
+    healthy = "relay_metrics_look_healthy" in checks or received > 0 or namespace_ok > 0
+    return healthy, detail
+
+
+def run_moq_recorder(relay_url: str, namespace: str, seconds: float = 10.0) -> tuple[bool, str]:
+    """Subscribe with the Node/quiche recorder — real WT, not Chrome."""
+    if not namespace:
+        return False, "recorder_no_namespace"
+    out = Path(tempfile.mkdtemp(prefix="moq-rec-")) / "probe.mp4"
+    record_js = ROOT / "tools" / "openmoq-recorder" / "record.mjs"
+    node_modules = ROOT / "tools" / "openmoq-recorder" / "node_modules"
+    if shutil.which("docker") and MOQ_RECORDER.is_file():
+        cmd = [
+            str(MOQ_RECORDER),
+            relay_url,
+            namespace,
+            str(out),
+            "--insecure-skip-verify",
+            "--duration",
+            str(max(4, int(seconds))),
+            "--track",
+            "vide_1",
+            "--track",
+            "video",
+        ]
+    elif record_js.is_file() and node_modules.is_dir() and shutil.which("node"):
+        cmd = [
+            "node",
+            str(record_js),
+            relay_url,
+            namespace,
+            str(out),
+            "--insecure-skip-verify",
+            "--duration",
+            str(max(4, int(seconds))),
+            "--track",
+            "vide_1",
+            "--track",
+            "video",
+        ]
+    else:
+        return False, "recorder_unavailable"
+    try:
+        raw = subprocess.check_output(
+            cmd,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=int(seconds + 40),
+            cwd=str(record_js.parent),
+        )
+        size = out.stat().st_size if out.is_file() else 0
+        note = (raw.strip().splitlines()[-1] if raw.strip() else "")[:160]
+        return size > 512, f"recorder_bytes={size} {note}"
+    except subprocess.CalledProcessError as exc:
+        return False, f"recorder_failed:{(exc.output or str(exc))[-200:]}"
+    except subprocess.TimeoutExpired:
+        size = out.stat().st_size if out.is_file() else 0
+        if size > 512:
+            return True, f"recorder_bytes={size} timeout_but_media"
+        return False, "recorder_timeout"
+    except FileNotFoundError:
+        return False, "recorder_missing"
+
+
+def probe_site_player(
+    job_id: str,
+    modes: List[str],
+    seconds: float,
+    *,
+    headed: bool = False,
+) -> tuple[bool, str]:
     messages: List[str] = []
     for mode in modes:
         if mode in {"skip", "none", ""}:
             return True, "skipped"
-        ok, msg = run_site_player(job_id, mode, seconds=seconds)
-        messages.append(f"{mode}:{msg}")
+        ok, msg = run_site_player(job_id, mode, seconds=seconds, headed=headed)
+        prefix = "headed" if headed else "headless"
+        messages.append(f"{prefix}/{mode}:{msg}")
         if ok:
             return True, " ".join(messages)
     return False, " ".join(messages) if messages else "chrome_no_modes"
@@ -690,6 +871,8 @@ def probe_site_player(job_id: str, modes: List[str], seconds: float) -> tuple[bo
 def run_case(case: dict, media_path: str) -> CaseResult:
     if case.get("skip"):
         return skipped_case_result(case)
+    if case.get("assert_api_reject"):
+        return run_put_gate_case(case, media_path)
 
     result = CaseResult(case_id=case["id"], ok=False)
     try:
@@ -709,8 +892,9 @@ def run_case(case: dict, media_path: str) -> CaseResult:
             result.errors.append(f"forbidden_error:{needle}")
         return result
 
-    # Let encode produce samples, then Chrome while still running.
-    time.sleep(6)
+    # Let encode produce the first samples, then Chrome while still running.
+    # Keep this short: DURATION=18 otherwise ends before the site player posts.
+    time.sleep(2)
     job = get_job(job_id)
     samples = job.get("samples") or []
     # Wait for preview if needed
@@ -742,26 +926,68 @@ def run_case(case: dict, media_path: str) -> CaseResult:
 
     # Drive the real site player (same StreamPlayer reporter) while ingest is live.
     chrome_modes = chrome_modes_for_case(case)
+    moq_probe_ok = False
+    moq_probe_msg = ""
+    recorder_ok = False
+    recorder_msg = ""
+    if case.get("requires_webtransport") or case.get("playback") == "moq":
+        moq_probe_ok, moq_probe_msg = probe_moq_relay(str(case.get("url") or ""))
+        result.detail["moq_probe"] = moq_probe_msg
+        ns = str(job_now.get("moq_namespace") or "")
+        if ns and job_now.get("status") == "running":
+            recorder_ok, recorder_msg = run_moq_recorder(
+                str(case.get("url") or ""),
+                ns,
+                seconds=min(12.0, float(os.environ.get("SITE_PLAYER_SEC", "16"))),
+            )
+            result.detail["moq_recorder"] = recorder_msg
     if job_now.get("status") == "running":
+        headed = HEADED
         chrome_ok, chrome_msg = probe_site_player(
             job_id,
             chrome_modes,
             seconds=float(os.environ.get("SITE_PLAYER_SEC", "16")),
+            headed=headed,
         )
         if not chrome_ok and get_job(job_id).get("status") == "running":
             time.sleep(3)
-            retry_ok, retry_msg = probe_site_player(job_id, chrome_modes, seconds=12)
+            retry_ok, retry_msg = probe_site_player(job_id, chrome_modes, seconds=12, headed=headed)
             chrome_ok = retry_ok
             chrome_msg = f"{chrome_msg} retry:{retry_msg}"
-        result.chrome = chrome_msg
+        # Headless Chrome has no WebTransport. After a failed headless pass,
+        # try headed system Chrome once — still do not fake a pass.
+        if (
+            not chrome_ok
+            and not headed
+            and case.get("requires_webtransport")
+            and get_job(job_id).get("status") == "running"
+        ):
+            headed_ok, headed_msg = probe_site_player(job_id, chrome_modes, seconds=12, headed=True)
+            chrome_msg = f"{chrome_msg} headed:{headed_msg}"
+            chrome_ok = headed_ok
+        bits = [chrome_msg]
+        if moq_probe_msg:
+            bits.append(f"relay:{moq_probe_msg}")
+        if recorder_msg:
+            bits.append(recorder_msg)
+        result.chrome = " ".join(bits)
+        if recorder_ok:
+            result.chrome = f"playing recorder {result.chrome}"
+            chrome_ok = True
         if not chrome_ok:
             if case.get("requires_webtransport"):
+                # Encode/preview + relay metrics are the runnable half. Glass
+                # paint still needs a real Chrome tab (not headless Playwright).
                 result.gated = True
                 result.gate_reason = (
-                    "requires_webtransport: headless Playwright cannot verify MoQ/WebTransport; "
-                    "encode/preview remain the product signal"
+                    "requires_webtransport: headless Playwright cannot complete "
+                    "WebTransport; encode/preview"
+                    + (" + relay probe" if moq_probe_ok else "")
+                    + " remain the product signal. Confirm paint in real Chrome."
                 )
-                result.chrome = f"gated_requires_webtransport:{chrome_msg}"
+                result.chrome = f"gated_requires_webtransport:{result.chrome}"
+                if not moq_probe_ok and "metrics_unreachable" not in moq_probe_msg:
+                    result.errors.append(f"moq_probe:{moq_probe_msg}")
             else:
                 result.errors.append(f"chrome:{chrome_msg}")
     else:
@@ -775,11 +1001,13 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     while time.time() < deadline and final.get("status") in {"pending", "queued", "running"}:
         time.sleep(2)
         final = get_job(job_id)
+    prior_detail = dict(result.detail)
     result.detail = {
         "final_status": final.get("status"),
         "error": final.get("error"),
         "sample_count": len(final.get("samples") or []),
         "preview_ready": final.get("preview_ready"),
+        **{key: prior_detail[key] for key in ("moq_probe", "moq_recorder") if key in prior_detail},
     }
     if final.get("status") == "failed":
         result.errors.append(final.get("error") or "job_failed")
@@ -797,7 +1025,7 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     if final.get("preview_ready") and "preview_not_ready" in result.errors:
         result.errors = [e for e in result.errors if e != "preview_not_ready"]
     # WHIP muxer often omits ffmpeg -progress bitrate; Chrome + preview is the signal.
-    chrome_ok = "playing site_player" in result.chrome
+    chrome_ok = "playing site_player" in result.chrome or result.chrome.startswith("playing recorder")
     result.detail["metric_completeness"] = metric_completeness(final.get("samples") or samples)
     if (
         (
@@ -854,7 +1082,10 @@ def main() -> int:
             print(f" reason {case.get('skip_reason') or 'skipped'}")
             results.append(skipped_case_result(case))
             continue
-        print(f"\n== {case['id']} preset={case['preset_id']} playback={case['playback']} ==")
+        if case.get("assert_api_reject"):
+            print(f"\n== {case['id']} PUT_GATE preset={case['preset_id']} ==")
+        else:
+            print(f"\n== {case['id']} preset={case['preset_id']} playback={case['playback']} ==")
         res = run_case(case, media_path)
         results.append(res)
         print(" job", res.job_id)

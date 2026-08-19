@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { WebCodecsVideoDecoder } from "@moqt/browser";
 import { Player } from "@playa/player";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "../api";
-import type { PlaybackGate } from "../playbackGate";
+import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
 import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
@@ -17,6 +17,7 @@ import {
   noMediaFailMessage,
   noMediaTimeoutMs,
   playerErrorForFailedJob,
+  shouldFailNoMediaWatchdog,
   shouldKeepSessionOnSubscribeError,
 } from "../moqCmafPlayback";
 import {
@@ -54,6 +55,9 @@ interface MoqPlayerProps {
   jobStatus?: string;
   /** Encode/publish error from the job record — prefer this over a catalog miss. */
   jobError?: string | null;
+  waitingForEncodeSlot?: boolean;
+  encodeQueueAhead?: number;
+  previewReady?: boolean;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
   /** Glass-to-glass budget from upload config (ms). */
@@ -66,6 +70,8 @@ interface MoqPlayerProps {
    * video subscription with it (reproduced via QA harness, 2026-07-20).
    */
   sourceHasAudio?: boolean;
+  /** Injected LOC catalog codec — must match the in-page WebCodecs encoder. */
+  sourceVideoCodec?: string;
   /** Capture->bridge-output lag (ms) for live webcam runs; 0 for VOD. */
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (ms). */
@@ -135,10 +141,14 @@ export default function MoqPlayer({
   onPlaybackSample,
   jobStatus,
   jobError = null,
+  waitingForEncodeSlot = false,
+  encodeQueueAhead = 0,
+  previewReady,
   benchmarkLoading = false,
   encodeDurationSec = 30,
   targetLatencyMs = 400,
   sourceHasAudio = true,
+  sourceVideoCodec,
   bridgeLagMs = 0,
   encoderLagMs = 0,
   netRttMs = 0,
@@ -190,6 +200,8 @@ export default function MoqPlayer({
   };
   const jobStatusRef = useRef(jobStatus);
   jobStatusRef.current = jobStatus;
+  const previewReadyRef = useRef(previewReady);
+  previewReadyRef.current = previewReady;
   const jobErrorRef = useRef(jobError);
   jobErrorRef.current = jobError;
   useEffect(() => {
@@ -382,7 +394,14 @@ export default function MoqPlayer({
         }
       } else {
         setStatus(
-          playbackGate === "waiting" ? "Waiting for MoQ publish..." : "Waiting for encode...",
+          playbackGate === "waiting"
+            ? waitingPlayerStatus({
+                engine: "moq",
+                jobStatus,
+                waitingForEncodeSlot,
+                encodeQueueAhead,
+              })
+            : "Waiting for encode...",
         );
       }
       setIsReady(false);
@@ -725,7 +744,10 @@ export default function MoqPlayer({
             }),
             ...(mediaPackaging === "loc"
               ? {
-                  catalog: browserLocCatalogTracks({ includeAudio: sourceHasAudio }),
+                  catalog: browserLocCatalogTracks({
+                    includeAudio: sourceHasAudio,
+                    videoCodec: sourceVideoCodec,
+                  }),
                   // Hardware VideoDecoder can fail silently mid-stream (~9s on
                   // both relays, recv still ~2.3 Mbps). Software is slower but
                   // keeps the canvas painting for a 300s webcam run.
@@ -1146,11 +1168,14 @@ export default function MoqPlayer({
             return;
           }
           if (!sessionRef.current.firstFrame) {
-            const encodeOver =
-              jobStatusRef.current === "completed" || jobStatusRef.current === "failed";
             if (
               !lastErrorRef.current &&
-              (encodeOver || Date.now() - liveStartedAtMs >= mediaDeadlineMs)
+              shouldFailNoMediaWatchdog({
+                jobStatus: jobStatusRef.current,
+                previewReady: previewReadyRef.current,
+                liveMs: Date.now() - liveStartedAtMs,
+                deadlineMs: mediaDeadlineMs,
+              })
             ) {
               fail(
                 noMediaFailMessage({
@@ -1372,7 +1397,7 @@ export default function MoqPlayer({
     };
     // encodeDurationSec is read once at start for catalog timeout — keep it out of
     // deps so a late duration update does not tear down a healthy Player/MediaSource.
-  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs, sourceHasAudio, draftVersion, mediaPackaging]);
+  }, [relayUrl, namespace, fingerprintUrl, playbackGate, pinTlsCert, jobId, targetLatencyMs, sourceHasAudio, sourceVideoCodec, draftVersion, mediaPackaging]);
 
   async function togglePlayPause() {
     const player = playerRef.current;

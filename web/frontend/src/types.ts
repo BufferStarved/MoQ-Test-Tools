@@ -122,6 +122,11 @@ export interface UploadJob {
   zixi_playback_stream_id?: string | null;
   /** False for SRT until Zixi HLS serves a readable MPEG-TS segment. */
   preview_ready?: boolean;
+  /** True while this cloud encode is blocked on MAX_CONCURRENT_CLOUD_ENCODES. */
+  waiting_for_encode_slot?: boolean;
+  /** Jobs already holding a slot or waiting in front of this one. */
+  encode_queue_ahead?: number;
+  encode_slot_limit?: number;
   created_at: string;
   started_at_epoch?: number | null;
   /** Wall-clock time of the first sample with real encode data (bitrate/fps

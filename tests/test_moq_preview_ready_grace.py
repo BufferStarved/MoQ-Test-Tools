@@ -20,6 +20,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from moq_preview import (  # noqa: E402
+    moq_job_should_fail_without_namespace,
+    moq_publish_missing_error,
+)
 from upload_service import moq_preview_ready_grace_sec  # noqa: E402
 
 
@@ -46,6 +50,37 @@ class MoqPreviewReadyGraceTests(unittest.TestCase):
 
     def test_live_source_grace_capped_even_for_very_long_jobs(self):
         self.assertEqual(moq_preview_ready_grace_sec("device:webcam", 3600), 30.0)
+
+
+class MoqNamespacePublishFailureTests(unittest.TestCase):
+    def test_observing_poller_fails_encode_only_success(self):
+        # bench-733f1d7c: 240 CMAF fragments, moqx_ns=0, job completed.
+        self.assertTrue(
+            moq_job_should_fail_without_namespace(
+                publish_confirmed=False,
+                poller_observing=True,
+            )
+        )
+        error = moq_publish_missing_error(namespace="bench-733f1d7c", observing=True)
+        self.assertIn("bench-733f1d7c", error)
+        self.assertIn("not a player", error.lower())
+        self.assertNotIn("0x10 subscribe miss is not OK", error)
+
+    def test_confirmed_publish_is_success(self):
+        self.assertFalse(
+            moq_job_should_fail_without_namespace(
+                publish_confirmed=True,
+                poller_observing=True,
+            )
+        )
+
+    def test_unreachable_metrics_do_not_fail_the_job(self):
+        self.assertFalse(
+            moq_job_should_fail_without_namespace(
+                publish_confirmed=False,
+                poller_observing=False,
+            )
+        )
 
 
 if __name__ == "__main__":

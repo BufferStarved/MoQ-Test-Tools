@@ -189,6 +189,7 @@ class PlaybackSampleRequest(BaseModel):
 
 
 def job_to_dict(job) -> dict:
+    slot = job_manager.encode_slot_fields(job)
     return {
         "id": job.id,
         "status": job.status.value,
@@ -204,6 +205,9 @@ def job_to_dict(job) -> dict:
         "zixi_stream_id": job.zixi_stream_id,
         "zixi_playback_stream_id": getattr(job, "zixi_playback_stream_id", None),
         "preview_ready": getattr(job, "preview_ready", True),
+        "waiting_for_encode_slot": slot["waiting_for_encode_slot"],
+        "encode_queue_ahead": slot["encode_queue_ahead"],
+        "encode_slot_limit": slot["encode_slot_limit"],
         "created_at": job.created_at,
         "csv_path": job.csv_path,
         "summary_path": job.summary_path,
@@ -916,6 +920,25 @@ def post_publisher_ready(job_id: str):
     return {"ok": True}
 
 
+class PublisherErrorRequest(BaseModel):
+    error: str = Field(..., min_length=1, max_length=500)
+
+
+@app.post("/api/uploads/{job_id}/publisher-error")
+def post_publisher_error(job_id: str, request: PublisherErrorRequest):
+    """Browser publisher failed this leg (WHIP ICE / MoQ relay). Surface it on the job."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {JobStatus.PENDING, JobStatus.QUEUED, JobStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="Upload is not active")
+    if getattr(job, "publisher_host", "") != "browser":
+        raise HTTPException(status_code=400, detail="publisher-error is for browser publishers")
+    if not job_manager.fail_browser_publisher(job_id, request.error):
+        raise HTTPException(status_code=400, detail="Could not fail browser publisher")
+    return {"ok": True}
+
+
 @app.post("/api/uploads/{job_id}/vmaf-reference")
 async def post_browser_vmaf_reference(job_id: str, file: UploadFile = File(...)):
     """In-tab encoder bitstream used as the ingest VMAF reference (not encoder VMAF)."""
@@ -999,9 +1022,13 @@ async def upload_events(job_id: str):
                 yield f"data: {json.dumps(current.samples[seen])}\n\n"
                 seen += 1
 
+            slot = job_manager.encode_slot_fields(current)
             payload = {
                 "status": current.status.value,
                 "preview_ready": getattr(current, "preview_ready", True),
+                "waiting_for_encode_slot": slot["waiting_for_encode_slot"],
+                "encode_queue_ahead": slot["encode_queue_ahead"],
+                "encode_slot_limit": slot["encode_slot_limit"],
                 "csv_path": current.csv_path,
                 "summary_path": current.summary_path,
                 "error": current.error,

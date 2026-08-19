@@ -1,4 +1,4 @@
-import { postEncodeSample, postPublisherReady } from "../api";
+import { postEncodeSample, postPublisherError, postPublisherReady } from "../api";
 import { unwrapFastApiDetail } from "../playbackEos";
 import { proxiedWebrtcSignalingUrl } from "../webrtcSignaling";
 
@@ -31,6 +31,39 @@ function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2500): Promise<v
   });
 }
 
+function waitForIceConnected(pc: RTCPeerConnection, timeoutMs = 8000): Promise<void> {
+  const connected = (state: RTCIceConnectionState) => state === "connected" || state === "completed";
+  if (connected(pc.iceConnectionState)) {
+    return Promise.resolve();
+  }
+  if (pc.iceConnectionState === "failed" || pc.iceConnectionState === "closed") {
+    return Promise.reject(new Error(`WHIP ICE ${pc.iceConnectionState}. MediaMTX is not reachable from this browser.`));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pc.removeEventListener("iceconnectionstatechange", onChange);
+      reject(
+        new Error(
+          `WHIP ICE ${pc.iceConnectionState || "unknown"} — signaling worked but the peer never connected. Check UDP 8189 to MediaMTX.`,
+        ),
+      );
+    }, timeoutMs);
+    const onChange = () => {
+      const state = pc.iceConnectionState;
+      if (connected(state)) {
+        window.clearTimeout(timer);
+        pc.removeEventListener("iceconnectionstatechange", onChange);
+        resolve();
+      } else if (state === "failed" || state === "closed") {
+        window.clearTimeout(timer);
+        pc.removeEventListener("iceconnectionstatechange", onChange);
+        reject(new Error(`WHIP ICE ${state}. MediaMTX is not reachable from this browser.`));
+      }
+    };
+    pc.addEventListener("iceconnectionstatechange", onChange);
+  });
+}
+
 /**
  * Browser WHIP publish: camera tracks → RTCPeerConnection → MediaMTX.
  * Signaling goes through /api/webrtc/sdp so HTTPS pages can reach http://:8889.
@@ -39,6 +72,8 @@ export async function startWhipPublish(options: {
   stream: MediaStream;
   whipUrl: string;
   jobId: string;
+  includeAudio?: boolean;
+  onFatalError?: (message: string) => void;
 }): Promise<WhipPublishSession> {
   const whipUrl = normalizeWhipUrl(options.whipUrl);
   if (!whipUrl) {
@@ -48,7 +83,15 @@ export async function startWhipPublish(options: {
     bundlePolicy: "max-bundle",
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
-  for (const track of options.stream.getTracks()) {
+  // Video-only matches the MoQ loc path (audio disabled for moqx uni-stream
+  // limits). Publishing mic audio here made WHEP negotiate then 406-retry
+  // while the camera was already starved by WebCodecs.
+  const tracks = options.includeAudio ? options.stream.getTracks() : options.stream.getVideoTracks();
+  if (!tracks.length) {
+    pc.close();
+    throw new Error("WebRTC publish has no video track.");
+  }
+  for (const track of tracks) {
     pc.addTrack(track, options.stream);
   }
 
@@ -78,8 +121,26 @@ export async function startWhipPublish(options: {
   const startedAt = performance.now();
   const rate = { lastBytes: 0, lastRecv: 0, lastAt: 0 };
   let sampleErrorLogged = false;
-
+  let fatalReported = false;
   let stopped = false;
+
+  const reportFatal = (message: string) => {
+    if (fatalReported || stopped) {
+      return;
+    }
+    fatalReported = true;
+    options.onFatalError?.(message);
+    void postPublisherError(options.jobId, message).catch(() => undefined);
+  };
+
+  const onIce = () => {
+    const state = pc.iceConnectionState;
+    if (state === "failed" || state === "closed") {
+      reportFatal(`WHIP ICE ${state}. MediaMTX dropped the publish connection.`);
+    }
+  };
+  pc.addEventListener("iceconnectionstatechange", onIce);
+
   let statsTimer: number | null = window.setInterval(() => {
     void postWhipEncodeSample(pc, options.jobId, startedAt, rate).catch((err) => {
       if (!sampleErrorLogged) {
@@ -88,7 +149,18 @@ export async function startWhipPublish(options: {
       }
     });
   }, 1000);
-  await postPublisherReady(options.jobId);
+
+  void waitForIceConnected(pc)
+    .then(() => {
+      if (stopped) {
+        return;
+      }
+      return postPublisherReady(options.jobId);
+    })
+    .catch((err) => {
+      const message = err instanceof Error ? err.message : "WHIP ICE failed.";
+      reportFatal(message);
+    });
 
   return {
     stop() {
@@ -96,6 +168,7 @@ export async function startWhipPublish(options: {
         return;
       }
       stopped = true;
+      pc.removeEventListener("iceconnectionstatechange", onIce);
       if (statsTimer != null) {
         window.clearInterval(statsTimer);
         statsTimer = null;

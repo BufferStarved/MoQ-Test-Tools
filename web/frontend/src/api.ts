@@ -217,6 +217,14 @@ export function postPublisherReady(jobId: string): Promise<{ ok: boolean }> {
   });
 }
 
+export function postPublisherError(jobId: string, error: string): Promise<{ ok: boolean }> {
+  return request(`/uploads/${jobId}/publisher-error`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ error }),
+  });
+}
+
 export async function uploadVmafReference(jobId: string, blob: Blob, filename = "reference.h264"): Promise<void> {
   const body = new FormData();
   body.append("file", blob, filename);
@@ -387,6 +395,9 @@ export function subscribeToUpload(
   onStatus: (status: {
     status: string;
     preview_ready?: boolean;
+    waiting_for_encode_slot?: boolean;
+    encode_queue_ahead?: number;
+    encode_slot_limit?: number;
     csv_path?: string | null;
     summary_path?: string | null;
     error?: string | null;

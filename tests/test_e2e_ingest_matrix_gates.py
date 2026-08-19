@@ -1,4 +1,4 @@
-"""Matrix e2e cases must skip retired PUT recipes and gate MoQ Chrome."""
+"""Matrix e2e cases must fail-close retired PUT recipes and gate MoQ Chrome."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "e2e_ingest_matrix_test.py"
@@ -25,23 +26,74 @@ class E2eIngestMatrixGateTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.mod = _load_matrix()
 
-    def test_put_cases_are_skipped_not_started(self) -> None:
+    def test_put_cases_assert_api_reject_not_silent_skip(self) -> None:
         by_id = {case["id"]: case for case in self.mod.CASES}
         for case_id in ("zixi_tsput_hls", "zixi_tsput_dash"):
             case = by_id[case_id]
-            self.assertTrue(case.get("skip"), case_id)
-            self.assertIn("PUT", case.get("skip_reason") or "")
-            result = self.mod.skipped_case_result(case)
-            self.assertTrue(result.ok)
-            self.assertTrue(result.skipped)
-            self.assertTrue(result.gated)
-            self.assertEqual(result.job_id, "")
+            self.assertTrue(case.get("assert_api_reject"), case_id)
+            self.assertFalse(case.get("skip"), case_id)
+            self.assertEqual(case.get("known_gap"), "zixi_http_ts_push_retired")
 
-    def test_linode_put_skipped_when_present(self) -> None:
+    def test_linode_put_asserts_api_reject(self) -> None:
         by_id = {case["id"]: case for case in self.mod.LINODE_CASES}
         case = by_id["linode_zixi_tsput"]
-        self.assertTrue(case.get("skip"))
-        self.assertIn("PUT", case.get("skip_reason") or "")
+        self.assertTrue(case.get("assert_api_reject"))
+        self.assertFalse(case.get("skip"))
+
+    def test_put_gate_runner_rejects_without_starting_job(self) -> None:
+        case = {
+            "id": "zixi_tsput_hls",
+            "preset_id": "moq_zixi_gcp_hls",
+            "known_gap": "zixi_http_ts_push_retired",
+            "assert_api_reject": True,
+        }
+
+        def fake_api(method, path, data=None, files=None):
+            if method == "GET" and path == "/api/presets":
+                return {"presets": [{"id": "moq_zixi_gcp"}]}
+            if method == "GET" and path == "/api/protocols":
+                return {"protocols": [{"id": "srt"}, {"id": "moq"}]}
+            if method == "POST" and path == "/api/uploads":
+                raise RuntimeError(
+                    "POST /api/uploads -> 400: Zixi HTTP-TS PUT ingest stops draining"
+                )
+            raise AssertionError(f"unexpected {method} {path}")
+
+        with patch.object(self.mod, "api", side_effect=fake_api):
+            result = self.mod.run_put_gate_case(case, "/tmp/dummy.mp4")
+        self.assertTrue(result.ok)
+        self.assertFalse(result.skipped)
+        self.assertEqual(result.job_id, "")
+        self.assertIn("api_reject_400", result.ingest)
+
+    def test_put_gate_fails_if_recipe_is_startable(self) -> None:
+        case = {
+            "id": "zixi_tsput_hls",
+            "preset_id": "moq_zixi_gcp_hls",
+            "assert_api_reject": True,
+        }
+
+        def fake_api(method, path, data=None, files=None):
+            if method == "GET" and path == "/api/presets":
+                return {"presets": [{"id": "moq_zixi_gcp_hls"}]}
+            if method == "GET" and path == "/api/protocols":
+                return {"protocols": [{"id": "hls"}, {"id": "dash"}]}
+            if method == "POST" and path == "/api/uploads":
+                return {"id": "should-not-start"}
+            raise AssertionError(f"unexpected {method} {path}")
+
+        with patch.object(self.mod, "api", side_effect=fake_api):
+            result = self.mod.run_put_gate_case(case, "/tmp/dummy.mp4")
+        self.assertFalse(result.ok)
+        self.assertIn("put_preset_still_listed", result.errors)
+        self.assertIn("hls_dash_still_offered", result.errors)
+        self.assertIn("put_start_not_rejected", result.errors)
+
+    def test_moq_admin_from_sslip(self) -> None:
+        admin = self.mod.moq_admin_from_relay_url(
+            "https://34-28-164-90.sslip.io:4433/moq-relay"
+        )
+        self.assertEqual(admin, "http://34.28.164.90:8000")
 
     def test_moq_requires_webtransport(self) -> None:
         for cases in (self.mod.CASES, self.mod.EAST_CASES, self.mod.LINODE_CASES):

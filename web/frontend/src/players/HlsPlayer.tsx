@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlaybackMetricsSnapshot } from "../api";
 import { proxiedPlaybackUrl } from "../playbackUrls";
 import { resolvePlaybackXhrUrl } from "../playbackFetch";
-import type { PlaybackGate } from "../playbackGate";
+import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
 import { isGracefulHlsEos } from "../hlsEos";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
@@ -30,6 +30,8 @@ interface HlsPlayerProps {
   encodeStartedAtEpoch?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
+  waitingForEncodeSlot?: boolean;
+  encodeQueueAhead?: number;
   benchmarkLoading?: boolean;
   /** Derived from upload target latency (segment-count fallback). */
   liveSyncDurationCount?: number;
@@ -291,6 +293,8 @@ export default function HlsPlayer({
   encodeStartedAtEpoch,
   onPlaybackSample,
   jobStatus,
+  waitingForEncodeSlot = false,
+  encodeQueueAhead = 0,
   benchmarkLoading = false,
   liveSyncDurationCount = 2,
   liveSyncDurationSec,
@@ -557,7 +561,12 @@ export default function HlsPlayer({
       } else {
         setStatus(
           playbackGate === "waiting"
-            ? "Waiting for readable HLS segments..."
+            ? waitingPlayerStatus({
+                engine: "hls",
+                jobStatus,
+                waitingForEncodeSlot,
+                encodeQueueAhead,
+              })
             : "Waiting for encode...",
         );
       }
@@ -1382,7 +1391,7 @@ export default function HlsPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate, jobStatus, jobId]);
+  }, [url, playbackGate, jobStatus, jobId, waitingForEncodeSlot, encodeQueueAhead]);
 
   function togglePlayPause() {
     const video = videoRef.current;

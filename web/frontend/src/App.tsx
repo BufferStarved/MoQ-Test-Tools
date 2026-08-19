@@ -87,6 +87,7 @@ import { isSafariBrowser } from "./browserDetect";
 import { IconBroadcast, IconPlus } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
+import { operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
 
 type Tab = "benchmark" | "metrics" | "about";
 
@@ -142,6 +143,10 @@ const PLAYBACK_DRAIN_MS = 10_000;
 function createEndpointId(): string {
   return `ep-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
+
+const operatorPlan = parseOperatorSearch(
+  typeof window !== "undefined" ? window.location.search : "",
+);
 
 function buildDefaultEndpoints(ctx: RecipeContext = {
   source: "dummy",
@@ -238,9 +243,27 @@ function App() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
-  const [mediaSource, setMediaSource] = useState<MediaSourceId>("dummy");
-  const [mediaPath, setMediaPath] = useState("dummy.mp4");
-  const [mediaLabel, setMediaLabel] = useState("Default Color Bars");
+  const [mediaSource, setMediaSource] = useState<MediaSourceId>(
+    operatorPlan.source ?? "dummy",
+  );
+  const [mediaPath, setMediaPath] = useState(
+    operatorPlan.source === "browser_moq"
+      ? DEVICE_BROWSER_MEDIA
+      : operatorPlan.source === "webcam"
+        ? LOCAL_DEVICE_WEBCAM
+        : operatorPlan.source === "bbb"
+          ? BBB_MEDIA_PATH
+          : "dummy.mp4",
+  );
+  const [mediaLabel, setMediaLabel] = useState(
+    operatorPlan.source === "browser_moq"
+      ? "Browser camera"
+      : operatorPlan.source === "webcam"
+        ? "Webcam"
+        : operatorPlan.source === "bbb"
+          ? "Big Buck Bunny"
+          : "Default Color Bars",
+  );
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
@@ -314,6 +337,7 @@ function App() {
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
   const [browserPreviewStream, setBrowserPreviewStream] = useState<MediaStream | null>(null);
   const [browserHasAudio, setBrowserHasAudio] = useState(false);
+  const [browserVideoCodec, setBrowserVideoCodec] = useState<string>("");
   const browserMoqRunRef = useRef<BrowserMoqRun | null>(null);
 
   function stopBrowserMoqRun() {
@@ -444,8 +468,9 @@ function App() {
       setPresets(presetData.presets);
       setFeatures(featureData);
       setEndpoints((current) => {
+        const source = operatorPlan.source ?? "dummy";
         const ctx: RecipeContext = {
-          source: "dummy",
+          source,
           presets: presetData.presets,
           caps: {
             safari: isSafariBrowser(),
@@ -454,6 +479,9 @@ function App() {
           },
           publisher: { localFfmpegWhip: Boolean(featureData.local_publisher_whip) },
         };
+        if (operatorPlan.outputs.length > 0) {
+          return coerceRecipe(operatorEndpoints(operatorPlan.outputs, createEndpointId), ctx);
+        }
         const seed = current.length > 0 ? current : buildDefaultEndpoints(ctx);
         return coerceRecipe(seed, ctx);
       });
@@ -920,6 +948,10 @@ function App() {
               // (MediaMTX / managed Zixi SRT) — without this, the SSE stream
               // never tells the player it flipped true and playback never starts.
               preview_ready: status.preview_ready ?? leg.job.preview_ready,
+              waiting_for_encode_slot:
+                status.waiting_for_encode_slot ?? leg.job.waiting_for_encode_slot,
+              encode_queue_ahead: status.encode_queue_ahead ?? leg.job.encode_queue_ahead,
+              encode_slot_limit: status.encode_slot_limit ?? leg.job.encode_slot_limit,
               csv_path: status.csv_path ?? leg.job.csv_path,
               summary_path: status.summary_path ?? leg.job.summary_path,
               error: status.error,
@@ -1212,6 +1244,7 @@ function App() {
           browserMoqRunRef.current = run;
           setBrowserPreviewStream(run.previewStream);
           setBrowserHasAudio(run.hasAudio);
+          setBrowserVideoCodec(run.videoCodec || "");
           const drafts = [...new Set(Object.values(run.draftByJobId))];
           setWebcamStatus(
             drafts.length
@@ -1553,6 +1586,9 @@ function App() {
                         }}
                         jobStatus={leg?.job.status}
                         jobError={leg?.job.error}
+                        waitingForEncodeSlot={Boolean(leg?.job.waiting_for_encode_slot)}
+                        encodeQueueAhead={leg?.job.encode_queue_ahead ?? 0}
+                        previewReady={leg?.job.preview_ready}
                         benchmarkLoading={loading}
                         encodeDurationSec={leg?.job.duration_sec ?? 60}
                         targetLatencyMs={moqPlayerTargetLatencyMs(
@@ -1567,6 +1603,7 @@ function App() {
                         )}
                         controlsLocked={bootstrapping || !apiOnline}
                         sourceHasAudio={mediaSource === "browser_moq" ? browserHasAudio : true}
+                        moqVideoCodec={mediaSource === "browser_moq" ? browserVideoCodec : undefined}
                         moqDraftVersion={16}
                         moqMediaPackaging={mediaSource === "browser_moq" ? "loc" : "cmaf"}
                         // Webcam is always captured by the local-agent path (ffmpeg
@@ -1589,7 +1626,7 @@ function App() {
                             <span>Status</span>
                             <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
                           </div>
-                          {leg.job.status === "failed" && leg.job.error && (
+                          {leg.job.error && (
                             <p className="error">{humanizeJobError(leg.job.error) || leg.job.error}</p>
                           )}
                           {leg.encoderVmafRequested ? (

@@ -246,8 +246,8 @@ function publisherRows(
       value: encodeKind === "browser" ? "Browser camera → MediaMTX WHIP" : "ffmpeg WHIP ingest",
       note:
         encodeKind === "browser"
-          ? "Native WebRTC encode. WHEP playback is the same session — there is no HLS packager."
-          : "ffmpeg publishes WHIP; WHEP playback has no HLS packager.",
+          ? "Native WebRTC encode. WHEP is the same session; MediaMTX also remuxes WHIP to LL-HLS."
+          : "ffmpeg publishes WHIP; MediaMTX remuxes to LL-HLS / LL-DASH / WHEP.",
     });
   }
   if (stream.endpointUrl?.trim()) {
@@ -328,11 +328,11 @@ function packagerRows(
         value: "MediaMTX + CMAF / LL-DASH sidecar",
         note: "Low-latency DASH via ffmpeg CMAF → nginx",
       });
-    } else if (mode === "whep" || protocol === "webrtc") {
+    } else if (mode === "whep") {
       rows.push({
         label: "Packager",
         value: "None — expected for WebRTC",
-        note: "WHEP plays the live WHIP session directly. No HLS/DASH packager in this path.",
+        note: "WHEP plays the live WHIP session directly. MediaMTX also remuxes WHIP to LL-HLS / LL-DASH.",
       });
     } else {
       rows.push({

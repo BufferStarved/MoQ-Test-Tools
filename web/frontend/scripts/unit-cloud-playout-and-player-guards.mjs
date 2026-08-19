@@ -27,6 +27,8 @@ assert.match(moqCmaf, /Playback ended \(reconnected/);
 assert.match(moq, /graceful_eos RESET_STREAM/);
 assert.match(whep, /isGracefulWhepDisconnect/);
 assert.match(whep, /unwrapFastApiDetail/);
+assert.doesNotMatch(whep, /video\.muted = false/);
+assert.match(whep, /video\.muted = true/);
 assert.match(streamPlayer, /WhepPlayer[\s\S]*jobStatus=\{jobStatus\}/);
 assert.match(fs.readFileSync(path.join(root, "src/players/MpegTsPlayer.tsx"), "utf8"), /graceful_eos/);
 assert.match(moq, /playhead_frozen_hold/);

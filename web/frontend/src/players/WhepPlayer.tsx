@@ -13,6 +13,7 @@ import {
 import { isPlausibleE2eMs, pathDelayMs } from "../glassLatency";
 import { isGracefulWhepDisconnect, unwrapFastApiDetail } from "../playbackEos";
 import { startWhepSession, waitForWhepIceTerminal, waitForWhepMedia, type WhepSession } from "../whepSession";
+import { classifyWhepEndVerdict } from "../webrtcPlayback";
 
 interface WhepPlayerProps {
   url: string;
@@ -88,6 +89,7 @@ export default function WhepPlayer({
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Connecting WHEP...");
+  const lastErrorRef = useRef<string | null>(null);
   const rebufferRef = useRef(new RebufferTracker());
   const sessionRef = useRef({
     ttffMs: 0,
@@ -97,6 +99,8 @@ export default function WhepPlayer({
     viewerLatencyMs: 0,
     bitrateBps: 0,
     rttMs: 0,
+    framesRendered: 0,
+    framesDecoded: 0,
   });
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0 });
   lagRef.current = { bridgeMs: bridgeLagMs, encoderMs: encoderLagMs };
@@ -109,6 +113,18 @@ export default function WhepPlayer({
 
   const getPlaybackSnapshot = useCallback((): PlaybackMetricsSnapshot => {
     const frames = readVideoFrameStats(videoRef.current);
+    sessionRef.current.framesRendered = Math.max(
+      sessionRef.current.framesRendered,
+      frames.framesRendered,
+      sessionRef.current.framesDecoded,
+    );
+    const video = videoRef.current;
+    if (video) {
+      const vt = video.currentTime;
+      if (vt > sessionRef.current.maxVideoTime) {
+        sessionRef.current.maxVideoTime = vt;
+      }
+    }
     persistJobRebuffer(jobId, rebufferRef.current);
     const { bridgeMs, encoderMs } = lagRef.current;
     const e2e = pathDelayMs({
@@ -117,9 +133,9 @@ export default function WhepPlayer({
       playerBufferMs: sessionRef.current.viewerLatencyMs + bridgeMs,
     });
     return {
-      playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
+      playback_stats_events: sessionRef.current.framesRendered > 0 ? 1 : 0,
       playback_stall_count: rebufferRef.current.stallCount,
-      playback_frames_rendered: frames.framesRendered,
+      playback_frames_rendered: sessionRef.current.framesRendered,
       playback_frames_dropped: frames.framesDropped,
       playback_bitrate_bps: sessionRef.current.bitrateBps,
       playback_ttff_ms: sessionRef.current.ttffMs,
@@ -150,9 +166,26 @@ export default function WhepPlayer({
     }
 
     if (playbackGate !== "live") {
-      setError(null);
+      if (playbackGate === "ended") {
+        const verdict = classifyWhepEndVerdict({
+          framesRendered: sessionRef.current.framesRendered,
+          videoTimeSec: sessionRef.current.maxVideoTime,
+          lastError: lastErrorRef.current,
+          encodeDurationSec: encodeDurationRef.current,
+        });
+        if (verdict.ok) {
+          setError(null);
+          lastErrorRef.current = null;
+          setStatus(verdict.status);
+        } else {
+          lastErrorRef.current = verdict.error;
+          setError(verdict.error);
+          setStatus(verdict.status);
+        }
+        return;
+      }
       setStatus(
-        playbackGate === "waiting" ? "Waiting…" : playbackGateLabel(playbackGate, "other"),
+        playbackGate === "waiting" ? "Waiting for WebRTC publish..." : playbackGateLabel(playbackGate, "other"),
       );
       return;
     }
@@ -171,6 +204,8 @@ export default function WhepPlayer({
       viewerLatencyMs: 0,
       bitrateBps: 0,
       rttMs: 0,
+      framesRendered: 0,
+      framesDecoded: 0,
     };
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
@@ -222,6 +257,7 @@ export default function WhepPlayer({
         }
         void pc.getStats().then((report) => {
           let bytes = 0;
+          let decoded = 0;
           report.forEach((stat) => {
             if (stat.type !== "inbound-rtp") {
               return;
@@ -234,7 +270,17 @@ export default function WhepPlayer({
             if (received >= bytes) {
               bytes = received;
             }
+            const frames = inbound.framesDecoded ?? 0;
+            if (frames >= decoded) {
+              decoded = frames;
+            }
           });
+          if (decoded > 0) {
+            sessionRef.current.framesDecoded = Math.max(
+              sessionRef.current.framesDecoded,
+              decoded,
+            );
+          }
           const now = performance.now();
           if (lastInboundAt > 0 && bytes >= lastInboundBytes) {
             const dt = (now - lastInboundAt) / 1000;
@@ -251,7 +297,6 @@ export default function WhepPlayer({
     async function start() {
       while (!destroyed) {
         try {
-          setError(null);
           setStatus("Connecting...");
           const session = await startWhepSession({ url, video, signal: abort.signal });
           if (destroyed) {
@@ -265,8 +310,12 @@ export default function WhepPlayer({
           if (destroyed) {
             return;
           }
-          video.muted = false;
+          // Stay muted. Unmuting here rejects autoplay in headless Chrome
+          // (NotAllowedError), which left WHEP connected but never painting.
+          video.muted = true;
           void video.play().catch(() => undefined);
+          lastErrorRef.current = null;
+          setError(null);
           setStatus("Playing");
           if (sessionRef.current.ttffMs <= 0 && sessionRef.current.liveStartedAtMs > 0) {
             sessionRef.current.ttffMs = Math.max(
@@ -329,13 +378,13 @@ export default function WhepPlayer({
             setStatus("Playback OK");
             return;
           }
-          setError(
-            unwrapFastApiDetail(
-              err instanceof Error
-                ? err.message
-                : "WHEP connection failed. Is the WHEP gateway running and the stream live?",
-            ),
+          const detail = unwrapFastApiDetail(
+            err instanceof Error
+              ? err.message
+              : "WHEP connection failed. Is the WHEP gateway running and the stream live?",
           );
+          lastErrorRef.current = detail;
+          setError(detail);
           setStatus("Retrying WHEP...");
           await new Promise((resolve) => window.setTimeout(resolve, 1500));
         }

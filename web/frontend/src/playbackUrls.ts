@@ -81,7 +81,19 @@ export function isPlaybackModeCompatible(
   if (mode === "moq") {
     return false;
   }
+  // MediaMTX remuxes WHIP to the same HLS/DASH/WHEP origins as SRT/RTMP.
+  // WHEP stays the default player; LL-HLS is a real second path (and the only
+  // one that works in headless Chrome).
   if (protocol === "webrtc") {
+    if (ingestEndpointId && isMediaMtxManaged(ingestEndpointId)) {
+      return (
+        mode === "whep" ||
+        mode === "ll-hls" ||
+        mode === "ll-dash" ||
+        mode === "hls" ||
+        mode === "mpegts"
+      );
+    }
     return mode === "whep";
   }
 

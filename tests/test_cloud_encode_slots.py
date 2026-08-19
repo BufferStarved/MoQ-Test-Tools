@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from cloud_encode_slots import (  # noqa: E402
     CloudEncodeSlotPool,
+    encode_slot_fields,
     job_needs_cloud_encode_slot,
     max_concurrent_cloud_encodes,
 )
@@ -72,6 +73,42 @@ class CloudEncodeSlotTests(unittest.TestCase):
         self.assertEqual(pool.held_count(), 1)
         pool.release("held")
         self.assertEqual(pool.held_count(), 0)
+
+    def test_queue_ahead_is_fifo_and_api_fields_name_the_slot(self):
+        pool = CloudEncodeSlotPool(limit=1)
+        cancel = threading.Event()
+        self.assertTrue(pool.acquire("held", cancel))
+        waiting = threading.Event()
+
+        def waiter() -> None:
+            waiting.set()
+            self.assertTrue(pool.acquire("queued", cancel, timeout=0.05))
+            pool.release("queued")
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        waiting.wait(timeout=1)
+        time.sleep(0.05)
+        self.assertEqual(pool.queue_ahead("queued"), 1)
+        fields = encode_slot_fields(
+            pool,
+            job_id="queued",
+            publisher_host="cloud",
+            status="queued",
+        )
+        self.assertTrue(fields["waiting_for_encode_slot"])
+        self.assertEqual(fields["encode_queue_ahead"], 1)
+        self.assertEqual(fields["encode_slot_limit"], 1)
+        browser = encode_slot_fields(
+            pool,
+            job_id="browser-1",
+            publisher_host="browser",
+            status="queued",
+        )
+        self.assertFalse(browser["waiting_for_encode_slot"])
+        cancel.set()
+        pool.release("held")
+        t.join(timeout=2)
 
 
 if __name__ == "__main__":

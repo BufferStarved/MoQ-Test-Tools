@@ -144,7 +144,9 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("code 251") ||
     text.includes("input/output error") ||
     text.includes("conversion failed") ||
-    text.includes("opening input")
+    text.includes("opening input") ||
+    text.includes("never announced namespace") ||
+    text.includes("catalog is not live")
   );
 }
 
@@ -196,9 +198,40 @@ export function noMediaFailMessage(options: {
     return "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.";
   }
   const ns = (options.namespace || "").trim();
+  if (options.jobStatus === "completed") {
+    return ns
+      ? `MoQ publisher never announced namespace ${ns} on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.`
+      : "MoQ publisher never announced the namespace on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.";
+  }
   return ns
     ? `MoQ catalog never loaded on namespace ${ns}. Publisher must be live; a 0x10 subscribe miss is not OK.`
     : "MoQ catalog never loaded. Publisher must be live; a 0x10 subscribe miss is not OK.";
+}
+
+/** When the no-media watchdog may fail the visible player.
+
+A 15s timeout while the job is still queued or the publisher has not
+announced the namespace produces a catalog-miss toast for a queue /
+publisher-death problem (bench-733f1d7c). Wait for encode-over, or for
+preview_ready plus the usual deadline.
+*/
+export function shouldFailNoMediaWatchdog(options: {
+  jobStatus?: string;
+  previewReady?: boolean;
+  liveMs: number;
+  deadlineMs: number;
+}): boolean {
+  const status = (options.jobStatus || "").toLowerCase();
+  if (status === "queued" || status === "pending") {
+    return false;
+  }
+  if (status === "completed" || status === "failed") {
+    return true;
+  }
+  if (options.previewReady === false) {
+    return false;
+  }
+  return options.liveMs >= options.deadlineMs;
 }
 
 export type MoqEndVerdict =

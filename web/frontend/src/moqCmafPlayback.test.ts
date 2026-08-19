@@ -12,6 +12,7 @@ import {
   noMediaFailMessage,
   noMediaTimeoutMs,
   playerErrorForFailedJob,
+  shouldFailNoMediaWatchdog,
   shouldKeepSessionOnSubscribeError,
   CMAF_LATE_FRAME_THRESHOLD_MS,
   MOQ_ALL_TRACKS_REFUSED,
@@ -114,6 +115,60 @@ describe("classifyMoqEndVerdict", () => {
 describe("noMediaFailMessage", () => {
   it("names the namespace so a 0x10 miss is diagnosable", () => {
     assert.match(noMediaFailMessage({ catalogReady: false, namespace: "bench-6a9355b9" }), /bench-6a9355b9/);
+  });
+
+  it("does not call encode-only success a 0x10 miss", () => {
+    const message = noMediaFailMessage({
+      catalogReady: false,
+      namespace: "bench-733f1d7c",
+      jobStatus: "completed",
+    });
+    assert.match(message, /never announced namespace bench-733f1d7c/i);
+    assert.doesNotMatch(message, /0x10 subscribe miss is not OK/);
+  });
+});
+
+describe("shouldFailNoMediaWatchdog", () => {
+  it("does not fail while the job is queued or the publisher is not live", () => {
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "queued",
+        previewReady: false,
+        liveMs: 20_000,
+        deadlineMs: 15_000,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "running",
+        previewReady: false,
+        liveMs: 20_000,
+        deadlineMs: 15_000,
+      }),
+      false,
+    );
+  });
+
+  it("fails after encode ends or after a live publisher misses the deadline", () => {
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "completed",
+        previewReady: false,
+        liveMs: 1_000,
+        deadlineMs: 15_000,
+      }),
+      true,
+    );
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "running",
+        previewReady: true,
+        liveMs: 16_000,
+        deadlineMs: 15_000,
+      }),
+      true,
+    );
   });
 });
 

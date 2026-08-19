@@ -38,7 +38,7 @@ class CloudEncodeSlotPool:
         self.limit = limit if limit is not None else max_concurrent_cloud_encodes()
         self._sema = threading.BoundedSemaphore(self.limit)
         self._lock = threading.Lock()
-        self._waiting: set[str] = set()
+        self._waiting: list[str] = []
         self._held: set[str] = set()
 
     def acquire(self, job_id: str, cancel_event: threading.Event, timeout: float = 1.0) -> bool:
@@ -49,19 +49,22 @@ class CloudEncodeSlotPool:
         """
         token = (job_id or "").strip() or "unknown"
         with self._lock:
-            self._waiting.add(token)
+            if token not in self._waiting:
+                self._waiting.append(token)
         try:
             while True:
                 if cancel_event.is_set():
                     return False
                 if self._sema.acquire(timeout=timeout):
                     with self._lock:
-                        self._waiting.discard(token)
+                        if token in self._waiting:
+                            self._waiting.remove(token)
                         self._held.add(token)
                     return True
         finally:
             with self._lock:
-                self._waiting.discard(token)
+                if token in self._waiting:
+                    self._waiting.remove(token)
 
     def release(self, job_id: str) -> None:
         token = (job_id or "").strip() or "unknown"
@@ -78,3 +81,43 @@ class CloudEncodeSlotPool:
     def held_count(self) -> int:
         with self._lock:
             return len(self._held)
+
+    def queue_ahead(self, job_id: str) -> int:
+        """Jobs holding a slot or waiting in front of this one.
+
+        0 means this job already holds a slot. A waiter behind one in-flight
+        encode sees 1 — the UI can say "waiting for encode slot (1 ahead)"
+        instead of pretending HLS/MoQ is already attaching.
+        """
+        token = (job_id or "").strip() or "unknown"
+        with self._lock:
+            if token in self._held:
+                return 0
+            held = len(self._held)
+            try:
+                return held + self._waiting.index(token)
+            except ValueError:
+                return held
+
+
+def encode_slot_fields(
+    pool: CloudEncodeSlotPool,
+    *,
+    job_id: str,
+    publisher_host: str = "cloud",
+    status: str = "",
+) -> dict:
+    """API/SSE fields for a job's cloud encode-slot state."""
+    limit = pool.limit
+    if not job_needs_cloud_encode_slot(publisher_host):
+        return {
+            "waiting_for_encode_slot": False,
+            "encode_queue_ahead": 0,
+            "encode_slot_limit": limit,
+        }
+    waiting = (status or "").strip().lower() == "queued"
+    return {
+        "waiting_for_encode_slot": waiting,
+        "encode_queue_ahead": pool.queue_ahead(job_id) if waiting else 0,
+        "encode_slot_limit": limit,
+    }
