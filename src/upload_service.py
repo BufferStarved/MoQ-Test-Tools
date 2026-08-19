@@ -40,10 +40,8 @@ from moq_preview import (
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
-    PUBLISHER_WEBTRANSPORT_WAIT_SEC,
     publisher_webtransport_connected,
     should_pace_moq_publisher,
-    wait_for_publisher_webtransport,
     MPEGTS_VIDEO_BSF,
     build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
@@ -2134,41 +2132,6 @@ class UploadService:
                     daemon=True,
                 )
                 ffmpeg_drain_thread.start()
-            connected = wait_for_publisher_webtransport(
-                lambda: (
-                    f"{self._tail_file(publisher_stdout_path, max_lines=50)}\n"
-                    f"{self._tail_file(publisher_log_path, max_lines=50)}"
-                ),
-                lambda: publisher_proc.poll() is None,
-            )
-            if not connected:
-                if drain_thread is not None:
-                    drain_thread.join(timeout=2)
-                if stdout_drain_thread is not None:
-                    stdout_drain_thread.join(timeout=2)
-                self._terminate_process(publisher_proc)
-                self._terminate_process(ffmpeg_proc)
-                detail = self._tail_file(publisher_log_path) or "unknown error"
-                stdout_detail = self._tail_file(publisher_stdout_path, max_lines=10)
-                if stdout_detail:
-                    detail = f"{detail}\n{stdout_detail}"
-                code = publisher_proc.returncode
-                if code not in (0, None):
-                    return UploadResult(
-                        success=False,
-                        error=(
-                            f"{publisher_backend} publisher exited with code {code} "
-                            f"before WebTransport CONNECT: {detail}"
-                        ),
-                    )
-                return UploadResult(
-                    success=False,
-                    error=(
-                        f"{publisher_backend} publisher never printed connection_id "
-                        f"within {PUBLISHER_WEBTRANSPORT_WAIT_SEC:.0f}s "
-                        f"(WebTransport CONNECT failed). {detail}"
-                    ),
-                )
         except FileNotFoundError:
             self._terminate_process(publisher_proc)
             self._terminate_process(ffmpeg_proc)
