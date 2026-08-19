@@ -2,8 +2,9 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 
@@ -622,7 +623,7 @@ def build_moq_publisher_cmd(
     *,
     duration_sec: int,
     qlog_dir: str = "",
-    paced: bool = True,
+    paced: bool = False,
 ) -> List[str]:
     if backend == "moq5":
         return build_moq5_publisher_cmd(
@@ -639,17 +640,71 @@ def build_moq_publisher_cmd(
     )
 
 
+def should_pace_moq_publisher(media_path: str = "") -> bool:
+    """Whether openmoq-publisher should get ``--paced``.
+
+    Always false: ffmpeg already rate-limits (``-re`` on files, live sources
+    are realtime). Stacking ``--paced`` on top delayed PUBLISH_NAMESPACE until
+    the first media timestamp and produced encode-only jobs whose relay never
+    saw the namespace (bench-733f1d7c: 240 CMAF fragments, moqx_ns=0).
+    """
+    del media_path
+    return False
+
+
+def publisher_webtransport_connected(log_text: str) -> bool:
+    """True when openmoq-publisher logged a live WebTransport session.
+
+    ``connection_id=wt-…`` goes to stdout. Production used to discard stdout,
+    so a publisher that never CONNECTed still looked "healthy" while it
+    drained fMP4 into a session the relay never registered.
+    """
+    text = log_text or ""
+    return "connection_id=" in text
+
+
+# Docker-wrapped openmoq-publisher pays container startup before CONNECT.
+# ffmpeg must not write CMAF until that line appears (bench-733f1d7c).
+PUBLISHER_WEBTRANSPORT_WAIT_SEC = 20.0
+
+
+def wait_for_publisher_webtransport(
+    read_log: Callable[[], str],
+    is_alive: Callable[[], bool],
+    *,
+    timeout_sec: float = PUBLISHER_WEBTRANSPORT_WAIT_SEC,
+    poll_interval: float = 0.1,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Block until stdout/stderr shows ``connection_id=``, or give up.
+
+    Returns False if the publisher dies, the timeout elapses, or the log
+    never contains a WebTransport session id. Callers must fail the job
+    instead of starting ffmpeg.
+    """
+    deadline = clock() + max(0.0, timeout_sec)
+    while clock() < deadline:
+        connected = publisher_webtransport_connected(read_log())
+        alive = is_alive()
+        if connected and alive:
+            return True
+        if not alive:
+            return False
+        sleep(poll_interval)
+    return publisher_webtransport_connected(read_log()) and is_alive()
+
+
 def build_openmoq_publisher_cmd(
     publisher_bin: str,
     target: MoqPublishTarget,
     *,
     duration_sec: int,
-    paced: bool = True,
+    paced: bool = False,
 ) -> List[str]:
     timeout_sec = max(duration_sec + 60, 120)
-    # --paced delays object sends to media timestamps. For live webcam/UDP the
-    # encode is already realtime; pacing stacks delay and makes browser playback
-    # fall behind the live edge. Keep paced for VOD file publishes only.
+    # --paced is off by default: ffmpeg is already realtime. See
+    # should_pace_moq_publisher.
     cmd = [
         publisher_bin,
         "--input",

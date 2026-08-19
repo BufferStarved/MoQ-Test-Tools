@@ -16,19 +16,15 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
     if (job.preview_ready === false) {
       const protocol = (job.protocol || "").toLowerCase();
       const browser = (job.publisher_host || "").toLowerCase() === "browser";
-      // Browser LOC/WHIP: wait until the in-page publisher has a first IDR
-      // (MoQ) or ICE-connected WHIP. Going live earlier SUBSCRIBEs
-      // LargestObject on an empty track — moqx never attached later groups
-      // (linode 0 frames while the later GCP subscribe painted).
-      if (browser && (protocol === "moq" || protocol === "webrtc")) {
-        return "waiting";
+      // Cloud WHIP has no preview_ready signal — WHEP must attach on running.
+      // ffmpeg MoQ must wait for the relay namespace announce. Going live
+      // earlier SUBSCRIBEs catalog before PUBLISH_NAMESPACE, gets 0x10, and
+      // burns the one-shot catalog (bench-733f1d7c: 240 CMAF fragments,
+      // moqx_ns=0, tile showed catalog-miss).
+      if (protocol === "webrtc" && !browser) {
+        return "live";
       }
-      // HLS / HTTP-TS wait for a readable segment. ffmpeg MoQ must not —
-      // catalog is one-shot. Cloud/local WebRTC must not — WHIP never
-      // produces HLS, so gating on preview_ready left WHEP on "Waiting".
-      if (protocol !== "moq" && protocol !== "webrtc") {
-        return "waiting";
-      }
+      return "waiting";
     }
     return "live";
   }

@@ -109,10 +109,12 @@ class EastWhipLoopbackTests(unittest.TestCase):
 
 
 class FrontendRegressionSourceTests(unittest.TestCase):
-    def test_moq_playback_gate_does_not_wait_for_preview(self) -> None:
+    def test_moq_playback_gate_waits_for_namespace_announce(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
-        self.assertIn("protocol !== \"moq\" && protocol !== \"webrtc\"", text)
+        self.assertIn('protocol === "webrtc" && !browser', text)
         self.assertIn("preview_ready === false", text)
+        self.assertIn("burns the one-shot catalog", text)
+        self.assertNotIn("protocol !== \"moq\" && protocol !== \"webrtc\"", text)
 
     def test_moq_player_retries_catalog_miss(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "players" / "MoqPlayer.tsx").read_text()

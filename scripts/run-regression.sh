@@ -28,6 +28,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_cloud_placement \
   tests.test_cloud_encode_slots \
   tests.test_moq_preview_ready_grace \
+  tests.test_moq_publish_announce \
   tests.test_encoder_metrics_fixes \
   tests.test_live_sample_payload \
   tests.test_moqx_stats \

@@ -1,7 +1,8 @@
 /**
- * ffmpeg MoQ must go live as soon as the encode job is running. Waiting for
- * preview_ready misses the one-shot catalog on a cache-less moqx.
- * Browser LOC/WHIP must wait — empty LargestObject never attaches later groups.
+ * ffmpeg MoQ waits for preview_ready (relay namespace announce). Going live
+ * on running-alone SUBSCRIBEs catalog before PUBLISH_NAMESPACE and burns the
+ * one-shot catalog (bench-733f1d7c). Cloud WHIP still goes live on running —
+ * it has no preview_ready signal.
  */
 import assert from "node:assert/strict";
 
@@ -13,12 +14,10 @@ function playbackGateForJob(job, benchmarkStarting) {
     if (job.preview_ready === false) {
       const protocol = (job.protocol || "").toLowerCase();
       const browser = (job.publisher_host || "").toLowerCase() === "browser";
-      if (browser && (protocol === "moq" || protocol === "webrtc")) {
-        return "waiting";
+      if (protocol === "webrtc" && !browser) {
+        return "live";
       }
-      if (protocol !== "moq" && protocol !== "webrtc") {
-        return "waiting";
-      }
+      return "waiting";
     }
     return "live";
   }
@@ -27,7 +26,14 @@ function playbackGateForJob(job, benchmarkStarting) {
 
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "moq", preview_ready: false }, false),
-  "live",
+  "waiting",
+);
+assert.equal(
+  playbackGateForJob(
+    { status: "running", protocol: "moq", publisher_host: "cloud", preview_ready: false },
+    false,
+  ),
+  "waiting",
 );
 assert.equal(
   playbackGateForJob(
@@ -48,6 +54,10 @@ assert.equal(
     { status: "running", protocol: "moq", publisher_host: "browser", preview_ready: true },
     false,
   ),
+  "live",
+);
+assert.equal(
+  playbackGateForJob({ status: "running", protocol: "moq", preview_ready: true }, false),
   "live",
 );
 assert.equal(
@@ -105,6 +115,10 @@ assert.doesNotMatch(
 assert.match(
   waitingPlayerStatus({ engine: "hls", jobStatus: "running" }),
   /readable HLS/,
+);
+assert.match(
+  waitingPlayerStatus({ engine: "moq", jobStatus: "running" }),
+  /MoQ publish/,
 );
 
 console.log("unit-playback-gate: PASS");

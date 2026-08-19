@@ -40,6 +40,10 @@ from moq_preview import (
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
+    PUBLISHER_WEBTRANSPORT_WAIT_SEC,
+    publisher_webtransport_connected,
+    should_pace_moq_publisher,
+    wait_for_publisher_webtransport,
     MPEGTS_VIDEO_BSF,
     build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
@@ -84,6 +88,7 @@ from system_metrics import read_client_host_metrics
 from encoder_capture import (
     build_tee_output_args,
     encoder_capture_path,
+    fanout_stdout,
     start_moq_capture_tee,
 )
 from quality_metrics import (
@@ -2044,7 +2049,7 @@ class UploadService:
             target,
             duration_sec=job.duration_sec,
             qlog_dir=qlog_dir,
-            paced=not is_live_media_source(job.media_path),
+            paced=should_pace_moq_publisher(job.media_path),
         )
         logger.info(
             "MoQ publish via %s (%s) → %s namespace=%s forward=%s",
@@ -2055,6 +2060,7 @@ class UploadService:
             target.forward,
         )
         publisher_log_path = os.path.join(temp_dir, "publisher-stderr.log")
+        publisher_stdout_path = os.path.join(temp_dir, "publisher-stdout.log")
         ffmpeg_log_path = os.path.join(temp_dir, "ffmpeg-stderr.log")
         print(
             f"MoQ publish via {publisher_backend}: namespace={target.namespace} "
@@ -2065,6 +2071,7 @@ class UploadService:
         ffmpeg_proc: Optional[subprocess.Popen] = None
         publisher_proc: Optional[subprocess.Popen] = None
         drain_thread: Optional[threading.Thread] = None
+        stdout_drain_thread: Optional[threading.Thread] = None
         ffmpeg_drain_thread: Optional[threading.Thread] = None
         fanout_thread: Optional[threading.Thread] = None
         tee_proc: Optional[subprocess.Popen] = None
@@ -2074,37 +2081,23 @@ class UploadService:
 
         try:
             self._stamp_media_zero(job)
-            ffmpeg_proc = subprocess.Popen(
-                ffmpeg_cmd,
+            # Publisher first: the Linux binary is Docker-wrapped, so Popen
+            # pays container startup before WebTransport CONNECT. Starting
+            # ffmpeg first (bench-733f1d7c) let encode finish 240 CMAF
+            # fragments while the relay never saw PUBLISH_NAMESPACE.
+            publisher_proc = subprocess.Popen(
+                publisher_cmd,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            if ffmpeg_proc.stdout is not None:
-                tee_proc = start_moq_capture_tee(
-                    ffmpeg_proc.stdout,
-                    job.encoder_capture_path,
+            if publisher_proc.stdout is not None:
+                stdout_drain_thread = threading.Thread(
+                    target=self._drain_stream_to_file,
+                    args=(publisher_proc.stdout, publisher_stdout_path),
+                    daemon=True,
                 )
-                ffmpeg_proc.stdout.close()
-                publisher_proc = subprocess.Popen(
-                    publisher_cmd,
-                    stdin=tee_proc.stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                if tee_proc.stdout is not None:
-                    tee_proc.stdout.close()
-            else:
-                publisher_proc = subprocess.Popen(
-                    publisher_cmd,
-                    stdin=ffmpeg_proc.stdout,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                if ffmpeg_proc.stdout is not None:
-                    ffmpeg_proc.stdout.close()
-            # Drain continuously — an unread stderr PIPE can fill its OS
-            # buffer and block the publisher's writes once it logs enough,
-            # silently stalling media sends well after SUBSCRIBE succeeds.
+                stdout_drain_thread.start()
             if publisher_proc.stderr is not None:
                 drain_thread = threading.Thread(
                     target=self._drain_stream_to_file,
@@ -2112,6 +2105,58 @@ class UploadService:
                     daemon=True,
                 )
                 drain_thread.start()
+            connected = wait_for_publisher_webtransport(
+                lambda: (
+                    f"{self._tail_file(publisher_stdout_path, max_lines=50)}\n"
+                    f"{self._tail_file(publisher_log_path, max_lines=50)}"
+                ),
+                lambda: publisher_proc.poll() is None,
+            )
+            if not connected:
+                if drain_thread is not None:
+                    drain_thread.join(timeout=2)
+                if stdout_drain_thread is not None:
+                    stdout_drain_thread.join(timeout=2)
+                self._terminate_process(publisher_proc)
+                detail = self._tail_file(publisher_log_path) or "unknown error"
+                stdout_detail = self._tail_file(publisher_stdout_path, max_lines=10)
+                if stdout_detail:
+                    detail = f"{detail}\n{stdout_detail}"
+                code = publisher_proc.returncode
+                if code not in (0, None):
+                    return UploadResult(
+                        success=False,
+                        error=(
+                            f"{publisher_backend} publisher exited with code {code} "
+                            f"before WebTransport CONNECT: {detail}"
+                        ),
+                    )
+                return UploadResult(
+                    success=False,
+                    error=(
+                        f"{publisher_backend} publisher never printed connection_id "
+                        f"within {PUBLISHER_WEBTRANSPORT_WAIT_SEC:.0f}s "
+                        f"(WebTransport CONNECT failed). {detail}"
+                    ),
+                )
+            ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if ffmpeg_proc.stdout is not None and publisher_proc.stdin is not None:
+                tee_proc = start_moq_capture_tee(
+                    ffmpeg_proc.stdout,
+                    job.encoder_capture_path,
+                )
+                ffmpeg_proc.stdout.close()
+                if tee_proc.stdout is not None:
+                    fanout_thread = threading.Thread(
+                        target=fanout_stdout,
+                        args=(tee_proc.stdout, [publisher_proc.stdin]),
+                        daemon=True,
+                    )
+                    fanout_thread.start()
             # Same risk applies to ffmpeg's own stderr: default -loglevel is
             # verbose, and a live UDP source with wallclock PTS regeneration
             # can log "Non-monotonic DTS"/timestamp-discontinuity warnings
@@ -2127,6 +2172,7 @@ class UploadService:
                 )
                 ffmpeg_drain_thread.start()
         except FileNotFoundError:
+            self._terminate_process(publisher_proc)
             self._terminate_process(ffmpeg_proc)
             return UploadResult(success=False, error="ffmpeg not found in PATH")
 
@@ -2202,9 +2248,14 @@ class UploadService:
                 if publisher_proc.poll() is not None:
                     if drain_thread is not None:
                         drain_thread.join(timeout=2)
+                    if stdout_drain_thread is not None:
+                        stdout_drain_thread.join(timeout=2)
                     if job.is_cancelled():
                         break
                     detail = self._tail_file(publisher_log_path) or "unknown error"
+                    stdout_detail = self._tail_file(publisher_stdout_path, max_lines=10)
+                    if stdout_detail:
+                        detail = f"{detail}\n{stdout_detail}"
                     code = publisher_proc.returncode
                     ffmpeg_tail = ""
                     if ffmpeg_drain_thread is not None:
@@ -2394,11 +2445,16 @@ class UploadService:
                 fanout_thread.join(timeout=5)
             if drain_thread is not None:
                 drain_thread.join(timeout=2)
+            if stdout_drain_thread is not None:
+                stdout_drain_thread.join(timeout=2)
             if ffmpeg_drain_thread is not None:
                 ffmpeg_drain_thread.join(timeout=2)
             tail = self._tail_file(publisher_log_path, max_lines=15)
             if tail:
                 print(f"MoQ publisher log tail ({publisher_log_path}):\n{tail}", flush=True)
+            stdout_tail = self._tail_file(publisher_stdout_path, max_lines=10)
+            if stdout_tail:
+                print(f"MoQ publisher stdout ({publisher_stdout_path}):\n{stdout_tail}", flush=True)
             ffmpeg_tail = self._tail_file(ffmpeg_log_path, max_lines=15)
             if ffmpeg_tail:
                 print(f"MoQ ffmpeg log tail ({ffmpeg_log_path}):\n{ffmpeg_tail}", flush=True)
@@ -2426,6 +2482,14 @@ class UploadService:
                 namespace=namespace,
                 observing=True,
             )
+            wt_log = (
+                f"{self._tail_file(publisher_stdout_path, max_lines=20)}\n"
+                f"{self._tail_file(publisher_log_path, max_lines=20)}"
+            )
+            if not publisher_webtransport_connected(wt_log):
+                finalized.error += (
+                    " WebTransport session never connected (no connection_id)."
+                )
             return finalized
 
         return self._finalize_result(
