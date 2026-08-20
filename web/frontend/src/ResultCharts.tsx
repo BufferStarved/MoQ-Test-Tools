@@ -416,5 +416,5 @@ export function ResultCharts({
 }
 
 function hasData(points: ChartPoint[], key: string): boolean {
-  return points.some((point) => point[key] > 0);
+  return points.some((point) => (point[key] ?? 0) > 0);
 }

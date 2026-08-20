@@ -92,18 +92,19 @@ function formatMs(value: number): string {
 }
 
 function streamRtt(result: ResultSummary): number | undefined {
-  const avg = result.averages;
+  const avg = result.averages ?? {};
   const rtt = avg.net_rtt_ms || avg.transport_rtt_ms || avg.quic_rtt_ms;
   return finitePositive(rtt) ? rtt : undefined;
 }
 
 function streamPlaybackFps(result: ResultSummary): number | undefined {
-  if (finitePositive(result.averages.playback_fps)) {
-    return result.averages.playback_fps;
+  const avg = result.averages ?? {};
+  if (finitePositive(avg.playback_fps)) {
+    return avg.playback_fps;
   }
   return playbackFpsFromCounters(
-    result.averages.playback_frames_rendered ?? 0,
-    Math.max(result.samples, result.averages.playback_video_time_sec ?? 0),
+    avg.playback_frames_rendered ?? 0,
+    Math.max(result.samples ?? 0, avg.playback_video_time_sec ?? 0),
   );
 }
 
@@ -123,7 +124,7 @@ export function buildComparisonVerdict(
   const highlights: VerdictHighlight[] = [];
   const parts: string[] = [];
 
-  const ttff = pickLowest(streams, (r) => r.averages.playback_ttff_ms);
+  const ttff = pickLowest(streams, (r) => r.averages?.playback_ttff_ms);
   if (ttff) {
     const name = streamName(streams[ttff.index], ttff.index, labels);
     highlights.push({
@@ -135,7 +136,7 @@ export function buildComparisonVerdict(
     parts.push(`${name} joined fastest (${formatMs(ttff.value)})`);
   }
 
-  const stalls = pickLowestOrZero(streams, (r) => r.averages.playback_stall_count);
+  const stalls = pickLowestOrZero(streams, (r) => r.averages?.playback_stall_count);
   if (stalls) {
     const name = streamName(streams[stalls.index], stalls.index, labels);
     const value =
@@ -157,7 +158,7 @@ export function buildComparisonVerdict(
   // jitter buffer; HLS/TS uses wall − encoder playhead. Same units, same
   // question (how late is the glass vs capture). Rank any plausible sample.
   const e2e = pickLowest(streams, (r) =>
-    isPlausibleE2eMs(r.averages.e2e_latency_ms) ? r.averages.e2e_latency_ms : null,
+    isPlausibleE2eMs(r.averages?.e2e_latency_ms) ? r.averages?.e2e_latency_ms : null,
   );
   if (e2e) {
     const name = streamName(streams[e2e.index], e2e.index, labels);
@@ -192,7 +193,7 @@ export function buildComparisonVerdict(
     });
   }
 
-  const dropped = pickLowestOrZero(streams, (r) => r.averages.playback_frames_dropped);
+  const dropped = pickLowestOrZero(streams, (r) => r.averages?.playback_frames_dropped);
   if (dropped && highlights.length < 7) {
     const name = streamName(streams[dropped.index], dropped.index, labels);
     highlights.push({

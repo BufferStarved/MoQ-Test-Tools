@@ -6,7 +6,8 @@ import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
 import { PipelineConfigDetails } from "./PipelineConfigDetails";
 import { buildSessionPipelineSections, type PipelineDiagramSpec } from "./pipelineConfig";
-import { protocolColor } from "./protocolTheme";
+import { ResultsErrorBoundary } from "./ResultsErrorBoundary";
+import { protocolColor, protocolLabel } from "./protocolTheme";
 import { isRealVmafLeg } from "./qualityVmaf";
 import type { ResultSummary } from "./types";
 
@@ -54,7 +55,7 @@ function streamLabel(result: ResultSummary, index: number, labels?: string[]): s
   if (result.summary_extra?.stream_label) {
     return result.summary_extra.stream_label;
   }
-  return `Stream ${index + 1} (${result.protocol.toUpperCase()})`;
+  return `Stream ${index + 1} (${protocolLabel(result.protocol)})`;
 }
 
 function healthTone(count?: number | null): "ok" | "warn" | "na" {
@@ -127,28 +128,31 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         extra?.target_latency_ms != null
           ? `HLS/SRT ${extra.target_latency_ms} ms · MoQ uses its own budget`
           : "Shared encode profile",
-      streams: streams.map((result, index) => ({
+      streams: streams.map((result, index) => {
+        const proto = (result.protocol || "").toLowerCase();
+        return {
         id: result.filename,
         label: `Output ${index + 1}`,
-        protocol: result.protocol,
-        publish: result.protocol.toLowerCase() === "moq" ? "MoQ" : result.protocol.toUpperCase(),
+        protocol: proto || "unknown",
+        publish: proto === "moq" ? "MoQ" : protocolLabel(result.protocol),
         ingest: streamLabel(result, index, labels),
         packager:
-          result.protocol.toLowerCase() === "moq"
+          proto === "moq"
             ? "Objects"
-            : result.protocol.toLowerCase() === "webrtc"
+            : proto === "webrtc"
               ? "Direct WHEP"
               : result.summary_extra?.hls_segment_sec
                 ? `HLS ${result.summary_extra.hls_segment_sec}s`
                 : "Packager",
         player:
-          result.protocol.toLowerCase() === "moq"
+          proto === "moq"
             ? "MoQ"
-            : result.protocol.toLowerCase() === "webrtc"
+            : proto === "webrtc"
               ? "WHEP"
               : "HLS",
         accentColor: protocolColor(result.protocol),
-      })),
+        };
+      }),
     };
   }, [fromHistory, labels, streams]);
 
@@ -265,7 +269,9 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       {chartLegs.length > 0 && (
         <section className="scorecard-section session-charts-section">
-          <ComparisonCharts legs={chartLegs} minLegs={1} />
+          <ResultsErrorBoundary label="charts">
+            <ComparisonCharts legs={chartLegs} minLegs={1} />
+          </ResultsErrorBoundary>
         </section>
       )}
 
@@ -273,7 +279,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         <h4>Latency & join</h4>
         <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
           {displayStreams.map((result, index) => {
-            const avg = result.averages;
+            const avg = result.averages ?? {};
             return (
               <div key={`lat-${result.filename}`} className="scorecard-column">
                 <p className="scorecard-column-title">{displayLabels[index]}</p>
@@ -381,7 +387,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
           {displayStreams.map((result, index) => {
             const encoder = result.quality?.encoder;
             const ingest = result.quality?.ingest;
-            const avg = result.averages;
+            const avg = result.averages ?? {};
             const encoderReal = isRealVmafLeg(encoder);
             const ingestReal = isRealVmafLeg(ingest);
             return (
@@ -457,7 +463,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         <h4>Media health (end state)</h4>
         <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
           {displayStreams.map((result, index) => {
-            const avg = result.averages;
+            const avg = result.averages ?? {};
             const isMoq = result.protocol === "moq";
             return (
               <div key={`mh-${result.filename}`} className="scorecard-column">
@@ -508,7 +514,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         <h4>Encode health</h4>
         <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
           {displayStreams.map((result, index) => {
-            const avg = result.averages;
+            const avg = result.averages ?? {};
             return (
               <div key={`enc-${result.filename}`} className="scorecard-column">
                 <p className="scorecard-column-title">{displayLabels[index]}</p>

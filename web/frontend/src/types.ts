@@ -187,9 +187,9 @@ export interface QualityLeg {
 export interface ResultSummary {
   filename: string;
   samples: number;
-  protocol: string;
-  endpoint: string;
-  averages: {
+  protocol?: string | null;
+  endpoint?: string | null;
+  averages?: {
     cpu_percent: number;
     memory_mb: number;
     encoded_bitrate_kbps: number;

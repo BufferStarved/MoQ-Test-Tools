@@ -1,4 +1,5 @@
 import { fetchResultDetail, fetchResults } from "./api";
+import { protocolLabel } from "./protocolTheme";
 import type { ResultFile, ResultSummary } from "./types";
 
 export interface SessionGroup {
@@ -95,7 +96,8 @@ export async function loadSessionSummaries(
 ): Promise<{ summaries: ResultSummary[]; labels: string[] }> {
   const details = await Promise.all(group.files.map((file) => fetchResultDetail(file.filename)));
   const labels = details.map(
-    (detail, index) => detail.summary_extra?.stream_label || `Stream ${index + 1} (${detail.protocol.toUpperCase()})`,
+    (detail, index) =>
+      detail.summary_extra?.stream_label || `Stream ${index + 1} (${protocolLabel(detail.protocol)})`,
   );
   return { summaries: details, labels };
 }

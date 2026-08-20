@@ -3027,6 +3027,21 @@ code {
   gap: 8px;
 }
 
+.results-crash {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 16px 18px;
+  border: 1px solid var(--warning-border);
+  background: var(--warning-soft);
+  border-radius: 10px;
+}
+
+.results-crash p {
+  margin: 0;
+}
+
 .results-output-tabs {
   display: flex;
   flex-wrap: wrap;

@@ -25,6 +25,9 @@ interface MetricChartProps {
 }
 
 function formatValue(value: number, unit?: string): string {
+  if (value == null || !Number.isFinite(value)) {
+    return "—";
+  }
   if (unit === "kbps") {
     return `${value.toFixed(0)} kbps`;
   }

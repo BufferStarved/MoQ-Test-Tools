@@ -56,7 +56,7 @@ function playbackShortLabel(mode?: string | null, protocol = ""): string {
     case "":
     case undefined:
     case null:
-      return protocol.toLowerCase() === "moq" ? "MoQ" : "Default";
+      return (protocol || "").toLowerCase() === "moq" ? "MoQ" : "Default";
     default:
       return mode || "Default";
   }
@@ -66,7 +66,7 @@ export function diagramHopsForStream(
   stream: StreamConfigInput,
   summary: EncodeProfileSummary,
 ): Pick<PipelineDiagramStream, "publish" | "ingest" | "packager" | "player"> {
-  const protocol = stream.protocol.toLowerCase();
+  const protocol = (stream.protocol || "").toLowerCase();
   const ingest = stream.ingestEndpointId;
   const mode = (stream.playbackMode || "auto").toLowerCase();
   let packager = "Origin";
@@ -97,7 +97,7 @@ export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "browser";
 
 export interface StreamConfigInput {
   label: string;
-  protocol: string;
+  protocol?: string | null;
   ingestEndpointId: string;
   endpointUrl?: string;
   playbackMode?: PlaybackMode | string;
@@ -215,9 +215,9 @@ function publisherRows(
   summary: EncodeProfileSummary,
   encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
-  const protocol = stream.protocol.toLowerCase();
+  const protocol = (stream.protocol || "").toLowerCase();
   const rows: ConfigDetailRow[] = [
-    { label: "Publish protocol", value: protocol.toUpperCase() },
+    { label: "Publish protocol", value: protocol ? protocol.toUpperCase() : "—" },
   ];
   if (protocol === "srt") {
     rows.push({
@@ -297,7 +297,7 @@ function packagerRows(
   summary: EncodeProfileSummary,
   encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
-  const protocol = stream.protocol.toLowerCase();
+  const protocol = (stream.protocol || "").toLowerCase();
   const ingest = stream.ingestEndpointId;
   const mode = (stream.playbackMode || "auto").toLowerCase();
   const rows: ConfigDetailRow[] = [];
@@ -369,7 +369,7 @@ function playerRows(
     { label: "Playback mode", value: playbackLabel(stream.playbackMode) },
   ];
 
-  if (mode === "moq" || mode === "playa" || stream.protocol.toLowerCase() === "moq") {
+  if (mode === "moq" || mode === "playa" || (stream.protocol || "").toLowerCase() === "moq") {
     const catchUp = summary.moq_catch_up;
     rows.push({
       label: "MoQ target latency",
@@ -479,7 +479,7 @@ export function buildRecipePipelineSections(
 }
 
 export function buildSessionPipelineSections(streams: Array<{
-  protocol: string;
+  protocol?: string | null;
   endpoint?: string;
   summary_extra?: {
     encode_ladder?: string | null;

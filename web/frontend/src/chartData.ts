@@ -1,5 +1,5 @@
 import type { ResultSummary, UploadSample } from "./types";
-import { assignStreamColors, STREAM_COLORS } from "./protocolTheme";
+import { assignStreamColors, STREAM_COLORS } from "./protocolTheme.ts";
 
 export interface ChartPoint {
   second: number;
@@ -121,6 +121,9 @@ export const LEGACY_CHART_GROUP_ALIASES: Record<string, string> = {
   video_quality: "encode",
 };
 
+/** Hard cap so a unix-epoch timestamp cannot allocate millions of chart points. */
+export const MAX_CHART_SECONDS = 4 * 60 * 60;
+
 function parseNumber(value: string | undefined): number {
   if (!value || value.trim() === "") {
     return 0;
@@ -129,12 +132,29 @@ function parseNumber(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function clampChartSecond(value: number | undefined | null): number {
+  if (value == null || !Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+  return Math.min(MAX_CHART_SECONDS, Math.round(value));
+}
+
+function uniqueChartSeconds(perLegPoints: ChartPoint[][]): number[] {
+  const seconds = new Set<number>();
+  for (const points of perLegPoints) {
+    for (const point of points) {
+      seconds.add(clampChartSecond(point.second));
+    }
+  }
+  return [...seconds].sort((a, b) => a - b);
+}
+
 function rowMetric(row: Record<string, string>, key: string, legacyKey?: string): number {
   return parseNumber(row[key] ?? (legacyKey ? row[legacyKey] : undefined));
 }
 
-export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] {
-  if (rows.length === 0) {
+export function rowsToChartPoints(rows: Record<string, string>[] | null | undefined): ChartPoint[] {
+  if (!rows || rows.length === 0) {
     return [];
   }
 
@@ -142,10 +162,9 @@ export function rowsToChartPoints(rows: Record<string, string>[]): ChartPoint[] 
 
   const points = rows.map((row, index) => {
     const timestamp = parseNumber(row.timestamp);
-    const second =
-      firstTimestamp > 0 && timestamp > 0
-        ? Math.max(0, Math.round(timestamp - firstTimestamp))
-        : index;
+    const second = clampChartSecond(
+      firstTimestamp > 0 && timestamp > 0 ? timestamp - firstTimestamp : index,
+    );
 
     const transportRtt = rowMetric(row, "transport_rtt_ms", "rtt_ms");
     const transportJitter = rowMetric(row, "transport_rtt_jitter_ms", "rtt_jitter_ms");
@@ -332,10 +351,11 @@ export function qualityScoresFromResult(result: ResultSummary): {
     }
     return null;
   };
+  const averages = result.averages ?? {};
   return {
-    vmafScore: pick(result.averages.vmaf_score, ingest?.vmaf_score, encoder?.vmaf_score),
-    psnrDb: pick(result.averages.psnr_db, ingest?.psnr_db, encoder?.psnr_db),
-    ssim: pick(result.averages.ssim, ingest?.ssim, encoder?.ssim),
+    vmafScore: pick(averages.vmaf_score, ingest?.vmaf_score, encoder?.vmaf_score),
+    psnrDb: pick(averages.psnr_db, ingest?.psnr_db, encoder?.psnr_db),
+    ssim: pick(averages.ssim, ingest?.ssim, encoder?.ssim),
   };
 }
 
@@ -388,7 +408,7 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
   const hlsFatal = sample.playback_hls_fatal_errors ?? 0;
 
   return {
-    second: sample.elapsed_sec,
+    second: clampChartSecond(sample.elapsed_sec),
     encoded_bitrate_kbps: sample.encoded_bitrate_kbps,
     fps: sample.fps,
     fps_stability: sample.fps_stability ?? 0,
@@ -493,10 +513,7 @@ export function samplesToChartPoints(samples: UploadSample[]): ChartPoint[] {
 }
 
 export function hasSeriesData(points: ChartPoint[], key: string): boolean {
-  if (key === "vmaf_score") {
-    return points.some((point) => point[key] > 0);
-  }
-  return points.some((point) => point[key] > 0);
+  return points.some((point) => (point[key] ?? 0) > 0);
 }
 
 export function visibleGroups(points: ChartPoint[], protocol: string): ChartGroup[] {
@@ -535,15 +552,16 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
 }
 
 export function resultToChartPoints(result: ResultSummary): ChartPoint[] {
+  const averages = result.averages ?? {};
   let points = applyQualityScores(rowsToChartPoints(result.rows), qualityScoresFromResult(result));
   points = applyStagedQualityScores(points, stagedQualityScoresFromResult(result));
   return applyMediaHealthScores(points, {
-    cmaf_seq_gap_count: result.averages.cmaf_seq_gap_count,
-    cmaf_tfdt_gap_count: result.averages.cmaf_tfdt_gap_count,
-    cmaf_tfdt_gap_ms: result.averages.cmaf_tfdt_gap_ms,
-    cmaf_tfdt_overlap_count: result.averages.cmaf_tfdt_overlap_count,
-    cmaf_parse_errors: result.averages.cmaf_parse_errors,
-    cmaf_fragment_count: result.averages.cmaf_fragment_count,
+    cmaf_seq_gap_count: averages.cmaf_seq_gap_count,
+    cmaf_tfdt_gap_count: averages.cmaf_tfdt_gap_count,
+    cmaf_tfdt_gap_ms: averages.cmaf_tfdt_gap_ms,
+    cmaf_tfdt_overlap_count: averages.cmaf_tfdt_overlap_count,
+    cmaf_parse_errors: averages.cmaf_parse_errors,
+    cmaf_fragment_count: averages.cmaf_fragment_count,
   });
 }
 
@@ -585,7 +603,7 @@ export function resultToSavedStream(result: ResultSummary, index: number): Saved
   return {
     id: result.filename,
     label,
-    protocol: result.protocol,
+    protocol: result.protocol ?? "",
     result,
     vmafScore: scores.vmafScore,
     psnrDb: scores.psnrDb,
@@ -605,10 +623,10 @@ export function buildComparisonPointsFromResults(streams: SavedStreamData[]): Ch
   }
 
   const perStreamPoints = streams.map((stream) => resultToChartPoints(stream.result));
-  const maxSecond = Math.max(0, ...perStreamPoints.flatMap((points) => points.map((point) => point.second)));
+  const seconds = uniqueChartSeconds(perStreamPoints);
   const points: ChartPoint[] = [];
 
-  for (let second = 0; second <= maxSecond; second += 1) {
+  for (const second of seconds) {
     const point: ChartPoint = { second };
     perStreamPoints.forEach((streamPoints, index) => {
       const sample = streamPoints.find((item) => item.second === second);
@@ -723,6 +741,12 @@ const COMPARISON_METRIC_KEYS = [
   "vmaf_score",
   "psnr_db",
   "ssim",
+  "vmaf_score_encoder",
+  "psnr_db_encoder",
+  "ssim_encoder",
+  "vmaf_score_ingest",
+  "psnr_db_ingest",
+  "ssim_ingest",
 ] as const;
 
 export interface ComparisonLegData {
@@ -765,13 +789,10 @@ export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
           : [],
   }));
 
-  const maxSecond = Math.max(
-    0,
-    ...normalizedLegs.flatMap((leg) => leg.points.map((point) => point.second)),
-  );
+  const seconds = uniqueChartSeconds(normalizedLegs.map((leg) => leg.points));
 
   const points: ChartPoint[] = [];
-  for (let second = 0; second <= maxSecond; second += 1) {
+  for (const second of seconds) {
     const point: ChartPoint = { second };
     normalizedLegs.forEach((leg, index) => {
       const samplePoint = leg.points.find((item) => item.second === second);

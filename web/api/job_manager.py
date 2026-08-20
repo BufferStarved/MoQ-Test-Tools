@@ -1350,6 +1350,19 @@ def _row_value(row: dict, key: str) -> float:
     return 0.0
 
 
+def _read_summary_sidecar(csv_path: str) -> dict:
+    base, _ = os.path.splitext(csv_path)
+    summary_path = f"{base}.summary.json"
+    if not os.path.exists(summary_path):
+        return {}
+    try:
+        with open(summary_path, mode="r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def read_result_summary(csv_path: str) -> dict:
     rows = []
     with open(csv_path, mode="r") as file:
@@ -1357,8 +1370,21 @@ def read_result_summary(csv_path: str) -> dict:
         for row in reader:
             rows.append(row)
 
+    sidecar = _read_summary_sidecar(csv_path)
     if not rows:
-        return {"samples": 0, "averages": {}}
+        # Header-only / failed-leg CSVs still have a sidecar with protocol.
+        # Returning a stub without protocol made the Results tab throw on
+        # result.protocol.toUpperCase() and unmount the SPA.
+        return {
+            "samples": 0,
+            "protocol": sidecar.get("protocol") or "",
+            "endpoint": sidecar.get("endpoint") or sidecar.get("endpoint_url") or "",
+            "averages": sidecar.get("averages") or {},
+            "throughput": sidecar.get("throughput") or {},
+            "rows": [],
+            "summary_extra": sidecar.get("extra") or {},
+            "quality": sidecar.get("quality") or {},
+        }
 
     count = len(rows)
     numeric_keys = [
@@ -1450,17 +1476,11 @@ def read_result_summary(csv_path: str) -> dict:
     if vmaf_values:
         averages["vmaf_score"] = round(vmaf_values[-1], 3)
 
-    summary_extra = {}
-    throughput = {}
-    quality = {}
-    base, _ = os.path.splitext(csv_path)
-    summary_path = f"{base}.summary.json"
-    if os.path.exists(summary_path):
-        with open(summary_path, mode="r", encoding="utf-8") as handle:
-            summary_payload = json.load(handle)
-        summary_extra = summary_payload.get("extra", {})
-        throughput = summary_payload.get("throughput", {})
-        quality = summary_payload.get("quality", {})
+    summary_extra = sidecar.get("extra") or {}
+    throughput = sidecar.get("throughput") or {}
+    quality = sidecar.get("quality") or {}
+    if sidecar:
+        summary_payload = sidecar
         summary_averages = summary_payload.get("averages", {})
         for key in (
             "vmaf_score",
@@ -1493,8 +1513,11 @@ def read_result_summary(csv_path: str) -> dict:
 
     return {
         "samples": count,
-        "protocol": rows[0].get("protocol", ""),
-        "endpoint": rows[0].get("endpoint", ""),
+        "protocol": rows[0].get("protocol") or sidecar.get("protocol") or "",
+        "endpoint": rows[0].get("endpoint")
+        or sidecar.get("endpoint")
+        or sidecar.get("endpoint_url")
+        or "",
         "averages": averages,
         "throughput": throughput,
         "rows": rows,

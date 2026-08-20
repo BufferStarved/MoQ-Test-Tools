@@ -21,6 +21,7 @@ import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { EndpointSection } from "./EndpointSection";
 import { AboutPage, PAYPAL_DONATE_URL } from "./AboutPage";
+import { ResultsErrorBoundary } from "./ResultsErrorBoundary";
 import { SessionMetrics } from "./SessionMetrics";
 import { SessionHistory } from "./SessionHistory";
 import { StreamPlayer } from "./StreamPlayer";
@@ -1789,6 +1790,7 @@ function App() {
             {(loading || comparisonLegs.some((leg) => leg.samples.length > 0)) && (
               <section className="panel live-charts-panel">
                 <h2 className="live-charts-heading">Charts</h2>
+                <ResultsErrorBoundary label="live charts">
                 <ComparisonCharts
                   legs={comparisonLegs.map((leg, index) => {
                     const endpoint = endpoints[index];
@@ -1851,6 +1853,7 @@ function App() {
                     };
                   })}
                 />
+                </ResultsErrorBoundary>
               </section>
             )}
           </>
@@ -1872,11 +1875,13 @@ function App() {
                 }}
               />
             </div>
-            <SessionMetrics
-              streams={sessionMetrics}
-              labels={sessionMetricLabels}
-              fromHistory={sessionFromHistory}
-            />
+            <ResultsErrorBoundary label="session">
+              <SessionMetrics
+                streams={sessionMetrics}
+                labels={sessionMetricLabels}
+                fromHistory={sessionFromHistory}
+              />
+            </ResultsErrorBoundary>
           </section>
         )}
 
