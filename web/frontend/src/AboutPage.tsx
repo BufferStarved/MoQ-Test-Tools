@@ -310,9 +310,10 @@ export function AboutPage() {
             WebTransport-capable browser (Chrome / Edge).
           </li>
           <li>
-            Glass delay is comparable across protocols: MoQ LOC uses CaptureTimestamp at camera
-            capture; WebRTC uses encode time + RTT/2 + jitter buffer; HLS/HTTP-TS uses wall clock
-            minus the encoder-timeline playhead. Frozen playheads no longer inflate the series.
+            Glass delay is comparable across protocols: MoQ LOC uses CaptureTimestamp of the
+            frame on glass (plus freeze time if that frame is stale); WebRTC uses encode time +
+            RTT/2 + jitter buffer; HLS/HTTP-TS uses wall clock minus the encoder-timeline
+            playhead. A frozen MoQ canvas must climb or go blank — never a flat 30ms win.
             TTFF stays a separate join metric.
           </li>
           <li>

@@ -4,6 +4,7 @@
  * playhead stuck at 1.4s, e2e ~20ms vs WebRTC ~170ms.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,11 +96,22 @@ assert.match(truth, /export function locGlassDelayMs/);
 const moq = fs.readFileSync(path.join(root, "players/MoqPlayer.tsx"), "utf8");
 assert.match(moq, /inferDroppedFrames/);
 assert.match(moq, /lastFrameAtMs/);
+assert.match(moq, /resetLocPlaybackPipeline/);
+assert.match(moq, /requestLocIdr/);
 const charts = fs.readFileSync(path.join(root, "ComparisonCharts.tsx"), "utf8");
 assert.match(charts, /playa reports 0/);
 assert.match(charts, /stale frame aging/);
 const glass = fs.readFileSync(path.join(root, "glassLatency.ts"), "utf8");
 assert.match(glass, /mediaPackaging === "loc"/);
 assert.match(glass, /locGlassDelayMs/);
+
+for (const testFile of ["playbackTruth.test.ts", "glassLatency.test.ts", "moqLocPlayback.test.ts"]) {
+  const unit = spawnSync(
+    process.execPath,
+    ["--test", "--experimental-strip-types", path.join(root, testFile)],
+    { encoding: "utf8" },
+  );
+  assert.equal(unit.status, 0, `${testFile}: ${unit.stderr || unit.stdout}`);
+}
 
 console.log("unit-playback-truth: PASS");

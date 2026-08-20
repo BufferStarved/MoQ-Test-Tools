@@ -75,7 +75,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   e2e_latency_ms: {
     label: "Glass delay (estimated)",
     description:
-      "Capture-to-glass delay in milliseconds, comparable across protocols. MoQ LOC: playa latency from LOC CaptureTimestamp (Unix-epoch µs stamped at camera capture). WebRTC: encode time + RTT/2 + jitter buffer. HLS/HTTP-TS: clock-skew-corrected wall now minus the encoder-timeline playhead. Frozen playheads are not allowed to make this climb with wall clock. Distinct from TTFF.",
+      "Capture-to-glass delay in milliseconds, comparable across protocols. MoQ LOC: last painted frame's CaptureTimestamp (or path delay) plus stall time if the canvas is frozen — a stalled playhead must climb, never sit at a healthy ~30ms. WebRTC: encode time + RTT/2 + jitter buffer. HLS/HTTP-TS: clock-skew-corrected wall now minus the encoder-timeline playhead. Distinct from TTFF.",
   },
   playback_fps: {
     label: "Playback FPS",

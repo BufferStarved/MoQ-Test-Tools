@@ -12,6 +12,8 @@ describe("computeMoqE2eMs", () => {
 
   it("does not grow LOC e2e with media time when playhead is frames/30", () => {
     const firstFrameAtMs = 1_000_000;
+    const earlyNow = firstFrameAtMs + 2_000;
+    const lateNow = firstFrameAtMs + 20_000;
     const early = computeMoqE2eMs({
       mediaPackaging: "loc",
       encoderLagMs: 8,
@@ -19,9 +21,10 @@ describe("computeMoqE2eMs", () => {
       bufferMs: 20,
       ttffMs: 400,
       firstFrameAtMs,
+      lastFrameAtMs: earlyNow,
       firstFrameVideoSec: 0,
       videoCurrentTimeSec: 2,
-      nowMs: firstFrameAtMs + 2_000,
+      nowMs: earlyNow,
     });
     const late = computeMoqE2eMs({
       mediaPackaging: "loc",
@@ -30,12 +33,27 @@ describe("computeMoqE2eMs", () => {
       bufferMs: 20,
       ttffMs: 400,
       firstFrameAtMs,
+      lastFrameAtMs: lateNow,
       firstFrameVideoSec: 0,
       videoCurrentTimeSec: 18,
-      nowMs: firstFrameAtMs + 20_000,
+      nowMs: lateNow,
     });
     assert.equal(early, late);
     assert.ok((early ?? 0) < 200);
+  });
+
+  it("does not report ~30ms LOC glass delay while the playhead is frozen", () => {
+    const firstFrameAtMs = 1_000_000;
+    const frozen = computeMoqE2eMs({
+      mediaPackaging: "loc",
+      encoderLagMs: 6,
+      rttMs: 38,
+      bufferMs: 0,
+      firstFrameAtMs,
+      lastFrameAtMs: firstFrameAtMs + 1_400,
+      nowMs: firstFrameAtMs + 36_000,
+    });
+    assert.ok((frozen ?? 0) > 20_000, `stale canvas must not stay at path delay, got ${frozen}`);
   });
 
   it("falls back to encode-epoch + playhead for CMAF when join offset is null", () => {

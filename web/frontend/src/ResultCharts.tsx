@@ -330,7 +330,7 @@ export function ResultCharts({
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "e2e_latency_ms")}
-                caption="Capture-to-glass. A healthy line stays flat; a climb is a frozen playhead, not growing delay."
+                caption="Capture-to-glass of the frame on screen. A healthy live line stays roughly flat. If the playhead is frozen this line climbs with wall time — that is the stale frame aging, not a 20ms win."
               />
             )}
             {hasData(points, "playback_ttff_ms") && (
@@ -361,7 +361,7 @@ export function ResultCharts({
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_frames_dropped")}
                 keepZeroSeries
-                caption="Cumulative viewer-side drops. Rising means the player missed frames."
+                caption="Cumulative viewer-side drops. Browser MoQ LOC infers this (playa reports 0). Rising means the player missed frames."
               />
             )}
             <MetricChart
@@ -385,7 +385,7 @@ export function ResultCharts({
                 keepZeroSeries
               />
             )}
-            {(hasData(points, "playback_buffer_sec") || isWebrtc) && (
+            {(hasData(points, "playback_buffer_sec") || isWebrtc || isMoq) && (
               <MetricChart
                 title="Buffer size"
                 metricKey="playback_buffer_sec"
@@ -395,16 +395,19 @@ export function ResultCharts({
                 caption={
                   isWebrtc
                     ? "WebRTC/WHEP jitter buffer from RTC stats (jitterBufferDelay), not HLS buffered ranges."
-                    : "Seconds of media buffered ahead of the playhead."
+                    : isMoq
+                      ? "MoQ canvas: seconds the glass is behind the encode (missed frames / fps). Rising here is missed video, not a larger safety buffer."
+                      : "Seconds of media buffered ahead of the playhead."
                 }
               />
             )}
-            {hasData(points, "playback_video_time_sec") && (
+            {(hasData(points, "playback_video_time_sec") || isMoq) && (
               <MetricChart
                 title="Playhead (seconds of media on glass)"
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_video_time_sec")}
+                keepZeroSeries
                 caption="Seconds of media the player has painted. A healthy line tracks encode time (the x-axis) within about a second. A line that stops while the x-axis keeps going is a freeze."
               />
             )}
