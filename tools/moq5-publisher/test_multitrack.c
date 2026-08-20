@@ -1,6 +1,11 @@
-#define main moq5_publisher_cli_main
-#include "main.c"
-#undef main
+#include "fmp4_moq_bridge_priv.h"
+
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
 #define CHECK(expr) do { \
     if (!(expr)) { \
@@ -229,7 +234,9 @@ int main(int argc, char **argv)
     moq_media_sender_cfg_t sender_cfg;
     init_sender_cfg(&sender_cfg, &ns_part, 1);
     CHECK(sender_cfg.struct_size == sizeof(sender_cfg));
+#if MOQ5_HAVE_PUBLISH_TRACKS
     CHECK(sender_cfg.publish_tracks);
+#endif
     CHECK(sender_cfg.namespace_.count == 1);
 
     bool have_audio = false;

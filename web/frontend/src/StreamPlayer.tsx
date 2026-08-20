@@ -69,6 +69,8 @@ interface StreamPlayerProps {
   netRttMs?: number;
   /** MOQT draft the in-page publisher negotiated; ffmpeg/openmoq legs stay 16. */
   moqDraftVersion?: 16 | 18;
+  /** False for the draft-18 canary (public Let's Encrypt; hash-pin needs ≤14-day certs). */
+  moqPinTlsCert?: boolean;
   /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
   moqMediaPackaging?: "cmaf" | "loc";
 }
@@ -119,6 +121,7 @@ export function StreamPlayer({
   encoderLagMs = 0,
   netRttMs = 0,
   moqDraftVersion = 18,
+  moqPinTlsCert = true,
   moqMediaPackaging = "cmaf",
 }: StreamPlayerProps) {
   const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);
@@ -285,7 +288,7 @@ export function StreamPlayer({
               fingerprintUrl={target.moqFingerprintUrl}
               label={target.label}
               playbackGate={moqPlaybackGate}
-              pinTlsCert
+              pinTlsCert={moqPinTlsCert}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
               onPlaybackSample={onPlaybackSample}

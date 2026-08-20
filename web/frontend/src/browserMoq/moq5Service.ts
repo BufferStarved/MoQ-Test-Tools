@@ -12,7 +12,7 @@ import {
 import type { MoqtDraftVersion } from "./moqtVersions";
 import { openStrictMoqtWebTransport } from "./webTransport";
 
-const RELAY_DRAFT: MoqtDraftVersion = 18;
+const DEFAULT_RELAY_DRAFT: MoqtDraftVersion = 18;
 
 /**
  * In-browser MoQ5 / MOQT publish surface.
@@ -78,8 +78,10 @@ export async function connectMoq5WasmPublisher(options: {
   videoCodec?: string;
   audioSampleRate?: number;
   audioChannels?: number;
+  draftVersion?: MoqtDraftVersion;
   onVideoSubscribed?: () => void;
 }): Promise<Moq5PublishSession> {
+  const draft = options.draftVersion ?? DEFAULT_RELAY_DRAFT;
   const certHash = options.fingerprintUrl ? await fetchCertHash(options.fingerprintUrl) : undefined;
   const catalogPayload = buildCatalog(
     browserLocCatalogTracks({
@@ -92,11 +94,11 @@ export async function connectMoq5WasmPublisher(options: {
     }),
   );
 
-  const transport = await openWebTransport(options.relayUrl, certHash, RELAY_DRAFT);
+  const transport = await openWebTransport(options.relayUrl, certHash, draft);
   try {
     return await bindPublisherSession({
       transport,
-      draft: RELAY_DRAFT,
+      draft,
       options,
       catalogPayload,
     });
@@ -107,7 +109,7 @@ export async function connectMoq5WasmPublisher(options: {
       // already closed
     }
     const detail = err instanceof Error ? err.message : "WebTransport failed";
-    throw new Error(`Relay did not accept MOQT draft-18: ${detail}`);
+    throw new Error(`Relay did not accept MOQT draft-${draft}: ${detail}`);
   }
 }
 

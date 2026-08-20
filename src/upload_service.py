@@ -2032,7 +2032,7 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
-        publisher_bin, publisher_backend = find_moq_publisher()
+        publisher_bin, publisher_backend = find_moq_publisher(job.destination.preset_id)
         if not publisher_bin:
             return UploadResult(
                 success=False,

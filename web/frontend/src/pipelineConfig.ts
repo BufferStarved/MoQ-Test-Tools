@@ -1,5 +1,5 @@
 import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles";
-import { ingestEndpointLabel, isCustomIngestEndpoint } from "./ingestEndpoints";
+import { ingestEndpointLabel, isCustomIngestEndpoint, isMoqRelayIngest } from "./ingestEndpoints";
 import type { PlaybackMode } from "./playbackTypes";
 import type { EndpointConfig } from "./types";
 
@@ -276,7 +276,7 @@ function ingestRows(stream: StreamConfigInput): ConfigDetailRow[] {
       value: "MediaMTX",
       note: "SRT/RTMP/WHIP → LL-HLS / LL-DASH / WHEP",
     });
-  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
+  } else if (isMoqRelayIngest(ingest)) {
     rows.push({
       label: "Ingest role",
       value: "OpenMOQ relay",
@@ -341,7 +341,7 @@ function packagerRows(
         note: "Part duration follows MediaMTX low-latency HLS settings",
       });
     }
-  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
+  } else if (isMoqRelayIngest(ingest)) {
     rows.push({
       label: "Packager",
       value: encodeKind === "browser" ? "MoQ / LOC objects" : "MoQ / CMAF objects",
@@ -534,12 +534,20 @@ export function buildSessionPipelineSections(streams: Array<{
 
 function guessIngestFromEndpoint(endpoint: string): string {
   const url = endpoint.toLowerCase();
+  const canary = url.includes(":14433");
+  if (url.includes("34.138.137.211") || url.includes("34-138-137-211")) {
+    return canary ? "gcp_east_moq_relay_d18" : "gcp_east_moq_relay";
+  }
+  if (url.includes("45.79.177.85") || url.includes("45-79-177-85")) {
+    return canary ? "linode_moq_relay_d18" : "linode_moq_relay";
+  }
   if (
     url.includes("34.28.164.90") ||
+    url.includes("34-28-164-90") ||
     (url.startsWith("https://") && url.includes(":4443")) ||
     url.includes("/anon/")
   ) {
-    return "gcp_moq_relay";
+    return canary ? "gcp_moq_relay_d18" : "gcp_moq_relay";
   }
   if (url.includes("mediamtx") || url.includes(":8890") || url.includes(":8889")) {
     return "gcp_mediamtx";

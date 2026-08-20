@@ -45,6 +45,8 @@ import {
   ingestEndpointLabel,
   isIngestEndpointIdAvailable,
   isCustomIngestEndpoint,
+  moqDraftForIngest,
+  moqPinTlsCertForIngest,
   presetIdForIngest,
   resolveEndpointUrl,
   type IngestEndpointId,
@@ -604,7 +606,7 @@ function App() {
     setEndpoints((current) => {
       let changed = false;
       const next = current.map((endpoint) => {
-        if (endpoint.protocol !== "moq" || !endpoint.ingestEndpointId.endsWith("_moq_relay")) {
+        if (endpoint.protocol !== "moq" || !endpoint.ingestEndpointId.includes("_moq_relay")) {
           return endpoint;
         }
         const presetId = presetIdForIngest(endpoint.ingestEndpointId, endpoint.protocol);
@@ -1239,14 +1241,17 @@ function App() {
                 };
               }
               const relayUrl = endpoint.moqRelayUrl?.trim() || relayWebTransportUrl(publishUrl);
+              const pinTls = moqPinTlsCertForIngest(endpoint.ingestEndpointId);
               return {
                 jobId: job.id,
                 protocol: "moq" as const,
                 relayUrl,
                 namespace: job.moq_namespace || `bench-${job.id.replace(/-/g, "").slice(0, 8)}`,
-                fingerprintUrl:
-                  endpoint.moqFingerprintUrl?.trim() || proxiedMoqFingerprintUrl(relayUrl),
+                fingerprintUrl: pinTls
+                  ? endpoint.moqFingerprintUrl?.trim() || proxiedMoqFingerprintUrl(relayUrl)
+                  : undefined,
                 ingestVmaf: Boolean(computeVmaf && endpoint.vmafAvailable),
+                draftVersion: moqDraftForIngest(endpoint.ingestEndpointId),
               };
             }),
           });
@@ -1626,7 +1631,8 @@ function App() {
                         controlsLocked={bootstrapping || !apiOnline}
                         sourceHasAudio={mediaSource === "browser_moq" ? browserHasAudio : true}
                         moqVideoCodec={mediaSource === "browser_moq" ? browserVideoCodec : undefined}
-                        moqDraftVersion={18}
+                        moqDraftVersion={moqDraftForIngest(endpoint.ingestEndpointId)}
+                        moqPinTlsCert={moqPinTlsCertForIngest(endpoint.ingestEndpointId)}
                         moqMediaPackaging={mediaSource === "browser_moq" ? "loc" : "cmaf"}
                         // Webcam is always captured by the local-agent path (ffmpeg
                         // AVFoundation/V4L2), which always includes an audio input,

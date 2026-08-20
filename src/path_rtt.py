@@ -12,13 +12,13 @@ Jitter is derived from successive samples with the same estimator as libsrt.
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import time
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
+from moqx_stats import admin_port_for_endpoint
 from srt_stats import RttJitterTracker
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -43,9 +43,10 @@ class PathRttProbe:
     ):
         parsed = urlparse(endpoint_url.strip())
         self._host = parsed.hostname or ""
-        # Prefer explicit override; else admin HTTP (8000) on the relay VM —
+        # Prefer explicit override; else admin HTTP on the relay VM —
         # TCP to the QUIC/WebTransport port usually gets no SYN-ACK.
-        self._port = int(port or 0) or int(os.environ.get("MOQX_ADMIN_PORT", "8000"))
+        # :14433 canary uses 18000, not prod 8000.
+        self._port = int(port or 0) or admin_port_for_endpoint(endpoint_url)
         self._timeout_sec = timeout_sec
         self._jitter = RttJitterTracker()
         self._latest = PathRttSnapshot()

@@ -20,6 +20,7 @@ export interface BrowserMoqLeg {
   fingerprintUrl?: string;
   whipUrl?: string;
   ingestVmaf?: boolean;
+  draftVersion?: MoqtDraftVersion;
 }
 
 export interface BrowserMoqRun {
@@ -117,6 +118,7 @@ export async function startBrowserMoqPublish(options: {
           height,
           includeAudio,
           videoCodec,
+          draftVersion: leg.draftVersion ?? 18,
           onVideoSubscribed: () => requestKeyframe(),
         });
         return { leg, session };

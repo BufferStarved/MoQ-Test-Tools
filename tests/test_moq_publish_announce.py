@@ -71,6 +71,7 @@ class PublisherAnnounceContractTests(unittest.TestCase):
             )
         )
         self.assertFalse(publisher_webtransport_connected(""))
+        self.assertTrue(publisher_webtransport_connected("track added: vide_1 (id=1 codec=avc1.4d4028 init=774 bytes)\n"))
 
     def test_sigkill_after_connection_id_is_not_before_connect(self) -> None:
         # Prod bench-216482ff: waiter missed block-buffered stdout, SIGKILL'd

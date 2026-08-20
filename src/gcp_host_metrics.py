@@ -68,8 +68,8 @@ def resolve_gcp_instance(ingest_provider: str = "", endpoint_url: str = "") -> T
         name = os.environ.get("GCP_EAST_INSTANCE_ZIXI", "moq-zixi-east-gcp").strip()
         return name, east_zone
 
-    if provider == "gcp_moq_relay" or (
-        not provider and ("sslip.io" in endpoint or ":4433" in endpoint)
+    if provider.startswith("gcp_moq_relay") or (
+        not provider and ("sslip.io" in endpoint or ":4433" in endpoint or ":14433" in endpoint)
     ):
         name = os.environ.get("GCP_INSTANCE_MOQX", "moq-relay-gcp").strip()
         return name, zone

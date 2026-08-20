@@ -490,7 +490,7 @@ export function proxiedMoqFingerprintUrl(relayUrl: string): string {
 }
 
 export function isManagedMoqRelay(ingestEndpointId: string): boolean {
-  return ingestEndpointId.endsWith("_moq_relay");
+  return ingestEndpointId.includes("_moq_relay");
 }
 
 function zixiHlsUrl(host: string, streamId: string, dvr: boolean): string {

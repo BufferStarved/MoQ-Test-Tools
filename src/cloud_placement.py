@@ -150,18 +150,24 @@ def ingest_endpoint_id_for_provider(ingest_provider: str) -> str:
         return "gcp_mediamtx"
     if provider == "gcp_moq_relay":
         return "gcp_moq_relay"
+    if provider == "gcp_moq_relay_d18":
+        return "gcp_moq_relay_d18"
     if provider == "gcp_east_zixi":
         return "gcp_east_zixi"
     if provider == "gcp_east_mediamtx":
         return "gcp_east_mediamtx"
     if provider == "gcp_east_moq_relay":
         return "gcp_east_moq_relay"
+    if provider == "gcp_east_moq_relay_d18":
+        return "gcp_east_moq_relay_d18"
     if provider == "linode_zixi":
         return "linode_zixi"
     if provider == "linode_mediamtx":
         return "linode_mediamtx"
     if provider == "linode_moq_relay":
         return "linode_moq_relay"
+    if provider == "linode_moq_relay_d18":
+        return "linode_moq_relay_d18"
     if provider == "aws_zixi":
         return "aws_zixi"
     return ""

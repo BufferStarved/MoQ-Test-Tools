@@ -65,7 +65,7 @@ class IngestHostMetricsPoller:
             endpoint_url=endpoint_url,
         )
         self.enabled = self._client is not None or self._gcp.enabled
-        self._prefer_gcp = self._ingest_provider == "gcp_moq_relay" and self._gcp.enabled
+        self._prefer_gcp = self._ingest_provider.startswith("gcp_moq_relay") and self._gcp.enabled
 
     def poll(self) -> IngestHostMetricsSnapshot:
         if self._use_local:

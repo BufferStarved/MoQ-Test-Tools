@@ -240,18 +240,32 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         protocol="moq",
         url="https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark",
         notes=(
-            "Publishes fragmented MP4 from ffmpeg to the GCP OpenMOQ moqx relay via "
-            "openmoq-publisher (WebTransport, draft 18). "
-            "Ingest VMAF subscribes on the ingest worker and records post-relay fMP4 "
-            "for libvmaf scoring. Install recorder (Docker): "
-            "./scripts/install-openmoq-recorder.sh or "
-            "sudo bash infra/zixi/scripts/install-openmoq-recorder.sh on the worker; "
-            "publisher: ./scripts/install-openmoq-publisher.sh"
+            "Prod relay on UDP 4433 (ghcr.io/openmoq/moqx:329b98b, draft-16 only). "
+            "Publishes fragmented MP4 from ffmpeg via openmoq-publisher. "
+            "Do not point draft-18 clients at this URL. Draft-18 canary is "
+            "moq_gcp_relay_d18 on :14433. "
+            "Ingest VMAF: ./scripts/install-openmoq-recorder.sh"
         ),
         supports_vmaf=True,
         ingest_agent_url=moq_recorder_agent_url(CENTRAL_WEB_INGEST_AGENT),
         ingest_recording_dir="/var/lib/moq-relay-recordings",
         ingest_provider="gcp_moq_relay",
+    ),
+    ServicePreset(
+        id="moq_gcp_relay_d18",
+        name="OpenMOQ MOQ-X draft-18 canary gcp-us-central1",
+        protocol="moq",
+        url="https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+        notes=(
+            "Canary moqx on UDP 14433 (scripts/canary-moqx.sh). Speaks moqt-18. "
+            "ffmpeg → moq5-fmp4-publish (not openmoq-publisher). Prod :4433 stays "
+            "draft-16. Start/stop: ./scripts/canary-moqx.sh start|status|stop. "
+            "Do not deploy this as the public demo default."
+        ),
+        supports_vmaf=True,
+        ingest_agent_url=moq_recorder_agent_url(CENTRAL_WEB_INGEST_AGENT),
+        ingest_recording_dir="/var/lib/moq-relay-recordings",
+        ingest_provider="gcp_moq_relay_d18",
     ),
     ServicePreset(
         id="moq_mediamtx_gcp_srt",
@@ -567,6 +581,22 @@ def _build_linode_presets() -> List[ServicePreset]:
             **common,
         ),
         ServicePreset(
+            id="moq_linode_relay_d18",
+            name=f"OpenMOQ MOQ-X draft-18 canary {region_label}",
+            protocol="moq",
+            url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
+            notes=(
+                "Canary moqx on UDP 14433 (scripts/canary-moqx.sh with "
+                "MOQX_CANARY_INSTANCE / MOQX_CANARY_HOST). Speaks moqt-18. "
+                "ffmpeg → moq5-fmp4-publish. Prod :4433 stays draft-16."
+            ),
+            supports_vmaf=True,
+            ingest_agent_url=moq_recorder_agent_url(web_agent),
+            ingest_recording_dir="/var/lib/moq-relay-recordings",
+            ingest_provider="linode_moq_relay_d18",
+            **common,
+        ),
+        ServicePreset(
             id="moq_mediamtx_linode_srt",
             name=f"MediaMTX {region_label} (LL delivery)",
             protocol="srt",
@@ -690,6 +720,23 @@ def _build_gcp_east_presets() -> List[ServicePreset]:
             ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="gcp_east_moq_relay",
+            **common,
+        ),
+        ServicePreset(
+            id="moq_gcp_east_relay_d18",
+            name=f"OpenMOQ MOQ-X draft-18 canary {region_label}",
+            protocol="moq",
+            url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
+            notes=(
+                "Canary moqx on UDP 14433 (GCP_ZONE=us-east1-b "
+                "MOQX_CANARY_INSTANCE=moq-relay-east-gcp "
+                "./scripts/canary-moqx.sh). Speaks moqt-18. ffmpeg → "
+                "moq5-fmp4-publish. Prod :4433 stays draft-16."
+            ),
+            supports_vmaf=True,
+            ingest_agent_url=moq_recorder_agent_url(web_agent),
+            ingest_recording_dir="/var/lib/moq-relay-recordings",
+            ingest_provider="gcp_east_moq_relay_d18",
             **common,
         ),
         ServicePreset(

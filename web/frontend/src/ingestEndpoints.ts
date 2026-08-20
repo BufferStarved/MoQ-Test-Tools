@@ -4,12 +4,15 @@ export type IngestEndpointId =
   | "gcp_zixi"
   | "gcp_mediamtx"
   | "gcp_moq_relay"
+  | "gcp_moq_relay_d18"
   | "gcp_east_zixi"
   | "gcp_east_mediamtx"
   | "gcp_east_moq_relay"
+  | "gcp_east_moq_relay_d18"
   | "linode_zixi"
   | "linode_mediamtx"
   | "linode_moq_relay"
+  | "linode_moq_relay_d18"
   | "aws_zixi"
   | "custom";
 
@@ -36,7 +39,12 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   {
     id: "gcp_moq_relay",
     label: "OpenMOQ · GCP us-central1",
-    detail: "MoQ relay (WebTransport)",
+    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+  },
+  {
+    id: "gcp_moq_relay_d18",
+    label: "OpenMOQ draft-18 canary · GCP us-central1",
+    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
   },
   {
     id: "gcp_east_zixi",
@@ -51,7 +59,12 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   {
     id: "gcp_east_moq_relay",
     label: "OpenMOQ · GCP us-east1",
-    detail: "MoQ relay (WebTransport)",
+    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+  },
+  {
+    id: "gcp_east_moq_relay_d18",
+    label: "OpenMOQ draft-18 canary · GCP us-east1",
+    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
   },
   {
     id: "linode_zixi",
@@ -66,7 +79,12 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   {
     id: "linode_moq_relay",
     label: "OpenMOQ · Linode",
-    detail: "MoQ relay (WebTransport)",
+    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+  },
+  {
+    id: "linode_moq_relay_d18",
+    label: "OpenMOQ draft-18 canary · Linode",
+    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
   },
   {
     id: "aws_zixi",
@@ -95,12 +113,15 @@ const ENDPOINT_PROVIDER: Record<IngestEndpointId, string | ""> = {
   gcp_zixi: "gcp_zixi",
   gcp_mediamtx: "gcp_mediamtx",
   gcp_moq_relay: "gcp_moq_relay",
+  gcp_moq_relay_d18: "gcp_moq_relay_d18",
   gcp_east_zixi: "gcp_east_zixi",
   gcp_east_mediamtx: "gcp_east_mediamtx",
   gcp_east_moq_relay: "gcp_east_moq_relay",
+  gcp_east_moq_relay_d18: "gcp_east_moq_relay_d18",
   linode_zixi: "linode_zixi",
   linode_mediamtx: "linode_mediamtx",
   linode_moq_relay: "linode_moq_relay",
+  linode_moq_relay_d18: "linode_moq_relay_d18",
   aws_zixi: "aws_zixi",
   custom: "",
 };
@@ -120,6 +141,9 @@ const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, st
   gcp_moq_relay: {
     moq: "moq_gcp_relay",
   },
+  gcp_moq_relay_d18: {
+    moq: "moq_gcp_relay_d18",
+  },
   gcp_east_zixi: {
     srt: "moq_zixi_gcp_east",
     rtmp: "moq_zixi_gcp_east_rtmp",
@@ -134,6 +158,9 @@ const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, st
   gcp_east_moq_relay: {
     moq: "moq_gcp_east_relay",
   },
+  gcp_east_moq_relay_d18: {
+    moq: "moq_gcp_east_relay_d18",
+  },
   linode_zixi: {
     srt: "moq_zixi_linode",
     rtmp: "moq_zixi_linode_rtmp",
@@ -147,6 +174,9 @@ const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, st
   },
   linode_moq_relay: {
     moq: "moq_linode_relay",
+  },
+  linode_moq_relay_d18: {
+    moq: "moq_linode_relay_d18",
   },
   aws_zixi: {
     srt: "zixi_aws_srt",
@@ -235,6 +265,21 @@ export function ingestEndpointsFromPresets(presets: Preset[]): IngestEndpointOpt
 }
 
 export const INGEST_PRESET_BY_PROTOCOL = PRESET_IDS_BY_ENDPOINT;
+
+/** Prod :4433 and the draft-18 canary :14433 both count as managed MoQ relays. */
+export function isMoqRelayIngest(ingestEndpointId: string): boolean {
+  return ingestEndpointId.includes("_moq_relay");
+}
+
+/** Headed Chrome playa / in-page publisher: 18 only on the canary ingest. */
+export function moqDraftForIngest(ingestEndpointId: string): 16 | 18 {
+  return ingestEndpointId.includes("moq_relay_d18") ? 18 : 16;
+}
+
+/** Prod :4433 uses a ≤14-day WT cert + hash pin. Canary :14433 uses public LE. */
+export function moqPinTlsCertForIngest(ingestEndpointId: string): boolean {
+  return !ingestEndpointId.includes("moq_relay_d18");
+}
 
 export function resolveEndpointUrl(
   endpoint: { ingestEndpointId: string; protocol: string; endpointUrl: string },
@@ -333,7 +378,7 @@ export function ingestPrefixForCloudHost(host: CloudEncodeHostId): string {
 }
 
 export function ingestRole(ingestEndpointId: string): "zixi" | "mediamtx" | "moq_relay" | null {
-  if (ingestEndpointId.endsWith("_moq_relay")) {
+  if (isMoqRelayIngest(ingestEndpointId)) {
     return "moq_relay";
   }
   if (ingestEndpointId.endsWith("_mediamtx")) {
@@ -351,6 +396,10 @@ export function remapIngestToCloudHost(
 ): IngestEndpointId {
   if (isCustomIngestEndpoint(ingestEndpointId)) {
     return "custom";
+  }
+  // Draft-18 canaries stay on :14433 in the chosen cloud (never remap to :4433).
+  if (ingestEndpointId.endsWith("moq_relay_d18")) {
+    return `${ingestPrefixForCloudHost(host)}_moq_relay_d18` as IngestEndpointId;
   }
   const role = ingestRole(ingestEndpointId);
   if (!role) {
@@ -392,10 +441,10 @@ export function ingestEndpointsForProtocol(protocol: string, presets: Preset[] =
   const options = presets.length > 0 ? ingestEndpointsFromPresets(presets) : INGEST_ENDPOINTS;
   const forProtocol =
     protocol === "moq"
-      ? options.filter((item) => item.id.endsWith("_moq_relay") || item.id === "custom")
+      ? options.filter((item) => isMoqRelayIngest(item.id) || item.id === "custom")
       : protocol === "webrtc"
         ? options.filter((item) => item.id.endsWith("_mediamtx") || item.id === "custom")
-        : options.filter((item) => !item.id.endsWith("_moq_relay"));
+        : options.filter((item) => !isMoqRelayIngest(item.id));
   // Hide unconfigured / roadmap / broken hosts instead of greying them out.
   return forProtocol.filter((item) => {
     if (RECIPE_HIDDEN_INGEST_IDS.has(item.id)) {
@@ -417,6 +466,9 @@ function browserPublishIngestId(endpoint: {
 }): IngestEndpointId {
   if (endpoint.protocol === "webrtc") {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
+  }
+  if (isMoqRelayIngest(endpoint.ingestEndpointId)) {
+    return endpoint.ingestEndpointId as IngestEndpointId;
   }
   return defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
 }

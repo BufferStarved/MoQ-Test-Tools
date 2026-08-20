@@ -293,6 +293,17 @@ def find_moq5_publisher() -> Optional[str]:
     return None
 
 
+# Force moq5-fmp4-publish on draft-18 canaries only. Prod :4433 presets
+# stay on auto/openmoq so main is unchanged.
+MOQ5_FORCED_PRESET_IDS = frozenset(
+    {
+        "moq_gcp_relay_d18",
+        "moq_gcp_east_relay_d18",
+        "moq_linode_relay_d18",
+    }
+)
+
+
 def resolve_moq_publisher_backend() -> str:
     backend = os.environ.get("MOQ_PUBLISHER_BACKEND", DEFAULT_MOQ_PUBLISHER_BACKEND).strip().lower()
     if backend not in {"auto", "moq5", "openmoq"}:
@@ -302,9 +313,16 @@ def resolve_moq_publisher_backend() -> str:
     return backend
 
 
-def find_moq_publisher() -> tuple[Optional[str], str]:
+def moq_publisher_backend_for_preset(preset_id: str = "") -> str:
+    """Return publisher backend, forcing moq5 on the draft-18 canary preset."""
+    if (preset_id or "").strip() in MOQ5_FORCED_PRESET_IDS:
+        return "moq5"
+    return resolve_moq_publisher_backend()
+
+
+def find_moq_publisher(preset_id: str = "") -> tuple[Optional[str], str]:
     """Return (binary_path, backend_name)."""
-    backend = resolve_moq_publisher_backend()
+    backend = moq_publisher_backend_for_preset(preset_id)
     moq5_bin = find_moq5_publisher()
     openmoq_bin = find_openmoq_publisher()
 
@@ -662,7 +680,7 @@ def publisher_webtransport_connected(log_text: str) -> bool:
     because it only looked for ``connection_id=`` in a prefix of stdout.
     """
     text = log_text or ""
-    return "connection_id=" in text or "live: sent track=" in text
+    return "connection_id=" in text or "live: sent track=" in text or "track added:" in text
 
 
 def publisher_exit_error(backend: str, code: Optional[int], log_text: str) -> str:
