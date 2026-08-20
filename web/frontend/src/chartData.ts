@@ -101,7 +101,7 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "playback_fps", label: "Playback FPS", color: "#86efac", unit: "fps" },
       { key: "playback_frames_dropped", label: "Frames dropped", color: "#fb923c", unit: "frames" },
       { key: "playback_error_count", label: "Player errors", color: "#ef4444", unit: "count" },
-      { key: "playback_video_time_sec", label: "Video time", color: "#c084fc", unit: "s" },
+      { key: "playback_video_time_sec", label: "Playhead on glass", color: "#c084fc", unit: "s" },
     ],
   },
 ];
@@ -472,9 +472,24 @@ export function dropProbeJitterSpike(points: ChartPoint[]): ChartPoint[] {
   return points;
 }
 
+function withPlaybackFps(points: ChartPoint[]): ChartPoint[] {
+  let prevFrames = 0;
+  let prevSecond = 0;
+  return points.map((point, index) => {
+    const dt = Math.max(1, point.second - prevSecond);
+    const rendered = point.playback_frames_rendered ?? 0;
+    const playbackFps = index === 0 ? 0 : Math.max(0, (rendered - prevFrames) / dt);
+    prevFrames = rendered;
+    prevSecond = point.second;
+    return { ...point, playback_fps: playbackFps };
+  });
+}
+
 export function samplesToChartPoints(samples: UploadSample[]): ChartPoint[] {
   const base = samples[0] ?? null;
-  return dropProbeJitterSpike(samples.map((sample) => normalizeSamplePoint(sample, base)));
+  return withPlaybackFps(
+    dropProbeJitterSpike(samples.map((sample) => normalizeSamplePoint(sample, base))),
+  );
 }
 
 export function hasSeriesData(points: ChartPoint[], key: string): boolean {
@@ -731,6 +746,8 @@ export interface ComparisonLegData {
   ssimIngest?: number | null;
   encoderQualityPending?: boolean;
   ingestQualityPending?: boolean;
+  publisherHost?: string;
+  qualityAnalysisRequested?: boolean;
 }
 
 export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
@@ -844,6 +861,17 @@ export function comparisonHasMetricPresent(
   return false;
 }
 
+export function ttffEventSummaries(legs: ComparisonLegData[], points: ChartPoint[]): string[] {
+  return legs.map((leg, index) => {
+    const key = `playback_ttff_ms_${index}`;
+    const ttff = points.map((point) => point[key]).find((value) => (value ?? 0) > 0);
+    if (ttff == null || ttff <= 0) {
+      return `${leg.label}: no first frame`;
+    }
+    return `${leg.label}: first frame at ${(ttff / 1000).toFixed(2)}s (${Math.round(ttff)} ms)`;
+  });
+}
+
 export function comparisonVisibleGroups(
   points: ChartPoint[],
   legs: ComparisonLegData[],
@@ -878,8 +906,11 @@ export function comparisonVisibleGroups(
     comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||
     comparisonHasMetric(points, "playback_fps", legs.length) ||
     comparisonHasMetricPresent(points, "playback_stall_count", legs.length) ||
+    comparisonHasMetricPresent(points, "playback_frames_dropped", legs.length) ||
     comparisonHasMetric(points, "playback_ttff_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_video_time_sec", legs.length)
+    comparisonHasMetric(points, "playback_video_time_sec", legs.length) ||
+    comparisonHasMetricPresent(points, "playback_buffer_sec", legs.length) ||
+    legs.some((leg) => leg.protocol === "webrtc")
   ) {
     groups.push({ id: "playback", title: "Browser playback" });
   }

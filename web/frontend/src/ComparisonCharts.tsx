@@ -6,6 +6,7 @@ import {
   comparisonSeries,
   comparisonVisibleGroups,
   buildComparisonPoints,
+  ttffEventSummaries,
   type ComparisonLegData,
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
@@ -64,9 +65,15 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
   const hasMoqLeg = activeLegs.some((leg) => leg.protocol === "moq");
+  const hasBrowserMoqLeg = activeLegs.some(
+    (leg) => leg.protocol === "moq" && (leg.publisherHost || "").toLowerCase() === "browser",
+  );
+  const qualityRequested = activeLegs.some((leg) => leg.qualityAnalysisRequested);
+  const ttffLines = ttffEventSummaries(activeLegs, points);
   const hasSrtOrRtmpLeg = activeLegs.some(
     (leg) => leg.protocol === "srt" || leg.protocol === "rtmp",
   );
+  const hasWebrtcLeg = activeLegs.some((leg) => leg.protocol === "webrtc");
   const whipBitrateMissing = activeLegs.some((leg) =>
     webrtcEncodeBitrateUnreported(
       leg.protocol,
@@ -148,16 +155,23 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             />
             {whipBitrateMissing ? (
               <p className="hint chart-availability-note">{WHIP_ENCODE_BITRATE_NOTE}</p>
+            ) : activeLegs.some((leg) => leg.protocol === "webrtc") ? (
+              <p className="hint chart-availability-note">
+                WebRTC/WHIP bitrate often ramps for the first ~20–30s while
+                the muxer warms up — expected, not a stall or a quality drop.
+              </p>
+            ) : null}
+            {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) ? null : hasBrowserMoqLeg ? (
+              <p className="hint chart-availability-note">
+                Encode lag was not collected for browser MoQ (no ffmpeg
+                progress). The WebCodecs queue vs capture clock should appear
+                here on a new run.
+              </p>
             ) : (
               <p className="hint chart-availability-note">
-                WebRTC/WHIP bitrate often ramps for ~20–30s while the muxer
-                warms up — that is expected, not a stall.
-              </p>
-            )}
-            {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) ? null : (
-              <p className="hint chart-availability-note">
-                Encode lag is hidden when every sample is 0 (not collected, or
-                the encoder stayed at its startup baseline).
+                Encode lag is hidden when every sample is 0 — either not
+                collected, or the encoder stayed at its startup baseline
+                (kept up with realtime).
               </p>
             )}
             <MetricChart
@@ -165,7 +179,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="fps"
               data={points}
               series={comparisonSeries(activeLegs, "fps", "fps")}
-              caption="Frames encoded per second — should sit near 30."
+              caption="Frames encoded per second — not what the glass painted. Check Playback FPS / dropped frames if the picture looks jumpy."
             />
             <MetricChart
               title="Send rate"
@@ -194,7 +208,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
-              caption="How much the publisher-side RTT is bouncing around."
+              caption="Publisher-side RTT variation. The first sample is often a connect-probe spike — ignore a lone 100ms+ blip at t=0."
             />
             {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) && (
               <MetricChart
@@ -202,7 +216,8 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="encode_lag_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
-                caption="How far the encoder is behind realtime."
+                keepZeroSeries
+                caption="How far the encoder is behind capture/realtime. A flat near-zero means the encoder kept up — not a missing series."
               />
             )}
             {comparisonHasMetric(points, "fps_stability", activeLegs.length) && (
@@ -221,23 +236,32 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 series={comparisonSeries(activeLegs, "speed", "x")}
               />
             )}
-            {comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) && (
+            {qualityRequested && comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) && (
             <MetricChart
               title="VMAF (encoder)"
               metricKey="vmaf_score_encoder"
               data={points}
               series={comparisonSeries(activeLegs, "vmaf_score_encoder", "score")}
-
               yDomain={[0, 100]}
+              caption="libvmaf score vs the source — only when Score picture quality was on."
             />
             )}
-            {!comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) &&
+            {qualityRequested &&
+              !comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) &&
               activeLegs.some((leg) => leg.encoderQualityPending) && (
                 <p className="hint chart-availability-note">
                   Picture-quality scores appear here when scoring finishes (after the encode).
                 </p>
               )}
-            {comparisonHasMetric(points, "psnr_db_encoder", activeLegs.length) && (
+            {qualityRequested &&
+              !comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) &&
+              !activeLegs.some((leg) => leg.encoderQualityPending) && (
+                <p className="hint chart-availability-note">
+                  Encoder VMAF was requested but this run was not scored
+                  (browser/live/WHIP cannot tee a file reference).
+                </p>
+              )}
+            {qualityRequested && comparisonHasMetric(points, "psnr_db_encoder", activeLegs.length) && (
             <MetricChart
               title="PSNR"
               metricKey="psnr_db_encoder"
@@ -245,7 +269,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "psnr_db_encoder", "dB")}
             />
             )}
-            {comparisonHasMetric(points, "ssim_encoder", activeLegs.length) && (
+            {qualityRequested && comparisonHasMetric(points, "ssim_encoder", activeLegs.length) && (
             <MetricChart
               title="SSIM"
               metricKey="ssim_encoder"
@@ -353,23 +377,31 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 keepZeroSeries
               />
             )}
-            {comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) && (
+            {qualityRequested && comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) && (
             <MetricChart
               title="VMAF (ingest)"
               metricKey="vmaf_score_ingest"
               data={points}
               series={comparisonSeries(activeLegs, "vmaf_score_ingest", "score")}
-
               yDomain={[0, 100]}
+              caption="libvmaf after the network path — only when Score picture quality was on."
             />
             )}
-            {!comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) &&
+            {qualityRequested &&
+              !comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) &&
               activeLegs.some((leg) => leg.ingestQualityPending) && (
                 <p className="hint chart-availability-note">
                   Destination picture-quality scores appear here after the remote recorder finishes.
                 </p>
               )}
-            {comparisonHasMetric(points, "psnr_db_ingest", activeLegs.length) && (
+            {qualityRequested &&
+              !comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) &&
+              !activeLegs.some((leg) => leg.ingestQualityPending) && (
+                <p className="hint chart-availability-note">
+                  Ingest VMAF was requested but this destination was not scored.
+                </p>
+              )}
+            {qualityRequested && comparisonHasMetric(points, "psnr_db_ingest", activeLegs.length) && (
             <MetricChart
               title="PSNR (ingest)"
               metricKey="psnr_db_ingest"
@@ -377,7 +409,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "psnr_db_ingest", "dB")}
             />
             )}
-            {comparisonHasMetric(points, "ssim_ingest", activeLegs.length) && (
+            {qualityRequested && comparisonHasMetric(points, "ssim_ingest", activeLegs.length) && (
             <MetricChart
               title="SSIM (ingest)"
               metricKey="ssim_ingest"
@@ -449,20 +481,37 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
           <>
             {comparisonHasMetric(points, "e2e_latency_ms", activeLegs.length) && (
               <MetricChart
-                title="E2E latency (estimated)"
+                title="Glass delay (estimated)"
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "e2e_latency_ms", "ms")}
+                caption="Capture-to-glass delay. A healthy live line stays roughly flat; a climb usually means a frozen playhead, not growing glass latency."
               />
             )}
             {comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) && (
-              <MetricChart
-                title="Time to first frame"
-                metricKey="playback_ttff_ms"
-                data={points}
-                series={comparisonSeries(activeLegs, "playback_ttff_ms", "ms")}
-              />
+              <p className="hint chart-availability-note">
+                Time to first frame is a single join event, not ongoing latency.
+                {" "}
+                {ttffLines.join(" · ")}
+                . After first paint this value does not change.
+              </p>
             )}
+            <MetricChart
+              title="Playback FPS"
+              metricKey="playback_fps"
+              data={points}
+              series={comparisonSeries(activeLegs, "playback_fps", "fps")}
+              keepZeroSeries
+              caption="Frames the player actually painted. Encode FPS can look perfect while this drops."
+            />
+            <MetricChart
+              title="Frames dropped"
+              metricKey="playback_frames_dropped"
+              data={points}
+              series={comparisonSeries(activeLegs, "playback_frames_dropped", "frames")}
+              keepZeroSeries
+              caption="Cumulative glass-side drops (HTML video quality, playa, or WHEP RTC stats). Rising means the viewer missed frames."
+            />
             {(comparisonHasMetricPresent(points, "playback_stall_count", activeLegs.length) ||
               comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) ||
               comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length)) && (
@@ -472,6 +521,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_stall_count", "count")}
                 keepZeroSeries
+                caption="How many times the playhead froze after first frame. Flat zero is smooth playback."
               />
             )}
             {comparisonHasMetric(points, "playback_rebuffer_sec", activeLegs.length) && (
@@ -483,20 +533,25 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 keepZeroSeries
               />
             )}
-            {comparisonHasMetric(points, "playback_buffer_sec", activeLegs.length) && (
+            {(comparisonHasMetric(points, "playback_buffer_sec", activeLegs.length) ||
+              comparisonHasMetricPresent(points, "playback_buffer_sec", activeLegs.length) ||
+              hasWebrtcLeg) && (
               <MetricChart
                 title="Buffer size"
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_buffer_sec", "s")}
+                keepZeroSeries
+                caption="Seconds queued ahead of the playhead. WebRTC/WHEP is the jitter buffer (RTCRtpReceiver jitterBufferDelay), not HLS buffered ranges."
               />
             )}
             {comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length) && (
               <MetricChart
-                title="Video playback time"
+                title="Playhead (seconds of media on glass)"
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_video_time_sec", "s")}
+                caption="Seconds of media the player has painted. A healthy line tracks encode time (the x-axis) within about a second. A line that stops while the x-axis keeps going is a freeze."
               />
             )}
           </>

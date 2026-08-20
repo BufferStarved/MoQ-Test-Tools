@@ -24,7 +24,7 @@ This document describes the normalized metrics model used for cross-protocol com
 | Encode | `encode` | Encoder output before the network path: bitrate, frame rate, send rate, client memory/jitter, encode lag, **encoder-side** VMAF / PSNR / SSIM |
 | Ingest | `ingest` | Normalized path health (`net_rtt_ms`, `net_jitter_ms`, merged `net_retrans_pct`, `net_loss_pct`) + ingest-host CPU/memory/disk, protocol-native recovery (moqx relay Δ, Zixi/libsrt, **receive loss** `quic_packets_lost`, **send loss** `pkt_snd_loss`), and **ingest-side** VMAF / PSNR / SSIM |
 | Media Health | `media_health` | Container/timeline integrity (not transport) |
-| Browser playback | `playback` | TTFF, stalls, **rebuffer time**, buffer size, **E2E latency estimate** |
+| Browser playback | `playback` | Glass delay, **playback FPS / dropped frames**, stalls, rebuffer, buffer. TTFF is a single join event, not a latency series. |
 
 Encode and Ingest each chart **stage-specific** VMAF/PSNR/SSIM (`vmaf_score_encoder`/`psnr_db_encoder`/`ssim_encoder`
 vs. `vmaf_score_ingest`/`psnr_db_ingest`/`ssim_ingest`) rather than one combined score, so a quality

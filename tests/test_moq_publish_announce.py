@@ -178,11 +178,12 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         pub_stop = body.index("self._stop_moq_publisher")
         self.assertLess(stop, pub_stop)
 
-    def test_playback_gate_waits_for_namespace_before_moq_subscribe(self) -> None:
+    def test_playback_gate_subscribes_moq_before_announce(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
         self.assertIn('protocol === "webrtc" && !browser', text)
-        self.assertIn("ffmpeg MoQ must wait for the relay namespace announce", text)
+        self.assertIn("Subscribe on running + 0x10 keepalive", text)
         self.assertIn('protocol === "srt" || protocol === "rtmp"', text)
+        self.assertIn('if (protocol === "moq")', text)
         self.assertNotIn('protocol !== "moq" && protocol !== "webrtc"', text)
 
 

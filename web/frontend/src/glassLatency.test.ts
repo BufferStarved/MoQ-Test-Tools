@@ -10,6 +10,34 @@ describe("computeMoqE2eMs", () => {
     );
   });
 
+  it("does not grow LOC e2e with media time when playhead is frames/30", () => {
+    const firstFrameAtMs = 1_000_000;
+    const early = computeMoqE2eMs({
+      mediaPackaging: "loc",
+      encoderLagMs: 8,
+      rttMs: 40,
+      bufferMs: 20,
+      ttffMs: 400,
+      firstFrameAtMs,
+      firstFrameVideoSec: 0,
+      videoCurrentTimeSec: 2,
+      nowMs: firstFrameAtMs + 2_000,
+    });
+    const late = computeMoqE2eMs({
+      mediaPackaging: "loc",
+      encoderLagMs: 8,
+      rttMs: 40,
+      bufferMs: 20,
+      ttffMs: 400,
+      firstFrameAtMs,
+      firstFrameVideoSec: 0,
+      videoCurrentTimeSec: 18,
+      nowMs: firstFrameAtMs + 20_000,
+    });
+    assert.equal(early, late);
+    assert.ok((early ?? 0) < 200);
+  });
+
   it("falls back to encode-epoch + playhead for CMAF when join offset is null", () => {
     const nowMs = 1_700_000_000_000;
     const epochSec = nowMs / 1000 - 10;

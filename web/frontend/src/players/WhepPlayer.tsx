@@ -13,7 +13,7 @@ import {
 import { isPlausibleE2eMs, pathDelayMs } from "../glassLatency";
 import { isGracefulWhepDisconnect, unwrapFastApiDetail } from "../playbackEos";
 import { startWhepSession, waitForWhepIceTerminal, waitForWhepMedia, type WhepSession } from "../whepSession";
-import { classifyWhepEndVerdict } from "../webrtcPlayback";
+import { classifyWhepEndVerdict, whepPlaybackBufferSec } from "../webrtcPlayback";
 
 interface WhepPlayerProps {
   url: string;
@@ -27,6 +27,8 @@ interface WhepPlayerProps {
   jobStatus?: string;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }
 
 const whepJitterState = new WeakMap<RTCPeerConnection, { delay: number; emitted: number }>();
@@ -83,6 +85,8 @@ export default function WhepPlayer({
   jobStatus,
   benchmarkLoading = true,
   encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
 }: WhepPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const sessionRefHandle = useRef<WhepSession | null>(null);
@@ -101,6 +105,7 @@ export default function WhepPlayer({
     rttMs: 0,
     framesRendered: 0,
     framesDecoded: 0,
+    framesDropped: 0,
   });
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0 });
   lagRef.current = { bridgeMs: bridgeLagMs, encoderMs: encoderLagMs };
@@ -110,6 +115,10 @@ export default function WhepPlayer({
   loadingRef.current = benchmarkLoading;
   const encodeDurationRef = useRef(encodeDurationSec);
   encodeDurationRef.current = encodeDurationSec;
+  const encodeElapsedRef = useRef(encodeElapsedSec ?? 0);
+  encodeElapsedRef.current = encodeElapsedSec ?? 0;
+  const runStoppedRef = useRef(runStopped);
+  runStoppedRef.current = runStopped;
 
   const getPlaybackSnapshot = useCallback((): PlaybackMetricsSnapshot => {
     const frames = readVideoFrameStats(videoRef.current);
@@ -136,7 +145,10 @@ export default function WhepPlayer({
       playback_stats_events: sessionRef.current.framesRendered > 0 ? 1 : 0,
       playback_stall_count: rebufferRef.current.stallCount,
       playback_frames_rendered: sessionRef.current.framesRendered,
-      playback_frames_dropped: frames.framesDropped,
+      playback_frames_dropped: Math.max(
+        frames.framesDropped,
+        sessionRef.current.framesDropped,
+      ),
       playback_bitrate_bps: sessionRef.current.bitrateBps,
       playback_ttff_ms: sessionRef.current.ttffMs,
       playback_hls_errors: sessionRef.current.errorCount,
@@ -144,7 +156,10 @@ export default function WhepPlayer({
       playback_hls_buffer_stalls: 0,
       playback_hls_frag_loads: 0,
       playback_video_time_sec: sessionRef.current.maxVideoTime,
-      playback_buffer_sec: bufferedAheadSec(videoRef.current),
+      playback_buffer_sec: whepPlaybackBufferSec({
+        jitterBufferMs: sessionRef.current.viewerLatencyMs,
+        htmlBufferedAheadSec: bufferedAheadSec(videoRef.current),
+      }),
       playback_rebuffer_sec: rebufferRef.current.totalSec,
       e2e_latency_ms: e2e && isPlausibleE2eMs(e2e) ? e2e : undefined,
     };
@@ -172,6 +187,8 @@ export default function WhepPlayer({
           videoTimeSec: sessionRef.current.maxVideoTime,
           lastError: lastErrorRef.current,
           encodeDurationSec: encodeDurationRef.current,
+          encodeElapsedSec: encodeElapsedRef.current,
+          runStopped: runStoppedRef.current,
         });
         if (verdict.ok) {
           setError(null);
@@ -206,6 +223,7 @@ export default function WhepPlayer({
       rttMs: 0,
       framesRendered: 0,
       framesDecoded: 0,
+      framesDropped: 0,
     };
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
@@ -274,6 +292,13 @@ export default function WhepPlayer({
             if (frames >= decoded) {
               decoded = frames;
             }
+            const dropped = inbound.framesDropped ?? 0;
+            if (dropped > 0) {
+              sessionRef.current.framesDropped = Math.max(
+                sessionRef.current.framesDropped ?? 0,
+                dropped,
+              );
+            }
           });
           if (decoded > 0) {
             sessionRef.current.framesDecoded = Math.max(
@@ -339,6 +364,8 @@ export default function WhepPlayer({
               benchmarkLoading: loadingRef.current,
               videoTimeSec: sessionRef.current.maxVideoTime,
               encodeDurationSec: encodeDurationRef.current,
+              encodeElapsedSec: encodeElapsedRef.current,
+              runStopped: runStoppedRef.current,
             })
           ) {
             session.stop();
@@ -372,6 +399,8 @@ export default function WhepPlayer({
               benchmarkLoading: loadingRef.current,
               videoTimeSec: sessionRef.current.maxVideoTime,
               encodeDurationSec: encodeDurationRef.current,
+              encodeElapsedSec: encodeElapsedRef.current,
+              runStopped: runStoppedRef.current,
             })
           ) {
             setError(null);

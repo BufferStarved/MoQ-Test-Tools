@@ -30,14 +30,32 @@ function whepHasRenderedMedia({ framesRendered = 0 } = {}) {
   return framesRendered >= 8;
 }
 
+function encodeDurationForEndVerdict({
+  encodeDurationSec = 0,
+  encodeElapsedSec = 0,
+  runStopped = false,
+} = {}) {
+  const planned = Math.max(0, encodeDurationSec);
+  const elapsed = Math.max(0, encodeElapsedSec);
+  if (runStopped) return elapsed;
+  if (planned > 0 && elapsed > 0 && elapsed < planned * 0.8) return elapsed;
+  return planned;
+}
+
 function classifyWhepEndVerdict({
   framesRendered = 0,
   videoTimeSec = 0,
   lastError = null,
   encodeDurationSec = 0,
+  encodeElapsedSec = 0,
+  runStopped = false,
 } = {}) {
   const played = whepHasRenderedMedia({ framesRendered });
-  const duration = encodeDurationSec;
+  const duration = encodeDurationForEndVerdict({
+    encodeDurationSec,
+    encodeElapsedSec,
+    runStopped,
+  });
   const vt = videoTimeSec;
   const covered = duration > 0 && vt >= duration * 0.8;
   if (played && covered) return { ok: true, status: "Playback OK", error: null };
@@ -88,5 +106,28 @@ const ok = classifyWhepEndVerdict({
 });
 assert.equal(ok.ok, true);
 assert.equal(ok.status, "Playback OK");
+
+const stopped = classifyWhepEndVerdict({
+  framesRendered: 400,
+  videoTimeSec: 28.9,
+  encodeDurationSec: 300,
+  encodeElapsedSec: 30,
+  runStopped: true,
+});
+assert.equal(stopped.ok, true, "Stop at 30s of a 300s cap is Playback OK");
+
+const freezeStopped = classifyWhepEndVerdict({
+  framesRendered: 400,
+  videoTimeSec: 24.6,
+  encodeDurationSec: 300,
+  encodeElapsedSec: 62,
+  runStopped: true,
+});
+assert.equal(freezeStopped.ok, false);
+assert.match(freezeStopped.error, /stalled at 24\.6s of a 62s encode/);
+assert.doesNotMatch(freezeStopped.error, /300s/);
+
+assert.match(whepPlayer, /whepPlaybackBufferSec/);
+assert.match(whepPlayer, /jitterBufferMs/);
 
 console.log("unit-whep-end-verdict: PASS");

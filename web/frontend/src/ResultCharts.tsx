@@ -61,6 +61,7 @@ export function ResultCharts({
   const mediaHealthGroup = chartGroupById("media_health");
   const playbackGroup = chartGroupById("playback");
   const isMoq = resolvedProtocol === "moq";
+  const isWebrtc = resolvedProtocol === "webrtc";
   const isSrtOrRtmp = resolvedProtocol === "srt" || resolvedProtocol === "rtmp";
   const whipBitrateMissing = webrtcEncodeBitrateUnreported(
     resolvedProtocol,
@@ -325,10 +326,42 @@ export function ResultCharts({
           <>
             {hasData(points, "e2e_latency_ms") && (
               <MetricChart
-                title="E2E latency (estimated)"
+                title="Glass delay (estimated)"
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "e2e_latency_ms")}
+                caption="Capture-to-glass. A healthy line stays flat; a climb is a frozen playhead, not growing delay."
+              />
+            )}
+            {hasData(points, "playback_ttff_ms") && (
+              <p className="hint chart-availability-note">
+                Time to first frame is a single join event
+                {points.find((point) => (point.playback_ttff_ms ?? 0) > 0)
+                  ? ` — first frame at ${(
+                      (points.find((point) => (point.playback_ttff_ms ?? 0) > 0)
+                        ?.playback_ttff_ms ?? 0) / 1000
+                    ).toFixed(2)}s`
+                  : ""}
+                . It is not ongoing latency.
+              </p>
+            )}
+            {hasData(points, "playback_fps") && (
+              <MetricChart
+                title="Playback FPS"
+                metricKey="playback_fps"
+                data={points}
+                series={playbackGroup.series.filter((series) => series.key === "playback_fps")}
+                caption="Frames painted at the glass. Encode FPS can look stable while this drops."
+              />
+            )}
+            {hasData(points, "playback_frames_dropped") && (
+              <MetricChart
+                title="Frames dropped"
+                metricKey="playback_frames_dropped"
+                data={points}
+                series={playbackGroup.series.filter((series) => series.key === "playback_frames_dropped")}
+                keepZeroSeries
+                caption="Cumulative viewer-side drops. Rising means the player missed frames."
               />
             )}
             <MetricChart
@@ -337,7 +370,6 @@ export function ResultCharts({
               data={points}
               series={playbackGroup.series.filter(
                 (series) =>
-                  series.key === "playback_ttff_ms" ||
                   series.key === "playback_stall_count" ||
                   series.key === "playback_error_count" ||
                   series.key === "playback_frames_rendered",
@@ -353,20 +385,27 @@ export function ResultCharts({
                 keepZeroSeries
               />
             )}
-            {hasData(points, "playback_buffer_sec") && (
+            {(hasData(points, "playback_buffer_sec") || isWebrtc) && (
               <MetricChart
                 title="Buffer size"
                 metricKey="playback_buffer_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_buffer_sec")}
+                keepZeroSeries
+                caption={
+                  isWebrtc
+                    ? "WebRTC/WHEP jitter buffer from RTC stats (jitterBufferDelay), not HLS buffered ranges."
+                    : "Seconds of media buffered ahead of the playhead."
+                }
               />
             )}
             {hasData(points, "playback_video_time_sec") && (
               <MetricChart
-                title="Video playback time"
+                title="Playhead (seconds of media on glass)"
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={playbackGroup.series.filter((series) => series.key === "playback_video_time_sec")}
+                caption="Seconds of media the player has painted. A healthy line tracks encode time (the x-axis) within about a second. A line that stops while the x-axis keeps going is a freeze."
               />
             )}
           </>

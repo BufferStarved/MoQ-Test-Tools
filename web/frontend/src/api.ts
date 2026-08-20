@@ -412,6 +412,7 @@ export function subscribeToUpload(
     encoder_psnr_db?: number | null;
     encoder_ssim?: number | null;
     encoder_vmaf_error?: string | null;
+    cancelled?: boolean;
     started_at_epoch?: number | null;
     first_sample_at_epoch?: number | null;
     media_zero_epoch?: number | null;

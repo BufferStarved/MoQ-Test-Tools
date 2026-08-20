@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyWhepEndVerdict, whepHasRenderedMedia } from "./webrtcPlayback.ts";
+import { classifyWhepEndVerdict, whepHasRenderedMedia, whepPlaybackBufferSec } from "./webrtcPlayback.ts";
 
 describe("whepHasRenderedMedia", () => {
   it("rejects a single frame or zeros (CSV 2026-08-19 black WHEP)", () => {
@@ -41,5 +41,40 @@ describe("classifyWhepEndVerdict", () => {
     });
     assert.equal(verdict.ok, false);
     assert.match(verdict.error ?? "", /stalled at 11.2s/);
+  });
+
+  it("does not treat operator stop as a stall against the unused 300s cap", () => {
+    const verdict = classifyWhepEndVerdict({
+      framesRendered: 400,
+      videoTimeSec: 28.9,
+      encodeDurationSec: 300,
+      encodeElapsedSec: 30,
+      runStopped: true,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
+
+  it("uses actual encode elapsed, not the 300s default, when a freeze is real", () => {
+    const verdict = classifyWhepEndVerdict({
+      framesRendered: 400,
+      videoTimeSec: 24.6,
+      encodeDurationSec: 300,
+      encodeElapsedSec: 62,
+      runStopped: true,
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.error ?? "", /stalled at 24\.6s of a 62s encode/);
+    assert.doesNotMatch(verdict.error ?? "", /300s/);
+  });
+});
+
+describe("whepPlaybackBufferSec", () => {
+  it("reports RTC jitter-buffer seconds when HTML buffered ranges are empty", () => {
+    assert.equal(
+      whepPlaybackBufferSec({ jitterBufferMs: 80, htmlBufferedAheadSec: 0 }),
+      0.08,
+    );
+    assert.equal(whepPlaybackBufferSec({ htmlBufferedAheadSec: 1.2 }), 1.2);
   });
 });

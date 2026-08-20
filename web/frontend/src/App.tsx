@@ -34,6 +34,7 @@ import {
 import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { humanizeJobError } from "./moqCmafPlayback";
+import { encodeElapsedSecForVerdict } from "./playbackEndVerdict";
 import { startClockSkewProbe } from "./clockSkew";
 import { assignStreamColors, protocolLabel } from "./protocolTheme";
 import { ToastStack, useToasts } from "./Toast";
@@ -955,6 +956,7 @@ function App() {
               csv_path: status.csv_path ?? leg.job.csv_path,
               summary_path: status.summary_path ?? leg.job.summary_path,
               error: status.error,
+              cancelled: status.cancelled ?? leg.job.cancelled,
               moq_namespace: status.moq_namespace ?? leg.job.moq_namespace,
               vmaf_status: status.vmaf_status ?? leg.job.vmaf_status,
               vmaf_score: status.vmaf_score ?? leg.job.vmaf_score,
@@ -1318,6 +1320,12 @@ function App() {
   }
 
   async function handleStopComparison() {
+    setComparisonLegs((current) =>
+      current.map((leg) => ({
+        ...leg,
+        job: { ...leg.job, cancelled: true },
+      })),
+    );
     pushToast("Stopping comparison…", "info");
     setWebcamStatus(
       mediaSource === "webcam"
@@ -1591,6 +1599,13 @@ function App() {
                         previewReady={leg?.job.preview_ready}
                         benchmarkLoading={loading}
                         encodeDurationSec={leg?.job.duration_sec ?? 60}
+                        encodeElapsedSec={encodeElapsedSecForVerdict({
+                          latestElapsedSec: leg?.latestSample?.elapsed_sec,
+                          sampleElapsedSecs: leg?.samples.map((sample) => sample.elapsed_sec),
+                          startedAtEpoch: leg?.job.started_at_epoch,
+                          completedAtMs: leg?.completedAtMs,
+                        })}
+                        runStopped={Boolean(leg?.job.cancelled)}
                         targetLatencyMs={moqPlayerTargetLatencyMs(
                           leg?.job.target_latency_ms ??
                             targetLatencyMsForProtocol(endpoint.protocol),
@@ -1782,6 +1797,7 @@ function App() {
                           );
                     const useSaved =
                       Boolean(saved?.rows?.length) && isEncodeFinished(leg.job);
+                    const qualityOn = leg.encoderVmafRequested || leg.ingestVmafRequested;
                     return {
                     id: leg.id,
                     label: leg.label,
@@ -1791,17 +1807,34 @@ function App() {
                     endpoint: endpoint?.endpointUrl || leg.job.endpoint_url,
                     samples: useSaved ? [] : leg.samples,
                     result: saved,
-                    vmafScore: saved?.averages?.vmaf_score ?? leg.job.vmaf_score,
-                    psnrDb: saved?.averages?.psnr_db ?? leg.job.psnr_db,
-                    ssim: saved?.averages?.ssim ?? leg.job.ssim,
-                    vmafScoreEncoder:
-                      saved?.quality?.encoder?.vmaf_score ?? leg.job.encoder_vmaf_score,
-                    psnrDbEncoder: saved?.quality?.encoder?.psnr_db ?? leg.job.encoder_psnr_db,
-                    ssimEncoder: saved?.quality?.encoder?.ssim ?? leg.job.encoder_ssim,
-                    vmafScoreIngest:
-                      saved?.quality?.ingest?.vmaf_score ?? leg.job.vmaf_score,
-                    psnrDbIngest: saved?.quality?.ingest?.psnr_db ?? leg.job.psnr_db,
-                    ssimIngest: saved?.quality?.ingest?.ssim ?? leg.job.ssim,
+                    vmafScore: qualityOn
+                      ? saved?.averages?.vmaf_score ?? leg.job.vmaf_score
+                      : null,
+                    psnrDb: qualityOn
+                      ? saved?.averages?.psnr_db ?? leg.job.psnr_db
+                      : null,
+                    ssim: qualityOn ? saved?.averages?.ssim ?? leg.job.ssim : null,
+                    vmafScoreEncoder: qualityOn
+                      ? saved?.quality?.encoder?.vmaf_score ?? leg.job.encoder_vmaf_score
+                      : null,
+                    psnrDbEncoder: qualityOn
+                      ? saved?.quality?.encoder?.psnr_db ?? leg.job.encoder_psnr_db
+                      : null,
+                    ssimEncoder: qualityOn
+                      ? saved?.quality?.encoder?.ssim ?? leg.job.encoder_ssim
+                      : null,
+                    vmafScoreIngest: qualityOn
+                      ? saved?.quality?.ingest?.vmaf_score ?? leg.job.vmaf_score
+                      : null,
+                    psnrDbIngest: qualityOn
+                      ? saved?.quality?.ingest?.psnr_db ?? leg.job.psnr_db
+                      : null,
+                    ssimIngest: qualityOn
+                      ? saved?.quality?.ingest?.ssim ?? leg.job.ssim
+                      : null,
+                    publisherHost: leg.job.publisher_host ?? undefined,
+                    qualityAnalysisRequested:
+                      leg.encoderVmafRequested || leg.ingestVmafRequested,
                     encoderQualityPending:
                       leg.encoderVmafRequested &&
                       (leg.job.encoder_vmaf_status === "computing" ||

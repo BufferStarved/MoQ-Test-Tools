@@ -4,6 +4,8 @@
  * close are successful EOS, not player crashes.
  */
 
+import { playbackCoveredEncode } from "./playbackEndVerdict.ts";
+
 export function encodeLooksFinished(options: {
   jobStatus?: string;
   benchmarkLoading?: boolean;
@@ -21,10 +23,10 @@ export function encodeLooksFinished(options: {
 export function playedMostOfEncode(options: {
   videoTimeSec?: number;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }): boolean {
-  const duration = options.encodeDurationSec ?? 0;
-  const played = options.videoTimeSec ?? 0;
-  return duration > 0 && played >= duration * 0.8;
+  return playbackCoveredEncode(options);
 }
 
 /** HTTP-TS ended after frames were shown. */
@@ -72,6 +74,8 @@ export function isGracefulWhepDisconnect(options: {
   benchmarkLoading?: boolean;
   videoTimeSec?: number;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }): boolean {
   if (!options.playedOk) {
     return false;

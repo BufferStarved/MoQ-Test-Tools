@@ -174,16 +174,21 @@ export function computeMoqE2eMs(options: {
     }
   }
 
-  const anchored = playheadAnchoredE2eMs({
-    ttffMs: options.ttffMs,
-    firstFrameAtMs: options.firstFrameAtMs,
-    firstFrameVideoSec: options.firstFrameVideoSec,
-    nowMs: now,
-    videoTimeSec: videoT,
-    bridgeMs: bridge,
-  });
-  if (anchored) {
-    return anchored;
+  // LOC glass is capture→now. Do not use playheadAnchored here:
+  // videoTime is often framesRendered/30, so dropped frames make e2e
+  // climb 1:1 with wall even when the canvas delay is steady.
+  if (options.mediaPackaging !== "loc") {
+    const anchored = playheadAnchoredE2eMs({
+      ttffMs: options.ttffMs,
+      firstFrameAtMs: options.firstFrameAtMs,
+      firstFrameVideoSec: options.firstFrameVideoSec,
+      nowMs: now,
+      videoTimeSec: videoT,
+      bridgeMs: bridge,
+    });
+    if (anchored) {
+      return anchored;
+    }
   }
 
   return pathDelayMs({

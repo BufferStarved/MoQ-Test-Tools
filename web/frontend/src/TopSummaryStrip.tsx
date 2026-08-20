@@ -99,11 +99,15 @@ export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSu
                     {glance.label} {glance.value}
                   </span>
                 ))}
-                {leg.job.encoder_vmaf_score != null && Number.isFinite(leg.job.encoder_vmaf_score) ? (
+                {Boolean(leg.job.compute_vmaf_encoder || leg.job.compute_vmaf_on_ingest) &&
+                leg.job.encoder_vmaf_score != null &&
+                Number.isFinite(leg.job.encoder_vmaf_score) ? (
                   <span className="top-summary-metric">
                     VMAF {leg.job.encoder_vmaf_score.toFixed(1)}
                   </span>
-                ) : leg.job.vmaf_score != null && Number.isFinite(leg.job.vmaf_score) ? (
+                ) : Boolean(leg.job.compute_vmaf_encoder || leg.job.compute_vmaf_on_ingest) &&
+                  leg.job.vmaf_score != null &&
+                  Number.isFinite(leg.job.vmaf_score) ? (
                   <span className="top-summary-metric">VMAF {leg.job.vmaf_score.toFixed(1)}</span>
                 ) : null}
               </div>

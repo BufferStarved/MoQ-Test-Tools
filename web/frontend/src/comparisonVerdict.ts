@@ -206,7 +206,11 @@ export function buildComparisonVerdict(
     });
   }
 
-  const encoderVmaf = pickHighest(streams, (r) => r.quality?.encoder?.vmaf_score);
+  const encoderVmaf = pickHighest(streams, (r) =>
+    (r.quality?.encoder?.computed_on || "").toLowerCase() === "webrtc_qp"
+      ? undefined
+      : r.quality?.encoder?.vmaf_score,
+  );
   if (encoderVmaf) {
     const name = streamName(streams[encoderVmaf.index], encoderVmaf.index, labels);
     highlights.push({

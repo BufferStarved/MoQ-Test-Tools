@@ -2,6 +2,7 @@
  * Quality scoring must match what the API actually runs — not a MoQ-only ingest gate.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 function wantsEncoderVmaf({ computeVmaf, encoderVmafAvailable, protocol, isLive }) {
   return computeVmaf && encoderVmafAvailable && !isLive && protocol !== "webrtc";
@@ -62,5 +63,17 @@ assert.equal(
   }),
   false,
 );
+
+const whip = fs.readFileSync(
+  new URL("../src/browserMoq/whipPublisher.ts", import.meta.url),
+  "utf8",
+);
+assert.doesNotMatch(whip, /vmaf_score:\s*qpQuality/, "QP must not be posted as VMAF");
+
+const jobManager = fs.readFileSync(
+  new URL("../../../web/api/job_manager.py", import.meta.url),
+  "utf8",
+);
+assert.doesNotMatch(jobManager, /webrtc_qp/, "browser jobs must not promote QP to encoder VMAF");
 
 console.log("unit-quality-vmaf: PASS");

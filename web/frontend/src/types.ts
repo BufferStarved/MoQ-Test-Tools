@@ -159,6 +159,8 @@ export interface UploadJob {
   encoder_psnr_db?: number | null;
   encoder_ssim?: number | null;
   encoder_vmaf_error?: string | null;
+  /** True after the operator hits Stop (or the job is cancelled). */
+  cancelled?: boolean;
 }
 
 export interface ResultFile {

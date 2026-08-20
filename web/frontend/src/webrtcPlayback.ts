@@ -5,6 +5,8 @@
  * frames, encode lag 20s+, no UI error).
  */
 
+import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
+
 export function whepHasRenderedMedia(options: {
   framesRendered?: number;
 }): boolean {
@@ -25,24 +27,43 @@ export function noWhepMediaFailMessage(options: { lastError?: string | null }): 
   return "WebRTC/WHEP produced no video frames. Encode-only success is a player or WHIP failure.";
 }
 
+/** WHEP MediaStream <video> usually has empty buffered ranges. Plot the
+ * RTC jitter buffer (jitterBufferDelay / emittedCount) instead. */
+export function whepPlaybackBufferSec(options: {
+  jitterBufferMs?: number;
+  htmlBufferedAheadSec?: number;
+}): number {
+  const fromJitter = Math.max(0, options.jitterBufferMs ?? 0) / 1000;
+  if (fromJitter > 0) {
+    return fromJitter;
+  }
+  return Math.max(0, options.htmlBufferedAheadSec ?? 0);
+}
+
 export function classifyWhepEndVerdict(options: {
   framesRendered?: number;
   videoTimeSec?: number;
   lastError?: string | null;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }): WhepEndVerdict {
   const played = whepHasRenderedMedia(options);
-  const duration = options.encodeDurationSec ?? 0;
-  const vt = options.videoTimeSec ?? 0;
-  const covered = duration > 0 && vt >= duration * 0.8;
+  const covered = playbackCoveredEncode(options);
   if (played && covered) {
     return { ok: true, status: "Playback OK", error: null };
   }
-  if (played && !covered && duration > 0) {
+  if (played && !covered) {
     return {
       ok: false,
       status: "Failed (see diagnostics)",
-      error: `WebRTC playback stalled at ${vt.toFixed(1)}s of a ${duration}s encode.`,
+      error: stallAgainstEncodeMessage({
+        protocolLabel: "WebRTC",
+        videoTimeSec: options.videoTimeSec,
+        encodeDurationSec: options.encodeDurationSec,
+        encodeElapsedSec: options.encodeElapsedSec,
+        runStopped: options.runStopped,
+      }),
     };
   }
   if (played) {

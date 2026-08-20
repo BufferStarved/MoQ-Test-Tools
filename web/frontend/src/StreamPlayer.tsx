@@ -46,6 +46,8 @@ interface StreamPlayerProps {
   previewReady?: boolean;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
   targetLatencyMs?: number;
   encodeLadder?: string;
   hlsLiveSyncCount?: number;
@@ -101,6 +103,8 @@ export function StreamPlayer({
   previewReady,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
   targetLatencyMs = 800,
   encodeLadder,
   hlsLiveSyncCount = 2,
@@ -269,6 +273,8 @@ export function StreamPlayer({
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
+              encodeElapsedSec={encodeElapsedSec}
+              runStopped={runStopped}
             />
           )}
           {target.engine === "moq" && moqReadyNamespace && (
@@ -290,6 +296,8 @@ export function StreamPlayer({
               previewReady={previewReady}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
+              encodeElapsedSec={encodeElapsedSec}
+              runStopped={runStopped}
               targetLatencyMs={targetLatencyMs}
               sourceHasAudio={sourceHasAudio}
               sourceVideoCodec={moqVideoCodec}

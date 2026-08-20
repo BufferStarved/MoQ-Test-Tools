@@ -442,6 +442,43 @@ class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
         self.assertEqual(float(rows[0]["vmaf_score"]), 72.5)
         self.assertEqual(rows[0]["cloud_provider"], "gcp")
 
+    def test_browser_webrtc_does_not_promote_sample_qp_to_vmaf(self) -> None:
+        from job_manager import JobManager, JobStatus, UploadJobRecord
+        from upload_service import UploadJob
+
+        manager = JobManager()
+        record = UploadJobRecord(
+            id="browser-job-qp",
+            status=JobStatus.RUNNING,
+            protocol="webrtc",
+            endpoint_url="http://example/whip",
+            media_path="device:browser",
+            duration_sec=30,
+            publisher_host="browser",
+        )
+        record.samples.append({"elapsed_sec": 1, "encoded_bitrate_kbps": 800, "fps": 30, "vmaf_score": 77})
+        manager._jobs[record.id] = record
+        record.cancel_event.set()
+        dest = MagicMock()
+        dest.protocol = "webrtc"
+        dest.url = "http://example/whip"
+        dest.cloud_provider = "gcp"
+        dest.cloud_region = "us-central1"
+        job = MagicMock(spec=UploadJob)
+        job.duration_sec = 30
+        job.destination = dest
+        job.encode_ladder = ""
+        job.target_latency_ms = 400
+        job.comparison_id = ""
+        job.stream_index = 0
+        job.stream_label = ""
+        job.compute_vmaf_on_ingest = False
+        result = manager._run_browser_publisher_job("browser-job-qp", job)
+        self.assertTrue(result.success)
+        self.assertIsNone(result.encoder_vmaf_score)
+        self.assertIsNone(result.vmaf_score)
+        self.assertEqual(result.encoder_vmaf_status, "disabled")
+
 
 if __name__ == "__main__":
     unittest.main()

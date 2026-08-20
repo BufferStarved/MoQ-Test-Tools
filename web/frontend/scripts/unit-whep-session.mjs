@@ -15,6 +15,13 @@ const src = fs.readFileSync(
 assert.match(src, /proxiedWebrtcSignalingUrl/);
 assert.match(src, /unwrapFastApiDetail/);
 assert.match(src, /waitForWhepIceTerminal/);
+assert.match(src, /WHEP_ICE_DISCONNECT_GRACE_MS/);
+assert.match(src, /whepIceWaitDecision/);
+assert.match(src, /"grace"/);
+assert.doesNotMatch(
+  src,
+  /const terminal = \(state: RTCIceConnectionState\) =>\s*state === "failed" \|\| state === "disconnected"/,
+);
 assert.match(src, /"Content-Type": "application\/sdp"/);
 assert.doesNotMatch(src, /method: "POST",\s*const headers/);
 assert.match(src, /a=ice-options:trickle/);

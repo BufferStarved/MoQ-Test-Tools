@@ -358,6 +358,7 @@ def run_units() -> CaseResult:
     ts_tests = [
         ROOT / "web" / "frontend" / "src" / "webrtcPlayback.test.ts",
         ROOT / "web" / "frontend" / "src" / "moqCmafPlayback.test.ts",
+        ROOT / "web" / "frontend" / "src" / "playbackEndVerdict.test.ts",
         ROOT / "web" / "frontend" / "src" / "playbackGate.ts",
     ]
     node_test = [

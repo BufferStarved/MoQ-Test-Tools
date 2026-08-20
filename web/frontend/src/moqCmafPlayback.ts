@@ -1,3 +1,5 @@
+import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
+
 /**
  * CMAF (ffmpeg / openmoq-publisher) subscribe + end-of-run policy.
  *
@@ -189,6 +191,7 @@ export function noMediaFailMessage(options: {
   namespace?: string;
   jobStatus?: string;
   jobError?: string | null;
+  previewReady?: boolean;
 }): string {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail) {
@@ -202,6 +205,11 @@ export function noMediaFailMessage(options: {
     return ns
       ? `MoQ publisher never announced namespace ${ns} on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.`
       : "MoQ publisher never announced the namespace on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.";
+  }
+  if (options.previewReady === true) {
+    return ns
+      ? `MoQ namespace ${ns} is live on the relay but the catalog object never reached this player (one-shot catalog miss).`
+      : "MoQ namespace is live on the relay but the catalog object never reached this player (one-shot catalog miss).";
   }
   return ns
     ? `MoQ catalog never loaded on namespace ${ns}. Publisher must be live; a 0x10 subscribe miss is not OK.`
@@ -244,11 +252,14 @@ export function classifyMoqEndVerdict(options: {
   videoTimeSec?: number;
   catalogReady?: boolean;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
   sessionRestarts?: number;
   lastError?: string | null;
   namespace?: string;
   jobStatus?: string;
   jobError?: string | null;
+  previewReady?: boolean;
 }): MoqEndVerdict {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail && !moqHasRenderedMedia(options)) {
@@ -259,9 +270,7 @@ export function classifyMoqEndVerdict(options: {
     };
   }
   const played = moqHasRenderedMedia(options);
-  const duration = options.encodeDurationSec ?? 0;
-  const vt = options.videoTimeSec ?? 0;
-  const covered = duration > 0 && vt >= duration * 0.8;
+  const covered = playbackCoveredEncode(options);
   if (played && covered) {
     const restarts = options.sessionRestarts ?? 0;
     return {
@@ -277,7 +286,13 @@ export function classifyMoqEndVerdict(options: {
     return {
       ok: false,
       status: "Failed (see diagnostics)",
-      error: `MoQ playback stalled at ${vt.toFixed(1)}s of a ${duration}s encode.`,
+      error: stallAgainstEncodeMessage({
+        protocolLabel: "MoQ",
+        videoTimeSec: options.videoTimeSec,
+        encodeDurationSec: options.encodeDurationSec,
+        encodeElapsedSec: options.encodeElapsedSec,
+        runStopped: options.runStopped,
+      }),
     };
   }
   if (options.lastError) {
@@ -295,6 +310,7 @@ export function classifyMoqEndVerdict(options: {
       namespace: options.namespace,
       jobStatus: options.jobStatus,
       jobError: options.jobError,
+      previewReady: options.previewReady,
     }),
   };
 }

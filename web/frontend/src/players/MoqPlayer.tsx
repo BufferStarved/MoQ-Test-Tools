@@ -60,6 +60,10 @@ interface MoqPlayerProps {
   previewReady?: boolean;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  /** Actual publisher run length (last encode sample), not the 300s cap. */
+  encodeElapsedSec?: number;
+  /** Operator Stop / cancel — leftover unused duration is not a stall. */
+  runStopped?: boolean;
   /** Glass-to-glass budget from upload config (ms). */
   targetLatencyMs?: number;
   /**
@@ -146,6 +150,8 @@ export default function MoqPlayer({
   previewReady,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
   targetLatencyMs = 400,
   sourceHasAudio = true,
   sourceVideoCodec,
@@ -217,6 +223,10 @@ export default function MoqPlayer({
   loadingRef.current = benchmarkLoading;
   const encodeDurationRef = useRef(encodeDurationSec);
   encodeDurationRef.current = encodeDurationSec;
+  const encodeElapsedRef = useRef(encodeElapsedSec ?? 0);
+  encodeElapsedRef.current = encodeElapsedSec ?? 0;
+  const runStoppedRef = useRef(runStopped);
+  runStoppedRef.current = runStopped;
   // Survives across effect re-mounts (unlike pinnedDiagRef, which start()
   // clears). Lets us tell from the UI alone whether the "live" effect fired
   // more than once for this component instance — e.g. because `namespace`
@@ -366,6 +376,8 @@ export default function MoqPlayer({
           ),
           catalogReady: Boolean(outcome?.catalogReady || sessionRef.current.catalogReady),
           encodeDurationSec: encodeDurationRef.current,
+          encodeElapsedSec: encodeElapsedRef.current,
+          runStopped: runStoppedRef.current,
           sessionRestarts: sessionRef.current.sessionRestarts,
           lastError: lastErrorRef.current,
           namespace,
@@ -1051,8 +1063,15 @@ export default function MoqPlayer({
           }
           // A 0x10 keepalive is still subscribed — destroying here republishes
           // the catalog-miss window. Wait for the no-media watchdog instead.
-          if (keptPublisherNotReady) {
-            pushDiag("catalog_timeout_skipped keepalive_0x10", true);
+          // Webcam announce can take longer than CATALOG_RETRY_MS (4s); tearing
+          // down before preview_ready misses the one-shot CMAF catalog.
+          if (keptPublisherNotReady || previewReadyRef.current === false) {
+            pushDiag(
+              keptPublisherNotReady
+                ? "catalog_timeout_skipped keepalive_0x10"
+                : "catalog_timeout_skipped waiting_for_announce",
+              true,
+            );
             return;
           }
           if (retrySubscribe("catalog_timeout_retry", 200)) {
@@ -1064,6 +1083,7 @@ export default function MoqPlayer({
               namespace,
               jobStatus: jobStatusRef.current,
               jobError: jobErrorRef.current,
+              previewReady: previewReadyRef.current,
             }),
           );
         }, attempt < MAX_CONNECT_ATTEMPTS ? CATALOG_RETRY_MS : catalogWaitMs);
@@ -1183,6 +1203,7 @@ export default function MoqPlayer({
                   namespace,
                   jobStatus: jobStatusRef.current,
                   jobError: jobErrorRef.current,
+                  previewReady: previewReadyRef.current,
                 }),
               );
             }

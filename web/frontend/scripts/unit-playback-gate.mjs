@@ -1,8 +1,8 @@
 /**
- * ffmpeg MoQ waits for preview_ready (relay namespace announce). Going live
- * on running-alone SUBSCRIBEs catalog before PUBLISH_NAMESPACE and burns the
- * one-shot catalog (bench-733f1d7c). Cloud WHIP still goes live on running —
- * it has no preview_ready signal.
+ * ffmpeg MoQ goes live on running even before preview_ready. The CMAF
+ * catalog is one-shot: subscribe-after-announce misses it (bench-bbc4eb3c).
+ * 0x10 keepalive + no catalog teardown before announce catches the object.
+ * Cloud WHIP still goes live on running — it has no preview_ready signal.
  */
 import assert from "node:assert/strict";
 
@@ -20,6 +20,9 @@ function playbackGateForJob(job, benchmarkStarting) {
       if (protocol === "srt" || protocol === "rtmp") {
         return "live";
       }
+      if (protocol === "moq") {
+        return "live";
+      }
       return "waiting";
     }
     return "live";
@@ -29,21 +32,22 @@ function playbackGateForJob(job, benchmarkStarting) {
 
 assert.equal(
   playbackGateForJob({ status: "running", protocol: "moq", preview_ready: false }, false),
-  "waiting",
+  "live",
+  "catalog-when-ingest-healthy: subscribe before announce",
 );
 assert.equal(
   playbackGateForJob(
     { status: "running", protocol: "moq", publisher_host: "cloud", preview_ready: false },
     false,
   ),
-  "waiting",
+  "live",
 );
 assert.equal(
   playbackGateForJob(
     { status: "running", protocol: "moq", publisher_host: "browser", preview_ready: false },
     false,
   ),
-  "waiting",
+  "live",
 );
 assert.equal(
   playbackGateForJob(

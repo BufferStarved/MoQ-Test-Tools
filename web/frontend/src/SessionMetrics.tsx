@@ -7,6 +7,7 @@ import { MetricLabel } from "./MetricLabel";
 import { PipelineConfigDetails } from "./PipelineConfigDetails";
 import { buildSessionPipelineSections, type PipelineDiagramSpec } from "./pipelineConfig";
 import { protocolColor } from "./protocolTheme";
+import { isRealVmafLeg } from "./qualityVmaf";
 import type { ResultSummary } from "./types";
 
 interface SessionMetricsProps {
@@ -100,7 +101,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         label: displayLabels[index],
       };
     });
-    return savedStreamsToLegs(saved);
+    return savedStreamsToLegs(saved).map((leg, index) => ({
+      ...leg,
+      qualityAnalysisRequested:
+        isRealVmafLeg(displayStreams[index]?.quality?.encoder) ||
+        isRealVmafLeg(displayStreams[index]?.quality?.ingest),
+    }));
   }, [displayIndex, displayLabels, displayStreams]);
 
   const verdict = useMemo(() => buildComparisonVerdict(streams, labels), [streams, labels]);
@@ -365,6 +371,10 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
         </div>
       </section>
 
+      {displayStreams.some(
+        (result) =>
+          isRealVmafLeg(result.quality?.encoder) || isRealVmafLeg(result.quality?.ingest),
+      ) && (
       <section className="scorecard-section">
         <h4>Video quality</h4>
         <div className="scorecard-grid" style={{ gridTemplateColumns: `repeat(${displayStreams.length}, minmax(0, 1fr))` }}>
@@ -372,13 +382,15 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
             const encoder = result.quality?.encoder;
             const ingest = result.quality?.ingest;
             const avg = result.averages;
+            const encoderReal = isRealVmafLeg(encoder);
+            const ingestReal = isRealVmafLeg(ingest);
             return (
               <div key={`q-${result.filename}`} className="scorecard-column">
                 <p className="scorecard-column-title">{displayLabels[index]}</p>
                 <ScoreCell
                   metricKey="vmaf_score"
                   label="VMAF (encoder)"
-                  value={formatNum(encoder?.vmaf_score ?? null, 1)}
+                  value={encoderReal ? formatNum(encoder?.vmaf_score ?? null, 1) : "not scored"}
                 />
                 <ScoreCell
                   metricKey="vmaf_score"
@@ -390,7 +402,9 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                         ? "failed"
                         : ingest?.status === "pending"
                           ? "pending"
-                          : formatNum(ingest?.vmaf_score ?? avg.vmaf_score ?? null, 1)
+                          : ingestReal
+                            ? formatNum(ingest?.vmaf_score ?? avg.vmaf_score ?? null, 1)
+                            : "not scored"
                   }
                 />
                 <ScoreCell
@@ -437,6 +451,7 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
           })}
         </div>
       </section>
+      )}
 
       <section className="scorecard-section">
         <h4>Media health (end state)</h4>

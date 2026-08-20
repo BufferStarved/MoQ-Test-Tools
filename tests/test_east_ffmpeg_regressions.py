@@ -109,11 +109,12 @@ class EastWhipLoopbackTests(unittest.TestCase):
 
 
 class FrontendRegressionSourceTests(unittest.TestCase):
-    def test_moq_playback_gate_waits_for_namespace_announce(self) -> None:
+    def test_moq_playback_gate_is_live_before_preview_ready(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
         self.assertIn('protocol === "webrtc" && !browser', text)
         self.assertIn("preview_ready === false", text)
-        self.assertIn("burns the one-shot catalog", text)
+        self.assertIn("Subscribe on running + 0x10 keepalive", text)
+        self.assertIn('if (protocol === "moq")', text)
         self.assertNotIn("protocol !== \"moq\" && protocol !== \"webrtc\"", text)
 
     def test_moq_player_retries_catalog_miss(self) -> None:
@@ -121,6 +122,7 @@ class FrontendRegressionSourceTests(unittest.TestCase):
         self.assertIn("const MAX_CONNECT_ATTEMPTS = 12", text)
         self.assertIn("const CATALOG_RETRY_MS = 4_000", text)
         self.assertIn("catalog_timeout_retry", text)
+        self.assertIn("catalog_timeout_skipped waiting_for_announce", text)
         self.assertIn("subscribe_0x10_keepalive", text)
         self.assertIn("noMediaTimeoutMs", text)
 

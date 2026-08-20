@@ -1049,22 +1049,6 @@ class JobManager:
         quality = {}
         if job.compute_vmaf_on_ingest:
             quality["ingest"] = {"status": "pending", "computed_on": "ingest_agent"}
-        qp_scores = [
-            float(s["vmaf_score"])
-            for s in samples
-            if s.get("vmaf_score") not in (None, "")
-        ]
-        if qp_scores and (job.destination.protocol or "").lower() == "webrtc":
-            avg_qp = round(sum(qp_scores) / len(qp_scores), 3)
-            quality["encoder"] = {
-                "status": "completed",
-                "computed_on": "webrtc_qp",
-                "vmaf_score": avg_qp,
-                "note": (
-                    "WebRTC cannot tee encoder VMAF; this is H.264 QP mapped "
-                    "to a 0–100 score so the quality column is comparable."
-                ),
-            }
         bitrate_vals = [float(s.get("encoded_bitrate_kbps") or 0) for s in samples]
         fps_vals = [float(s.get("fps") or 0) for s in samples]
         averages = {}
@@ -1072,8 +1056,6 @@ class JobManager:
             averages["encoded_bitrate_kbps"] = round(sum(bitrate_vals) / len(bitrate_vals), 1)
         if fps_vals:
             averages["fps"] = round(sum(fps_vals) / len(fps_vals), 2)
-        if qp_scores:
-            averages["vmaf_score"] = round(sum(qp_scores) / len(qp_scores), 3)
         payload = {
             "protocol": job.destination.protocol,
             "endpoint": job.destination.url,
@@ -1089,14 +1071,13 @@ class JobManager:
         }
         with open(summary_path, mode="w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
-        encoder_score = averages.get("vmaf_score") if qp_scores else None
         return UploadResult(
             success=True,
             csv_path=csv_path,
             summary_path=summary_path,
-            encoder_vmaf_status="completed" if encoder_score is not None else "disabled",
-            encoder_vmaf_score=encoder_score,
-            vmaf_score=encoder_score,
+            encoder_vmaf_status="disabled",
+            encoder_vmaf_score=None,
+            vmaf_score=None,
         )
 
     def _persist_collected_samples_csv(self, job_id: str, job: "UploadJob") -> Optional[str]:

@@ -230,6 +230,7 @@ def job_to_dict(job) -> dict:
         "media_zero_epoch": getattr(job, "media_zero_epoch", None),
         "packager_transit_ms": getattr(job, "packager_transit_ms", None),
         "delivery_media_origin_sec": getattr(job, "delivery_media_origin_sec", None),
+        "cancelled": bool(getattr(job, "cancel_event", None) and job.cancel_event.is_set()),
     }
 
 
@@ -1055,6 +1056,7 @@ async def upload_events(job_id: str):
                 "delivery_media_origin_sec": getattr(
                     current, "delivery_media_origin_sec", None
                 ),
+                "cancelled": current.cancel_event.is_set(),
             }
             yield f"event: status\ndata: {json.dumps(payload)}\n\n"
 

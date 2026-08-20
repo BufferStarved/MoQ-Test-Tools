@@ -110,6 +110,19 @@ describe("classifyMoqEndVerdict", () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.error ?? "", /stalled at 12.4s/);
   });
+
+  it("does not treat operator stop as a stall against the unused 300s cap", () => {
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: 500,
+      videoTimeSec: 18.8,
+      encodeDurationSec: 300,
+      encodeElapsedSec: 20,
+      runStopped: true,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
 });
 
 describe("noMediaFailMessage", () => {
@@ -124,6 +137,18 @@ describe("noMediaFailMessage", () => {
       jobStatus: "completed",
     });
     assert.match(message, /never announced namespace bench-733f1d7c/i);
+    assert.doesNotMatch(message, /0x10 subscribe miss is not OK/);
+  });
+
+  it("names a one-shot catalog miss when ingest already announced", () => {
+    const message = noMediaFailMessage({
+      catalogReady: false,
+      namespace: "bench-bbc4eb3c",
+      jobStatus: "running",
+      previewReady: true,
+    });
+    assert.match(message, /bench-bbc4eb3c/);
+    assert.match(message, /catalog object never reached this player/i);
     assert.doesNotMatch(message, /0x10 subscribe miss is not OK/);
   });
 });

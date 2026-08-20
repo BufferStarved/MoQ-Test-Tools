@@ -8,6 +8,22 @@ export interface BrowserEncodeSample {
   encodeLagMs: number;
 }
 
+/** Capture→encoded plus WebCodecs queue. VideoFrame.timestamp is not wall. */
+export function browserEncodeLagMs(options: {
+  captureTimestampUs: number;
+  encodedAtMs?: number;
+  encodeQueueSize?: number;
+  fps?: number;
+}): number {
+  const encodedAt = options.encodedAtMs ?? Date.now();
+  const captureMs = options.captureTimestampUs / 1000;
+  const captureLag =
+    Number.isFinite(captureMs) && captureMs > 0 ? Math.max(0, encodedAt - captureMs) : 0;
+  const fps = options.fps && options.fps > 0 ? options.fps : 30;
+  const queueLag = Math.max(0, options.encodeQueueSize ?? 0) * (1000 / fps);
+  return Math.round(Math.min(30_000, Math.max(captureLag, queueLag)));
+}
+
 export interface BrowserVideoChunk {
   data: Uint8Array;
   isKeyframe: boolean;
@@ -107,11 +123,11 @@ export function createBrowserVideoEncoder(
         frameCount += 1;
         framesWindow += 1;
         lastFrameAt = performance.now();
-        const mediaMs = frame.timestamp / 1000;
-        const wallMs = lastFrameAt - startedAt;
-        if (startedAt > 0 && mediaMs >= 0) {
-          lastEncodeLagMs = Math.max(0, wallMs - mediaMs);
-        }
+        lastEncodeLagMs = browserEncodeLagMs({
+          captureTimestampUs: pendingCaptureUs[pendingCaptureUs.length - 1] ?? 0,
+          encodeQueueSize: encoder.encodeQueueSize,
+          fps: 30,
+        });
       } finally {
         frame.close();
       }
@@ -124,6 +140,12 @@ export function createBrowserVideoEncoder(
     async start() {
       encoder = new VideoEncoder({
         output(chunk, meta) {
+          const captureUs = pendingCaptureUs[0] ?? Math.round(Date.now() * 1000);
+          lastEncodeLagMs = browserEncodeLagMs({
+            captureTimestampUs: captureUs,
+            encodeQueueSize: encoder?.encodeQueueSize ?? 0,
+            fps: 30,
+          });
           bytesWindow += chunk.byteLength;
           const data = new Uint8Array(chunk.byteLength);
           chunk.copyTo(data);

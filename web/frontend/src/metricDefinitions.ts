@@ -288,12 +288,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   playback_ttff_ms: {
     label: "Time to first frame",
     description:
-      "Milliseconds until the first rendered frame after the player goes live (MoQ: @playa/player; HLS: wall clock to video.currentTime > 0.25s).",
+      "A single join event: milliseconds until the first rendered frame after the player goes live. It does not keep changing after first paint — not a continuous latency series.",
   },
   playback_buffer_sec: {
     label: "Buffer size",
     description:
-      "Seconds of media buffered ahead of the playhead (HTMLMediaElement.buffered end − currentTime). Higher values mean more resilience to jitter; lower values track the live edge more tightly.",
+      "Seconds of media queued ahead of the playhead. HLS/MPEG-TS/DASH/MoQ use HTMLMediaElement.buffered. WebRTC/WHEP uses the RTC jitter buffer (inbound-rtp jitterBufferDelay / emittedCount) — MediaStream video has empty buffered ranges, not N/A.",
   },
   playback_rebuffer_sec: {
     label: "Rebuffer time",
@@ -317,8 +317,9 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description: "Count of hls.js FRAG_LOADED events during browser playback.",
   },
   playback_video_time_sec: {
-    label: "Video playback time",
-    description: "Maximum <video> currentTime reached in the browser player during the encode.",
+    label: "Playhead (seconds of media on glass)",
+    description:
+      "Seconds of media the player has painted (max playhead). A healthy line tracks encode time (the chart x-axis) within about a second. A line that stops while wall/encode time keeps going is a freeze.",
   },
 };
 

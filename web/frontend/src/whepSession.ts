@@ -231,22 +231,43 @@ export function waitForWhepMedia(
   });
 }
 
+/** Brief ICE flaps are not session death. Only failed/closed tear WHEP down
+ * immediately; disconnected gets a grace window to return to connected. */
+export const WHEP_ICE_DISCONNECT_GRACE_MS = 8_000;
+
+export function whepIceWaitDecision(
+  state: RTCIceConnectionState | string,
+): "terminal" | "grace" | "wait" {
+  const normalized = String(state || "").toLowerCase();
+  if (normalized === "failed" || normalized === "closed") {
+    return "terminal";
+  }
+  if (normalized === "disconnected") {
+    return "grace";
+  }
+  return "wait";
+}
+
 export function waitForWhepIceTerminal(
   pc: RTCPeerConnection,
   signal?: AbortSignal,
+  disconnectGraceMs = WHEP_ICE_DISCONNECT_GRACE_MS,
 ): Promise<RTCIceConnectionState> {
-  const terminal = (state: RTCIceConnectionState) =>
-    state === "failed" || state === "disconnected" || state === "closed";
-  if (terminal(pc.iceConnectionState)) {
+  if (whepIceWaitDecision(pc.iceConnectionState) === "terminal") {
     return Promise.resolve(pc.iceConnectionState);
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    let graceTimer: number | null = null;
     const finish = (state: RTCIceConnectionState, err?: Error) => {
       if (settled) {
         return;
       }
       settled = true;
+      if (graceTimer != null) {
+        window.clearTimeout(graceTimer);
+        graceTimer = null;
+      }
       pc.removeEventListener("iceconnectionstatechange", onIce);
       signal?.removeEventListener("abort", onAbort);
       if (err) {
@@ -257,8 +278,25 @@ export function waitForWhepIceTerminal(
     };
     const onIce = () => {
       const state = pc.iceConnectionState;
-      if (terminal(state)) {
+      const decision = whepIceWaitDecision(state);
+      if (decision === "terminal") {
         finish(state);
+        return;
+      }
+      if (decision === "grace") {
+        if (graceTimer == null) {
+          graceTimer = window.setTimeout(() => {
+            graceTimer = null;
+            if (whepIceWaitDecision(pc.iceConnectionState) === "grace") {
+              finish(pc.iceConnectionState);
+            }
+          }, disconnectGraceMs);
+        }
+        return;
+      }
+      if (graceTimer != null) {
+        window.clearTimeout(graceTimer);
+        graceTimer = null;
       }
     };
     const onAbort = () => finish(pc.iceConnectionState, new DOMException("WHEP wait aborted.", "AbortError"));

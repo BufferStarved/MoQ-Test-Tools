@@ -17,10 +17,6 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
       const protocol = (job.protocol || "").toLowerCase();
       const browser = (job.publisher_host || "").toLowerCase() === "browser";
       // Cloud WHIP has no preview_ready signal — WHEP must attach on running.
-      // ffmpeg MoQ must wait for the relay namespace announce. Going live
-      // earlier SUBSCRIBEs catalog before PUBLISH_NAMESPACE, gets 0x10, and
-      // burns the one-shot catalog (bench-733f1d7c: 240 CMAF fragments,
-      // moqx_ns=0, tile showed catalog-miss).
       if (protocol === "webrtc" && !browser) {
         return "live";
       }
@@ -28,6 +24,15 @@ export function playbackGateForJob(job: UploadJob | undefined, benchmarkStarting
       // player keeps its own manifest wait; blocking the gate on HLS health
       // delayed a working HTTP-TS path by tens of seconds.
       if (protocol === "srt" || protocol === "rtmp") {
+        return "live";
+      }
+      // ffmpeg CMAF catalog is a one-shot group-0 object. Waiting until
+      // preview_ready (announce already happened) SUBSCRIBEs after the
+      // catalog is gone — ingest looks healthy, glass never starts
+      // (bench-bbc4eb3c). Subscribe on running + 0x10 keepalive catches it.
+      // Do not tear the session down on the 4s catalog timer while announce
+      // is still pending (webcam publish can take longer than 4s).
+      if (protocol === "moq") {
         return "live";
       }
       return "waiting";

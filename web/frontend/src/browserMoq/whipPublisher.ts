@@ -201,13 +201,11 @@ async function postWhipEncodeSample(
   let packetsLost = 0;
   let nackCount = 0;
   let retransmittedPackets = 0;
-  let qpSum = 0;
   report.forEach((stat) => {
     if (stat.type === "outbound-rtp") {
       const outbound = stat as RTCOutboundRtpStreamStats & {
         nackCount?: number;
         retransmittedPacketsSent?: number;
-        qpSum?: number;
       };
       if (outbound.kind === "audio") {
         return;
@@ -223,7 +221,6 @@ async function postWhipEncodeSample(
         packetsSent = outbound.packetsSent ?? packetsSent;
         nackCount = outbound.nackCount ?? nackCount;
         retransmittedPackets = outbound.retransmittedPacketsSent ?? retransmittedPackets;
-        qpSum = outbound.qpSum ?? qpSum;
       }
     }
     if (stat.type === "remote-inbound-rtp") {
@@ -294,9 +291,6 @@ async function postWhipEncodeSample(
     packetsSent + packetsLost > 0 ? Math.min(100, (packetsLost / Math.max(packetsSent + packetsLost, 1)) * 100) : 0;
   const retransPct =
     packetsSent > 0 ? Math.min(100, (retransmittedPackets / packetsSent) * 100) : 0;
-  // H.264 QP 0–51 → 100–0 so WebRTC fills the same quality column as VMAF.
-  const qpQuality =
-    framesEncoded > 0 && qpSum > 0 ? Math.max(0, Math.min(100, 100 * (1 - qpSum / framesEncoded / 51))) : undefined;
   await postEncodeSample(jobId, {
     elapsed_sec: elapsedSec,
     encoded_bitrate_kbps: kbps,
@@ -314,6 +308,5 @@ async function postWhipEncodeSample(
     net_retrans_pct: retransPct || (packetsSent > 0 ? Math.min(100, (nackCount / packetsSent) * 100) : 0),
     pkt_snd_loss: packetsLost,
     pkt_retrans: retransmittedPackets || nackCount,
-    vmaf_score: qpQuality,
   });
 }
