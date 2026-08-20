@@ -32,7 +32,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json();
 }
 
-export function checkHealth(): Promise<{ status: string }> {
+export function checkHealth(): Promise<{ status: string; git_sha?: string | null }> {
   return request("/health");
 }
 

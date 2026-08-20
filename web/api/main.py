@@ -22,6 +22,8 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from build_info import read_build_sha
+
 # Max duration for a live source (device webcam via the local publisher
 # agent) — user can stop earlier from the UI.
 DEFAULT_LIVE_DURATION_SEC = 300
@@ -236,7 +238,7 @@ def job_to_dict(job) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "git_sha": read_build_sha(ROOT_DIR)}
 
 
 @app.get("/api/time")
@@ -1812,7 +1814,10 @@ if FRONTEND_DIST.exists():
 
     @app.get("/")
     def serve_frontend():
-        return FileResponse(FRONTEND_DIST / "index.html")
+        return FileResponse(
+            FRONTEND_DIST / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 else:
     @app.get("/")
     def root():

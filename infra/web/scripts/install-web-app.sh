@@ -36,6 +36,10 @@ INGEST_HOST="${INGEST_AGENT_HOST:-ubuntu@35.222.33.58}"
 INGEST_KEY="${INGEST_SSH_KEY:-$SSH_KEY}"
 GIT_REMOTE="${GIT_REMOTE:-https://github.com/BufferStarved/MoQ-Test-Tools.git}"
 GIT_REF="${GIT_REF:-main}"
+GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$GIT_SHA" ]]; then
+  printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
+fi
 
 SSH_PORT="${WEB_SSH_PORT:-22}"
 
@@ -181,6 +185,7 @@ GCP_INSTANCE_ZIXI="${GCP_INSTANCE_ZIXI}"
 GCP_INSTANCE_MOQX="${GCP_INSTANCE_MOQX}"
 GIT_REMOTE="${GIT_REMOTE}"
 GIT_REF="${GIT_REF}"
+GIT_SHA="${GIT_SHA}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -235,12 +240,16 @@ bash "\$INSTALL_ROOT/scripts/install-openmoq-publisher.sh" </dev/null || true
 
 # Frontend production build (vite is a devDependency — need full install to build)
 echo "Building frontend..."
+if [[ -n "\$GIT_SHA" ]]; then
+  printf '%s\n' "\$GIT_SHA" > "\$INSTALL_ROOT/.build-sha"
+  export VITE_GIT_SHA="\$GIT_SHA"
+fi
 cd "\$INSTALL_ROOT/web/frontend"
 npm ci
 npm run build
 cd "\$INSTALL_ROOT"
 test -f web/frontend/dist/index.html
-echo "Frontend build OK."
+echo "Frontend build OK (sha=\${VITE_GIT_SHA:-unknown})."
 
 # Cloud-playout BBB is gitignored (~300MB) and must survive rsync --delete.
 if [[ ! -s "\$INSTALL_ROOT/bbb.mp4" ]]; then

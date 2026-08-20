@@ -38,6 +38,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_avfoundation_modes \
   tests.test_device_webcam \
   tests.test_webcam_broker \
+  tests.test_build_info \
   -q
 
 for script in "$ROOT"/web/frontend/scripts/unit-*.mjs; do

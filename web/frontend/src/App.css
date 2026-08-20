@@ -3390,3 +3390,17 @@ code {
     margin-left: 0;
   }
 }
+
+.build-stamp {
+  position: fixed;
+  right: 16px;
+  bottom: 12px;
+  margin: 0;
+  z-index: 20;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  opacity: 0.72;
+  user-select: all;
+}

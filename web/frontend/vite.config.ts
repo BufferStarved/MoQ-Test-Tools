@@ -1,7 +1,26 @@
+import { execSync } from "node:child_process";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+function resolveGitSha(): string {
+  const fromEnv = (process.env.VITE_GIT_SHA || "").trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+  try {
+    return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+  } catch {
+    return "dev";
+  }
+}
+
+const gitSha = resolveGitSha();
+process.env.VITE_GIT_SHA = gitSha;
+
 export default defineConfig({
+  define: {
+    "import.meta.env.VITE_GIT_SHA": JSON.stringify(gitSha),
+  },
   plugins: [react()],
   server: {
     host: "127.0.0.1",
