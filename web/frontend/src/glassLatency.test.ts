@@ -97,6 +97,24 @@ describe("computeMoqE2eMs", () => {
     );
   });
 
+  it("grows LOC e2e with stall time when the canvas stops painting", () => {
+    const lastFrameAtMs = 1_000_000;
+    const live = computeMoqE2eMs({
+      mediaPackaging: "loc",
+      playerLatencyMs: 28,
+      lastFrameAtMs,
+      nowMs: lastFrameAtMs + 200,
+    });
+    const frozen = computeMoqE2eMs({
+      mediaPackaging: "loc",
+      playerLatencyMs: 28,
+      lastFrameAtMs,
+      nowMs: lastFrameAtMs + 20_000,
+    });
+    assert.equal(live, 28);
+    assert.ok((frozen ?? 0) > 15_000, `frozen LOC e2e should age the stale frame, got ${frozen}`);
+  });
+
   it("uses the WHEP path-delay family when frames show but no clocks exist", () => {
     assert.equal(
       pathDelayMs({ encodeLagMs: 0, rttMs: 36, playerBufferMs: 0 }),

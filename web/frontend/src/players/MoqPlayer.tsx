@@ -39,6 +39,7 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { computeMoqE2eMs } from "../glassLatency";
+import { canvasBehindLiveSec, inferDroppedFrames } from "../playbackTruth";
 import { isGracefulMoqReset } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -193,6 +194,7 @@ export default function MoqPlayer({
     moqTimelineMs: 0,
     firstFrameAtMs: 0,
     firstFrameVideoSec: 0,
+    lastFrameAtMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
   const lastGoodE2eRef = useRef<number | undefined>(undefined);
@@ -282,6 +284,7 @@ export default function MoqPlayer({
       ttffMs: session.ttffMs,
       firstFrameAtMs: session.firstFrameAtMs,
       firstFrameVideoSec: session.firstFrameVideoSec,
+      lastFrameAtMs: session.lastFrameAtMs,
     });
     if (computed != null) {
       lastGoodE2eRef.current = computed;
@@ -303,7 +306,12 @@ export default function MoqPlayer({
         outcome?.framesRendered ?? 0,
       );
       const framesDropped = loc
-        ? session.framesDropped || htmlFrames.framesDropped
+        ? inferDroppedFrames({
+            framesRendered,
+            reportedDropped: session.framesDropped || htmlFrames.framesDropped,
+            firstFrameAtMs: session.firstFrameAtMs,
+            targetFps: 30,
+          })
         : htmlFrames.framesDropped || session.framesDropped;
       if (framesRendered > 0) {
         session.statsEvents = Math.max(session.statsEvents, 1);
@@ -334,7 +342,13 @@ export default function MoqPlayer({
         playback_hls_buffer_stalls: 0,
         playback_hls_frag_loads: 0,
         playback_video_time_sec: videoTimeSec,
-        playback_buffer_sec: bufferedAheadSec(videoRef.current),
+        playback_buffer_sec: loc
+          ? canvasBehindLiveSec({
+              framesRendered,
+              firstFrameAtMs: session.firstFrameAtMs,
+              targetFps: 30,
+            })
+          : bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         playback_error_count: lastErrorRef.current ? 1 : 0,
         e2e_latency_ms: captureAnchoredE2eMs(),
@@ -464,6 +478,7 @@ export default function MoqPlayer({
       moqTimelineMs: 0,
       firstFrameAtMs: 0,
       firstFrameVideoSec: 0,
+      lastFrameAtMs: 0,
       sessionRestarts: 0,
     };
     // Remounts used to wipe rebuffer to 0 mid-run — restore per-job accum.
@@ -598,6 +613,9 @@ export default function MoqPlayer({
       if (sessionRef.current.firstFrameAtMs <= 0) {
         sessionRef.current.firstFrameAtMs = Date.now();
         sessionRef.current.firstFrameVideoSec = mediaTimeSec;
+      }
+      if (sessionRef.current.lastFrameAtMs <= 0) {
+        sessionRef.current.lastFrameAtMs = Date.now();
       }
       markMoqFirstFrame(jobId, {
         ttffMs: sessionRef.current.ttffMs,
@@ -944,8 +962,12 @@ export default function MoqPlayer({
         });
 
         player.on("stats", (stats) => {
+          const prevRendered = sessionRef.current.framesRendered;
           sessionRef.current.framesRendered = stats.framesRendered;
           sessionRef.current.framesDropped = stats.framesDropped;
+          if (stats.framesRendered > prevRendered) {
+            sessionRef.current.lastFrameAtMs = Date.now();
+          }
           sessionRef.current.bitrateBps = stats.bitrate;
           sessionRef.current.stallCount = Math.max(sessionRef.current.stallCount, stats.stallCount);
           sessionRef.current.ttffMs = stats.timeToFirstFrameMs ?? sessionRef.current.ttffMs;

@@ -279,7 +279,8 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   },
   playback_frames_dropped: {
     label: "Frames dropped",
-    description: "Cumulative frames dropped reported by @playa/player stats during MoQ playback.",
+    description:
+      "Cumulative frames the viewer missed. For HLS/MPEG-TS/DASH/CMAF this is HTMLVideoElement droppedVideoFrames. For WebRTC it is RTC inbound-rtp framesDropped. For browser MoQ LOC, playa always reports 0, so the player infers missed frames as expected_fps × time_since_first_paint − frames_rendered.",
   },
   playback_bitrate_bps: {
     label: "Playback bitrate",
@@ -293,7 +294,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   playback_buffer_sec: {
     label: "Buffer size",
     description:
-      "Seconds of media queued ahead of the playhead. HLS/MPEG-TS/DASH/MoQ use HTMLMediaElement.buffered. WebRTC/WHEP uses the RTC jitter buffer (inbound-rtp jitterBufferDelay / emittedCount) — MediaStream video has empty buffered ranges, not N/A.",
+      "Seconds of media queued ahead of the playhead for HLS/MPEG-TS/DASH (HTMLMediaElement.buffered) and WebRTC (RTC jitter buffer). Browser MoQ canvas has no HTML buffer — this is seconds the glass is behind the encode (missed frames / fps).",
   },
   playback_rebuffer_sec: {
     label: "Rebuffer time",

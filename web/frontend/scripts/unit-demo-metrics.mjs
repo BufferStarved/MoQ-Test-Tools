@@ -133,6 +133,8 @@ assert.match(charts, /metricKey="playback_fps"/);
 assert.match(charts, /qualityRequested && comparisonHasMetric\(points, "vmaf_score_encoder"/);
 assert.match(charts, /Playhead \(seconds of media on glass\)/);
 assert.match(charts, /jitterBufferDelay/);
+assert.match(charts, /playa reports 0/);
+assert.match(charts, /stale frame aging/);
 
 const whep = fs.readFileSync(path.join(root, "players/WhepPlayer.tsx"), "utf8");
 assert.match(whep, /whepPlaybackBufferSec/);
@@ -154,6 +156,7 @@ assert.match(encoder, /export function browserEncodeLagMs/);
 assert.doesNotMatch(encoder, /wallMs - mediaMs/);
 
 const glass = fs.readFileSync(path.join(root, "glassLatency.ts"), "utf8");
+assert.match(glass, /locGlassDelayMs/);
 assert.match(glass, /Do not use playheadAnchored here/);
 
 console.log("unit-demo-metrics: PASS");

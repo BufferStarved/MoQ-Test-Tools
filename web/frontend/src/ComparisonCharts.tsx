@@ -485,7 +485,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="e2e_latency_ms"
                 data={points}
                 series={comparisonSeries(activeLegs, "e2e_latency_ms", "ms")}
-                caption="Capture-to-glass delay. A healthy live line stays roughly flat; a climb usually means a frozen playhead, not growing glass latency."
+                caption="Capture-to-glass of the frame on screen. A healthy live line stays roughly flat. If the playhead is frozen this line climbs with wall time — that is the stale frame aging, not a 20ms win."
               />
             )}
             {comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) && (
@@ -510,7 +510,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               data={points}
               series={comparisonSeries(activeLegs, "playback_frames_dropped", "frames")}
               keepZeroSeries
-              caption="Cumulative glass-side drops (HTML video quality, playa, or WHEP RTC stats). Rising means the viewer missed frames."
+              caption="Cumulative frames the viewer missed. Browser MoQ LOC infers this (playa reports 0). WebRTC uses RTC/HTML dropped-frame counters. Rising means missed pictures — a flat zero next to a dead FPS line is a bug."
             />
             {(comparisonHasMetricPresent(points, "playback_stall_count", activeLegs.length) ||
               comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) ||
@@ -542,7 +542,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_buffer_sec", "s")}
                 keepZeroSeries
-                caption="Seconds queued ahead of the playhead. WebRTC/WHEP is the jitter buffer (RTCRtpReceiver jitterBufferDelay), not HLS buffered ranges."
+                caption="WebRTC: jitter buffer ahead of the playhead (RTCRtpReceiver jitterBufferDelay). MoQ canvas: seconds the glass is behind the encode (missed frames / fps). Rising MoQ here is missed video, not a larger safety buffer."
               />
             )}
             {comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length) && (
@@ -551,6 +551,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 metricKey="playback_video_time_sec"
                 data={points}
                 series={comparisonSeries(activeLegs, "playback_video_time_sec", "s")}
+                keepZeroSeries
                 caption="Seconds of media the player has painted. A healthy line tracks encode time (the x-axis) within about a second. A line that stops while the x-axis keeps going is a freeze."
               />
             )}

@@ -2,14 +2,18 @@
  * Cross-protocol glass delay helpers.
  *
  * Browser MoQ LOC stamps CaptureTimestamp as Unix-epoch microseconds; that
- * is true capture→glass. WebRTC WHEP has no capture clock on the RTP, so it
+ * is true capture→glass **while frames are painting**. If the canvas freezes,
+ * locGlassDelayMs adds stall time so a stale frame cannot beat WebRTC at ~30ms. WebRTC WHEP has no capture clock on the RTP, so it
  * uses encode time + RTT/2 + jitter buffer — the same components, same
  * units, so a verdict can rank them. Do not mix those with
  * wall−playhead-from-zero (that series grows 1:1 with a frozen playhead).
  */
 
+import { locGlassDelayMs } from "./playbackTruth.ts";
+
 export const E2E_MIN_MS = 8;
-export const E2E_MAX_MS = 30_000;
+/** Includes freeze-adjusted glass delay (a 36s stall must still plot). */
+export const E2E_MAX_MS = 180_000;
 
 export function isPlausibleE2eMs(value: number | null | undefined): value is number {
   return value != null && Number.isFinite(value) && value >= E2E_MIN_MS && value < E2E_MAX_MS;
@@ -128,12 +132,27 @@ export function computeMoqE2eMs(options: {
   ttffMs?: number;
   firstFrameAtMs?: number;
   firstFrameVideoSec?: number;
+  lastFrameAtMs?: number;
 }): number | undefined {
   const bridge = options.bridgeMs ?? 0;
   const now = options.nowMs ?? Date.now();
   const skew = options.clockSkewMs ?? 0;
   const epoch = options.epochSec ?? 0;
   const videoT = options.videoCurrentTimeSec ?? 0;
+
+  // LOC: last CaptureTimestamp is NOT glass delay while the canvas is frozen.
+  // Add stall time so a dead playhead cannot "win" vs WebRTC at ~30ms.
+  if (options.mediaPackaging === "loc") {
+    return locGlassDelayMs({
+      playerLatencyMs: options.playerLatencyMs,
+      lastFrameAtMs: options.lastFrameAtMs,
+      nowMs: now,
+      bridgeMs: bridge,
+      encodeLagMs: options.encoderLagMs,
+      rttMs: options.rttMs,
+      bufferMs: options.bufferMs,
+    });
+  }
 
   if (isPlausibleE2eMs(options.playerLatencyMs)) {
     const total = options.playerLatencyMs + bridge;
