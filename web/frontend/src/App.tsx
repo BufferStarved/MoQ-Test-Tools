@@ -1626,7 +1626,7 @@ function App() {
                         controlsLocked={bootstrapping || !apiOnline}
                         sourceHasAudio={mediaSource === "browser_moq" ? browserHasAudio : true}
                         moqVideoCodec={mediaSource === "browser_moq" ? browserVideoCodec : undefined}
-                        moqDraftVersion={16}
+                        moqDraftVersion={18}
                         moqMediaPackaging={mediaSource === "browser_moq" ? "loc" : "cmaf"}
                         // Webcam is always captured by the local-agent path (ffmpeg
                         // AVFoundation/V4L2), which always includes an audio input,

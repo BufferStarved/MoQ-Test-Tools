@@ -241,7 +241,7 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         url="https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark",
         notes=(
             "Publishes fragmented MP4 from ffmpeg to the GCP OpenMOQ moqx relay via "
-            "openmoq-publisher (WebTransport, draft 16). "
+            "openmoq-publisher (WebTransport, draft 18). "
             "Ingest VMAF subscribes on the ingest worker and records post-relay fMP4 "
             "for libvmaf scoring. Install recorder (Docker): "
             "./scripts/install-openmoq-recorder.sh or "

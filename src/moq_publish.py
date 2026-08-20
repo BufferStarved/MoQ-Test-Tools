@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
 
 DEFAULT_MOQ_NAMESPACE = "benchmark"
-DEFAULT_MOQ_DRAFT = 16
+DEFAULT_MOQ_DRAFT = 18
 DEFAULT_MOQ_FORWARD = 1
 # NOTE: openmoq-publisher's forward=0 "await-subscribe" mode never receives a
 # downstream SUBSCRIBE notification from the moqx relay used here (confirmed by

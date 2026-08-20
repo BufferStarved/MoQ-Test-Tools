@@ -7,7 +7,12 @@ import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
-import { classifyLocFrameStall, locSubscribeOptions } from "../moqLocPlayback";
+import {
+  classifyLocFrameStall,
+  locSubscribeOptions,
+  resetLocPlaybackPipeline,
+} from "../moqLocPlayback";
+import { requestLocIdr } from "../browserMoq/locIdrNudge";
 import {
   classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
@@ -159,7 +164,7 @@ export default function MoqPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   netRttMs = 0,
-  draftVersion = 16,
+  draftVersion = 18,
   mediaPackaging = "cmaf",
 }: MoqPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -286,6 +291,10 @@ export default function MoqPlayer({
       firstFrameVideoSec: session.firstFrameVideoSec,
       lastFrameAtMs: session.lastFrameAtMs,
     });
+    if (mediaPackaging === "loc") {
+      // Never hold a last-good ~30ms path delay while the canvas is frozen.
+      return computed;
+    }
     if (computed != null) {
       lastGoodE2eRef.current = computed;
       return computed;
@@ -852,6 +861,7 @@ export default function MoqPlayer({
               moqTimelineMs: 0,
               firstFrameAtMs: sessionRef.current.firstFrameAtMs,
               firstFrameVideoSec: sessionRef.current.firstFrameVideoSec,
+              lastFrameAtMs: sessionRef.current.lastFrameAtMs,
               sessionRestarts: sessionRef.current.sessionRestarts,
             };
             setIsReady(false);
@@ -1221,6 +1231,7 @@ export default function MoqPlayer({
         let watchdogAtMs = Date.now();
         let watchdogGaveUp = false;
         let lastLocFrames = 0;
+        let locDecoderResets = 0;
         // Wall time the watchdog first saw rendered media this run. Anchors the
         // EARLY_JOIN_WINDOW_MS fast-restart window (survives session restarts:
         // the window is measured from the run's first media, not per session).
@@ -1276,12 +1287,29 @@ export default function MoqPlayer({
               lastAdvanceAtMs: watchdogAtMs,
               nowMs: Date.now(),
               sessionRestarts,
+              decoderResets: locDecoderResets,
               stallLimitMs: locStallMs,
               retrying,
               earlyWindow,
               encodeFinished:
                 jobStatusRef.current === "completed" || jobStatusRef.current === "failed",
             });
+            if (locAction === "reset") {
+              locDecoderResets += 1;
+              watchdogAtMs = Date.now();
+              const resetOk = resetLocPlaybackPipeline(playerRef.current);
+              requestLocIdr();
+              pushDiag(
+                `loc_decoder_reset=${locDecoderResets} ok=${resetOk} frames=${frames}${earlyWindow ? " early_join" : ""}`,
+                true,
+              );
+              try {
+                playerRef.current?.play();
+              } catch {
+                // ignore
+              }
+              return;
+            }
             if (locAction === "hold") {
               pushDiag(`loc_frames_hold frames=${frames}${earlyWindow ? " early_join" : ""}`);
               watchdogAtMs = Date.now();

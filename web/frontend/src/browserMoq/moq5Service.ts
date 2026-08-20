@@ -12,7 +12,7 @@ import {
 import type { MoqtDraftVersion } from "./moqtVersions";
 import { openStrictMoqtWebTransport } from "./webTransport";
 
-const RELAY_DRAFT: MoqtDraftVersion = 16;
+const RELAY_DRAFT: MoqtDraftVersion = 18;
 
 /**
  * In-browser MoQ5 / MOQT publish surface.
@@ -107,7 +107,7 @@ export async function connectMoq5WasmPublisher(options: {
       // already closed
     }
     const detail = err instanceof Error ? err.message : "WebTransport failed";
-    throw new Error(`Relay did not accept MOQT draft-16: ${detail}`);
+    throw new Error(`Relay did not accept MOQT draft-18: ${detail}`);
   }
 }
 
@@ -134,6 +134,9 @@ async function bindPublisherSession(args: {
   let closed = false;
   let videoWrite: Promise<void> = Promise.resolve();
   const pendingVideo: BrowserVideoChunk[] = [];
+  const sendQ: BrowserVideoChunk[] = [];
+  let sending = false;
+  const MAX_VIDEO_QUEUE = 45;
   // moqx forwards each SUBSCRIBE to the publisher (player + recorder, or a
   // player watchdog resubscribe overlapping the old session). A single
   // videoAlias meant the newest subscriber stole the track and the relay
@@ -239,7 +242,53 @@ async function bindPublisherSession(args: {
     }
   }
 
+  function trimSendQueue() {
+    if (sendQ.length <= MAX_VIDEO_QUEUE) {
+      return;
+    }
+    let lastKey = -1;
+    for (let i = sendQ.length - 1; i >= 0; i -= 1) {
+      if (sendQ[i]?.isKeyframe) {
+        lastKey = i;
+        break;
+      }
+    }
+    if (lastKey > 0) {
+      sendQ.splice(0, lastKey);
+    } else {
+      sendQ.splice(0, sendQ.length - MAX_VIDEO_QUEUE);
+    }
+  }
+
+  async function pumpVideo(): Promise<void> {
+    if (sending) {
+      return;
+    }
+    sending = true;
+    try {
+      while (!closed && sendQ.length > 0 && videoSubscribers.length > 0) {
+        const chunk = sendQ.shift();
+        if (!chunk) {
+          break;
+        }
+        try {
+          await sendVideoChunk(chunk);
+        } catch (err) {
+          console.warn("browser MoQ video object", err);
+        }
+      }
+    } finally {
+      sending = false;
+      if (!closed && sendQ.length > 0 && videoSubscribers.length > 0) {
+        void pumpVideo();
+      }
+    }
+  }
+
   function enqueueVideo(chunk: BrowserVideoChunk): void {
+    if (closed) {
+      return;
+    }
     if (chunk.description) {
       lastDescription = chunk.description;
     }
@@ -253,13 +302,14 @@ async function bindPublisherSession(args: {
       }
       return;
     }
-    videoWrite = videoWrite
-      .then(async () => {
-        await sendVideoChunk(chunk);
-      })
-      .catch((err) => {
-        console.warn("browser MoQ video object", err);
-      });
+    // Live edge only: a backed-up promise-per-frame chain used to deliver a
+    // stale GOP while the player sat on a frozen canvas (recv still ~2.4 Mbps).
+    if (chunk.isKeyframe) {
+      sendQ.length = 0;
+    }
+    sendQ.push(chunk);
+    trimSendQueue();
+    void pumpVideo();
   }
 
   function flushPendingVideo(): void {

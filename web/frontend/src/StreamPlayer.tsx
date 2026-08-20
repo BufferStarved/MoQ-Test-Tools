@@ -118,7 +118,7 @@ export function StreamPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   netRttMs = 0,
-  moqDraftVersion = 16,
+  moqDraftVersion = 18,
   moqMediaPackaging = "cmaf",
 }: StreamPlayerProps) {
   const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);

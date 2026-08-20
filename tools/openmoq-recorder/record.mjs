@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * openmoq-fmp4-record — subscribe to an OpenMOQ/moqx relay (draft 16) and write
+ * openmoq-fmp4-record — subscribe to an OpenMOQ/moqx relay (draft 18) and write
  * post-relay CMAF fMP4 to a file for ingest VMAF scoring.
  *
  * Usage:
@@ -252,7 +252,7 @@ async function connectRelay(relayUrl, { insecure }) {
 
   /** @type {Record<string, unknown>} */
   const wtOptions = {
-    protocols: ['moqt-16'],
+    protocols: ['moqt-18'],
   };
 
   if (!insecure) {
@@ -265,7 +265,7 @@ async function connectRelay(relayUrl, { insecure }) {
   const transport = new WebTransport(wtUrl, wtOptions);
   await transport.ready;
 
-  const conn = new MoqtConnection(16);
+  const conn = new MoqtConnection(18);
   let closing = false;
   conn.onError = (err) => {
     if (closing) return;
@@ -283,7 +283,7 @@ async function connectRelay(relayUrl, { insecure }) {
   };
 
   await conn.connect(nodeSessionToWebTransportLike(transport));
-  log(`SETUP complete (draft 16) url=${wtUrl}`);
+  log(`SETUP complete (draft 18) url=${wtUrl}`);
   log('recorder=loc-cmaf-v2');
 
   return {
