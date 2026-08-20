@@ -93,6 +93,34 @@ class PlaybackMergeTests(unittest.TestCase):
         self.assertEqual(rows[7]["playback_error_count"], "1")
         self.assertEqual(rows[7]["playback_video_time_sec"], "12.43")
 
+    def test_zero_reconnect_sample_does_not_erase_painted_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            _write_csv(csv_path, count=6)
+            playback = [
+                {
+                    "elapsed_sec": 3,
+                    "playback_frames_rendered": 1692,
+                    "playback_video_time_sec": 56.2,
+                    "e2e_latency_ms": 800,
+                },
+                {
+                    "elapsed_sec": 5,
+                    "playback_frames_rendered": 0,
+                    "playback_video_time_sec": 0,
+                    "e2e_latency_ms": 0,
+                },
+            ]
+            rows = merge_playback_into_csv(csv_path, playback, csv_columns=CSV_COLUMNS)
+
+        self.assertEqual(rows[3]["playback_frames_rendered"], "1692")
+        self.assertEqual(rows[5]["playback_frames_rendered"], "1692")
+        self.assertEqual(rows[5]["e2e_latency_ms"], "800")
+        from playback_metrics import compute_playback_averages
+
+        averages = compute_playback_averages(rows)
+        self.assertEqual(averages["playback_frames_rendered"], 1692)
+
 
 class RobustE2eTests(unittest.TestCase):
     def test_trims_freeze_runaway(self):

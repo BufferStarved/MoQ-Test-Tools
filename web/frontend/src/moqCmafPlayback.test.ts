@@ -111,6 +111,20 @@ describe("classifyMoqEndVerdict", () => {
     assert.match(verdict.error ?? "", /stalled at 12.4s/);
   });
 
+  it("does not call a late drain/reconnect a never-rendered failure", () => {
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: 1692,
+      videoTimeSec: 56.2,
+      catalogReady: true,
+      encodeDurationSec: 60,
+      encodeElapsedSec: 59,
+      lastError: "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
+
   it("does not treat operator stop as a stall against the unused 300s cap", () => {
     const verdict = classifyMoqEndVerdict({
       firstFrame: true,

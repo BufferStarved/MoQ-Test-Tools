@@ -31,7 +31,7 @@ import {
   wantsEncoderVmaf,
   wantsIngestVmaf,
 } from "./qualityVmaf";
-import { mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
+import { applyPlaybackHighWater, mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { humanizeJobError } from "./moqCmafPlayback";
 import { encodeElapsedSecForVerdict } from "./playbackEndVerdict";
@@ -929,8 +929,14 @@ function App() {
             leg.id === job.id
               ? {
                   ...leg,
-                  samples: [...leg.samples, sample],
-                  latestSample: sample,
+                  samples: [
+                    ...leg.samples,
+                    applyPlaybackHighWater(sample as Record<string, unknown>, leg.samples.at(-1) as Record<string, unknown> | undefined) as typeof sample,
+                  ],
+                  latestSample: applyPlaybackHighWater(
+                    sample as Record<string, unknown>,
+                    leg.samples.at(-1) as Record<string, unknown> | undefined,
+                  ) as typeof sample,
                 }
               : leg,
           ),

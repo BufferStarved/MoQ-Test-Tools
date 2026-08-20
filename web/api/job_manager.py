@@ -19,7 +19,12 @@ from remote_vmaf import (
 )
 from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
-from playback_metrics import PLAYBACK_FIELD_NAMES, patch_summary_with_playback, robust_e2e_stats
+from playback_metrics import (
+    PLAYBACK_FIELD_NAMES,
+    _playback_high_water,
+    patch_summary_with_playback,
+    robust_e2e_stats,
+)
 from encode_profile import encode_profile_summary
 from moq_publish import is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
@@ -751,8 +756,9 @@ class JobManager:
             if target is None and record.samples:
                 target = record.samples[-1]
             if target is not None:
+                merged = _playback_high_water(target, payload)
                 for name in PLAYBACK_FIELD_NAMES:
-                    target[name] = payload[name]
+                    target[name] = merged[name]
         return True
 
     def record_browser_encode_sample(self, job_id: str, sample: dict) -> bool:

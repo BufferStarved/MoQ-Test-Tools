@@ -246,6 +246,12 @@ export type MoqEndVerdict =
   | { ok: true; status: string; error: null }
   | { ok: false; status: "Failed (see diagnostics)"; error: string };
 
+export function isNoMediaCatalogMessage(text?: string | null): boolean {
+  return /catalog loaded but no video frames|catalog never loaded|0x10 subscribe miss|catalog object never reached/i.test(
+    text || "",
+  );
+}
+
 export function classifyMoqEndVerdict(options: {
   firstFrame?: boolean;
   framesRendered?: number;
@@ -295,7 +301,7 @@ export function classifyMoqEndVerdict(options: {
       }),
     };
   }
-  if (options.lastError) {
+  if (options.lastError && !(played && isNoMediaCatalogMessage(options.lastError))) {
     return {
       ok: false,
       status: "Failed (see diagnostics)",

@@ -297,14 +297,28 @@ export default function MoqPlayer({
       // LOC paints a <canvas> — the hidden <video> never advances, so HTML
       // decoded-frame counters stay near zero and made playback look like 1–2 fps.
       const loc = mediaPackaging === "loc";
-      const framesRendered = loc
-        ? session.framesRendered || htmlFrames.framesRendered
-        : htmlFrames.framesRendered || session.framesRendered;
+      const outcome = getMoqPlaybackOutcome(jobId);
+      const framesRendered = Math.max(
+        loc ? session.framesRendered || htmlFrames.framesRendered : htmlFrames.framesRendered || session.framesRendered,
+        outcome?.framesRendered ?? 0,
+      );
       const framesDropped = loc
         ? session.framesDropped || htmlFrames.framesDropped
         : htmlFrames.framesDropped || session.framesDropped;
       if (framesRendered > 0) {
         session.statsEvents = Math.max(session.statsEvents, 1);
+      }
+      const videoTimeSec = Math.max(
+        session.videoTimeSec,
+        videoRef.current?.currentTime ?? 0,
+        outcome?.videoTimeSec ?? 0,
+      );
+      if (framesRendered > 0 || videoTimeSec > 0.25) {
+        markMoqFirstFrame(jobId, {
+          ttffMs: session.ttffMs,
+          videoTimeSec,
+          framesRendered,
+        });
       }
       persistJobRebuffer(jobId, rebufferRef.current);
       return {
@@ -314,15 +328,12 @@ export default function MoqPlayer({
         playback_frames_rendered: framesRendered,
         playback_frames_dropped: framesDropped,
         playback_bitrate_bps: session.bitrateBps,
-        playback_ttff_ms: session.ttffMs,
+        playback_ttff_ms: Math.max(session.ttffMs, outcome?.ttffMs ?? 0),
         playback_hls_errors: 0,
         playback_hls_fatal_errors: 0,
         playback_hls_buffer_stalls: 0,
         playback_hls_frag_loads: 0,
-        playback_video_time_sec: Math.max(
-          session.videoTimeSec,
-          videoRef.current?.currentTime ?? 0,
-        ),
+        playback_video_time_sec: videoTimeSec,
         playback_buffer_sec: bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         playback_error_count: lastErrorRef.current ? 1 : 0,
@@ -369,10 +380,14 @@ export default function MoqPlayer({
               framesRendered: snapshotNow.playback_frames_rendered,
               videoTimeSec: sessionRef.current.videoTimeSec,
             }),
-          framesRendered: snapshotNow.playback_frames_rendered,
+          framesRendered: Math.max(
+            snapshotNow.playback_frames_rendered,
+            outcome?.framesRendered ?? 0,
+          ),
           videoTimeSec: Math.max(
             sessionRef.current.videoTimeSec,
             outcome?.videoTimeSec ?? 0,
+            snapshotNow.playback_video_time_sec,
           ),
           catalogReady: Boolean(outcome?.catalogReady || sessionRef.current.catalogReady),
           encodeDurationSec: encodeDurationRef.current,
@@ -587,6 +602,7 @@ export default function MoqPlayer({
       markMoqFirstFrame(jobId, {
         ttffMs: sessionRef.current.ttffMs,
         videoTimeSec: sessionRef.current.videoTimeSec,
+        framesRendered: sessionRef.current.framesRendered,
       });
       if (!wasFirst) {
         return;
@@ -656,6 +672,14 @@ export default function MoqPlayer({
        */
       function scheduleSessionRestart(reason: string, delayMs = SESSION_RESTART_DELAY_MS) {
         if (destroyed || retrying) {
+          return;
+        }
+        if (
+          runStoppedRef.current ||
+          jobStatusRef.current === "completed" ||
+          jobStatusRef.current === "failed"
+        ) {
+          pushDiag(`session_restart_skipped encode_over reason=${reason}`, true);
           return;
         }
         retrying = true;
@@ -799,13 +823,13 @@ export default function MoqPlayer({
             sessionRef.current = {
               catalogReady: false,
               firstFrame: false,
-              statsEvents: 0,
-              stallCount: 0,
-              framesRendered: 0,
-              framesDropped: 0,
-              bitrateBps: 0,
-              ttffMs: 0,
-              videoTimeSec: 0,
+              statsEvents: sessionRef.current.statsEvents,
+              stallCount: sessionRef.current.stallCount,
+              framesRendered: sessionRef.current.framesRendered,
+              framesDropped: sessionRef.current.framesDropped,
+              bitrateBps: sessionRef.current.bitrateBps,
+              ttffMs: sessionRef.current.ttffMs,
+              videoTimeSec: sessionRef.current.videoTimeSec,
               playerLatencyMs: 0,
               moqTimelineMs: 0,
               firstFrameAtMs: sessionRef.current.firstFrameAtMs,
@@ -1187,7 +1211,7 @@ export default function MoqPlayer({
           if (destroyed) {
             return;
           }
-          if (!sessionRef.current.firstFrame) {
+          if (!sessionRef.current.firstFrame && !moqPlaybackSucceeded(jobId)) {
             if (
               !lastErrorRef.current &&
               shouldFailNoMediaWatchdog({

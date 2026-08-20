@@ -139,6 +139,8 @@ assert.match(whep, /whepPlaybackBufferSec/);
 
 const moqPlayer = fs.readFileSync(path.join(root, "players/MoqPlayer.tsx"), "utf8");
 assert.match(moqPlayer, /catalog_timeout_skipped waiting_for_announce/);
+assert.match(moqPlayer, /session_restart_skipped encode_over/);
+assert.match(moqPlayer, /moqPlaybackSucceeded\(jobId\)/);
 
 const gate = fs.readFileSync(path.join(root, "playbackGate.ts"), "utf8");
 assert.match(gate, /if \(protocol === "moq"\) \{\s*return "live";/s);

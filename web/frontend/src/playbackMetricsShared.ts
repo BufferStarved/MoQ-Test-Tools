@@ -18,6 +18,47 @@ export const EMPTY_PLAYBACK_METRICS: PlaybackMetricsSnapshot = {
   e2e_latency_ms: 0,
 };
 
+const PLAYBACK_COUNTER_KEYS = [
+  "playback_stats_events",
+  "playback_stall_count",
+  "playback_frames_rendered",
+  "playback_frames_dropped",
+  "playback_hls_errors",
+  "playback_hls_fatal_errors",
+  "playback_hls_buffer_stalls",
+  "playback_hls_frag_loads",
+  "playback_error_count",
+  "playback_rebuffer_sec",
+  "playback_video_time_sec",
+  "playback_ttff_ms",
+] as const;
+
+const PLAYBACK_GAUGE_KEYS = ["playback_bitrate_bps", "playback_buffer_sec", "e2e_latency_ms"] as const;
+
+/** Keep painted-glass high-water. A reconnect snapshot of zeros must not
+ * erase frames / e2e / buffer from the live series or the CSV tail. */
+export function applyPlaybackHighWater<T extends Record<string, unknown>>(
+  dest: T,
+  incoming: Partial<PlaybackMetricsSnapshot> | Record<string, unknown> | undefined,
+): T {
+  if (!incoming) {
+    return dest;
+  }
+  const next: Record<string, unknown> = { ...dest };
+  for (const key of PLAYBACK_COUNTER_KEYS) {
+    const prev = Number(dest[key] ?? 0);
+    const value = Number(incoming[key] ?? 0);
+    next[key] = Math.max(prev, value);
+  }
+  for (const key of PLAYBACK_GAUGE_KEYS) {
+    const value = Number(incoming[key] ?? 0);
+    if (value > 0) {
+      next[key] = value;
+    }
+  }
+  return next as T;
+}
+
 export function mergePlaybackSampleIntoUploadSample<T extends { elapsed_sec: number }>(
   samples: T[],
   playback: PlaybackMetricsSnapshot & { elapsed_sec: number },
@@ -38,6 +79,6 @@ export function mergePlaybackSampleIntoUploadSample<T extends { elapsed_sec: num
     index = best >= 0 ? best : samples.length - 1;
   }
   const next = [...samples];
-  next[index] = { ...next[index], ...playback };
+  next[index] = applyPlaybackHighWater({ ...next[index], ...playback }, next[index]);
   return next;
 }

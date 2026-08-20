@@ -69,8 +69,38 @@ def _playback_by_elapsed(playback_samples: List[dict]) -> Dict[int, dict]:
             continue
         if elapsed < 0:
             continue
-        by_sec[elapsed] = {name: sample.get(name, 0) for name in PLAYBACK_FIELD_NAMES}
+        incoming = {name: sample.get(name, 0) for name in PLAYBACK_FIELD_NAMES}
+        previous = by_sec.get(elapsed)
+        if previous:
+            incoming = _playback_high_water(previous, incoming)
+        by_sec[elapsed] = incoming
     return by_sec
+
+
+def _as_float(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _csv_number(value: object) -> str:
+    number = _as_float(value)
+    if number.is_integer():
+        return str(int(number))
+    return str(number)
+
+
+def _playback_high_water(dest: dict, incoming: dict) -> dict:
+    """Do not let a reconnect snapshot of zeros erase painted-glass counters."""
+    merged = dict(dest)
+    for name in PLAYBACK_COUNTER_KEYS:
+        merged[name] = max(_as_float(dest.get(name)), _as_float(incoming.get(name)))
+    for name in PLAYBACK_GAUGE_KEYS:
+        value = _as_float(incoming.get(name))
+        if value > 0:
+            merged[name] = value
+    return merged
 
 
 def merge_playback_into_csv(
@@ -105,9 +135,13 @@ def merge_playback_into_csv(
     for index, row in enumerate(rows):
         elapsed = _row_elapsed_sec(rows, index)
         while cursor < len(sorted_secs) and sorted_secs[cursor] <= elapsed:
-            for name in PLAYBACK_FIELD_NAMES:
-                value = by_sec[sorted_secs[cursor]].get(name, last_values[name])
-                last_values[name] = str(value)
+            last_values = {
+                name: _csv_number(value)
+                for name, value in _playback_high_water(
+                    {name: _as_float(last_values[name]) for name in PLAYBACK_FIELD_NAMES},
+                    by_sec[sorted_secs[cursor]],
+                ).items()
+            }
             cursor += 1
         merged = dict(row)
         merged.update(last_values)
@@ -147,19 +181,18 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
             averages[key] = round(sum(values) / count, 3)
 
     for key in PLAYBACK_COUNTER_KEYS:
-        if key not in rows[-1]:
+        if key not in rows[0] and key not in rows[-1]:
             continue
-        value = int(float(rows[-1].get(key, 0) or 0))
+        value = max(int(float(row.get(key, 0) or 0)) for row in rows)
         if value > 0:
             averages[key] = value
 
     # Cumulative seconds (not a plain count) — keep sub-second precision.
-    if "playback_rebuffer_sec" in rows[-1]:
-        rebuffer_sec = round(float(rows[-1].get("playback_rebuffer_sec", 0) or 0), 3)
-        if rebuffer_sec > 0:
-            averages["playback_rebuffer_sec"] = rebuffer_sec
+    rebuffer_sec = round(max(float(row.get("playback_rebuffer_sec", 0) or 0) for row in rows), 3)
+    if rebuffer_sec > 0:
+        averages["playback_rebuffer_sec"] = rebuffer_sec
 
-    frames = float(rows[-1].get("playback_frames_rendered", 0) or 0)
+    frames = max(float(row.get("playback_frames_rendered", 0) or 0) for row in rows)
     if frames > 0 and count > 0:
         averages["playback_fps"] = round(frames / count, 2)
 
