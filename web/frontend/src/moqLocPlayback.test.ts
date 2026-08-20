@@ -5,6 +5,7 @@ import {
   classifyLocFrameStall,
   LOC_LATE_FRAME_THRESHOLD_MS,
   locSubscribeOptions,
+  resetLocPlaybackPipeline,
 } from "./moqLocPlayback.ts";
 
 describe("locSubscribeOptions", () => {
@@ -41,11 +42,11 @@ describe("classifyLocFrameStall", () => {
     assert.equal(classifyLocFrameStall({ ...base, nowMs: 4_000 }), "ok");
   });
 
-  it("holds after the stall limit when frames already painted", () => {
-    assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000 }), "hold");
+  it("resets the decoder after the stall limit when frames already painted", () => {
+    assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000 }), "reset");
   });
 
-  it("holds on early join even with only a handful of frames", () => {
+  it("resets on early join instead of RESET_STREAM reconnect", () => {
     assert.equal(
       classifyLocFrameStall({
         ...base,
@@ -54,7 +55,34 @@ describe("classifyLocFrameStall", () => {
         earlyWindow: true,
         stallLimitMs: 3_000,
       }),
+      "reset",
+    );
+  });
+
+  it("holds on early join after the decoder-reset budget", () => {
+    assert.equal(
+      classifyLocFrameStall({
+        ...base,
+        framesRendered: 4,
+        nowMs: 5_000,
+        earlyWindow: true,
+        stallLimitMs: 3_000,
+        decoderResets: 2,
+      }),
       "hold",
+    );
+  });
+
+  it("restarts after decoder resets when the encode is still live", () => {
+    assert.equal(
+      classifyLocFrameStall({
+        ...base,
+        framesRendered: 42,
+        nowMs: 20_000,
+        decoderResets: 2,
+        sessionRestarts: 0,
+      }),
+      "restart",
     );
   });
 
@@ -70,9 +98,9 @@ describe("classifyLocFrameStall", () => {
     );
   });
 
-  it("restarts only when there is no media and the encode is still live", () => {
+  it("restarts after decoder resets when there is no media and the encode is still live", () => {
     assert.equal(
-      classifyLocFrameStall({ ...base, framesRendered: 0, nowMs: 10_000 }),
+      classifyLocFrameStall({ ...base, framesRendered: 0, nowMs: 10_000, decoderResets: 2 }),
       "restart",
     );
     assert.equal(
@@ -80,6 +108,7 @@ describe("classifyLocFrameStall", () => {
         ...base,
         framesRendered: 0,
         nowMs: 10_000,
+        decoderResets: 2,
         sessionRestarts: 3,
       }),
       "give_up",
@@ -88,5 +117,25 @@ describe("classifyLocFrameStall", () => {
 
   it("does not count a freeze while a reconnect is in flight", () => {
     assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000, retrying: true }), "ok");
+  });
+});
+
+describe("resetLocPlaybackPipeline", () => {
+  it("resets the engine pipeline without pause", () => {
+    const calls: string[] = [];
+    const player = {
+      play: () => calls.push("play"),
+      engine: {
+        videoPipeline: { reset: () => calls.push("video") },
+        syncController: { reset: () => calls.push("sync") },
+      },
+    };
+    assert.equal(resetLocPlaybackPipeline(player), true);
+    assert.deepEqual(calls, ["video", "sync", "play"]);
+  });
+
+  it("returns false when the engine has no pipeline", () => {
+    assert.equal(resetLocPlaybackPipeline({ play: () => undefined }), false);
+    assert.equal(resetLocPlaybackPipeline(null), false);
   });
 });

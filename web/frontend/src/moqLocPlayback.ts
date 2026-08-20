@@ -23,7 +23,37 @@ export function locSubscribeOptions(): {
   };
 }
 
-export type LocStallAction = "ok" | "hold" | "restart" | "give_up";
+export type LocStallAction = "ok" | "hold" | "reset" | "restart" | "give_up";
+
+export const LOC_MAX_DECODER_RESETS = 2;
+
+/**
+ * Reset playa's video pipeline without tearing the WebTransport session.
+ * pause()+play() is forbidden here — pause sends FORWARD=0 and freezes the
+ * live subscribe at the relay.
+ */
+export function resetLocPlaybackPipeline(player: {
+  play?: () => void;
+} | null | undefined): boolean {
+  if (!player) {
+    return false;
+  }
+  const engine = (player as { engine?: {
+    videoPipeline?: { reset?: (id?: bigint) => void };
+    syncController?: { reset?: () => void };
+  } }).engine;
+  if (typeof engine?.videoPipeline?.reset !== "function") {
+    return false;
+  }
+  engine.videoPipeline.reset();
+  engine.syncController?.reset?.();
+  try {
+    player.play?.();
+  } catch {
+    // already playing
+  }
+  return true;
+}
 
 export function classifyLocFrameStall(input: {
   framesRendered: number;
@@ -31,6 +61,8 @@ export function classifyLocFrameStall(input: {
   nowMs: number;
   sessionRestarts: number;
   maxRestarts?: number;
+  decoderResets?: number;
+  maxDecoderResets?: number;
   stallLimitMs: number;
   retrying: boolean;
   /** First 15s after first paint — waiting for the next IDR, not a dead WT. */
@@ -50,10 +82,15 @@ export function classifyLocFrameStall(input: {
   if (input.encodeFinished) {
     return "hold";
   }
-  if (input.earlyWindow) {
-    return "hold";
+  const maxResets = input.maxDecoderResets ?? LOC_MAX_DECODER_RESETS;
+  const resets = input.decoderResets ?? 0;
+  // Early join and first paints: reset the decoder only. Do not destroy the
+  // session — that RESET_STREAMs the publisher. After the reset budget, a
+  // later restart is better than a dead canvas for the rest of the run.
+  if (resets < maxResets) {
+    return "reset";
   }
-  if (input.framesRendered > 0) {
+  if (input.earlyWindow) {
     return "hold";
   }
   const maxRestarts = input.maxRestarts ?? LOC_MAX_SESSION_RESTARTS;

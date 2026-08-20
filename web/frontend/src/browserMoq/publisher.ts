@@ -10,6 +10,7 @@ import { createH264AnnexBMuxer } from "./h264AnnexB";
 import { connectMoq5WasmPublisher, type Moq5PublishSession } from "./moq5Service";
 import type { MoqtDraftVersion } from "./moqtVersions";
 import { startWhipPublish, type WhipPublishSession } from "./whipPublisher";
+import { setLocIdrNudge } from "./locIdrNudge";
 
 export interface BrowserMoqLeg {
   jobId: string;
@@ -207,6 +208,7 @@ export async function startBrowserMoqPublish(options: {
       );
       encoders.push(encoder);
       requestKeyframe = () => encoder.requestKeyframe();
+      setLocIdrNudge(requestKeyframe);
       await encoder.start();
       await Promise.race([
         firstIdr,
@@ -245,6 +247,7 @@ export async function startBrowserMoqPublish(options: {
         return;
       }
       stopped = true;
+      setLocIdrNudge(undefined);
       if (vmafTimer != null) {
         window.clearTimeout(vmafTimer);
         vmafTimer = null;

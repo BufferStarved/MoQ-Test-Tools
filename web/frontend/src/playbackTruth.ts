@@ -59,6 +59,7 @@ export function canvasBehindLiveSec(options: {
 export function locGlassDelayMs(options: {
   playerLatencyMs?: number;
   lastFrameAtMs?: number;
+  firstFrameAtMs?: number;
   nowMs?: number;
   bridgeMs?: number;
   encodeLagMs?: number;
@@ -66,19 +67,23 @@ export function locGlassDelayMs(options: {
   bufferMs?: number;
 }): number | undefined {
   const now = options.nowMs ?? Date.now();
-  const lastAt = options.lastFrameAtMs ?? 0;
+  const lastAt = options.lastFrameAtMs || options.firstFrameAtMs || 0;
   const stallMs = lastAt > 0 ? Math.max(0, now - lastAt) : 0;
   const frozen = stallMs >= FRAME_STALL_MS;
   const paint = options.playerLatencyMs;
   let base: number | undefined;
   if (paint != null && Number.isFinite(paint) && paint >= 8) {
     base = paint;
-  } else {
+  } else if (!frozen) {
     const encode = Math.max(0, options.encodeLagMs ?? 0);
     const net = Math.max(0, (options.rttMs ?? 0) / 2);
     const buf = Math.max(0, options.bufferMs ?? 0);
     const path = encode + net + buf;
-    base = path >= 8 ? path : frozen ? 0 : undefined;
+    base = path >= 8 ? path : undefined;
+  } else {
+    // Stale canvas: path delay is encode+RTT, not glass. Age the last paint
+    // (or 0 if we never measured one) so we never post a flat ~30ms win.
+    base = 0;
   }
   if (base == null) {
     return undefined;

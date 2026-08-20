@@ -146,6 +146,7 @@ export function computeMoqE2eMs(options: {
     return locGlassDelayMs({
       playerLatencyMs: options.playerLatencyMs,
       lastFrameAtMs: options.lastFrameAtMs,
+      firstFrameAtMs: options.firstFrameAtMs,
       nowMs: now,
       bridgeMs: bridge,
       encodeLagMs: options.encoderLagMs,
