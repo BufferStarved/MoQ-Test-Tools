@@ -54,12 +54,23 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcEncryption: no
 webrtcAllowOrigin: "*"
+# Wildcard is deliberate. This address is passed straight to net.ListenPacket,
+# so it must be an address the host actually owns. On GCE the public IP lives on
+# the 1:1 NAT, not on ens4 (ens4 is 10.128.0.2/32) — binding it fails with
+# EADDRNOTAVAIL and MediaMTX aborts startup, taking LL-HLS/RTMP/SRT down with
+# it. The install script may narrow this to the primary NIC address, but only
+# after a bind preflight. See docs/WEBRTC-ICE.md.
 webrtcLocalUDPAddress: :8189
 # Only advertise the public IP. webrtcIPsFromInterfaces would add
 # 127.0.0.1 / RFC1918 NIC addresses; ffmpeg's WHIP muxer picks those,
 # ICE fails in the same second, and the UI shows "ffmpeg exited with
 # code 69: Conversion failed!" (reproduced laptop→us-east1 2026-08-18).
 # Browser WHIP still works because Chrome gathers srflx/prflx.
+#
+# NB: MediaMTX rewrites only the SDP it hands the client; the pion agent still
+# gathers a host candidate per local IP. So "local candidate: host/udp/
+# 127.0.0.1/8189" in the log is cosmetic, not a broken pair — the pair is real
+# whenever the remote candidate is the peer's public address.
 webrtcAdditionalHosts: ["34.9.217.178"]
 webrtcIPsFromInterfaces: no
 
