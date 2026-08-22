@@ -182,8 +182,20 @@ export interface PlaybackMetricsSnapshot {
   playback_hls_buffer_stalls: number;
   playback_hls_frag_loads: number;
   playback_video_time_sec: number;
-  /** Seconds of media buffered ahead of the playhead. */
+  /**
+   * Seconds of media buffered AHEAD of the playhead. This is the only
+   * quantity the latency budget's player-buffer stage may consume, so it must
+   * stay strictly "ahead" for every engine.
+   */
   playback_buffer_sec: number;
+  /**
+   * Seconds the glass is BEHIND live. MoQ LOC only — its canvas has no HTML
+   * media buffer, and this is the opposite direction from playback_buffer_sec.
+   * It lives in its own field precisely so it can never be summed into the
+   * player-buffer stage, which is what charted a 10.9s "buffer" on the Linode
+   * MoQ leg (2026-08-22).
+   */
+  playback_behind_live_sec?: number;
   /** Cumulative seconds the player spent in a rebuffer/stalled state. */
   playback_rebuffer_sec: number;
   playback_error_count?: number;

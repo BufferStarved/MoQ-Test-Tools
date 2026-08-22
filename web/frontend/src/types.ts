@@ -51,6 +51,12 @@ export interface UploadSample {
   latency_player_buffer_ms?: number;
   latency_accounted_ms?: number;
   latency_residual_ms?: number;
+  /** Components in excess of measured e2e — the signed other half. */
+  latency_overcount_ms?: number;
+  /** Comma-separated stage names with no instrument on this leg. */
+  latency_unmeasured?: string;
+  /** Which span e2e_latency_ms covers: capture_to_glass | ingest_to_glass. */
+  latency_e2e_scope?: string;
   encode_frames_total?: number;
   encode_frames_dropped?: number;
   encode_frames_duped?: number;
@@ -165,12 +171,12 @@ export interface UploadJob {
   samples: UploadSample[];
   compute_vmaf_on_ingest?: boolean;
   compute_vmaf_encoder?: boolean;
-  vmaf_status?: string;
+  vmaf_status?: string | null;
   vmaf_score?: number | null;
   psnr_db?: number | null;
   ssim?: number | null;
   vmaf_error?: string | null;
-  encoder_vmaf_status?: string;
+  encoder_vmaf_status?: string | null;
   encoder_vmaf_score?: number | null;
   encoder_psnr_db?: number | null;
   encoder_ssim?: number | null;
@@ -230,6 +236,7 @@ export interface ResultAverages {
   latency_player_buffer_ms?: number;
   latency_accounted_ms?: number;
   latency_residual_ms?: number;
+  latency_overcount_ms?: number;
   // Frame accounting.
   encode_frames_total?: number;
   encode_frames_dropped?: number;
@@ -239,12 +246,30 @@ export interface ResultAverages {
   frame_delivery_pct?: number;
 }
 
+/**
+ * The non-numeric entries in the same bag.
+ *
+ * Kept as an intersection rather than extra properties on `ResultAverages`
+ * because that interface's index signature is `number | undefined`, and
+ * widening it to include `string` would make every arithmetic read of an
+ * average a type error. These are annotations, not measurements.
+ *
+ * Note the key is `latency_unmeasured_stages`, not the per-sample
+ * `latency_unmeasured`: the run-level value only lists stages that had no
+ * instrument on *every* sample, so it is a different (stricter) statement
+ * than any single row's.
+ */
+export interface ResultAverageAnnotations {
+  latency_unmeasured_stages?: string;
+}
+
 export interface ResultSummary {
   filename: string;
   samples: number;
   protocol?: string | null;
   endpoint?: string | null;
-  averages?: ResultAverages & {
+  averages?: ResultAverages &
+    ResultAverageAnnotations & {
     transport_rtt_ms?: number;
     net_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;

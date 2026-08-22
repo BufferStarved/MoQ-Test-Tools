@@ -352,13 +352,18 @@ export default function MoqPlayer({
         playback_hls_buffer_stalls: 0,
         playback_hls_frag_loads: 0,
         playback_video_time_sec: videoTimeSec,
-        playback_buffer_sec: loc
+        // Strictly seconds queued AHEAD. A LOC canvas has no HTML media
+        // buffer, so this is 0 for LOC and the "behind live" figure travels
+        // in its own field below — the latency budget's player-buffer stage
+        // consumes this column and the two quantities point opposite ways.
+        playback_buffer_sec: bufferedAheadSec(videoRef.current),
+        playback_behind_live_sec: loc
           ? canvasBehindLiveSec({
               framesRendered,
               firstFrameAtMs: session.firstFrameAtMs,
               targetFps: 30,
             })
-          : bufferedAheadSec(videoRef.current),
+          : 0,
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         playback_error_count: lastErrorRef.current ? 1 : 0,
         e2e_latency_ms: captureAnchoredE2eMs(),
@@ -377,11 +382,16 @@ export default function MoqPlayer({
   });
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) {
+    const mountedCanvas = canvasRef.current;
+    const mountedVideo = videoRef.current;
+    if (!mountedCanvas || !mountedVideo) {
       return;
     }
+    // TS carries `const` narrowing into arrow functions but not into the
+    // hoisted `function` declarations below, so bind the guarded elements to
+    // explicitly non-null aliases rather than re-checking in every handler.
+    const canvas: HTMLCanvasElement = mountedCanvas;
+    const video: HTMLVideoElement = mountedVideo;
     // CMAF MSE is the <video> element. JSX starts it `hidden`; leaving it
     // display:none until catalog_received lets Chrome suspend the pipeline.
     if (mediaPackaging === "cmaf") {
@@ -690,7 +700,6 @@ export default function MoqPlayer({
 
     async function start() {
       const catalogWaitMs = Math.max((encodeDurationSec + 25) * 1000, 50_000);
-      const catalogWaitSec = Math.round(catalogWaitMs / 1000);
       setError(null);
       lastErrorRef.current = null;
       setDiagLines([]);

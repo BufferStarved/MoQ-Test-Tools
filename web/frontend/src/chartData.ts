@@ -123,6 +123,10 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "latency_player_buffer_ms", label: "Player buffer (→ glass)", color: "#c084fc", unit: "ms" },
       { key: "latency_accounted_ms", label: "Accounted total", color: "#4ade80", unit: "ms" },
       { key: "latency_residual_ms", label: "Unattributed", color: "#f87171", unit: "ms" },
+      // The other half of the reconciliation. Without it, a leg whose stages
+      // sum to more than the measurement is indistinguishable from one that
+      // reconciles exactly — both draw a flat 0 "Unattributed" line.
+      { key: "latency_overcount_ms", label: "Over-attributed", color: "#fb7185", unit: "ms" },
       { key: "e2e_latency_ms", label: "Measured glass delay", color: "#f472b6", unit: "ms" },
     ],
   },
@@ -780,7 +784,8 @@ export interface ComparisonLegData {
   protocol: string;
   ingestEndpointId?: string;
   playbackMode?: string;
-  endpoint?: string;
+  /** Nullable to match `ResultSummary.endpoint`, which the API can return null. */
+  endpoint?: string | null;
   samples: UploadSample[];
   /** When samples are empty (saved session), charts are built from this summary. */
   result?: ResultSummary;

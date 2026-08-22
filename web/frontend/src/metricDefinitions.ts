@@ -85,32 +85,47 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   latency_publish_ms: {
     label: "Latency · publish",
     description:
-      "Component 2: muxed output → first confirmed write at the ingest server (same measurement as upload_latency_ms). One-shot per run, not a continuous series. Not RTT and not glass-to-glass.",
+      "Component 2: muxed output → ingest, per sample. No protocol produces this measurement yet, so it reads 0 and 'publish' is listed in latency_unmeasured on every leg. It is deliberately NOT upload_latency_ms: that is a one-shot startup figure (encoder-ready → first confirmed publish), and adding a startup constant to every steady-state sample used to inflate the accounted total for a whole run. Read upload_latency_ms in its own column for the startup number.",
   },
   latency_network_ms: {
     label: "Latency · network",
     description:
-      "Component 3: one-way path estimate, net_rtt_ms ÷ 2. Assumes a symmetric path. This is the only network figure every protocol can supply (libsrt, RTMP TCP probe, WebRTC ICE, MoQ qlog/probe), which is what makes the component comparable — but the underlying measurement differs per protocol, so treat cross-protocol differences of a few ms as noise.",
+      "Component 3: one-way path estimate, net_rtt_ms ÷ 2. Assumes a symmetric path. Available on SRT (libsrt), RTMP (TCP connect probe) and WebRTC (ICE currentRoundTripTime) — the underlying measurement differs per protocol, so treat cross-protocol differences of a few ms as noise. MoQ has no RTT source wired: the openmoq publisher emits no qlog and the relay admin TCP port the probe targets is not reachable, so MoQ legs list 'network' in latency_unmeasured instead of reporting a 0 ms hop.",
   },
   latency_packager_ms: {
     label: "Latency · packager",
     description:
-      "Component 4: ingest → delivery-ready. Measured for MediaMTX LL-HLS from EXT-X-PROGRAM-DATE-TIME versus the encode anchor (folds in SRT tsbpd + network + remux). Zixi HTTP-TS is ~0 by construction (continuous TS, no packaging buffer). Zixi Fast HLS and MoQ have no direct measurement today, so their packaging time lands in the unattributed residual rather than being guessed at here.",
+      "Component 4: ingest → delivery-ready. Measured for MediaMTX LL-HLS from EXT-X-PROGRAM-DATE-TIME versus the encode anchor (folds in SRT tsbpd + network + remux). Zixi HTTP-TS is a measured ~0 by construction (continuous TS, no packaging buffer). Zixi Fast HLS carries no PDT and MoQ has no packager clock, so on those legs there is no instrument at all: they list 'packager' in latency_unmeasured and their packaging time is part of the residual. A 0 here with 'packager' unmeasured means unknown, not free.",
   },
   latency_player_buffer_ms: {
     label: "Latency · player buffer",
     description:
-      "Component 5: delivery → glass. Media queued ahead of the playhead (HTMLMediaElement.buffered, or the WebRTC jitter buffer). Browser MoQ LOC renders to canvas and has no HTML buffer, so it contributes 0 here — its playback_buffer_sec column means 'seconds behind live', a different quantity that must not be summed into this chain.",
+      "Component 5: delivery → glass. Media queued AHEAD of the playhead (HTMLMediaElement.buffered, or the WebRTC jitter buffer). Browser MoQ LOC renders to canvas and has no HTML buffer, so it contributes 0 — its 'seconds behind live' figure is the opposite direction and travels in playback_behind_live_sec, which is never summed into this chain. Unmeasured (and listed as such) for any sample where the player was not reporting.",
   },
   latency_accounted_ms: {
     label: "Latency · accounted",
     description:
-      "Sum of the five latency components. Compare against e2e_latency_ms: close together means the decomposition explains the glass delay, far apart means it does not (see latency_residual_ms).",
+      "Sum of the latency components that this leg's e2e estimator actually spans — see latency_e2e_scope. Compare against e2e_latency_ms: close together means the decomposition explains the glass delay; the gap in either direction is split into latency_residual_ms and latency_overcount_ms.",
   },
   latency_residual_ms: {
     label: "Latency · unattributed",
     description:
-      "Measured glass delay minus the accounted components. This is a deliberate part of the model, not an error term to ignore: a large residual says the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Expected to be non-trivial on Zixi Fast HLS (unmeasured chunk packaging) and MoQ CMAF (group accumulation + join offset). Clamped at 0 — a negative value would mean components double-count, which is fixed at the source instead of displayed.",
+      "Measured glass delay the accounted components do not explain. A deliberate part of the model, not an error term to ignore: a large residual says the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Check latency_unmeasured first — on Zixi legs the residual is largely the packager stage, which has no instrument rather than being zero. Never negative: components exceeding the measurement is a different fact and is reported in latency_overcount_ms.",
+  },
+  latency_overcount_ms: {
+    label: "Latency · over-attributed",
+    description:
+      "How far the accounted components exceed measured glass delay. Non-zero means the model double-counts or mixes measurement spans somewhere, which is a bug to fix at the source — but it can only be fixed if it is visible. This column exists because the residual alone was clamped at 0, which made a leg over-attributing by 1.7 s look exactly like one that reconciled perfectly. Exactly one of this and latency_residual_ms can be non-zero.",
+  },
+  latency_unmeasured: {
+    label: "Latency · unmeasured stages",
+    description:
+      "Which pipeline stages have no instrument on this leg, comma separated. A component reading 0.0 means 'measured, and it was zero' only if it is absent from this list; if it is present, 0.0 means 'nothing measures this here' and the time is inside the residual. Today: 'publish' on every leg, 'packager' on Zixi and MoQ, 'network' on MoQ, 'player_buffer' on samples where the browser was not reporting.",
+  },
+  latency_e2e_scope: {
+    label: "Latency · e2e scope",
+    description:
+      "Which span this leg's e2e_latency_ms actually measures, and therefore which components may be summed against it. 'capture_to_glass' (HLS PDT, HTTP-TS, MoQ) includes the sender's encode pipeline, so all five stages are in scope. 'ingest_to_glass' (WHEP) is a receiver-side estimate built from ICE RTT/2 plus jitterBufferDelay and structurally cannot see the sender: latency_encode_ms is still reported there so the operator knows the pipeline exists, but it is excluded from the accounted total. Two legs with different scopes are not measuring the same thing — a WHEP number is not comparable to an HLS number without adding the encode column back.",
   },
   encode_frames_total: {
     label: "Frames encoded",
@@ -139,7 +154,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   frame_delivery_pct: {
     label: "Frame delivery %",
     description:
-      "Painted frames as a share of encoded frames — the only frame metric spanning the whole chain, and the only one that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own. 100% means every encoded frame reached the glass.",
+      "Painted frames as a share of encoded frames over the window the player was actually attached for — the only frame metric spanning the whole chain, and the only one that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own. 100% means every frame encoded since the player attached reached the glass. Both counters are differenced against their value at attach, because they are cumulative from different zero points: dividing the raw totals measured how late the browser attached, not delivery. Blank means there is no shared window yet (or the player has stopped reporting), which is unknown rather than zero. Not capped at 100% — a player reading ahead of the encoder counter is clock skew, and hiding that behind a perfect score is what a cap would do.",
   },
   e2e_latency_ms: {
     label: "Glass delay (estimated)",

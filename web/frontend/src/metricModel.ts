@@ -73,17 +73,27 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   upload_latency_ms: ["srt", "rtmp", "webrtc", "moq"],
 
   // Latency decomposition. Every leg reports every component in the same
-  // units; components with no measurement on a given path report 0 and their
-  // time lands in latency_residual_ms rather than being guessed at.
+  // units. A stage with no instrument on a given path reports 0 *and names
+  // itself in latency_unmeasured*, so its time lands in latency_residual_ms
+  // without the 0 reading as "this stage was free".
   latency_encode_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // No protocol measures steady-state publish transit yet; the column exists
+  // so the stage is named rather than silently missing from the chain.
   latency_publish_ms: ["srt", "rtmp", "webrtc", "moq"],
-  latency_network_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // MoQ is absent on purpose: no RTT source is wired for the openmoq
+  // publisher (no qlog, relay admin TCP unreachable), so a MoQ network figure
+  // would be invented.
+  latency_network_ms: ["srt", "rtmp", "webrtc"],
   // Measured only where the packager stamps a wall clock we can difference
-  // (MediaMTX LL-HLS PDT). Zixi HTTP-TS is ~0 by construction.
+  // (MediaMTX LL-HLS PDT). Zixi HTTP-TS is a measured ~0 by construction;
+  // Zixi Fast HLS carries no PDT, so it has no instrument at all.
   latency_packager_ms: ["srt", "rtmp", "hls", "dash"],
   latency_player_buffer_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_accounted_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_overcount_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_e2e_scope: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Frame accounting. Encoder counters come from ffmpeg -progress, so browser
   // publish paths (no ffmpeg) cannot fill them.
