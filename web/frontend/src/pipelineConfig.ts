@@ -99,7 +99,7 @@ export interface StreamConfigInput {
   label: string;
   protocol?: string | null;
   ingestEndpointId: string;
-  endpointUrl?: string;
+  endpointUrl?: string | null;
   playbackMode?: PlaybackMode | string;
   moqNamespace?: string | null;
   zixiStreamId?: string | null;
@@ -313,7 +313,6 @@ function packagerRows(
   summary: EncodeProfileSummary,
   encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
-  const protocol = (stream.protocol || "").toLowerCase();
   const ingest = stream.ingestEndpointId;
   const mode = (stream.playbackMode || "auto").toLowerCase();
   const rows: ConfigDetailRow[] = [];
@@ -496,7 +495,7 @@ export function buildRecipePipelineSections(
 
 export function buildSessionPipelineSections(streams: Array<{
   protocol?: string | null;
-  endpoint?: string;
+  endpoint?: string | null;
   summary_extra?: {
     encode_ladder?: string | null;
     encode_ladder_label?: string | null;

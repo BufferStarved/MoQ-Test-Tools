@@ -1064,12 +1064,9 @@ function App() {
                   ...leg,
                   samples: [
                     ...leg.samples,
-                    applyPlaybackHighWater(sample as Record<string, unknown>, leg.samples.at(-1) as Record<string, unknown> | undefined) as typeof sample,
+                    applyPlaybackHighWater(sample, leg.samples.at(-1)),
                   ],
-                  latestSample: applyPlaybackHighWater(
-                    sample as Record<string, unknown>,
-                    leg.samples.at(-1) as Record<string, unknown> | undefined,
-                  ) as typeof sample,
+                  latestSample: applyPlaybackHighWater(sample, leg.samples.at(-1)),
                 }
               : leg,
           ),

@@ -35,23 +35,28 @@ const PLAYBACK_COUNTER_KEYS = [
 
 const PLAYBACK_GAUGE_KEYS = ["playback_bitrate_bps", "playback_buffer_sec", "e2e_latency_ms"] as const;
 
+/** Read one playback metric off any object that may carry it. Callers pass
+ *  upload samples, SSE snapshots and merged spreads, none of which declare an
+ *  index signature, so the lookup is done through a widened view. */
+function metricNumber(source: object, key: string): number {
+  return Number((source as Record<string, unknown>)[key] ?? 0);
+}
+
 /** Keep painted-glass high-water. A reconnect snapshot of zeros must not
  * erase frames / e2e / buffer from the live series or the CSV tail. */
-export function applyPlaybackHighWater<T extends Record<string, unknown>>(
+export function applyPlaybackHighWater<T extends object>(
   dest: T,
-  incoming: Partial<PlaybackMetricsSnapshot> | Record<string, unknown> | undefined,
+  incoming: object | undefined,
 ): T {
   if (!incoming) {
     return dest;
   }
-  const next: Record<string, unknown> = { ...dest };
+  const next: Record<string, unknown> = { ...(dest as Record<string, unknown>) };
   for (const key of PLAYBACK_COUNTER_KEYS) {
-    const prev = Number(dest[key] ?? 0);
-    const value = Number(incoming[key] ?? 0);
-    next[key] = Math.max(prev, value);
+    next[key] = Math.max(metricNumber(dest, key), metricNumber(incoming, key));
   }
   for (const key of PLAYBACK_GAUGE_KEYS) {
-    const value = Number(incoming[key] ?? 0);
+    const value = metricNumber(incoming, key);
     if (value > 0) {
       next[key] = value;
     }

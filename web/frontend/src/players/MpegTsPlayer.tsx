@@ -409,10 +409,16 @@ export default function MpegTsPlayer({
       instance.attachMediaElement(video);
       instance.load();
       pushDiag("mpegtsjs=attached load() called");
-      void instance.play().catch((err: unknown) => {
-        // autoplay may be blocked; controls remain
-        pushDiag(`play_rejected=${err instanceof Error ? err.message : String(err)}`);
-      });
+      // mpegts.js types play() as `void | Promise<void>` and returns whatever
+      // the media element gave it — calling .catch() on a void return throws a
+      // TypeError that would abort start() right after load().
+      const playback = instance.play();
+      if (playback) {
+        void playback.catch((err: unknown) => {
+          // autoplay may be blocked; controls remain
+          pushDiag(`play_rejected=${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
       setStatus("Playing (HTTP-TS)");
 
       instance.on(mpegts.Events.MEDIA_INFO, (info: { videoCodec?: string; audioCodec?: string }) => {

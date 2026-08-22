@@ -9,7 +9,8 @@ export interface VerdictHighlight {
   winner: string;
   /** Human-readable value, e.g. "420 ms". */
   value: string;
-  protocol?: string;
+  /** Nullable to match `ResultSummary.protocol`, which the API can return null. */
+  protocol?: string | null;
 }
 
 export interface ComparisonVerdict {

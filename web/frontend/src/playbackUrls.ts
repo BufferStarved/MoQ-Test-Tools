@@ -498,14 +498,6 @@ function zixiHlsUrl(host: string, streamId: string, dvr: boolean): string {
   return dvr ? `${url}&dvr` : url;
 }
 
-function zixiDashUrl(host: string, streamId: string, dvr: boolean): string {
-  const primary = `http://${host}:${ZIXI_HTTP_PORT}/playback.mpd?stream=${encodeURIComponent(streamId)}`;
-  if (dvr) {
-    return `${primary}&dvr`;
-  }
-  return primary;
-}
-
 function zixiMpegTsUrl(host: string, streamId: string): string {
   return `http://${host}:${ZIXI_HTTP_PORT}/${encodeURIComponent(streamId)}.ts`;
 }

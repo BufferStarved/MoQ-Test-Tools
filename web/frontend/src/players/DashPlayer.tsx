@@ -269,7 +269,7 @@ export default function DashPlayer({
             ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
             : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`,
         );
-      }) as (e: Event) => void);
+      }) as Parameters<typeof instance.on>[1]);
       instance.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, (() => {
         if (!destroyed) {
           setStatus("Playing");
@@ -280,7 +280,7 @@ export default function DashPlayer({
             );
           }
         }
-      }) as (e: Event) => void);
+      }) as Parameters<typeof instance.on>[1]);
     }
 
     void start();

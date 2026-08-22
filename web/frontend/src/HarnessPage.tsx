@@ -56,7 +56,11 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         if (cancelled) {
           return;
         }
-        setJob((current) => (current ? { ...current, ...status } : current));
+        setJob((current) =>
+          current
+            ? { ...current, ...status, status: status.status as UploadJob["status"] }
+            : current,
+        );
       },
     );
     return () => {

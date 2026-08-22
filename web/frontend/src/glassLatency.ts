@@ -169,53 +169,50 @@ export function computeMoqE2eMs(options: {
     }
   }
 
-  if (options.mediaPackaging !== "loc") {
-    const join = options.joinOffsetSec;
-    if (join != null && videoT > 0.05) {
-      const mediaPosSec = join + videoT;
-      if (mediaPosSec > 1e6) {
-        const total = now + skew - mediaPosSec * 1000 + bridge;
-        if (isPlausibleE2eMs(total)) {
-          return Math.round(total);
-        }
-      } else if (epoch > 0) {
-        const total = now + skew - epoch * 1000 - mediaPosSec * 1000 + bridge;
-        if (isPlausibleE2eMs(total)) {
-          return Math.round(total);
-        }
-      }
-    }
-
-    const timelineMs = options.moqTimelineMs ?? 0;
-    if (epoch > 0 && timelineMs > 50) {
-      const total = now + skew - epoch * 1000 - timelineMs + bridge;
+  // Everything below is the CMAF path: LOC returned above.
+  const join = options.joinOffsetSec;
+  if (join != null && videoT > 0.05) {
+    const mediaPosSec = join + videoT;
+    if (mediaPosSec > 1e6) {
+      const total = now + skew - mediaPosSec * 1000 + bridge;
       if (isPlausibleE2eMs(total)) {
         return Math.round(total);
       }
-    }
-    if (epoch > 0 && videoT > 0.05) {
-      const total = now + skew - epoch * 1000 - videoT * 1000 + bridge;
+    } else if (epoch > 0) {
+      const total = now + skew - epoch * 1000 - mediaPosSec * 1000 + bridge;
       if (isPlausibleE2eMs(total)) {
         return Math.round(total);
       }
     }
   }
 
-  // LOC glass is capture→now. Do not use playheadAnchored here:
-  // videoTime is often framesRendered/30, so dropped frames make e2e
-  // climb 1:1 with wall even when the canvas delay is steady.
-  if (options.mediaPackaging !== "loc") {
-    const anchored = playheadAnchoredE2eMs({
-      ttffMs: options.ttffMs,
-      firstFrameAtMs: options.firstFrameAtMs,
-      firstFrameVideoSec: options.firstFrameVideoSec,
-      nowMs: now,
-      videoTimeSec: videoT,
-      bridgeMs: bridge,
-    });
-    if (anchored) {
-      return anchored;
+  const timelineMs = options.moqTimelineMs ?? 0;
+  if (epoch > 0 && timelineMs > 50) {
+    const total = now + skew - epoch * 1000 - timelineMs + bridge;
+    if (isPlausibleE2eMs(total)) {
+      return Math.round(total);
     }
+  }
+  if (epoch > 0 && videoT > 0.05) {
+    const total = now + skew - epoch * 1000 - videoT * 1000 + bridge;
+    if (isPlausibleE2eMs(total)) {
+      return Math.round(total);
+    }
+  }
+
+  // LOC glass is capture→now. Do not use playheadAnchored here for LOC — that
+  // is why it returns above: videoTime is often framesRendered/30, so dropped
+  // frames make e2e climb 1:1 with wall even when the canvas delay is steady.
+  const anchored = playheadAnchoredE2eMs({
+    ttffMs: options.ttffMs,
+    firstFrameAtMs: options.firstFrameAtMs,
+    firstFrameVideoSec: options.firstFrameVideoSec,
+    nowMs: now,
+    videoTimeSec: videoT,
+    bridgeMs: bridge,
+  });
+  if (anchored) {
+    return anchored;
   }
 
   return pathDelayMs({

@@ -175,10 +175,14 @@ export default function WhepPlayer({
   });
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) {
+    const mountedVideo = videoRef.current;
+    if (!mountedVideo) {
       return;
     }
+    // TS carries `const` narrowing into arrow functions but not into the
+    // hoisted `function` declarations below, so bind the guarded element to an
+    // explicitly non-null alias rather than re-checking in every handler.
+    const video: HTMLVideoElement = mountedVideo;
 
     if (playbackGate !== "live") {
       if (playbackGate === "ended") {
