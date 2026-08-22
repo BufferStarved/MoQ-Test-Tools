@@ -114,20 +114,35 @@ capture ──encode──> muxed ──publish──> ingest ──packager─�
 | Column | Stage | Source |
 |--------|-------|--------|
 | `latency_encode_ms` | capture → muxed | Encoder pipeline offset (the baseline `encode_lag_ms` subtracts) + sustained lag |
-| `latency_publish_ms` | muxed → ingest | Same measurement as `upload_latency_ms` (one-shot) |
-| `latency_network_ms` | one-way path | `net_rtt_ms ÷ 2` (symmetric-path assumption) |
-| `latency_packager_ms` | ingest → delivery | Measured for MediaMTX LL-HLS via PROGRAM-DATE-TIME; ~0 for Zixi HTTP-TS (continuous TS) |
-| `latency_player_buffer_ms` | delivery → glass | `playback_buffer_sec × 1000` (HTML media / WebRTC jitter buffer) |
-| `latency_accounted_ms` | — | Sum of the five components |
-| `latency_residual_ms` | — | `e2e_latency_ms − latency_accounted_ms`, clamped at 0 |
+| `latency_publish_ms` | muxed → ingest | **No instrument on any protocol today.** Always listed in `latency_unmeasured` |
+| `latency_network_ms` | one-way path | `net_rtt_ms ÷ 2` (symmetric-path assumption). SRT / RTMP / WebRTC only |
+| `latency_packager_ms` | ingest → delivery | Measured for MediaMTX LL-HLS via PROGRAM-DATE-TIME; measured ~0 for Zixi HTTP-TS (continuous TS). Unmeasured on Zixi Fast HLS and MoQ |
+| `latency_player_buffer_ms` | delivery → glass | `playback_buffer_sec × 1000` — strictly seconds queued **ahead** (HTML media / WebRTC jitter buffer) |
+| `latency_accounted_ms` | — | Sum of the components **this leg's e2e actually spans** — see `latency_e2e_scope` |
+| `latency_residual_ms` | — | Measured glass delay the accounted components do not explain. Never negative |
+| `latency_overcount_ms` | — | Accounted components **in excess of** measured e2e. Never negative |
+| `latency_unmeasured` | — | Comma-separated stages that had no instrument on this sample |
+| `latency_e2e_scope` | — | `capture_to_glass` or `ingest_to_glass` — which span the e2e estimator covers |
 
-**The residual is a feature, not an error term.** A large residual means the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Expect a non-trivial residual on:
+### The three honesty properties
 
-- **Zixi Fast HLS** — chunk packaging time is not measured (only HTTP-TS is ~0 by construction).
+The model makes three separate statements and refuses to blur them together:
+
+1. **A stage with no instrument reads 0 *and* names itself in `latency_unmeasured`.** A bare 0 would mean "this stage is free"; the annotation makes it mean "we did not measure this". `latency_publish_ms` is unmeasured everywhere; `latency_packager_ms` is unmeasured on Zixi Fast HLS and MoQ; `latency_network_ms` is unmeasured on MoQ (no RTT source is wired for the openmoq publisher — `quic_rtt_ms` is 0 too).
+2. **Under- and over-attribution are different facts and get different columns.** `latency_residual_ms` was previously clamped at zero, so a leg whose components summed to *more* than its measured e2e looked identical to one that reconciled exactly — Linode WebRTC over-counted by up to 1721 ms against a 35 ms e2e while reporting a residual of 0.0. Exactly one of `latency_residual_ms` and `latency_overcount_ms` can be non-zero.
+3. **Only components inside the measured span are summed.** WHEP's `e2e_latency_ms` is a *receiver-side* jitter-buffer estimate that begins at ingest, while `latency_encode_ms` is a *sender-side* offset. Summing them was the modelling error behind that 1721 ms. WebRTC legs therefore carry `latency_e2e_scope=ingest_to_glass`: the encode component is still reported in its own column, but it is excluded from `latency_accounted_ms`.
+
+**The residual is a feature, not an error term.** A large residual means the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Check `latency_unmeasured` first. Expect a non-trivial residual on:
+
+- **Zixi Fast HLS** — chunk packaging time has no instrument (no PDT in the playlist), so `packager` is listed as unmeasured and its cost lands here. Only HTTP-TS is a measured ~0.
 - **MoQ CMAF** — group accumulation plus join offset, neither of which is a measured stage today.
-- **Browser MoQ LOC** — reports 0 for the player-buffer component on purpose: its `playback_buffer_sec` means "seconds behind live", a different quantity that must not be summed into this chain.
+- **Browser MoQ LOC** — reports 0 for the player-buffer component on purpose. Its "seconds behind live" figure points the *opposite direction* from a buffer and travels in its own `playback_behind_live_sec` column so it can never be summed into this chain.
 
 Formulas live in `src/latency_budget.py` and its browser mirror `web/frontend/src/latencyBudget.ts`; they are kept numerically identical and tested against each other.
+
+**`upload_latency_ms` is not a stage.** It is a one-shot *startup* measurement (encoder-ready → first confirmed publish) and it is deliberately excluded from the chain above. Adding a startup constant to every steady-state sample inflated `latency_accounted_ms` for whole runs. Read it in its own column.
+
+Run `scripts/qa_metric_audit.py --latest N --assert` to check these properties against finished legs; it exits non-zero if any of them is violated.
 
 ---
 
@@ -142,9 +157,13 @@ Drops are counted at both ends of the chain with the **same denominator conventi
 | `encode_frames_duped` | ffmpeg `-progress dup_frames` | CFR normalization of a VFR source |
 | `encode_frame_drop_pct` | `dropped / (encoded + dropped)` | Frames *offered* to the encoder |
 | `playback_frame_drop_pct` | `dropped / (rendered + dropped)` | Frames *delivered* to the player |
-| `frame_delivery_pct` | `playback_frames_rendered / encode_frames_total` | Spans the whole chain |
+| `frame_delivery_pct` | painted ÷ encoded, **both counted since the player attached** | Spans the whole chain |
 
 Deliberately **not** `fps × elapsed`: a genuine 24fps source is not dropping 20% of a 30fps expectation. `frame_delivery_pct` is the only frame metric that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own.
+
+**The window matters more than the ratio.** Both counters are cumulative but they do not start together: the encoder counts the whole run while the browser attaches seconds late and often detaches early. Dividing the raw totals compared two different time spans and produced a number that decayed as the run went on with nothing actually being lost — on the Linode Zixi RTMP leg it fell monotonically from 48.0% to 10.1% while `playback_frames_rendered` sat frozen at 84 and `encode_frames_total` climbed to 835. Both counters are therefore rebased to their values at player attach, so the ratio compares the same interval on both ends. Samples with no common window are left **blank**, not zero, and blanks are excluded from the run average.
+
+There is no 100% cap. A cap would hide the cases worth seeing: a player legitimately reading ahead of the encoder counter under clock skew, or an attach point captured a moment too late. Values above 100% mean the window is misaligned, and the column says so rather than flattening it to a confident 100.0.
 
 ---
 
@@ -292,9 +311,17 @@ not available for MoQ; they are complementary, protocol-native views rather than
 | `playback_ttff_ms` | Time to first frame after player start |
 | `playback_stall_count` | Stalls after first frame (HTML waiting / frozen-playhead; all players) |
 | `playback_rebuffer_sec` | Cumulative seconds rebuffering — HTML `<video>` waiting→playing (+ frozen-playhead); same for MoQ/HLS/MPEG-TS/DASH/WHEP |
-| `playback_buffer_sec` | Seconds of media buffered ahead of the playhead (renamed from "Buffer duration" to "Buffer size" in the UI) |
+| `playback_buffer_sec` | Seconds of media buffered **ahead** of the playhead (renamed from "Buffer duration" to "Buffer size" in the UI). Strictly "ahead" on every engine |
+| `playback_behind_live_sec` | Seconds the glass is **behind** live. MoQ LOC only — its canvas has no HTML media buffer. Opposite direction from the row above, which is why it is a separate column |
 | `playback_video_time_sec` | Max `<video>.currentTime` |
 | `playback_error_count` | Normalized player errors |
+| `playback_sample_age_sec` | Seconds since the browser last reported. Non-zero means the live gauges on this row are carried over, not fresh |
+
+### Stale is not stable
+
+The pipeline samples once a second for the whole encode, but the browser only reports while a player is attached. Rows written after the player detaches used to repeat its last reading verbatim — Linode WebRTC held an identical 35 ms for 22 of 30 samples and Zixi RTMP held 5522 ms for 24 of 30 — which pulled the run average toward the frozen value and made a leg that had stopped being measured look rock-steady.
+
+Live gauges (`e2e_latency_ms`, `playback_buffer_sec`, `playback_bitrate_bps`, and the other point-in-time playback readings) are now **blanked** once `playback_sample_age_sec` passes 3 s, and blanks are excluded from the run average rather than counted as zero. Cumulative run totals — frames rendered, stall count, rebuffer seconds — are exempt: the last value of a counter remains a true statement about the run after the player leaves.
 
 ---
 
@@ -346,12 +373,16 @@ Empty / zero is often honest, not a CSV bug. After `100826e`, MoQ `e2e_latency_m
 - WebRTC `e2e_latency_ms` ≈ encode lag + RTT/2 + jitter buffer (no capture clock on RTP).
 - RTMP `net_rtt_ms` without Zixi REST ≈ TCP connect probe.
 - `encoder_send_rate_mbps` on direct-ffmpeg RTMP/SRT/MoQ ≈ a copy of `encoded_bitrate_kbps / 1000`, **not** an independent network measurement. Only `srt-live-transmit` supplies a measured libsrt send rate.
-- MoQ LOC `playback_buffer_sec` ≈ seconds the canvas is *behind live*, not seconds buffered *ahead* of the playhead. Same column, opposite direction — this is why LOC contributes 0 to `latency_player_buffer_ms`.
+- MoQ LOC has no HTML media buffer at all. Its "seconds behind live" figure used to be written into `playback_buffer_sec`, where the latency chain multiplied it by 1000 and charted a **10.9 s player buffer** on the Linode MoQ leg — on the protocol that should be lowest-latency. It now travels in `playback_behind_live_sec`, and LOC's `playback_buffer_sec` is a true 0, so LOC contributes 0 to `latency_player_buffer_ms` as documented.
 
 **Playback engine vs published protocol.** The playback columns describe whatever the player actually consumed. When those disagree, the summary carries `extra.playback_engine_caveat`:
 
 > Job `c49d2ef4` (2026-08-22) is tagged `protocol=webrtc`, but the tile played the **LL-HLS remux** of the WHIP ingest — no WHEP reader session ever opened. Its TTFF (7.6s), 8 stalls, 28.2s rebuffer and ~37s glass delay are HLS numbers, and ranking them against native-path legs is invalid. Check `extra.playback_engine` before comparing.
 
 **Counter fields are run totals, not averages.** In `summary.averages`, every `pkt_*`, `cmaf_*_count`, `cmaf_tfdt_gap_ms`, `moqx_*`, `encode_frames_*`, and `playback_*` counter (plus `playback_rebuffer_sec`) is the value from the final sample. `averages_note` in the summary says so explicitly. Only rate/gauge columns are true means.
+
+**Headline `fps` comes from the frame counter, not from the mean of the rate column.** The per-sample `fps` is ffmpeg's instantaneous rate and it is honest, but the sample interval is not perfectly constant, so an unweighted mean over-weights the short fast ticks. Every MoQ leg reported 32.2–32.7 fps for a 30 fps source; the counter says 29.78. The summary now divides frames produced by wall time elapsed, which is exact and interval-independent.
+
+The oscillation behind that is real and worth reading: the MoQ publisher pipe applies backpressure, so ffmpeg genuinely alternates roughly 24.9 and 37.4 fps while media time advances at a steady 30. **`fps_stability`** — the coefficient of variation over a rolling window — is the column that reports it, and it separates the protocols cleanly (0.198 on MoQ against 0.019 on SRT). A high `fps_stability` with a counter-derived `fps` at source rate means throughput is bursty, not that frames are being lost.
 
 **`e2e_latency_max_ms` is the observed worst case.** It is taken before the 3×-median outlier trim that produces the average, so a leg that froze once still reports the freeze. The plausibility ceiling is 180s on both the backend and the browser — a 30s backend ceiling previously discarded every sample from the worst legs in a run, which read as "not measured".
