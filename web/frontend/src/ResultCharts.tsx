@@ -149,6 +149,7 @@ export function ResultCharts({
               keepZeroSeries
             />
             {(hasData(points, "encode_lag_ms") ||
+              hasData(points, "upload_latency_ms") ||
               hasData(points, "fps_stability") ||
               hasData(points, "speed")) && (
               <MetricChart
@@ -158,6 +159,7 @@ export function ResultCharts({
                 series={encodeGroup.series.filter(
                   (series) =>
                     series.key === "encode_lag_ms" ||
+                    series.key === "upload_latency_ms" ||
                     series.key === "fps_stability" ||
                     series.key === "speed",
                 )}

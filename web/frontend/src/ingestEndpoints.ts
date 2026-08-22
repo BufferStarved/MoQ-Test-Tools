@@ -38,13 +38,13 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
   {
     id: "gcp_moq_relay",
-    label: "OpenMOQ · GCP us-central1",
-    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+    label: "OpenMOQ draft-16 · GCP us-central1",
+    detail: "Legacy :4433 / moqt-16. Hidden — same stall as draft-18, not actively worked.",
   },
   {
     id: "gcp_moq_relay_d18",
-    label: "OpenMOQ draft-18 canary · GCP us-central1",
-    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
+    label: "OpenMOQ · GCP us-central1",
+    detail: "WebTransport :14433 · moqt-18",
   },
   {
     id: "gcp_east_zixi",
@@ -58,13 +58,13 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
   {
     id: "gcp_east_moq_relay",
-    label: "OpenMOQ · GCP us-east1",
-    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+    label: "OpenMOQ draft-16 · GCP us-east1",
+    detail: "Legacy :4433 / moqt-16. Hidden — same stall as draft-18, not actively worked.",
   },
   {
     id: "gcp_east_moq_relay_d18",
-    label: "OpenMOQ draft-18 canary · GCP us-east1",
-    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
+    label: "OpenMOQ · GCP us-east1",
+    detail: "WebTransport :14433 · moqt-18",
   },
   {
     id: "linode_zixi",
@@ -78,13 +78,13 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
   {
     id: "linode_moq_relay",
-    label: "OpenMOQ · Linode",
-    detail: "MoQ relay (WebTransport, draft-16 prod :4433)",
+    label: "OpenMOQ draft-16 · Linode",
+    detail: "Legacy :4433 / moqt-16. Hidden — same stall as draft-18, not actively worked.",
   },
   {
     id: "linode_moq_relay_d18",
-    label: "OpenMOQ draft-18 canary · Linode",
-    detail: "MoQ relay :14433 (WebTransport, moqt-18)",
+    label: "OpenMOQ · Linode",
+    detail: "WebTransport :14433 · moqt-18",
   },
   {
     id: "aws_zixi",
@@ -98,8 +98,12 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
 ];
 
-/** Hosts hidden from web recipes. Empty while all configured stacks are live. */
-export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set();
+/** Draft-16 :4433 stays up but is not offered. Same stall; draft-18 is the MoQ path. */
+export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set([
+  "gcp_moq_relay",
+  "gcp_east_moq_relay",
+  "linode_moq_relay",
+]);
 
 /** Static list (legacy). Prefer `ingestEndpointsFromPresets` when presets are loaded. */
 export const INGEST_ENDPOINTS: IngestEndpointOption[] = INGEST_ENDPOINT_DEFS.map((item) => ({
@@ -266,12 +270,12 @@ export function ingestEndpointsFromPresets(presets: Preset[]): IngestEndpointOpt
 
 export const INGEST_PRESET_BY_PROTOCOL = PRESET_IDS_BY_ENDPOINT;
 
-/** Prod :4433 and the draft-18 canary :14433 both count as managed MoQ relays. */
+/** Draft-18 :14433 and leftover draft-16 :4433 both count as managed MoQ relays. */
 export function isMoqRelayIngest(ingestEndpointId: string): boolean {
   return ingestEndpointId.includes("_moq_relay");
 }
 
-/** Headed Chrome playa / in-page publisher: 18 only on the canary ingest. */
+/** Headed Chrome playa / in-page publisher: 18 on the public :14433 ingest. */
 export function moqDraftForIngest(ingestEndpointId: string): 16 | 18 {
   return ingestEndpointId.includes("moq_relay_d18") ? 18 : 16;
 }
@@ -292,7 +296,13 @@ export function resolveEndpointUrl(
   if (!presetId) {
     return "";
   }
-  return presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
+  const url = presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
+  // A draft-18 ingest must never publish to prod :4433, even if a stale
+  // preset URL is mis-wired. Empty URL fails Start instead of going silent.
+  if (endpoint.ingestEndpointId.includes("moq_relay_d18") && url.includes(":4433") && !url.includes(":14433")) {
+    return "";
+  }
+  return url;
 }
 
 export function ingestEndpointIdForPreset(presetId: string): IngestEndpointId | "custom" {
@@ -416,7 +426,7 @@ export function defaultIngestForProtocol(
   const prefix = ingestPrefixForCloudHost(host);
   const preferred: IngestEndpointId =
     protocol === "moq"
-      ? (`${prefix}_moq_relay` as IngestEndpointId)
+      ? (`${prefix}_moq_relay_d18` as IngestEndpointId)
       : protocol === "srt" || protocol === "webrtc"
         ? (`${prefix}_mediamtx` as IngestEndpointId)
         : (`${prefix}_zixi` as IngestEndpointId);
@@ -427,8 +437,9 @@ export function defaultIngestForProtocol(
   if (!role) {
     return preferred;
   }
+  const d18 = preferred.endsWith("_d18") && role === "moq_relay" ? "_d18" : "";
   for (const fallback of ["gcp_east", "linode", "gcp"] as CloudEncodeHostId[]) {
-    const candidate = `${ingestPrefixForCloudHost(fallback)}_${role}` as IngestEndpointId;
+    const candidate = `${ingestPrefixForCloudHost(fallback)}_${role}${d18}` as IngestEndpointId;
     if (!RECIPE_HIDDEN_INGEST_IDS.has(candidate)) {
       return candidate;
     }
@@ -468,7 +479,11 @@ function browserPublishIngestId(endpoint: {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
   }
   if (isMoqRelayIngest(endpoint.ingestEndpointId)) {
-    return endpoint.ingestEndpointId as IngestEndpointId;
+    const id = endpoint.ingestEndpointId;
+    if (RECIPE_HIDDEN_INGEST_IDS.has(id) && !id.endsWith("_d18")) {
+      return `${id}_d18` as IngestEndpointId;
+    }
+    return id as IngestEndpointId;
   }
   return defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
 }

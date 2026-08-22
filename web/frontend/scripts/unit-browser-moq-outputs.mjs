@@ -17,14 +17,21 @@ function cloudHostFromIngest(id) {
 
 function defaultIngestForProtocol(protocol, host = "gcp") {
   const prefix = host === "gcp_east" ? "gcp_east" : host === "linode" || host === "aws" ? host : "gcp";
-  if (protocol === "moq") return `${prefix}_moq_relay`;
+  if (protocol === "moq") return `${prefix}_moq_relay_d18`;
   if (protocol === "srt" || protocol === "webrtc") return `${prefix}_mediamtx`;
   return `${prefix}_zixi`;
+}
+
+function isMoqRelayIngest(id) {
+  return String(id).includes("_moq_relay");
 }
 
 function browserPublishIngestId(endpoint) {
   if (endpoint.protocol === "webrtc") {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
+  }
+  if (isMoqRelayIngest(endpoint.ingestEndpointId)) {
+    return endpoint.ingestEndpointId;
   }
   return defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
 }
@@ -83,12 +90,13 @@ const sameCloud = collapseOutputsForBrowserMoq([
   { id: "2", protocol: "srt", ingestEndpointId: "gcp_mediamtx" },
   { id: "3", protocol: "moq", ingestEndpointId: "gcp_moq_relay" },
 ]);
-assert.equal(sameCloud.length, 2);
+assert.equal(sameCloud.length, 3);
 assert.equal(sameCloud[0].protocol, "moq");
-assert.equal(sameCloud[0].ingestEndpointId, "gcp_moq_relay");
+assert.equal(sameCloud[0].ingestEndpointId, "gcp_moq_relay_d18");
 assert.equal(sameCloud[1].protocol, "webrtc");
 assert.equal(sameCloud[1].ingestEndpointId, "gcp_mediamtx");
 assert.equal(sameCloud[1].playbackMode, "whep");
+assert.equal(sameCloud[2].ingestEndpointId, "gcp_moq_relay");
 
 const twoDefault = collapseOutputsForBrowserMoq([
   { id: "1", protocol: "rtmp", ingestEndpointId: "gcp_zixi" },
@@ -97,7 +105,7 @@ const twoDefault = collapseOutputsForBrowserMoq([
 assert.deepEqual(
   twoDefault.map((item) => [item.protocol, item.ingestEndpointId]),
   [
-    ["moq", "gcp_moq_relay"],
+    ["moq", "gcp_moq_relay_d18"],
     ["webrtc", "gcp_mediamtx"],
   ],
 );
@@ -110,7 +118,7 @@ const threeClouds = collapseOutputsForBrowserMoq([
 assert.equal(threeClouds.length, 3);
 assert.deepEqual(
   threeClouds.map((item) => item.ingestEndpointId),
-  ["gcp_east_moq_relay", "linode_mediamtx", "gcp_moq_relay"],
+  ["gcp_east_moq_relay_d18", "linode_mediamtx", "gcp_moq_relay"],
 );
 
 const identity = [{ id: "1", protocol: "moq", ingestEndpointId: "gcp_moq_relay", playbackMode: "moq" }];
@@ -135,6 +143,6 @@ assert.deepEqual(
 const custom = collapseOutputsForBrowserMoq([
   { id: "1", protocol: "moq", ingestEndpointId: "custom", playbackMode: "moq" },
 ]);
-assert.equal(custom[0].ingestEndpointId, "gcp_moq_relay");
+assert.equal(custom[0].ingestEndpointId, "gcp_moq_relay_d18");
 
 console.log("unit-browser-moq-outputs: ok");

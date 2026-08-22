@@ -49,7 +49,14 @@ export function pathDelayMs(options: {
   return isPlausibleE2eMs(total) ? Math.round(total) : undefined;
 }
 
-/** Drop zeros and freeze-runaways, then average the remaining healthy samples. */
+/**
+ * Trimmed mean of plausible glass-delay samples, plus the true worst case.
+ *
+ * `avg` drops zeros and single-sample freeze spikes (> 3× median) so one stall
+ * does not dominate the headline number. `max` is taken *before* that trim: a
+ * value labelled "max" must report the worst glass delay actually observed,
+ * not the worst that survived outlier rejection.
+ */
 export function robustE2eStats(values: number[]): { avg: number; max: number } | null {
   const filtered = values.filter(isPlausibleE2eMs).sort((a, b) => a - b);
   if (filtered.length === 0) {
@@ -62,7 +69,7 @@ export function robustE2eStats(values: number[]): { avg: number; max: number } |
   const healthy = filtered.filter((value) => value <= cap);
   const pool = healthy.length ? healthy : filtered;
   const avg = pool.reduce((sum, value) => sum + value, 0) / pool.length;
-  return { avg, max: pool[pool.length - 1] };
+  return { avg, max: filtered[filtered.length - 1] };
 }
 
 export function playbackFpsFromCounters(

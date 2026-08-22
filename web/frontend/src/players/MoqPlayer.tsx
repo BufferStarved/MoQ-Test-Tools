@@ -17,6 +17,9 @@ import {
   classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
   cmafSubscribeOptions,
+  CMAF_MAX_CATCH_UP_RATE,
+  moqLiveEdgePolicy,
+  isPlayableCatalogReady,
   moqHasRenderedMedia,
   moqRenderSink,
   noMediaFailMessage,
@@ -45,7 +48,7 @@ import {
 } from "../videoPlaybackMetrics";
 import { computeMoqE2eMs } from "../glassLatency";
 import { canvasBehindLiveSec, inferDroppedFrames } from "../playbackTruth";
-import { isGracefulMoqReset } from "../playbackEos";
+import { isGracefulMoqEncodeOver, isGracefulMoqReset } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
 interface MoqPlayerProps {
@@ -131,13 +134,11 @@ const WATCHDOG_TICK_MS = 500;
 // holes that freeze the playhead with media queued right behind them. Jump
 // them after ~1.5s instead of waiting for the stall watchdog (which burns a
 // full session restart on what is just a buffered hole).
-const GAP_JUMP_AFTER_MS = 1_500;
+const GAP_JUMP_AFTER_MS = 450;
 const GAP_JUMP_MAX_HOLE_SEC = 1.5;
-// Live-edge catch-up rate cap. Proportional between 1.0 and this based on
-// how far past the hold target the buffer lead has drifted; 1.25 recovers a
-// 4s overshoot in ~16s, fast enough to matter within a benchmark run while
-// staying just below obvious motion speed-up.
-const MAX_CATCH_UP_RATE = 1.25;
+// Live-edge catch-up rate cap. 1.25× drained webcam CMAF into GOP-boundary
+// stalls (~250ms playa_stall). 1.12× is enough to bleed a burst without
+// racing the next 0.5s group.
 
 export default function MoqPlayer({
   relayUrl,
@@ -533,6 +534,28 @@ export default function MoqPlayer({
     }
 
     function fail(message: string) {
+      const painted =
+        sessionRef.current.firstFrame ||
+        moqPlaybackSucceeded(jobId) ||
+        moqHasRenderedMedia({
+          framesRendered: sessionRef.current.framesRendered,
+          videoTimeSec: sessionRef.current.videoTimeSec,
+        });
+      if (
+        isGracefulMoqEncodeOver({
+          playedOk: painted,
+          jobStatus: jobStatusRef.current,
+          runStopped: runStoppedRef.current,
+        })
+      ) {
+        lastErrorRef.current = null;
+        setError(null);
+        setStatus("Encode ended");
+        setIsReady(false);
+        setIsPlaying(false);
+        pushDiag(`encode_over_suppressed_fail ${message}`, true);
+        return;
+      }
       const jobFail = playerErrorForFailedJob({
         jobStatus: jobStatusRef.current,
         jobError: jobErrorRef.current,
@@ -680,7 +703,7 @@ export default function MoqPlayer({
       pushDiag(
         mediaPackaging === "loc"
           ? `catalog_mode=injected loc video${sourceHasAudio ? "+audio" : ""} draft=${draftVersion}`
-          : `catalog_mode=relay catalog then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (publisher initData) draft=${draftVersion}`,
+          : `catalog_mode=relay catalog FETCH+subscribe then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (MSF-01 initDataList→initData) draft=${draftVersion}`,
         true,
       );
       pushDiag(`publisher_forward=1 warmup=${PUBLISHER_WARMUP_MS / 1000}s`, true);
@@ -906,7 +929,24 @@ export default function MoqPlayer({
             setStatus("Paused");
           } else if (state === "error") {
             setIsPlaying(false);
-            setStatus("Failed");
+            if (
+              isGracefulMoqEncodeOver({
+                playedOk:
+                  sessionRef.current.firstFrame ||
+                  moqHasRenderedMedia({
+                    framesRendered: sessionRef.current.framesRendered,
+                    videoTimeSec: sessionRef.current.videoTimeSec,
+                  }),
+                jobStatus: jobStatusRef.current,
+                runStopped: runStoppedRef.current,
+              })
+            ) {
+              lastErrorRef.current = null;
+              setError(null);
+              setStatus("Encode ended");
+            } else {
+              setStatus("Failed");
+            }
           }
         });
 
@@ -914,13 +954,21 @@ export default function MoqPlayer({
           if (destroyed) {
             return;
           }
-          sessionRef.current.catalogReady = true;
-          markMoqCatalogReady(jobId);
           const levelNames = event.levels.map((level) => level.trackName ?? String(level.index)).join(",");
+          const playable = isPlayableCatalogReady({
+            catalogReady: true,
+            videoLevels: event.levels.length,
+          });
           pushDiag(
             `ready levels=${event.levels.length} tracks=${levelNames || "?"} audio=${event.audioTracks.length}`,
             true,
           );
+          if (!playable) {
+            pushDiag("ready levels=0 — waiting for catalog refresh (not playable)", true);
+            return;
+          }
+          sessionRef.current.catalogReady = true;
+          markMoqCatalogReady(jobId);
           updateMediaVisibility(player);
           setIsReady(true);
           setStatus("Ready");
@@ -1213,19 +1261,16 @@ export default function MoqPlayer({
           return;
         }
         video.addEventListener("timeupdate", onTimeUpdate);
-        // Live-edge policy (smoothness first):
-        //  1. GENTLE RATE CATCH-UP is the primary mechanism — when the buffer
-        //     lead creeps past the hold target, play slightly fast (1.08x /
-        //     1.12x, imperceptible) until back at the hold. The old
-        //     seek-only trim let a 4s target balloon to ~11s of buffer and
-        //     then jumped 6-7s at once (webcam run 2026-08-08), which read
-        //     as freezes + skips.
-        //  2. HARD SEEK stays only as a gross-drift backstop (relay burst
-        //     after a long stall) on the original 2s cadence.
-        const holdBehindSec = Math.max(0.15, (targetLatencyMs || 400) / 1000);
-        const seekThresholdSec = Math.max(holdBehindSec * 2, holdBehindSec + 1);
-        const rateOnSec = holdBehindSec + 0.75; // start chasing above this lead
-        const rateOffSec = holdBehindSec + 0.25; // stop chasing below this lead
+        // Live-edge policy (publish is paced — job 805b3146 wall_dt p50=501ms):
+        //  1. RATE CATCH-UP from ~2.4s lead (1.35×). Sitting at 1.0× through
+        //     a 6.5s slack left e2e at 8–11s after MSE holes.
+        //  2. HARD SEEK only on runaway lead (≥30s). The 7s seek was the
+        //     visible freeze.
+        //  3. Gap-jump hops a <1.5s MSE hole after 450ms frozen so a late
+        //     IDR does not count as a GOP-length stall.
+        const { holdBehindSec, rateOnSec, rateOffSec, seekThresholdSec } = moqLiveEdgePolicy(
+          targetLatencyMs || 400,
+        );
         // Frozen-playhead watchdog state (see STALL_RESTART_MS).
         let watchdogVt = -1;
         let watchdogAtMs = Date.now();
@@ -1250,6 +1295,7 @@ export default function MoqPlayer({
               shouldFailNoMediaWatchdog({
                 jobStatus: jobStatusRef.current,
                 previewReady: previewReadyRef.current,
+                catalogReady: sessionRef.current.catalogReady,
                 liveMs: Date.now() - liveStartedAtMs,
                 deadlineMs: mediaDeadlineMs,
               })
@@ -1421,7 +1467,7 @@ export default function MoqPlayer({
           const previousRate = catchUpRate;
           if (ahead > rateOnSec) {
             const overshoot = Math.min(1, (ahead - rateOnSec) / (seekThresholdSec - rateOnSec));
-            const raw = 1 + (MAX_CATCH_UP_RATE - 1) * Math.max(overshoot, 0.3);
+            const raw = 1 + (CMAF_MAX_CATCH_UP_RATE - 1) * Math.max(overshoot, 0.3);
             catchUpRate = Math.round(raw * 20) / 20; // quantize to 0.05 steps
           } else if (ahead < rateOffSec) {
             catchUpRate = 1;

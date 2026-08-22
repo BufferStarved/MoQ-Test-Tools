@@ -40,7 +40,23 @@ export interface UploadSample {
   net_loss_pct?: number;
   net_retrans_pct?: number;
   encode_lag_ms?: number;
+  upload_latency_ms?: number | null;
   e2e_latency_ms?: number;
+  // Latency decomposition (src/latency_budget.py ↔ latencyBudget.ts). The five
+  // components sum to latency_accounted_ms; e2e minus that is the residual.
+  latency_encode_ms?: number;
+  latency_publish_ms?: number;
+  latency_network_ms?: number;
+  latency_packager_ms?: number;
+  latency_player_buffer_ms?: number;
+  latency_accounted_ms?: number;
+  latency_residual_ms?: number;
+  encode_frames_total?: number;
+  encode_frames_dropped?: number;
+  encode_frames_duped?: number;
+  encode_frame_drop_pct?: number;
+  playback_frame_drop_pct?: number;
+  frame_delivery_pct?: number;
   playback_error_count?: number;
   pkt_rcv_drop?: number;
   pkt_snd_drop?: number;
@@ -184,19 +200,51 @@ export interface QualityLeg {
   error?: string;
 }
 
+/**
+ * Per-run summary values keyed by CSV column.
+ *
+ * Named and index-signed on purpose. The backend derives this bag from
+ * whatever columns exist in `CSV_COLUMNS`, so a closed object type forces an
+ * edit here for every new metric — and the common `result.averages ?? {}`
+ * idiom widened to `Averages | {}`, which made *every* property read a type
+ * error. The listed keys stay for autocomplete and documentation.
+ *
+ * Not all entries are means: cumulative counters are run totals from the final
+ * sample (see `averages_note` in the summary JSON).
+ */
+export interface ResultAverages {
+  [column: string]: number | undefined;
+  cpu_percent?: number;
+  memory_mb?: number;
+  encoded_bitrate_kbps?: number;
+  fps?: number;
+  fps_stability?: number;
+  speed?: number;
+  encode_lag_ms?: number;
+  upload_latency_ms?: number;
+  // Latency decomposition (src/latency_budget.py).
+  latency_encode_ms?: number;
+  latency_publish_ms?: number;
+  latency_network_ms?: number;
+  latency_packager_ms?: number;
+  latency_player_buffer_ms?: number;
+  latency_accounted_ms?: number;
+  latency_residual_ms?: number;
+  // Frame accounting.
+  encode_frames_total?: number;
+  encode_frames_dropped?: number;
+  encode_frames_duped?: number;
+  encode_frame_drop_pct?: number;
+  playback_frame_drop_pct?: number;
+  frame_delivery_pct?: number;
+}
+
 export interface ResultSummary {
   filename: string;
   samples: number;
   protocol?: string | null;
   endpoint?: string | null;
-  averages?: {
-    cpu_percent: number;
-    memory_mb: number;
-    encoded_bitrate_kbps: number;
-    fps: number;
-    fps_stability?: number;
-    speed: number;
-    encode_lag_ms?: number;
+  averages?: ResultAverages & {
     transport_rtt_ms?: number;
     net_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
@@ -279,5 +327,9 @@ export interface ResultSummary {
     vmaf_distorted_path?: string;
     vmaf_pending_on_ingest?: boolean;
     vmaf_note?: string;
+    /** Player that actually produced the playback columns (whep, ll-hls, moq…). */
+    playback_engine?: string;
+    /** Set when playback_engine is not the protocol's own delivery path. */
+    playback_engine_caveat?: string;
   };
 }

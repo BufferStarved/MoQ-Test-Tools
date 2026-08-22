@@ -72,6 +72,75 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description:
       "How far the encoder is behind realtime (ms). ffmpeg: wall-clock minus media out_time after subtracting startup. Browser WebCodecs: wall since encode start minus the frame’s media timestamp. WebRTC WHIP: per-frame encode time from getStats, plus any capture-vs-encoded frame backlog.",
   },
+  upload_latency_ms: {
+    label: "Upload latency",
+    description:
+      "Publisher→ingest only: milliseconds from encoded bits ready to publish (ffmpeg -progress out_time / first muxed packet) to the first confirmed write at the ingest server. SRT: connected + first bytes acked (libsrt send rate or MediaMTX receive). RTMP: first ingest receive (MediaMTX/Zixi). MoQ: first object on the wire (live: sent track) or first relay namespace/group. WebRTC/OBS monitor: — until a publish-success signal exists. Not RTT, not glass-to-glass, not player TTFF.",
+  },
+  latency_encode_ms: {
+    label: "Latency · encode",
+    description:
+      "Component 1 of the latency budget: capture → muxed output. The constant encoder pipeline offset (x264 lookahead, mux buffering, device/broker warmup — 1.2–2.4s typical) plus any sustained encode lag on top. encode_lag_ms deliberately charts only the growth past that offset; this metric adds the offset back so the budget accounts for it exactly once.",
+  },
+  latency_publish_ms: {
+    label: "Latency · publish",
+    description:
+      "Component 2: muxed output → first confirmed write at the ingest server (same measurement as upload_latency_ms). One-shot per run, not a continuous series. Not RTT and not glass-to-glass.",
+  },
+  latency_network_ms: {
+    label: "Latency · network",
+    description:
+      "Component 3: one-way path estimate, net_rtt_ms ÷ 2. Assumes a symmetric path. This is the only network figure every protocol can supply (libsrt, RTMP TCP probe, WebRTC ICE, MoQ qlog/probe), which is what makes the component comparable — but the underlying measurement differs per protocol, so treat cross-protocol differences of a few ms as noise.",
+  },
+  latency_packager_ms: {
+    label: "Latency · packager",
+    description:
+      "Component 4: ingest → delivery-ready. Measured for MediaMTX LL-HLS from EXT-X-PROGRAM-DATE-TIME versus the encode anchor (folds in SRT tsbpd + network + remux). Zixi HTTP-TS is ~0 by construction (continuous TS, no packaging buffer). Zixi Fast HLS and MoQ have no direct measurement today, so their packaging time lands in the unattributed residual rather than being guessed at here.",
+  },
+  latency_player_buffer_ms: {
+    label: "Latency · player buffer",
+    description:
+      "Component 5: delivery → glass. Media queued ahead of the playhead (HTMLMediaElement.buffered, or the WebRTC jitter buffer). Browser MoQ LOC renders to canvas and has no HTML buffer, so it contributes 0 here — its playback_buffer_sec column means 'seconds behind live', a different quantity that must not be summed into this chain.",
+  },
+  latency_accounted_ms: {
+    label: "Latency · accounted",
+    description:
+      "Sum of the five latency components. Compare against e2e_latency_ms: close together means the decomposition explains the glass delay, far apart means it does not (see latency_residual_ms).",
+  },
+  latency_residual_ms: {
+    label: "Latency · unattributed",
+    description:
+      "Measured glass delay minus the accounted components. This is a deliberate part of the model, not an error term to ignore: a large residual says the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Expected to be non-trivial on Zixi Fast HLS (unmeasured chunk packaging) and MoQ CMAF (group accumulation + join offset). Clamped at 0 — a negative value would mean components double-count, which is fixed at the source instead of displayed.",
+  },
+  encode_frames_total: {
+    label: "Frames encoded",
+    description: "Cumulative frames ffmpeg has written to the output muxer (-progress frame).",
+  },
+  encode_frames_dropped: {
+    label: "Frames dropped (encode)",
+    description:
+      "Cumulative frames ffmpeg dropped rather than encode (-progress drop_frames). Exact, not inferred. The encoder-side counterpart to the player's dropped-frame counter: drops here mean the publish host could not keep up, and no downstream tuning will recover them.",
+  },
+  encode_frames_duped: {
+    label: "Frames duplicated (encode)",
+    description:
+      "Cumulative frames ffmpeg duplicated to hold constant frame rate (-progress dup_frames), typically a VFR webcam normalized to CFR. Counted because a duplicated frame is not new content — a high dup count with a healthy fps means the source is starving the encoder.",
+  },
+  encode_frame_drop_pct: {
+    label: "Frame drop % (encode)",
+    description:
+      "Encoder drops as a share of frames offered to the encoder (encoded + dropped). Deliberately not measured against fps × elapsed: a genuine 24fps source is not dropping 20% of a 30fps expectation.",
+  },
+  playback_frame_drop_pct: {
+    label: "Frame drop % (playback)",
+    description:
+      "Viewer drops as a share of frames delivered to the player (rendered + dropped). Uses the same denominator convention as the encode-side percentage, which is what makes the two directly comparable rather than one being 'of expected' and the other 'of delivered'.",
+  },
+  frame_delivery_pct: {
+    label: "Frame delivery %",
+    description:
+      "Painted frames as a share of encoded frames — the only frame metric spanning the whole chain, and the only one that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own. 100% means every encoded frame reached the glass.",
+  },
   e2e_latency_ms: {
     label: "Glass delay (estimated)",
     description:

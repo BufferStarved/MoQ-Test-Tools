@@ -37,6 +37,39 @@ export const RECIPE_CHROME_CAPS: RecipeBrowserCaps = {
 };
 
 export type RecipeSourceId = "dummy" | "bbb" | "upload" | "webcam" | "browser_moq";
+export type RecipeEncoderId = "ffmpeg" | "obs" | "browser";
+
+/** Webcam encodes on this laptop via the publisher agent (ffmpeg / OBS). */
+export function isLocalAgentSource(source: RecipeSourceId): boolean {
+  return source === "webcam";
+}
+
+/**
+ * Last-mile encoder for this source. Cloud playout stays server ffmpeg.
+ * In-tab Browser is an encoder (Webcam + Browser, or legacy source=browser_moq).
+ */
+export function recipeEncoderForSource(
+  source: RecipeSourceId,
+  encoder: RecipeEncoderId = "ffmpeg",
+): RecipeEncoderId {
+  if (source === "browser_moq") {
+    return "browser";
+  }
+  return source === "webcam" ? encoder : "ffmpeg";
+}
+
+/** Webcam + Browser engine (or legacy Browser source) publishes MoQ / WebRTC. */
+export function isBrowserPublish(
+  source: RecipeSourceId,
+  encoder: RecipeEncoderId = "ffmpeg",
+): boolean {
+  return recipeEncoderForSource(source, encoder) === "browser";
+}
+
+/** OpenMOQ plugin occupies OBS Settings → Stream, so the recipe must include MoQ. */
+export function recipeRequiresMoq(ctx: Pick<RecipeContext, "source" | "encoder">): boolean {
+  return recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg") === "obs";
+}
 
 export interface RecipePublisherCaps {
   /**
@@ -54,6 +87,8 @@ export interface RecipeContext {
   presets: Preset[];
   caps: RecipeBrowserCaps;
   publisher?: RecipePublisherCaps;
+  /** ffmpeg (default) or OBS as the last-mile encoder. */
+  encoder?: RecipeEncoderId;
 }
 
 export function recipePublisherCaps(ctx: Pick<RecipeContext, "publisher">): RecipePublisherCaps {
@@ -78,15 +113,22 @@ export function publishProtocolIdsForSource(
   source: RecipeSourceId,
   caps: RecipeBrowserCaps,
   publisher: RecipePublisherCaps = RECIPE_CLOUD_PUBLISHER,
+  encoder: RecipeEncoderId = "ffmpeg",
 ): PublishProtocolId[] {
-  const live: PublishProtocolId[] =
-    source === "browser_moq" ? ["moq", "webrtc"] : ["srt", "rtmp", "webrtc", "moq"];
+  const effective = recipeEncoderForSource(source, encoder);
+  const live: PublishProtocolId[] = isBrowserPublish(source, encoder)
+    ? ["moq", "webrtc"]
+    : ["srt", "rtmp", "webrtc", "moq"];
   return live.filter((protocol) => {
     if (!protocolAllowedInBrowser(protocol, caps)) {
       return false;
     }
-    // Webcam encode is the local agent. No WHIP muxer → no WebRTC option.
-    if (protocol === "webrtc" && source === "webcam" && !publisher.localFfmpegWhip) {
+    // Laptop ffmpeg encode is the local agent. No WHIP muxer → no WebRTC option.
+    if (protocol === "webrtc" && isLocalAgentSource(source) && effective === "ffmpeg" && !publisher.localFfmpegWhip) {
+      return false;
+    }
+    // OBS + OpenMOQ plugin: MoQ via the plugin, SRT/RTMP via OBS outputs. No WHIP.
+    if (protocol === "webrtc" && effective === "obs") {
       return false;
     }
     return true;
@@ -147,7 +189,15 @@ export function ingestAllowedForRecipe(
     return false;
   }
   if (isCustomIngestEndpoint(ingestEndpointId)) {
-    return ctx.source !== "browser_moq";
+    return !isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg");
+  }
+  // openmoq-plugin is draft-16 / :4433 only. Public MoQ is :14433.
+  if (
+    recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg") === "obs" &&
+    protocol === "moq" &&
+    ingestEndpointId.includes("moq_relay_d18")
+  ) {
+    return false;
   }
   return ingestEndpointsForProtocol(protocol, ctx.presets).some(
     (item) => item.id === ingestEndpointId,
@@ -187,8 +237,21 @@ export function destinationsForProtocol(
       if (aRole !== bRole) {
         return aRole - bRole;
       }
+      // Draft-18 :14433 before leftover :4433 so Add output cannot pick draft-16.
+      if (protocol === "moq") {
+        const aD18 = a.id.endsWith("_d18") ? 0 : 1;
+        const bD18 = b.id.endsWith("_d18") ? 0 : 1;
+        if (aD18 !== bD18) {
+          return aD18 - bD18;
+        }
+      }
       return hostRank(a.id) - hostRank(b.id);
     });
+}
+
+/** True when OBS can publish MoQ (draft-16 dest exists). Public site is d18-only. */
+export function obsMoqSupported(ctx: RecipeContext): boolean {
+  return destinationsForProtocol("moq", { ...ctx, encoder: "obs" }, new Set()).length > 0;
 }
 
 function pickIngest(
@@ -210,12 +273,34 @@ function pickIngest(
   );
 }
 
+/**
+ * Merge a UI patch into an output. A protocol switch invalidates the previous
+ * player unless the same patch names one: isPlaybackModeCompatible whitelists
+ * the MediaMTX LL-HLS remux for webrtc, so a leg switched from SRT to WebRTC
+ * would keep its inherited "ll-hls" and never open a WHEP session.
+ */
+export function applyEndpointPatch(
+  endpoint: EndpointConfig,
+  patch: Partial<EndpointConfig>,
+): EndpointConfig {
+  const next = { ...endpoint, ...patch };
+  if (patch.protocol !== undefined && patch.protocol !== endpoint.protocol && !patch.playbackMode) {
+    next.playbackMode = undefined;
+  }
+  return next;
+}
+
 export function coerceEndpoint(
   endpoint: EndpointConfig,
   ctx: RecipeContext,
   occupiedCollisionKeys: ReadonlySet<string>,
 ): EndpointConfig {
-  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx));
+  const allowed = publishProtocolIdsForSource(
+    ctx.source,
+    ctx.caps,
+    recipePublisherCaps(ctx),
+    ctx.encoder ?? "ffmpeg",
+  );
   let protocol = endpoint.protocol;
   if (!allowed.includes(protocol as PublishProtocolId)) {
     protocol = allowed[0] ?? "srt";
@@ -227,8 +312,10 @@ export function coerceEndpoint(
   const ingestEndpointId = currentOk
     ? endpoint.ingestEndpointId
     : pickIngest(protocol, endpoint.ingestEndpointId, ctx, occupiedCollisionKeys);
+  // Re-default the player when this call is what changed the protocol; a mode
+  // inherited from the old protocol can still read as "compatible".
   const playbackMode = resolvedSelectablePlaybackMode(
-    endpoint.playbackMode,
+    protocol === endpoint.protocol ? endpoint.playbackMode : undefined,
     protocol,
     ingestEndpointId,
     ctx.caps,
@@ -244,8 +331,9 @@ export function coerceEndpoint(
 }
 
 export function coerceRecipe(endpoints: EndpointConfig[], ctx: RecipeContext): EndpointConfig[] {
-  const sourceAdjusted =
-    ctx.source === "browser_moq" ? collapseOutputsForBrowserMoq(endpoints) : endpoints;
+  const sourceAdjusted = isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg")
+    ? collapseOutputsForBrowserMoq(endpoints)
+    : endpoints;
   const used = new Set<string>();
   let changed = sourceAdjusted !== endpoints;
   const next = sourceAdjusted.map((endpoint) => {
@@ -288,7 +376,14 @@ function tryAddProtocol(
   ctx: RecipeContext,
   used: ReadonlySet<string>,
 ): Omit<EndpointConfig, "id"> | null {
-  if (!publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx)).includes(protocol)) {
+  if (
+    !publishProtocolIdsForSource(
+      ctx.source,
+      ctx.caps,
+      recipePublisherCaps(ctx),
+      ctx.encoder ?? "ffmpeg",
+    ).includes(protocol)
+  ) {
     return null;
   }
   const usedLegs = new Set(
@@ -298,7 +393,10 @@ function tryAddProtocol(
     if (isCustomIngestEndpoint(item.id)) {
       return false;
     }
-    if (ctx.source === "browser_moq" && usedLegs.has(`${protocol}:${item.id}`)) {
+    if (
+      isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg") &&
+      usedLegs.has(`${protocol}:${item.id}`)
+    ) {
       return false;
     }
     return true;
@@ -324,7 +422,7 @@ export function nextAddableEndpoint(
   protocolOrder?: readonly PublishProtocolId[],
 ): Omit<EndpointConfig, "id"> | null {
   const used = collisionKeysFor(current);
-  if (ctx.source === "browser_moq") {
+  if (isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg")) {
     if (!current.some((endpoint) => endpoint.protocol === "webrtc")) {
       const webrtc = tryAddProtocol("webrtc", current, ctx, used);
       if (webrtc) {
@@ -344,18 +442,24 @@ export function nextAddableEndpoint(
 }
 
 export function defaultRecipeEndpoints(ctx: RecipeContext): Omit<EndpointConfig, "id">[] {
-  const pairs: PublishProtocolId[][] = [
-    ["rtmp", "srt"],
-    ["srt", "moq"],
-    ["webrtc", "moq"],
-    ["moq", "webrtc"],
-  ];
+  const pairs: PublishProtocolId[][] = recipeRequiresMoq(ctx)
+    ? [
+        ["srt", "moq"],
+        ["rtmp", "moq"],
+        ["moq", "srt"],
+      ]
+    : [
+        ["rtmp", "srt"],
+        ["srt", "moq"],
+        ["webrtc", "moq"],
+        ["moq", "webrtc"],
+      ];
   for (const pair of pairs) {
     const first = nextAddableEndpoint([], ctx, pair);
     if (!first) {
       continue;
     }
-    if (ctx.source === "browser_moq") {
+    if (isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg")) {
       return [first];
     }
     const second = nextAddableEndpoint([{ id: "seed-0", ...first }], ctx, [
@@ -379,16 +483,33 @@ export function canAddRecipeOutput(
 }
 
 export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): string | null {
-  const allowed = publishProtocolIdsForSource(ctx.source, ctx.caps, recipePublisherCaps(ctx));
+  const allowed = publishProtocolIdsForSource(
+    ctx.source,
+    ctx.caps,
+    recipePublisherCaps(ctx),
+    ctx.encoder ?? "ffmpeg",
+  );
+  if (recipeRequiresMoq(ctx)) {
+    const moqDests = destinationsForProtocol("moq", ctx, new Set());
+    if (moqDests.length === 0) {
+      return "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 (:14433). Use ffmpeg (helper) for MoQ.";
+    }
+    if (!endpoints.some((endpoint) => endpoint.protocol === "moq")) {
+      return "OBS needs a MoQ output — the plugin occupies Settings → Stream. Add SRT/RTMP alongside it.";
+    }
+  }
   const used = new Set<string>();
   for (const endpoint of endpoints) {
     if (!allowed.includes(endpoint.protocol as PublishProtocolId)) {
+      if (endpoint.protocol === "webrtc" && recipeRequiresMoq(ctx)) {
+        return "OBS encode supports SRT, RTMP, and MoQ — not WebRTC. Use ffmpeg (helper) for WebRTC.";
+      }
       if (
         endpoint.protocol === "webrtc" &&
-        ctx.source === "webcam" &&
+        isLocalAgentSource(ctx.source) &&
         !recipePublisherCaps(ctx).localFfmpegWhip
       ) {
-        return "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch to Cloud playout or Browser.";
+        return "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch to Cloud playout or Webcam + Browser.";
       }
       return "This output uses a protocol that is not available here.";
     }

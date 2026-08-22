@@ -9,7 +9,9 @@ import { playbackModeAllowedInBrowser } from "./recipeSupport";
 import { isSafariBrowser } from "./browserDetect";
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
+import { IconFilm } from "./Icons";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
+import { moqDraftForIngest, moqPinTlsCertForIngest } from "./ingestEndpoints";
 
 const HlsPlayer = lazy(() => import("./players/HlsPlayer"));
 const DashPlayer = lazy(() => import("./players/DashPlayer"));
@@ -120,10 +122,12 @@ export function StreamPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   netRttMs = 0,
-  moqDraftVersion = 18,
-  moqPinTlsCert = true,
+  moqDraftVersion,
+  moqPinTlsCert,
   moqMediaPackaging = "cmaf",
 }: StreamPlayerProps) {
+  const resolvedDraft = moqDraftVersion ?? moqDraftForIngest(ingestEndpointId);
+  const pinTlsCert = moqPinTlsCert ?? moqPinTlsCertForIngest(ingestEndpointId);
   const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);
 
   useEffect(() => {
@@ -190,7 +194,10 @@ export function StreamPlayer({
         </div>
       )}
       {!previewActive ? (
-        <div className="player-idle-placeholder" aria-hidden="true" />
+        <div className="player-idle-placeholder" role="status">
+          <IconFilm size={22} />
+          <span>Awaiting publish…</span>
+        </div>
       ) : (
       <PlayerErrorBoundary engine={target.engine}>
         <Suspense fallback={<PlayerFallback />}>
@@ -256,7 +263,13 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
-              skipConnectProbe={playbackGate === "live"}
+              // Skip only when the backend actually validated TS sync bytes.
+              // RTMP/SRT get gate=live while preview_ready is still false, so
+              // keying off the gate skipped the probe exactly when the origin
+              // was most likely empty — mpegts.js then attached to 0 bytes and
+              // burned 1.2s reconnects instead (a chunk of the 23s Linode
+              // join). preview_ready === true means the probe is redundant.
+              skipConnectProbe={previewReady === true}
               jobStatus={jobStatus}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
@@ -282,13 +295,13 @@ export function StreamPlayer({
           )}
           {target.engine === "moq" && moqReadyNamespace && (
             <MoqPlayer
-              key={`${target.url}:${moqReadyNamespace}:d${moqDraftVersion}:${moqMediaPackaging}`}
+              key={`${target.url}:${moqReadyNamespace}:d${resolvedDraft}:${moqMediaPackaging}`}
               relayUrl={target.url}
               namespace={moqReadyNamespace}
-              fingerprintUrl={target.moqFingerprintUrl}
+              fingerprintUrl={pinTlsCert ? target.moqFingerprintUrl : undefined}
               label={target.label}
               playbackGate={moqPlaybackGate}
-              pinTlsCert={moqPinTlsCert}
+              pinTlsCert={pinTlsCert}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
               onPlaybackSample={onPlaybackSample}
@@ -307,7 +320,7 @@ export function StreamPlayer({
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               netRttMs={netRttMs}
-              draftVersion={moqDraftVersion}
+              draftVersion={resolvedDraft}
               mediaPackaging={moqMediaPackaging}
             />
           )}

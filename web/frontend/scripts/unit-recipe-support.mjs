@@ -18,7 +18,8 @@ const appSrc = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
 assert.match(appSrc, /coerceRecipe/);
 assert.match(appSrc, /recipeIssue/);
 assert.match(appSrc, /canAddRecipeOutput/);
-assert.match(appSrc, /Boolean\(recipeBlockReason\)/);
+assert.match(appSrc, /Boolean\(startTitle\)/);
+assert.match(appSrc, /recipeBlockReason/);
 assert.match(endpointSrc, /destinationsForProtocol/);
 assert.match(endpointSrc, /selectablePlaybackModes/);
 assert.doesNotMatch(endpointSrc, /playbackModeBlockedReason/);
@@ -26,7 +27,27 @@ assert.match(endpointSrc, /UPLOAD_PROTOCOLS_COMING_SOON = new Set\(\["hls", "das
 assert.match(recipeSrc, /PUBLISH_PROTOCOL_IDS = \["srt", "rtmp", "webrtc", "moq"\]/);
 assert.match(playbackSrc, /Compatible players only/);
 assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS/);
+assert.match(ingestSrc, /_moq_relay_d18` as IngestEndpointId/);
+assert.match(ingestSrc, /label: "OpenMOQ · GCP us-central1"/);
+assert.match(ingestSrc, /OpenMOQ draft-16 · GCP us-central1/);
+assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*gcp_moq_relay/);
 assert.match(recipeSrc, /publishProtocolIdsForSource/);
+assert.match(recipeSrc, /isLocalAgentSource/);
+assert.match(recipeSrc, /recipeEncoderForSource/);
+assert.match(recipeSrc, /isBrowserPublish/);
+assert.match(recipeSrc, /recipeRequiresMoq/);
+assert.match(recipeSrc, /effective === "obs"/);
+assert.match(appSrc, /encode-encoder-options/);
+assert.match(appSrc, /encoderModeExplainer/);
+assert.match(appSrc, /const MIN_ENDPOINTS = 1/);
+assert.match(appSrc, /canRemove=\{endpoints.length > minEndpointsForSource/);
+assert.doesNotMatch(appSrc, /OBS \+ OpenMOQ/);
+assert.match(appSrc, /Calculate VMAF, PSNR, and SSIM pre- and post-ingest/);
+assert.doesNotMatch(appSrc, /setMediaSource\("dummy"\);\s*setMediaPath\(OBS_OPENMOQ_MEDIA\)/);
+assert.doesNotMatch(
+  fs.readFileSync(path.join(root, "src/SourceSection.tsx"), "utf8"),
+  /OBS Virtual Camera/,
+);
 
 const SOURCES = ["dummy", "bbb", "upload", "webcam", "browser_moq"];
 const PROTOCOLS = ["srt", "rtmp", "webrtc", "moq", "hls", "dash"];
@@ -34,12 +55,15 @@ const INGESTS = [
   "gcp_zixi",
   "gcp_mediamtx",
   "gcp_moq_relay",
+  "gcp_moq_relay_d18",
   "gcp_east_zixi",
   "gcp_east_mediamtx",
   "gcp_east_moq_relay",
+  "gcp_east_moq_relay_d18",
   "linode_zixi",
   "linode_mediamtx",
   "linode_moq_relay",
+  "linode_moq_relay_d18",
   "aws_zixi",
   "custom",
 ];
@@ -62,7 +86,7 @@ const NO_WT = { safari: false, webTransport: false, rtcPeerConnection: true };
 
 function ingestRole(id) {
   const value = String(id);
-  if (value.endsWith("_moq_relay")) return "moq_relay";
+  if (value.includes("_moq_relay")) return "moq_relay";
   if (value.endsWith("_mediamtx")) return "mediamtx";
   if (value.endsWith("_zixi")) return "zixi";
   return null;
@@ -106,8 +130,12 @@ function playerAllowed(mode, caps) {
 }
 
 function ingestHidden(id) {
-  // Product RECIPE_HIDDEN_INGEST_IDS is empty; only the AWS stub is unconfigured.
-  return id === "aws_zixi";
+  return (
+    id === "aws_zixi" ||
+    id === "gcp_moq_relay" ||
+    id === "gcp_east_moq_relay" ||
+    id === "linode_moq_relay"
+  );
 }
 
 function ingestMatchesProtocol(protocol, ingest) {
@@ -119,12 +147,30 @@ function ingestMatchesProtocol(protocol, ingest) {
   return false;
 }
 
-function isLegalCombo(source, protocol, ingest, player, caps, publisher = { localFfmpegWhip: true }) {
+function isLegalCombo(
+  source,
+  protocol,
+  ingest,
+  player,
+  caps,
+  publisher = { localFfmpegWhip: true },
+  encoder = "ffmpeg",
+) {
+  const effective =
+    source === "browser_moq" ? "browser" : source === "webcam" ? encoder : "ffmpeg";
   const sourceProtocols =
-    source === "browser_moq" ? ["moq", "webrtc"] : ["srt", "rtmp", "webrtc", "moq"];
+    effective === "browser" || source === "browser_moq"
+      ? ["moq", "webrtc"]
+      : ["srt", "rtmp", "webrtc", "moq"];
   if (!sourceProtocols.includes(protocol)) return false;
   if (!protocolAllowed(protocol, caps)) return false;
-  if (protocol === "webrtc" && source === "webcam" && !publisher.localFfmpegWhip) return false;
+  if (protocol === "webrtc" && source === "webcam" && effective === "ffmpeg" && !publisher.localFfmpegWhip) {
+    return false;
+  }
+  if (protocol === "webrtc" && effective === "obs") return false;
+  if (effective === "obs" && protocol === "moq" && String(ingest).includes("moq_relay_d18")) {
+    return false;
+  }
   if (ingestHidden(ingest)) return false;
   if (ingest === "custom" && source === "browser_moq") return false;
   if (!ingestMatchesProtocol(protocol, ingest)) return false;
@@ -169,10 +215,10 @@ for (const row of [
   ["dummy", "webrtc", "gcp_east_mediamtx", "whep"],
   ["dummy", "webrtc", "gcp_mediamtx", "ll-hls"],
   ["dummy", "webrtc", "gcp_mediamtx", "hls"],
-  ["dummy", "moq", "linode_moq_relay", "moq"],
+  ["dummy", "moq", "linode_moq_relay_d18", "moq"],
   ["dummy", "srt", "custom", "hls"],
   ["webcam", "rtmp", "gcp_east_zixi", "mpegts"],
-  ["browser_moq", "moq", "gcp_moq_relay", "moq"],
+  ["browser_moq", "moq", "gcp_moq_relay_d18", "moq"],
   ["browser_moq", "webrtc", "linode_mediamtx", "whep"],
 ]) {
   assert.equal(isLegalCombo(...row, CHROME), true, row.join("/"));
@@ -186,6 +232,8 @@ for (const row of [
   ["dummy", "hls", "gcp_east_zixi", "mpegts"],
   ["dummy", "dash", "custom", "hls"],
   ["dummy", "srt", "aws_zixi", "mpegts"],
+  ["dummy", "moq", "gcp_moq_relay", "moq"],
+  ["dummy", "moq", "linode_moq_relay", "moq"],
   ["dummy", "srt", "gcp_mediamtx", "dash"],
   ["browser_moq", "srt", "gcp_mediamtx", "ll-hls"],
   ["browser_moq", "moq", "custom", "moq"],
@@ -222,6 +270,232 @@ assert.equal(isLegalCombo("browser_moq", "webrtc", "gcp_mediamtx", "whep", SAFAR
 
 assert.equal(isLegalCombo("dummy", "moq", "gcp_moq_relay", "moq", NO_WT), false);
 assert.equal(isLegalCombo("dummy", "srt", "gcp_mediamtx", "ll-hls", NO_WT), true);
+
+assert.equal(
+  isLegalCombo("webcam", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: true }, "obs"),
+  false,
+  "OBS last-mile encoder has no WebRTC",
+);
+assert.equal(
+  isLegalCombo("webcam", "moq", "gcp_moq_relay", "moq", CHROME, { localFfmpegWhip: true }, "obs"),
+  false,
+  "OBS last-mile encoder cannot use hidden draft-16 dests",
+);
+assert.equal(
+  isLegalCombo("webcam", "moq", "gcp_east_moq_relay_d18", "moq", CHROME, { localFfmpegWhip: true }, "obs"),
+  false,
+  "OBS + draft-18 is not legal — plugin is draft-16 only",
+);
+assert.equal(
+  isLegalCombo("webcam", "moq", "gcp_moq_relay_d18", "moq", CHROME, { localFfmpegWhip: true }, "ffmpeg"),
+  true,
+  "Webcam + ffmpeg + west draft-18 MoQ is legal",
+);
+assert.equal(
+  isLegalCombo("webcam", "srt", "gcp_mediamtx", "ll-hls", CHROME, { localFfmpegWhip: true }, "obs"),
+  true,
+  "OBS last-mile encoder still offers SRT",
+);
+assert.equal(
+  isLegalCombo("dummy", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: true }, "obs"),
+  true,
+  "OBS encoder is ignored for cloud playout",
+);
+assert.equal(
+  isLegalCombo("webcam", "moq", "gcp_moq_relay_d18", "moq", CHROME, { localFfmpegWhip: true }, "browser"),
+  true,
+  "Webcam + Browser engine maps to browser publish protocols",
+);
+assert.equal(
+  isLegalCombo("webcam", "webrtc", "linode_mediamtx", "whep", CHROME, { localFfmpegWhip: true }, "browser"),
+  true,
+  "Webcam + Browser engine allows WebRTC",
+);
+assert.equal(
+  isLegalCombo("webcam", "srt", "gcp_mediamtx", "ll-hls", CHROME, { localFfmpegWhip: true }, "browser"),
+  false,
+  "Webcam + Browser engine forbids SRT",
+);
+assert.equal(
+  isLegalCombo("webcam", "srt", "gcp_mediamtx", "ll-hls", CHROME, { localFfmpegWhip: true }, "ffmpeg"),
+  true,
+  "Webcam + ffmpeg still allows SRT",
+);
+assert.equal(
+  isLegalCombo("webcam", "rtmp", "gcp_zixi", "hls", CHROME, { localFfmpegWhip: true }, "ffmpeg"),
+  true,
+  "Webcam + ffmpeg still allows RTMP",
+);
+assert.equal(
+  isLegalCombo("webcam", "moq", "gcp_moq_relay_d18", "moq", CHROME, { localFfmpegWhip: true }, "ffmpeg"),
+  true,
+  "Webcam + ffmpeg still allows MoQ",
+);
+assert.match(recipeSrc, /needs a MoQ output/);
+assert.match(recipeSrc, /OBS needs a MoQ output/);
+assert.match(recipeSrc, /OBS OpenMOQ plugin is draft-16 only/);
+assert.match(recipeSrc, /obsMoqSupported/);
+assert.doesNotMatch(recipeSrc, /OBS \+ OpenMOQ needs/);
+assert.match(recipeSrc, /\["srt", "moq"\]/);
+
+// ---------------------------------------------------------------------------
+// Protocol switch must re-default the player.
+//
+// Regression: benchmark job c49d2ef4 tagged a tile protocol=webrtc but played
+// the MediaMTX LL-HLS remux of the WHIP ingest — MediaMTX logged zero WHEP
+// reader sessions. isPlaybackModeCompatible whitelists ll-hls for webrtc on a
+// MediaMTX host, so the ll-hls a leg inherited while it was SRT/RTMP survived
+// the switch to webrtc and defaultPlaybackModeForProtocol("webrtc") was never
+// consulted. The UI patches protocol onto the endpoint before coerceRecipe
+// runs, so the re-default has to happen at the patch site.
+// ---------------------------------------------------------------------------
+const PLAYBACK_MODE_ORDER = ["hls", "ll-hls", "dash", "ll-dash", "whep", "moq", "mpegts"];
+
+function defaultPlaybackModeForProtocol(protocol, ingest) {
+  if (protocol === "moq") return "moq";
+  if (protocol === "webrtc") return "whep";
+  if (protocol === "hls") return "mpegts";
+  if (ingestRole(ingest) === "mediamtx") return "ll-hls";
+  if (ingestRole(ingest) === "zixi") return "mpegts";
+  if (protocol === "dash") return "hls";
+  return "hls";
+}
+
+function resolvedPlaybackMode(mode, protocol, ingest) {
+  if (mode && isPlaybackModeCompatible(mode, protocol, ingest)) return mode;
+  const fallback = defaultPlaybackModeForProtocol(protocol, ingest);
+  if (isPlaybackModeCompatible(fallback, protocol, ingest)) return fallback;
+  return PLAYBACK_MODE_ORDER.find((id) => isPlaybackModeCompatible(id, protocol, ingest)) ?? "hls";
+}
+
+function resolvedSelectablePlaybackMode(mode, protocol, ingest, caps) {
+  const resolved = resolvedPlaybackMode(mode, protocol, ingest);
+  if (isPlaybackModeCompatible(resolved, protocol, ingest) && playerAllowed(resolved, caps)) {
+    return resolved;
+  }
+  return (
+    PLAYBACK_MODE_ORDER.filter(
+      (id) => isPlaybackModeCompatible(id, protocol, ingest) && playerAllowed(id, caps),
+    )[0] ?? resolved
+  );
+}
+
+function applyEndpointPatch(endpoint, patch) {
+  const next = { ...endpoint, ...patch };
+  if (patch.protocol !== undefined && patch.protocol !== endpoint.protocol && !patch.playbackMode) {
+    next.playbackMode = undefined;
+  }
+  return next;
+}
+
+/** The playbackMode half of coerceEndpoint. */
+function coercePlaybackMode(endpoint, caps, coercedProtocol) {
+  const protocol = coercedProtocol ?? endpoint.protocol;
+  return resolvedSelectablePlaybackMode(
+    protocol === endpoint.protocol ? endpoint.playbackMode : undefined,
+    protocol,
+    endpoint.ingestEndpointId,
+    caps,
+  );
+}
+
+/** One UI edit: patch the endpoint, then coerce it. */
+function editEndpoint(endpoint, patch, caps) {
+  const patched = applyEndpointPatch(endpoint, patch);
+  return { ...patched, playbackMode: coercePlaybackMode(patched, caps) };
+}
+
+for (const ingest of ["gcp_mediamtx", "gcp_east_mediamtx", "linode_mediamtx"]) {
+  // ll-hls is the honest SRT/RTMP default on MediaMTX...
+  for (const protocol of ["srt", "rtmp"]) {
+    assert.equal(
+      resolvedSelectablePlaybackMode(undefined, protocol, ingest, CHROME),
+      "ll-hls",
+      `${protocol}/${ingest} defaults to ll-hls`,
+    );
+  }
+  // ...and must not survive the switch to webrtc.
+  for (const from of ["srt", "rtmp"]) {
+    const leg = { protocol: from, ingestEndpointId: ingest, playbackMode: "ll-hls" };
+    assert.equal(
+      editEndpoint(leg, { protocol: "webrtc" }, CHROME).playbackMode,
+      "whep",
+      `${from}→webrtc on ${ingest} must resolve to whep`,
+    );
+  }
+  // The stale mode is judged "compatible" — that is why a naive merge kept it.
+  assert.equal(isPlaybackModeCompatible("ll-hls", "webrtc", ingest), true);
+  assert.equal(
+    coercePlaybackMode(
+      { protocol: "webrtc", ingestEndpointId: ingest, playbackMode: "ll-hls" },
+      CHROME,
+    ),
+    "ll-hls",
+    "a settled webrtc leg keeps a deliberate ll-hls choice",
+  );
+}
+
+// An operator who picks a player in the same edit keeps it.
+assert.equal(
+  editEndpoint(
+    { protocol: "srt", ingestEndpointId: "gcp_mediamtx", playbackMode: "ll-hls" },
+    { protocol: "webrtc", playbackMode: "ll-hls" },
+    CHROME,
+  ).playbackMode,
+  "ll-hls",
+  "explicit player in the same patch as the protocol switch wins",
+);
+
+// Edits that do not touch the protocol leave a deliberate choice alone.
+assert.equal(
+  editEndpoint(
+    { protocol: "webrtc", ingestEndpointId: "gcp_mediamtx", playbackMode: "ll-hls" },
+    { ingestEndpointId: "gcp_east_mediamtx" },
+    CHROME,
+  ).playbackMode,
+  "ll-hls",
+  "ingest-only edit keeps the operator's player",
+);
+
+// Every protocol switch lands on that protocol's own default.
+for (const [from, to, ingest, want] of [
+  ["webrtc", "srt", "gcp_mediamtx", "ll-hls"],
+  ["webrtc", "rtmp", "gcp_mediamtx", "ll-hls"],
+  ["srt", "rtmp", "gcp_zixi", "mpegts"],
+  ["rtmp", "srt", "linode_zixi", "mpegts"],
+]) {
+  const leg = {
+    protocol: from,
+    ingestEndpointId: ingest,
+    playbackMode: resolvedSelectablePlaybackMode(undefined, from, ingest, CHROME),
+  };
+  assert.equal(
+    editEndpoint(leg, { protocol: to }, CHROME).playbackMode,
+    want,
+    `${from}→${to} on ${ingest}`,
+  );
+}
+
+// Coercing is idempotent: a settled leg must not oscillate on re-render.
+for (const leg of [
+  { protocol: "webrtc", ingestEndpointId: "gcp_mediamtx", playbackMode: "whep" },
+  { protocol: "srt", ingestEndpointId: "gcp_mediamtx", playbackMode: "ll-hls" },
+  { protocol: "moq", ingestEndpointId: "gcp_moq_relay_d18", playbackMode: "moq" },
+]) {
+  assert.equal(coercePlaybackMode(leg, CHROME), leg.playbackMode, "coerce is idempotent");
+}
+
+// Pin the shipped source so the mirror above cannot drift.
+assert.match(recipeSrc, /export function applyEndpointPatch/);
+assert.match(recipeSrc, /next\.playbackMode = undefined/);
+assert.match(recipeSrc, /protocol === endpoint\.protocol \? endpoint\.playbackMode : undefined/);
+assert.match(appSrc, /applyEndpointPatch\(endpoint, patch\)/);
+assert.doesNotMatch(appSrc, /endpoint\.id === id \? \{ \.\.\.endpoint, \.\.\.patch \}/);
+// Operator presets name whep for every webrtc leg (defence in depth).
+assert.doesNotMatch(
+  fs.readFileSync(path.join(root, "src/operatorRecipe.ts"), "utf8"),
+  /protocol: "webrtc",\s*ingestEndpointId: "[^"]+",\s*playbackMode: "(?!whep)/,
+);
 
 // Collision keys: SRT+RTMP on the same MediaMTX share a path; Zixi SRT does not
 assert.equal(collisionKey("gcp_mediamtx", "srt"), collisionKey("gcp_mediamtx", "rtmp"));

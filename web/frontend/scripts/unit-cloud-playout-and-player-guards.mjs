@@ -32,6 +32,8 @@ assert.match(whep, /video\.muted = true/);
 assert.match(streamPlayer, /WhepPlayer[\s\S]*jobStatus=\{jobStatus\}/);
 assert.match(fs.readFileSync(path.join(root, "src/players/MpegTsPlayer.tsx"), "utf8"), /graceful_eos/);
 assert.match(moq, /playhead_frozen_hold/);
+assert.match(moq, /isGracefulMoqEncodeOver/);
+assert.match(moq, /encode_over_suppressed_fail/);
 assert.match(moq, /classifyCmafPlayheadStall/);
 assert.match(moq, /cmafSubscribeOptions/);
 assert.match(moq, /moqRenderSink/);

@@ -4,6 +4,7 @@ import { buildComparisonVerdict } from "./comparisonVerdict";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
+import { playbackEngineCaveat } from "./metricModel";
 import { PipelineConfigDetails } from "./PipelineConfigDetails";
 import { buildSessionPipelineSections, type PipelineDiagramSpec } from "./pipelineConfig";
 import { ResultsErrorBoundary } from "./ResultsErrorBoundary";
@@ -144,12 +145,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
               : result.summary_extra?.hls_segment_sec
                 ? `HLS ${result.summary_extra.hls_segment_sec}s`
                 : "Packager",
+        // Report the engine that actually produced the playback columns. A
+        // WHIP leg played over the LL-HLS remux must not label itself "WHEP" —
+        // that is what made job c49d2ef4's HLS numbers read as WebRTC.
         player:
-          proto === "moq"
-            ? "MoQ"
-            : proto === "webrtc"
-              ? "WHEP"
-              : "HLS",
+          result.summary_extra?.playback_engine ||
+          (proto === "moq" ? "MoQ" : proto === "webrtc" ? "WHEP" : "HLS"),
         accentColor: protocolColor(result.protocol),
         };
       }),
@@ -172,8 +173,30 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
     ? `Selected session · ${streams.length} streams`
     : `Latest comparison · ${streams.length} streams`;
 
+  // Rendered above the verdict on purpose: the verdict is precisely where a
+  // remuxed leg gets ranked as if it were its published protocol.
+  const engineCaveats = streams
+    .map((result, index) => ({
+      label: streamLabel(result, index, labels),
+      caveat:
+        result.summary_extra?.playback_engine_caveat ||
+        playbackEngineCaveat(result.protocol, result.summary_extra?.playback_engine),
+    }))
+    .filter((entry) => entry.caveat);
+
   return (
     <div className="session-metrics">
+      {engineCaveats.length > 0 && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Comparison caveat</span>
+          {engineCaveats.map((entry) => (
+            <p key={entry.label} className="results-caveat-line">
+              <strong>{entry.label}:</strong> {entry.caveat}
+            </p>
+          ))}
+        </div>
+      )}
+
       {verdict && (
         <div className="results-verdict">
           <span className="decision-board-kicker">Verdict</span>
@@ -522,6 +545,11 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                   metricKey="encode_lag_ms"
                   label="Avg encode lag"
                   value={formatMs(avg.encode_lag_ms)}
+                />
+                <ScoreCell
+                  metricKey="upload_latency_ms"
+                  label="Upload latency"
+                  value={formatMs(avg.upload_latency_ms)}
                 />
                 <ScoreCell
                   metricKey="fps_stability"

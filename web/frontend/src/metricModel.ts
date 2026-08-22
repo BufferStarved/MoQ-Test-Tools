@@ -37,7 +37,7 @@ export const METRIC_STAGES: MetricStage[] = [
     id: "encode",
     title: "Encode/Publish",
     description:
-      "Publisher-side metrics: bitrate, frame rate, send rate, client memory/jitter, encode lag/speed/FPS stability, and encoder-side VMAF/PSNR/SSIM.",
+      "Publisher-side metrics: bitrate, frame rate, send rate, client memory/jitter, encode lag, upload latency, speed/FPS stability, and encoder-side VMAF/PSNR/SSIM.",
   },
   {
     id: "ingest",
@@ -70,6 +70,29 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   fps_stability: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   speed: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   encode_lag_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  upload_latency_ms: ["srt", "rtmp", "webrtc", "moq"],
+
+  // Latency decomposition. Every leg reports every component in the same
+  // units; components with no measurement on a given path report 0 and their
+  // time lands in latency_residual_ms rather than being guessed at.
+  latency_encode_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_publish_ms: ["srt", "rtmp", "webrtc", "moq"],
+  latency_network_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // Measured only where the packager stamps a wall clock we can difference
+  // (MediaMTX LL-HLS PDT). Zixi HTTP-TS is ~0 by construction.
+  latency_packager_ms: ["srt", "rtmp", "hls", "dash"],
+  latency_player_buffer_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_accounted_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+
+  // Frame accounting. Encoder counters come from ffmpeg -progress, so browser
+  // publish paths (no ffmpeg) cannot fill them.
+  encode_frames_total: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frames_dropped: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frames_duped: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frame_drop_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  playback_frame_drop_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  frame_delivery_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   encoder_send_rate_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Normalized transport
@@ -137,6 +160,51 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   playback_video_time_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   e2e_latency_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 };
+
+/**
+ * Playback engines that measure a protocol's own delivery path. Anything else
+ * means the player consumed a remux, so the playback columns describe the
+ * remux rather than the protocol named in the `protocol` column.
+ */
+const NATIVE_PLAYBACK_ENGINES: Record<string, string[]> = {
+  webrtc: ["whep"],
+  moq: ["moq"],
+  srt: ["mpegts", "hls", "ll-hls", "dash"],
+  rtmp: ["mpegts", "hls", "ll-hls", "dash"],
+  hls: ["hls", "ll-hls", "mpegts"],
+  dash: ["dash"],
+  http: ["mpegts", "hls", "ll-hls", "dash"],
+};
+
+/**
+ * Warn when playback metrics do not describe the published protocol.
+ *
+ * Job c49d2ef4 (2026-08-22) motivates this: tagged `protocol=webrtc`, but the
+ * tile played the LL-HLS remux of the WHIP ingest, so its TTFF, stalls,
+ * rebuffer and glass delay were HLS numbers being ranked against other legs as
+ * if they were WebRTC. Mirror of playback_metrics.playback_engine_caveat.
+ */
+export function playbackEngineCaveat(
+  protocol: string | null | undefined,
+  playbackEngine: string | null | undefined,
+): string {
+  const proto = (protocol || "").trim().toLowerCase();
+  const engine = (playbackEngine || "").trim().toLowerCase();
+  if (!proto || !engine) {
+    return "";
+  }
+  const native = NATIVE_PLAYBACK_ENGINES[proto];
+  if (!native || native.includes(engine)) {
+    return "";
+  }
+  const upper = proto.toUpperCase();
+  return (
+    `Playback metrics were measured with the '${engine}' player, which is not ` +
+    `${upper}'s own delivery path. TTFF, stalls, rebuffer and glass delay describe ` +
+    `that remux, not ${upper} — do not compare them directly against legs played ` +
+    "on their native path."
+  );
+}
 
 export function protocolLabel(protocol: ProtocolId): string {
   const value = (protocol || "").toLowerCase();

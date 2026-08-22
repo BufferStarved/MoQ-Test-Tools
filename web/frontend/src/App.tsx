@@ -52,10 +52,13 @@ import {
   type IngestEndpointId,
 } from "./ingestEndpoints";
 import {
+  applyEndpointPatch,
   canAddRecipeOutput,
   coerceRecipe,
   defaultRecipeEndpoints,
+  isLocalAgentSource,
   nextAddableEndpoint,
+  obsMoqSupported,
   recipeIssue,
   RECIPE_CHROME_CAPS,
   siblingOccupiedCollisionKeys,
@@ -71,7 +74,9 @@ import {
   LOCAL_DEVICE_WEBCAM,
   BBB_MEDIA_PATH,
   CLOUD_PLAYOUT_DURATION_SEC,
+  OBS_OPENMOQ_MEDIA,
   SourceSection,
+  encoderModeExplainer,
   type EncoderId,
   type MediaSourceId,
 } from "./SourceSection";
@@ -88,18 +93,21 @@ import {
   resolveEncodeLadder,
 } from "./encodeProfiles";
 import { isSafariBrowser } from "./browserDetect";
-import { IconBroadcast, IconPlus } from "./Icons";
+import { IconBroadcast, IconCpu, IconMonitor, IconPlus } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
 import { operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
+import { applyBenchmarkPreset, BENCHMARK_PRESET_DEFS, type BenchmarkPresetId } from "./benchmarkPresets";
+import { compareLiveMetrics } from "./comparisonVerdict";
+import { PlayerHud } from "./PlayerHud";
 
 type Tab = "benchmark" | "metrics" | "about";
 
-const MIN_ENDPOINTS = 2;
+const MIN_ENDPOINTS = 1;
 const MAX_ENDPOINTS = 6;
 
-function minEndpointsForSource(source: MediaSourceId): number {
-  return source === "browser_moq" ? 1 : MIN_ENDPOINTS;
+function minEndpointsForSource(_source: MediaSourceId): number {
+  return MIN_ENDPOINTS;
 }
 
 function browserSourceCanStart(endpoints: EndpointConfig[]): boolean {
@@ -247,35 +255,53 @@ function App() {
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
-  const [mediaSource, setMediaSource] = useState<MediaSourceId>(
-    operatorPlan.source ?? "dummy",
-  );
-  const [mediaPath, setMediaPath] = useState(
-    operatorPlan.source === "browser_moq"
-      ? DEVICE_BROWSER_MEDIA
-      : operatorPlan.source === "webcam"
-        ? LOCAL_DEVICE_WEBCAM
-        : operatorPlan.source === "bbb"
-          ? BBB_MEDIA_PATH
-          : "dummy.mp4",
-  );
-  const [mediaLabel, setMediaLabel] = useState(
-    operatorPlan.source === "browser_moq"
-      ? "Browser camera"
-      : operatorPlan.source === "webcam"
-        ? "Webcam"
-        : operatorPlan.source === "bbb"
-          ? "Big Buck Bunny"
-          : "Default Color Bars",
-  );
+  const [mediaSource, setMediaSource] = useState<MediaSourceId>(() => {
+    if (operatorPlan.encoder === "browser") {
+      return "browser_moq";
+    }
+    return operatorPlan.source ?? "dummy";
+  });
+  const [mediaPath, setMediaPath] = useState(() => {
+    if (operatorPlan.encoder === "browser" || operatorPlan.source === "browser_moq") {
+      return DEVICE_BROWSER_MEDIA;
+    }
+    if (operatorPlan.source === "webcam") {
+      return LOCAL_DEVICE_WEBCAM;
+    }
+    if (operatorPlan.source === "bbb") {
+      return BBB_MEDIA_PATH;
+    }
+    return "dummy.mp4";
+  });
+  const [mediaLabel, setMediaLabel] = useState(() => {
+    if (operatorPlan.encoder === "browser" || operatorPlan.source === "browser_moq") {
+      return "Browser camera";
+    }
+    if (operatorPlan.source === "webcam") {
+      return "Webcam";
+    }
+    if (operatorPlan.source === "bbb") {
+      return "Big Buck Bunny";
+    }
+    return "Default Color Bars";
+  });
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
+  const [encoder, setEncoder] = useState<EncoderId>(
+    operatorPlan.encoder ?? (operatorPlan.source === "browser_moq" ? "browser" : "ffmpeg"),
+  );
+  const [activePresetId, setActivePresetId] = useState<BenchmarkPresetId | null>(null);
   const targetLatencyMs = DEFAULT_TARGET_LATENCY_MS;
   // Source and encode location are coupled 1:1 (cloud playout → API host,
   // webcam → this machine) — no independent "Publisher" toggle.
+  // OBS is a last-mile encoder option on Webcam, not a replacement for ffmpeg.
   const publisherHost: "cloud" | "local" | "browser" =
-    mediaSource === "webcam" ? "local" : mediaSource === "browser_moq" ? "browser" : "cloud";
+    encoder === "obs" || mediaSource === "webcam"
+      ? "local"
+      : mediaSource === "browser_moq"
+        ? "browser"
+        : "cloud";
   const recipeCaps = useMemo(() => {
     const detected = detectBrowserMoqCapabilities();
     return {
@@ -295,11 +321,12 @@ function App() {
       presets,
       caps: recipeCaps,
       publisher: { localFfmpegWhip: Boolean(features.local_publisher_whip) },
+      encoder,
     }),
-    [mediaSource, presets, recipeCaps, features.local_publisher_whip],
+    [mediaSource, presets, recipeCaps, features.local_publisher_whip, encoder],
   );
   const recipeBlockReason = recipeIssue(endpoints, recipeContext);
-  const [encoder, setEncoder] = useState<EncoderId>("ffmpeg");
+  const obsEncoderSupported = obsMoqSupported(recipeContext);
   // Last-mile camera choice ("" = agent default device).
   const [webcamDeviceIndex, setWebcamDeviceIndex] = useState("");
   const [encoderVmafAvailable, setEncoderVmafAvailable] = useState(false);
@@ -314,6 +341,8 @@ function App() {
   const [sessionHistoryRefreshToken, setSessionHistoryRefreshToken] = useState(0);
   const { toasts, pushToast } = useToasts();
   const comparisonFinishedRef = useRef(false);
+  const comparisonJobIdsRef = useRef<string[]>([]);
+  const stopRequestedRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
@@ -369,9 +398,15 @@ function App() {
         encodeLadder,
         targetLatencyMs,
         endpoints,
-        publisherHost === "browser" ? "browser" : publisherHost === "local" ? "ffmpeg-local" : "ffmpeg",
+        publisherHost === "browser"
+          ? "browser"
+          : encoder === "obs"
+            ? "obs"
+            : publisherHost === "local"
+              ? "ffmpeg-local"
+              : "ffmpeg",
       ),
-    [encodeLadder, endpoints, publisherHost, targetLatencyMs],
+    [encodeLadder, encoder, endpoints, publisherHost, targetLatencyMs],
   );
 
   const outputColors = useMemo(
@@ -392,7 +427,8 @@ function App() {
 
   const pipelineDiagram = useMemo(() => {
     const ladder = resolveEncodeLadder(encodeLadder);
-    const isLive = mediaSource === "webcam" || mediaSource === "browser_moq";
+    const isLive =
+      encoder === "obs" || isLocalAgentSource(mediaSource) || mediaSource === "browser_moq";
     const sourceTitle = isLive
       ? mediaSource === "browser_moq"
         ? "Browser camera"
@@ -402,17 +438,22 @@ function App() {
         : mediaSource === "upload"
           ? mediaLabel || "Upload"
           : "Color bars";
-    const sourceDetail = mediaSource === "browser_moq"
-      ? "Captured and encoded in this tab"
-      : mediaSource === "webcam"
-        ? "This laptop’s camera, encoded by the helper app"
-        : "Cloud playout on the server";
+    const sourceDetail =
+      mediaSource === "browser_moq"
+        ? "Captured and encoded in this tab"
+        : mediaSource === "webcam" && encoder === "obs"
+          ? "This laptop. OBS encodes the scene (plugin + extra outputs)."
+          : mediaSource === "webcam"
+            ? "This laptop’s camera, encoded by the helper app"
+            : "Cloud playout on the server";
     const encodeTitle =
       mediaSource === "browser_moq"
         ? "Browser encode"
-        : mediaSource === "webcam"
-          ? "This laptop"
-          : "Server ffmpeg";
+        : encoder === "obs"
+          ? "OBS"
+          : isLocalAgentSource(mediaSource)
+            ? "This laptop"
+            : "Server ffmpeg";
     const encodeDetail =
       mediaSource === "browser_moq"
         ? endpoints.some((endpoint) => endpoint.protocol === "webrtc") &&
@@ -447,7 +488,7 @@ function App() {
         };
       }),
     };
-  }, [encodeLadder, endpoints, mediaLabel, mediaSource, outputColors]);
+  }, [encodeLadder, encoder, endpoints, mediaLabel, mediaSource, outputColors]);
 
   const loadBootstrapData = useCallback(async () => {
     setBootstrapping(true);
@@ -472,7 +513,10 @@ function App() {
       setPresets(presetData.presets);
       setFeatures(featureData);
       setEndpoints((current) => {
-        const source = operatorPlan.source ?? "dummy";
+        const source =
+          operatorPlan.encoder === "browser"
+            ? "browser_moq"
+            : (operatorPlan.source ?? "dummy");
         const ctx: RecipeContext = {
           source,
           presets: presetData.presets,
@@ -482,6 +526,9 @@ function App() {
             rtcPeerConnection: detectBrowserMoqCapabilities().rtcPeerConnection,
           },
           publisher: { localFfmpegWhip: Boolean(featureData.local_publisher_whip) },
+          encoder:
+            operatorPlan.encoder ??
+            (source === "browser_moq" ? "browser" : "ffmpeg"),
         };
         if (operatorPlan.outputs.length > 0) {
           return coerceRecipe(operatorEndpoints(operatorPlan.outputs, createEndpointId), ctx);
@@ -516,10 +563,13 @@ function App() {
         const next = await fetchFeatures();
         if (!cancelled) {
           setFeatures(next);
-          if (!next.local_publisher && mediaSource === "webcam") {
-            setMediaSource("dummy");
-            setMediaPath("dummy.mp4");
-            setMediaLabel("Default Color Bars");
+          if (!next.local_publisher && (isLocalAgentSource(mediaSource) || encoder === "obs")) {
+            setEncoder("ffmpeg");
+            if (isLocalAgentSource(mediaSource)) {
+              setMediaSource("dummy");
+              setMediaPath("dummy.mp4");
+              setMediaLabel("Default Color Bars");
+            }
           }
         }
       } catch {
@@ -532,7 +582,7 @@ function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [apiOnline, mediaSource]);
+  }, [apiOnline, mediaSource, encoder]);
 
   // Cameras advertised by the connected agent, for the last-mile picker.
   const agentWebcamDevices =
@@ -546,9 +596,58 @@ function App() {
       : LOCAL_DEVICE_WEBCAM;
   }
 
+  function handleEncoderChange(next: EncoderId) {
+    if (next === encoder && !(next === "browser" && mediaSource !== "browser_moq")) {
+      return;
+    }
+    if (next !== "ffmpeg" && next !== "obs" && next !== "browser") {
+      return;
+    }
+    if ((next === "obs" || next === "browser") && mediaSource !== "webcam" && mediaSource !== "browser_moq") {
+      return;
+    }
+    setActivePresetId(null);
+    if (next === "browser") {
+      setEncoder("browser");
+      setMediaSource("browser_moq");
+      setMediaLabel("Browser camera");
+      setMediaPath(DEVICE_BROWSER_MEDIA);
+      setComputeVmaf(false);
+      setEndpoints((current) =>
+        coerceRecipe(current, { ...recipeContext, source: "browser_moq", encoder: "browser" }),
+      );
+      return;
+    }
+    if (mediaSource === "browser_moq") {
+      setMediaSource("webcam");
+      setMediaLabel("Webcam");
+      setMediaPath(lastMileWebcamMediaPath());
+    }
+    setEncoder(next);
+    if (next === "ffmpeg" && mediaPath === OBS_OPENMOQ_MEDIA) {
+      setMediaPath(lastMileWebcamMediaPath());
+      setMediaLabel("Webcam");
+    }
+    if (next === "obs") {
+      setEndpoints((current) => {
+        const ctx = { ...recipeContext, source: "webcam" as const, encoder: "obs" as const };
+        const coerced = coerceRecipe(current, ctx);
+        if (coerced.some((endpoint) => endpoint.protocol === "moq")) {
+          return coerced;
+        }
+        const moq = nextAddableEndpoint(coerced, ctx, ["moq"]);
+        return moq ? [...coerced, { ...moq, id: createEndpointId() }] : coerced;
+      });
+    }
+  }
+
   function handleMediaSourceChange(next: MediaSourceId) {
     setMediaSource(next);
     setWebcamStatus(null);
+    setActivePresetId(null);
+    if (next !== "webcam" && next !== "browser_moq" && (encoder === "obs" || encoder === "browser")) {
+      setEncoder("ffmpeg");
+    }
     if (next === "dummy") {
       setMediaPath("dummy.mp4");
       setMediaLabel("Default Color Bars");
@@ -563,14 +662,39 @@ function App() {
       setMediaLabel("Webcam");
       setMediaPath(lastMileWebcamMediaPath());
       setComputeVmaf(false);
+      if (encoder === "browser") {
+        setEncoder("ffmpeg");
+      }
     } else if (next === "browser_moq") {
       setMediaLabel("Browser camera");
       setMediaPath(DEVICE_BROWSER_MEDIA);
       setComputeVmaf(false);
+      setEncoder("browser");
       setEndpoints((current) =>
-        coerceRecipe(current, { ...recipeContext, source: "browser_moq" }),
+        coerceRecipe(current, { ...recipeContext, source: "browser_moq", encoder: "browser" }),
       );
     }
+  }
+
+  function handleBenchmarkPreset(id: BenchmarkPresetId) {
+    const plan = applyBenchmarkPreset(id, recipeContext, createEndpointId);
+    setActivePresetId(id);
+    setWebcamStatus(null);
+    setEncoder(plan.encoder);
+    setMediaSource(plan.source);
+    if (plan.source === "dummy") {
+      setMediaPath("dummy.mp4");
+      setMediaLabel("Default Color Bars");
+    } else if (plan.source === "webcam") {
+      setMediaPath(lastMileWebcamMediaPath());
+      setMediaLabel("Webcam");
+      setComputeVmaf(false);
+    } else if (plan.source === "browser_moq") {
+      setMediaPath(DEVICE_BROWSER_MEDIA);
+      setMediaLabel("Browser camera");
+      setComputeVmaf(false);
+    }
+    setEndpoints(plan.endpoints);
   }
 
   function handleUploadFile(file: File) {
@@ -744,7 +868,7 @@ function App() {
       );
       return;
     }
-    if (mediaSource === "webcam") {
+    if (isLocalAgentSource(mediaSource)) {
       setVmafUnavailableReason(
         encoderVmafAvailable
           ? "Scores the file after encode. WebRTC is not scored."
@@ -812,13 +936,16 @@ function App() {
   function updateEndpoint(id: string, patch: Partial<EndpointConfig>) {
     setEndpoints((current) =>
       coerceRecipe(
-        current.map((endpoint) => (endpoint.id === id ? { ...endpoint, ...patch } : endpoint)),
+        current.map((endpoint) =>
+          endpoint.id === id ? applyEndpointPatch(endpoint, patch) : endpoint,
+        ),
         recipeContext,
       ),
     );
   }
 
   function addEndpoint() {
+    setActivePresetId(null);
     setEndpoints((current) => {
       if (current.length >= MAX_ENDPOINTS) {
         return current;
@@ -832,6 +959,7 @@ function App() {
   }
 
   function removeEndpoint(id: string) {
+    setActivePresetId(null);
     setEndpoints((current) => {
       if (current.length <= minEndpointsForSource(mediaSource)) {
         return current;
@@ -860,6 +988,7 @@ function App() {
     protocol?: string;
     endpoint_url?: string;
     publisher_host?: "cloud" | "local" | "browser";
+    encoder?: "ffmpeg" | "obs";
   } {
     const presetId = resolvePresetId(endpoint);
     const isBrowserSource = resolvedMediaPath.toLowerCase().startsWith(DEVICE_BROWSER_MEDIA);
@@ -893,6 +1022,7 @@ function App() {
           : features.local_publisher
             ? publisherHost
             : "cloud",
+      encoder: encoder === "obs" ? "obs" : "ffmpeg",
       ...(isCustomIngestEndpoint(endpoint.ingestEndpointId)
         ? {
             protocol: endpoint.protocol,
@@ -1097,6 +1227,8 @@ function App() {
     setError(null);
     setComparisonLegs([]);
     comparisonFinishedRef.current = false;
+    comparisonJobIdsRef.current = [];
+    stopRequestedRef.current = false;
     setSessionMetrics([]);
     setSessionMetricLabels([]);
     setSelectedSessionKey(null);
@@ -1144,7 +1276,27 @@ function App() {
       return;
     }
 
-    if (mediaSource === "webcam") {
+    if (encoder === "obs") {
+      if (!features.local_publisher) {
+        setError("OBS encode requires the local publisher agent, which is not enabled on this deployment.");
+        setLoading(false);
+        return;
+      }
+      if (!features.local_publisher_connected) {
+        setError(
+          "No local publisher agent connected. Run the helper command, then retry.",
+        );
+        setLoading(false);
+        return;
+      }
+      if (!startEndpoints.some((endpoint) => endpoint.protocol === "moq")) {
+        setError(
+          "OBS needs a MoQ output — the plugin occupies Settings → Stream. Add SRT/RTMP alongside it.",
+        );
+        setLoading(false);
+        return;
+      }
+    } else if (isLocalAgentSource(mediaSource)) {
       if (!features.local_publisher) {
         setError("Webcam requires the local publisher agent, which is not enabled on this deployment.");
         setLoading(false);
@@ -1183,7 +1335,14 @@ function App() {
       let mediaPaths: string[];
       let durationSec: number | undefined;
 
-      if (mediaSource === "webcam") {
+      if (encoder === "obs") {
+        setWebcamStatus(
+          `OBS will encode (MoQ plugin + SRT/RTMP) — press Stop when finished (auto-stops at ${LIVE_WEBCAM_MAX_DURATION_SEC / 60} min).`,
+        );
+        mediaPaths = startEndpoints.map(() => OBS_OPENMOQ_MEDIA);
+        durationSec = LIVE_WEBCAM_MAX_DURATION_SEC;
+        setMediaPath(OBS_OPENMOQ_MEDIA);
+      } else if (isLocalAgentSource(mediaSource)) {
         // setLoading(true) above already flips WebcamLivePreview's `running`
         // prop, which stops its getUserMedia tracks — but that happens on
         // the next render, asynchronously. Give the OS a beat to actually
@@ -1225,6 +1384,13 @@ function App() {
           ),
         ),
       );
+      comparisonJobIdsRef.current = jobs.map((job) => job.id);
+      if (stopRequestedRef.current) {
+        await Promise.all(jobs.map((job) => stopUpload(job.id).catch(() => undefined)));
+        setLoading(false);
+        setWebcamStatus("Stopped before encode started.");
+        return;
+      }
 
       if (mediaSource === "browser_moq") {
         try {
@@ -1269,6 +1435,13 @@ function App() {
           await Promise.all(jobs.map((job) => stopUpload(job.id).catch(() => undefined)));
           throw err;
         }
+        if (stopRequestedRef.current) {
+          stopBrowserMoqRun();
+          await Promise.all(jobs.map((job) => stopUpload(job.id).catch(() => undefined)));
+          setLoading(false);
+          setWebcamStatus("Stopped before encode started.");
+          return;
+        }
       }
 
       const legs: ComparisonLegState[] = jobs.map((job, index) => ({
@@ -1281,14 +1454,20 @@ function App() {
         ingestVmafRequested: wantsIngestVmaf({
           computeVmaf,
           vmafAvailable: startEndpoints[index].vmafAvailable,
-          isLive: mediaSource === "webcam" || mediaSource === "browser_moq",
+          isLive:
+            encoder === "obs" ||
+            isLocalAgentSource(mediaSource) ||
+            mediaSource === "browser_moq",
           isBrowserSource: mediaSource === "browser_moq",
         }),
         encoderVmafRequested: wantsEncoderVmaf({
           computeVmaf,
           encoderVmafAvailable,
           protocol: startEndpoints[index].protocol,
-          isLive: mediaSource === "webcam" || mediaSource === "browser_moq",
+          isLive:
+            encoder === "obs" ||
+            isLocalAgentSource(mediaSource) ||
+            mediaSource === "browser_moq",
         }),
       }));
       setComparisonLegs(legs);
@@ -1301,7 +1480,9 @@ function App() {
         comparisonFinishedRef.current = true;
         setLoading(false);
         pushToast("Comparison finished", "success");
-        if (mediaSource === "webcam") {
+        if (encoder === "obs") {
+          setWebcamStatus("OBS run finished.");
+        } else if (isLocalAgentSource(mediaSource)) {
           setWebcamStatus("Live webcam run finished.");
         } else if (mediaSource === "browser_moq") {
           // Keep the camera publishing through the player drain window.
@@ -1332,30 +1513,117 @@ function App() {
   }
 
   async function handleStopComparison() {
+    stopRequestedRef.current = true;
+    comparisonFinishedRef.current = true;
+    stopBrowserMoqRun();
     setComparisonLegs((current) =>
       current.map((leg) => ({
         ...leg,
         job: { ...leg.job, cancelled: true },
       })),
     );
-    pushToast("Stopping comparison…", "info");
     setWebcamStatus(
-      mediaSource === "webcam"
+      encoder === "obs"
+        ? "Stopping OBS outputs…"
+        : mediaSource === "webcam"
         ? "Stopping live webcam and encoders…"
         : mediaSource === "browser_moq"
           ? "Stopping in-browser MoQ publisher…"
           : "Stopping comparison…",
     );
-    stopBrowserMoqRun();
-    await Promise.all(
-      comparisonLegs.map((leg) =>
-        stopUpload(leg.id).catch(() => ({ ok: false, status: "error" })),
-      ),
+    pushToast("Stopping comparison…", "info");
+    const ids = comparisonJobIdsRef.current.length
+      ? comparisonJobIdsRef.current
+      : comparisonLegs.map((leg) => leg.id);
+    const results = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          await stopUpload(id);
+          return { ok: true as const };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (/not found/i.test(message)) {
+            return { ok: true as const };
+          }
+          return { ok: false as const, message };
+        }
+      }),
     );
+    setLoading(false);
+    const failed = results.filter((item) => !item.ok);
+    if (failed.length) {
+      pushToast(failed[0].message || "Stop failed", "error");
+      return;
+    }
+    pushToast(ids.length ? "Comparison stopped" : "Stopped", "success");
   }
 
   const safariUnsupported = recipeCaps.safari;
   const canAddOutput = canAddRecipeOutput(endpoints, recipeContext, MAX_ENDPOINTS);
+  const liveMetricRanks = compareLiveMetrics(
+    endpoints.map((_, index) => comparisonLegs[index]?.latestSample ?? null),
+  );
+  const needsLocalHelper =
+    encoder === "obs" || isLocalAgentSource(mediaSource);
+  const helperConnected =
+    Boolean(features.local_publisher) && Boolean(features.local_publisher_connected);
+  const obsWebsocketUp = Boolean(features.local_publisher_obs?.websocket);
+  const hasMoqOutput = endpoints.some((endpoint) => endpoint.protocol === "moq");
+  const obsStartAllowed =
+    encoder !== "obs" || (helperConnected && (obsWebsocketUp || hasMoqOutput));
+  const obsWebsocketHint =
+    encoder === "obs" && helperConnected && !obsWebsocketUp
+      ? features.local_publisher_obs?.detail?.trim() ||
+        "OBS WebSocket is not connected on ws://127.0.0.1:4455. Enable Tools → WebSocket Server. Start will still dispatch the MoQ job — press Start Stream in OBS if the helper cannot reach it."
+      : undefined;
+  const startTitle = recipeBlockReason
+    ? recipeBlockReason
+    : !apiOnline
+      ? "API is offline."
+      : endpoints.length < minEndpointsForSource(mediaSource)
+        ? "Add at least one output."
+        : mediaSource === "bbb" && !bbbAvailable
+          ? bbbSource?.hint ?? "Big Buck Bunny is not on this host yet."
+          : mediaSource === "upload" && !mediaPath
+            ? "Choose a file to encode."
+            : needsLocalHelper && !helperConnected
+              ? "No local publisher agent connected. Run the helper command, then retry."
+              : encoder === "obs" && !obsStartAllowed
+                ? obsWebsocketHint ||
+                  "OBS encode needs the helper and a MoQ output. Enable Tools → WebSocket Server."
+                : mediaSource === "browser_moq" && !browserSourceCanStart(endpoints)
+                  ? "This browser cannot publish the selected outputs yet."
+                  : undefined;
+  const startHint = startTitle || obsWebsocketHint;
+  const startDisabled =
+    loading ||
+    bootstrapping ||
+    uploadingMedia ||
+    Boolean(startTitle);
+  const startLabel = uploadingMedia ? "Preparing…" : loading ? "Running…" : "Start";
+
+  function renderStartStop(extraClass = "") {
+    return (
+      <>
+        <button
+          className={`primary${extraClass ? ` ${extraClass}` : ""}`}
+          onClick={() => void handleStart()}
+          title={startTitle}
+          disabled={startDisabled}
+        >
+          {startLabel}
+        </button>
+        {loading && (
+          <button
+            className="secondary-button stop-webcam-button"
+            onClick={() => void handleStopComparison()}
+          >
+            Stop
+          </button>
+        )}
+      </>
+    );
+  }
 
   return (
     <div className="app">
@@ -1379,6 +1647,11 @@ function App() {
             label={bootstrapping ? "Connecting…" : apiOnline ? "API online" : "API offline"}
             className="hero-api-status"
           />
+          {tab === "benchmark" && (
+            <div className="hero-start-row" aria-label="Run controls">
+              {renderStartStop("hero-start-button")}
+            </div>
+          )}
           <a className="hero-support" href={PAYPAL_DONATE_URL} target="_blank" rel="noreferrer">
             Support
           </a>
@@ -1413,6 +1686,21 @@ function App() {
           <>
             <section className="panel benchmark-shared">
               <div className="benchmark-shared-stack">
+                <div className="benchmark-preset-row" role="group" aria-label="Quick-start recipes">
+                  <span className="benchmark-preset-label">Recipes</span>
+                  {BENCHMARK_PRESET_DEFS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`benchmark-preset-button${activePresetId === preset.id ? " selected" : ""}`}
+                      title={preset.hint}
+                      disabled={bootstrapping || !apiOnline || loading}
+                      onClick={() => handleBenchmarkPreset(preset.id)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
                 <SourceSection
                   mediaSource={mediaSource}
                   onMediaSourceChange={handleMediaSourceChange}
@@ -1421,7 +1709,6 @@ function App() {
                   uploadingMedia={uploadingMedia}
                   onUploadFile={handleUploadFile}
                   encoder={encoder}
-                  onEncoderChange={setEncoder}
                   features={features}
                   webcamDeviceIndex={webcamDeviceIndex}
                   onWebcamDeviceIndexChange={(index) => {
@@ -1436,15 +1723,120 @@ function App() {
                   browserPreviewStream={browserPreviewStream}
                   bbbAvailable={bbbAvailable}
                   bbbHint={bbbSource?.hint ?? null}
+                  preferD18Helper={endpoints.some((endpoint) =>
+                    endpoint.ingestEndpointId.includes("moq_relay_d18"),
+                  )}
                 />
 
                 <section className="encoder-profile-section">
                   <StepHeading
                     step={2}
                     title="Encode"
-                    tip="Same ladder for every output. HLS/SRT stay on a 2s floor; MoQ uses a 400 ms budget."
+                    tip="Same ladder for every output. HLS/SRT stay on a 2s floor; MoQ uses a 400 ms budget. Last-mile Webcam picks ffmpeg (default), OBS, or Browser."
                   />
                   <div className="encoder-profile-body">
+                    {mediaSource === "webcam" || mediaSource === "browser_moq" ? (
+                      <div className="encode-encoder-picker">
+                        <div
+                          className="source-mode-options encode-encoder-options"
+                          role="radiogroup"
+                          aria-label="Last-mile encoder"
+                        >
+                          <label className={`source-mode-card${encoder === "ffmpeg" ? " selected" : ""}`}>
+                            <input
+                              type="radio"
+                              name="encode-encoder"
+                              checked={encoder === "ffmpeg"}
+                              disabled={bootstrapping || !apiOnline || loading}
+                              onChange={() => handleEncoderChange("ffmpeg")}
+                            />
+                            <span className="source-mode-card-body">
+                              <strong>
+                                <IconBroadcast size={15} /> ffmpeg
+                              </strong>
+                              <span className="source-mode-card-hint">
+                                Default · helper encodes SRT, RTMP, WebRTC, MoQ
+                              </span>
+                            </span>
+                          </label>
+                          <label
+                            className={`source-mode-card${encoder === "obs" ? " selected" : ""}`}
+                            title={
+                              obsEncoderSupported
+                                ? undefined
+                                : "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18. Use ffmpeg."
+                            }
+                          >
+                            <input
+                              type="radio"
+                              name="encode-encoder"
+                              checked={encoder === "obs"}
+                              disabled={
+                                bootstrapping ||
+                                !apiOnline ||
+                                loading ||
+                                !obsEncoderSupported
+                              }
+                              onChange={() => handleEncoderChange("obs")}
+                            />
+                            <span className="source-mode-card-body">
+                              <strong>
+                                <IconMonitor size={15} /> OBS
+                              </strong>
+                              <span className="source-mode-card-hint">
+                                {obsEncoderSupported
+                                  ? "Option · OBS encodes; plugin does MoQ"
+                                  : "Unavailable · plugin is draft-16 only"}
+                              </span>
+                            </span>
+                          </label>
+                          <label className={`source-mode-card${encoder === "browser" ? " selected" : ""}`}>
+                            <input
+                              type="radio"
+                              name="encode-encoder"
+                              checked={encoder === "browser"}
+                              disabled={bootstrapping || !apiOnline || loading}
+                              onChange={() => handleEncoderChange("browser")}
+                            />
+                            <span className="source-mode-card-body">
+                              <strong>
+                                <IconCpu size={15} /> Browser
+                              </strong>
+                              <span className="source-mode-card-hint">
+                                This tab · MoQ + WebRTC only
+                              </span>
+                            </span>
+                          </label>
+                        </div>
+                        <p className="source-mode-explainer">{encoderModeExplainer(encoder)}</p>
+                        {encoder === "obs" && (
+                          <p className="field-hint">
+                            {obsEncoderSupported ? (
+                              <>
+                                Enable Tools → WebSocket Server. Load{" "}
+                                <code>tools/obs/benchmark-outputs.lua</code> in OBS → Tools →
+                                Scripts for SRT/RTMP alongside MoQ.
+                                {features.local_publisher_obs?.websocket
+                                  ? features.local_publisher_obs.plugin
+                                    ? " WebSocket connected."
+                                    : ` ${features.local_publisher_obs.detail || "WebSocket is up. Plugin not found on disk — Start still works if OBS already loaded it."}`
+                                  : features.local_publisher_connected
+                                    ? ` ${features.local_publisher_obs?.detail || "OBS WebSocket not connected on ws://127.0.0.1:4455. Set OBS_WEBSOCKET_PASSWORD, enable Tools → WebSocket Server, and load tools/obs/benchmark-outputs.lua."}`
+                                    : " Start the helper app first — it talks to OBS at ws://127.0.0.1:4455."}
+                              </>
+                            ) : (
+                              recipeBlockReason ||
+                              "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 (:14433). Use ffmpeg (helper) for MoQ."
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="field-hint encode-encoder-locked">
+                        Server ffmpeg encodes this file. ffmpeg (helper), OBS, and Browser are
+                        last-mile options under Webcam — ffmpeg stays the default there.
+                      </p>
+                    )}
                     <div className="encode-profile-grid">
                       <label>
                         Bitrate / resolution
@@ -1469,13 +1861,13 @@ function App() {
                             computeVmaf &&
                             (mediaSource === "browser_moq"
                               ? anyIngestVmafAvailable
-                              : mediaSource !== "webcam" || encoderVmafAvailable)
+                              : !isLocalAgentSource(mediaSource) || encoderVmafAvailable)
                           }
                           disabled={
                             !vmafSelectable ||
                             (mediaSource === "browser_moq"
                               ? !anyIngestVmafAvailable
-                              : mediaSource === "webcam" && !encoderVmafAvailable)
+                              : isLocalAgentSource(mediaSource) && !encoderVmafAvailable)
                           }
                           onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
@@ -1483,7 +1875,7 @@ function App() {
                       </label>
                       <span className="field-hint">
                         {vmafUnavailableReason ??
-                          "Compares the encode to the original so you can see if the picture stays sharp. Skip this on a first run."}
+                          "Calculate VMAF, PSNR, and SSIM pre- and post-ingest"}
                       </span>
                     </div>
                   </div>
@@ -1522,6 +1914,8 @@ function App() {
             <section className="benchmark-streams">
               {endpoints.map((endpoint, index) => {
                 const leg = comparisonLegs[index];
+                const liveRtt =
+                  leg?.latestSample?.net_rtt_ms ?? leg?.latestSample?.transport_rtt_ms;
                 return (
                   <article
                     key={endpoint.id}
@@ -1547,6 +1941,7 @@ function App() {
                     />
 
                     <div className="stream-column-preview">
+                      <div className="stream-player-with-hud">
                       <StreamPlayer
                         key={`${endpoint.id}:${endpoint.playbackMode ?? "default"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
                         title={`Output ${index + 1}`}
@@ -1644,6 +2039,16 @@ function App() {
                           updateEndpoint(endpoint.id, { whepPlaybackUrl: url })
                         }
                       />
+                      <PlayerHud
+                        visible={Boolean(leg) || loading}
+                        ttffMs={leg?.latestSample?.playback_ttff_ms}
+                        latencyMs={leg?.latestSample?.e2e_latency_ms}
+                        ttffBest={liveMetricRanks.ttff.bestIndex === index}
+                        latencyBest={liveMetricRanks.latency.bestIndex === index}
+                        ttffDeltaMs={liveMetricRanks.ttff.deltaVsBest[index]}
+                        latencyDeltaMs={liveMetricRanks.latency.deltaVsBest[index]}
+                      />
+                      </div>
                     </div>
 
                     {(leg || loading) && (
@@ -1653,6 +2058,34 @@ function App() {
                           <div className="status-row">
                             <span>Status</span>
                             <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
+                          </div>
+                          {liveRtt != null && Number.isFinite(liveRtt) && liveRtt > 0 ? (
+                            <div className="status-row">
+                              <span>RTT</span>
+                              <strong
+                                className={`metric-figure${liveMetricRanks.rtt.bestIndex === index ? " metric-best" : ""}`}
+                              >
+                                {Math.round(liveRtt)} ms
+                                {liveMetricRanks.rtt.deltaVsBest[index] != null &&
+                                liveMetricRanks.rtt.deltaVsBest[index]! > 0 ? (
+                                  <span className="metric-delta">
+                                    +{liveMetricRanks.rtt.deltaVsBest[index]}
+                                  </span>
+                                ) : null}
+                              </strong>
+                            </div>
+                          ) : null}
+                          <div className="status-row">
+                            <span title="Time from encoded bits ready to first successful publish at ingest. Publisher→ingest only — not glass-to-glass.">
+                              Upload
+                            </span>
+                            <strong className="metric-figure">
+                              {leg.latestSample?.upload_latency_ms != null &&
+                              Number.isFinite(leg.latestSample.upload_latency_ms) &&
+                              leg.latestSample.upload_latency_ms > 0
+                                ? `${Math.round(leg.latestSample.upload_latency_ms)} ms`
+                                : "—"}
+                            </strong>
                           </div>
                           {leg.job.error && (
                             <p className="error">{humanizeJobError(leg.job.error) || leg.job.error}</p>
@@ -1718,44 +2151,11 @@ function App() {
             </section>
 
             {error && <p className="error benchmark-start-error">{error}</p>}
-            {!error && recipeBlockReason && !loading && (
-              <p className="field-hint benchmark-start-error">{recipeBlockReason}</p>
+            {!error && startHint && !loading && (
+              <p className="field-hint benchmark-start-error">{startHint}</p>
             )}
             <div className="button-row benchmark-start-row">
-              <button
-                className="primary"
-                onClick={() => void handleStart()}
-                title={
-                  recipeBlockReason
-                    ? recipeBlockReason
-                    : mediaSource === "bbb" && !bbbAvailable
-                      ? bbbSource?.hint ?? "Big Buck Bunny is not on this host yet."
-                      : undefined
-                }
-                disabled={
-                  loading ||
-                  bootstrapping ||
-                  !apiOnline ||
-                  Boolean(recipeBlockReason) ||
-                  endpoints.length < minEndpointsForSource(mediaSource) ||
-                  uploadingMedia ||
-                  (mediaSource === "bbb" && !bbbAvailable) ||
-                  (mediaSource === "upload" && !mediaPath) ||
-                  (mediaSource === "webcam" &&
-                    (!features.local_publisher || !features.local_publisher_connected)) ||
-                  (mediaSource === "browser_moq" && !browserSourceCanStart(endpoints))
-                }
-              >
-                {uploadingMedia ? "Preparing…" : loading ? "Running…" : "Start"}
-              </button>
-              {loading && (
-                <button
-                  className="secondary-button stop-webcam-button"
-                  onClick={() => void handleStopComparison()}
-                >
-                  Stop
-                </button>
-              )}
+              {renderStartStop()}
             </div>
 
             {!loading &&

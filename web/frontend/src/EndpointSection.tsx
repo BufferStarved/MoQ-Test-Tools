@@ -118,7 +118,12 @@ export function EndpointSection({
   const { presets, caps } = recipeContext;
   const protocolMeta = protocols.find((item) => item.id === endpoint.protocol);
   const allowedProtocolIds = new Set<string>(
-    publishProtocolIdsForSource(recipeContext.source, caps, recipeContext.publisher),
+    publishProtocolIdsForSource(
+      recipeContext.source,
+      caps,
+      recipeContext.publisher,
+      recipeContext.encoder ?? "ffmpeg",
+    ),
   );
   const hostOptions = destinationsForProtocol(
     endpoint.protocol,

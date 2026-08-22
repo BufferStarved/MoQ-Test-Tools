@@ -49,6 +49,9 @@ export interface LocalPublisherAgentInfo {
   active_jobs?: number;
   webcam_devices?: WebcamDeviceInfo[];
   ffmpeg_whip?: boolean;
+  obs_websocket?: boolean;
+  obs_plugin?: boolean;
+  obs_detail?: string;
 }
 
 export interface EncodeHostInfo {
@@ -73,6 +76,12 @@ export interface FeatureFlags {
   local_publisher_agents: LocalPublisherAgentInfo[];
   /** Connected laptop agent can mux `-f whip`. False until proven. */
   local_publisher_whip?: boolean;
+  /** Connected laptop agent can drive OBS via obs-websocket. */
+  local_publisher_obs?: {
+    websocket: boolean;
+    plugin: boolean;
+    detail?: string;
+  };
   encode_hosts?: EncodeHostInfo[];
   media_sources?: BundledMediaSource[];
 }
@@ -152,6 +161,7 @@ export function createUpload(payload: {
   stream_index?: number;
   stream_label?: string;
   publisher_host?: "cloud" | "local" | "browser";
+  encoder?: "ffmpeg" | "obs";
 }): Promise<UploadJob> {
   return request("/uploads", {
     method: "POST",
@@ -188,6 +198,7 @@ export function postEncodeSample(
     fps: number;
     encoder_send_rate_mbps?: number;
     encode_lag_ms?: number;
+    upload_latency_ms?: number;
     transport_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
     net_rtt_ms?: number;

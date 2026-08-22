@@ -2,9 +2,8 @@
  * MOQT drafts this browser publisher can speak.
  *
  * Branch `feat/moq-draft-18`: offer and lock `moqt-18`.
- * Prod `main` stays on draft-16 because ghcr.io/openmoq/moqx:329b98b only
- * forwards 16. Do not merge this until a draft-18 relay is live and
- * openmoq-publisher + playa have been smoke-tested against it.
+ * Public site MoQ is :14433 / moqt-18. Leftover :4433 stays draft-16 and
+ * is hidden. Do not merge this branch to `main`.
  *
  * IETF newest is draft-ietf-moq-transport-19 (July 2026). Neither
  * OpenMOQ moq5 nor @moqt/playa implement 19 yet — both top out at 18.

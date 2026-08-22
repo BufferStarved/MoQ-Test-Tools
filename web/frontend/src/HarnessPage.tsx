@@ -3,7 +3,11 @@ import { fetchUpload, subscribeToUpload } from "./api";
 import { StreamPlayer } from "./StreamPlayer";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { playbackGateForJob } from "./playbackGate";
-import { ingestEndpointIdForPreset } from "./ingestEndpoints";
+import {
+  ingestEndpointIdForPreset,
+  moqDraftForIngest,
+  moqPinTlsCertForIngest,
+} from "./ingestEndpoints";
 import {
   defaultPlaybackModeForProtocol,
   moqDefaultsFromPublishUrl,
@@ -121,6 +125,8 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         encodeDurationSec={job.duration_sec}
         targetLatencyMs={job.target_latency_ms ?? 800}
         encodeLadder={job.encode_ladder ?? undefined}
+        moqDraftVersion={moqDraftForIngest(ingestEndpointId)}
+        moqPinTlsCert={moqPinTlsCertForIngest(ingestEndpointId)}
       />
     </div>
   );

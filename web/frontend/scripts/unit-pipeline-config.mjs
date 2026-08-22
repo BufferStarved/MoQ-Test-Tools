@@ -12,7 +12,9 @@ const src = fs.readFileSync(
   "utf8",
 );
 
-assert.match(src, /PipelineEncodeKind = "ffmpeg" \| "ffmpeg-local" \| "browser"/);
+assert.match(src, /PipelineEncodeKind = "ffmpeg" \| "ffmpeg-local" \| "obs" \| "browser"/);
+assert.match(src, /value: "OBS Studio"/);
+assert.doesNotMatch(src, /OBS Studio \+ OpenMOQ plugin/);
 assert.match(src, /This browser — ffmpeg is not used/);
 assert.match(src, /Native RTCPeerConnection encode/);
 assert.match(src, /In-page WebCodecs → LOC objects/);

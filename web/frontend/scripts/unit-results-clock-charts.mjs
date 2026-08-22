@@ -59,7 +59,7 @@ assert.match(cssSrc, /webcam-preview-clock/);
 assert.doesNotMatch(cssSrc, /\.webcam-live-preview-video \{[\s\S]*transform: scaleX\(-1\)/);
 const sourceSrc = fs.readFileSync(path.join(root, "src/SourceSection.tsx"), "utf8");
 assert.match(sourceSrc, /sourceModeExplainer/);
-assert.match(sourceSrc, /This laptop \+ helper app/);
+assert.match(sourceSrc, /This laptop — then pick the engine/);
 assert.match(sourceSrc, /Dummy \/ BBB on the server/);
 assert.match(sourceSrc, /This laptop cannot publish WebRTC yet/);
 assert.doesNotMatch(sourceSrc, /run-local-publisher/);

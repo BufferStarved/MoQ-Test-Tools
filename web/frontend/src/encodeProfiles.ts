@@ -16,6 +16,8 @@ export const HLS_LIVE_SYNC_SEGMENTS_DEFAULT = 2;
 export const HLS_LIVE_SYNC_DURATION_SEC_MIN = 1;
 export const MOQ_GOP_SEC_MIN = 0.5;
 export const MOQ_GOP_SEC_MAX = 1.0;
+/** Uniform IDR cadence for TS/HLS delivery (mirrors DELIVERY_GOP_SEC). */
+export const DELIVERY_GOP_SEC = 1;
 
 export interface EncodeLadderOption {
   id: string;
@@ -128,6 +130,17 @@ export function hlsLiveSyncCount(targetLatencyMs: number): number {
   return Math.max(1, Math.min(5, Math.round(duration / segment) || 1));
 }
 
+/**
+ * IDR cadence actually used by every delivery leg (mirrors
+ * src/encode_profile.delivery_gop_frames): 1s, or segment/2 for long segments.
+ * A GOP only has to divide the chunk, not equal it — keying Zixi's GOP to
+ * hls_chunk_time put a needless 2s floor under RTMP/SRT TTFF.
+ */
+export function deliveryGopFrames(targetLatencyMs: number, fps = ASSUMED_FPS): number {
+  const segment = hlsSegmentSec(clampTargetLatencyMs(targetLatencyMs));
+  return Math.max(1, Math.round(Math.max(DELIVERY_GOP_SEC, segment / 2) * fps));
+}
+
 export function moqGopFramesForLatency(targetLatencyMs: number, fps = ASSUMED_FPS): number {
   const ms = clampTargetLatencyMs(targetLatencyMs);
   const seconds = Math.min(MOQ_GOP_SEC_MAX, Math.max(MOQ_GOP_SEC_MIN, ms / 2000));
@@ -180,6 +193,7 @@ export interface EncodeProfileSummary {
   minrate_kbps: number;
   target_latency_ms: number;
   gop_frames: number;
+  delivery_gop_frames: number;
   keyframe_interval_sec: number;
   vbv_bufsize_kb: number;
   x264_tune: "zerolatency" | null;
@@ -199,7 +213,7 @@ export function encodeProfileSummary(
 ): EncodeProfileSummary {
   const ladder = resolveEncodeLadder(ladderId);
   const latencyMs = clampTargetLatencyMs(targetLatencyMs ?? DEFAULT_TARGET_LATENCY_MS);
-  const gop = gopFramesForLatency(latencyMs);
+  const gop = deliveryGopFrames(latencyMs);
   const moqMs = moqPlayerTargetLatencyMs(latencyMs);
   return {
     encode_ladder: ladder.id,
@@ -210,6 +224,7 @@ export function encodeProfileSummary(
     minrate_kbps: ladder.minrate_kbps,
     target_latency_ms: latencyMs,
     gop_frames: gop,
+    delivery_gop_frames: gop,
     keyframe_interval_sec: Math.round((gop / ASSUMED_FPS) * 1000) / 1000,
     vbv_bufsize_kb: vbvBufsizeKb(ladder.id, latencyMs),
     x264_tune: latencyMs <= 500 ? "zerolatency" : null,

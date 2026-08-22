@@ -93,7 +93,7 @@ export function diagramHopsForStream(
   };
 }
 
-export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "browser";
+export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "obs" | "browser";
 
 export interface StreamConfigInput {
   label: string;
@@ -172,6 +172,22 @@ function encoderSection(
     };
   }
 
+  if (kind === "obs") {
+    return {
+      id: "encoder",
+      title: "Encoder",
+      subtitle: "OBS on this computer — MoQ plugin + extra outputs",
+      rows: [
+        {
+          label: "Engine",
+          value: "OBS Studio",
+          note: "Not ffmpeg. The MoQ plugin occupies Settings → Stream. Extra outputs do SRT/RTMP. No WebRTC.",
+        },
+        { label: "Target ladder", value: summary.encode_ladder_label },
+      ],
+    };
+  }
+
   const where = kind === "ffmpeg-local" ? "this computer" : "the API host";
   return {
     id: "encoder",
@@ -182,12 +198,12 @@ function encoderSection(
       {
         label: "GOP / keyint",
         value: `${summary.gop_frames} frames (~${summary.keyframe_interval_sec}s @ 30 fps)`,
-        note: "HLS/SRT only — packagers cut segments on IDRs (2s floor)",
+        note: `Divides the ${summary.hls_segment_sec}s chunk exactly — packagers cut segments on IDRs, so a GOP that does not divide the chunk stretches every segment`,
       },
       {
         label: "MoQ GOP",
         value: `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
-        note: `MoQ does not use the 2s HLS floor — player target ${summary.moq_target_latency_ms} ms`,
+        note: `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
       },
       {
         label: "VBV bufsize",
@@ -378,7 +394,7 @@ function playerRows(
     rows.push({
       label: "Catch-up",
       value: `maxRate ${catchUp.maxCatchUpRate} · threshold ${catchUp.catchUpThresholdMs} ms · recovery ${catchUp.catchUpRecoveryMs} ms`,
-      note: "Rate stays at 1.0 — live-edge uses buffer seek (avoids A/V warp)",
+      note: "CMAF live-edge rate catch-up in MoqPlayer; seek only on runaway lead",
     });
   } else if (mode === "whep") {
     rows.push({

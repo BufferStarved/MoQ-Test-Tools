@@ -271,3 +271,59 @@ export function liveGlanceMetrics(sample: {
   }
   return out.slice(0, 3);
 }
+
+export interface LiveMetricRank {
+  values: (number | null)[];
+  /** Set only when at least two legs have a numeric value. */
+  bestIndex: number | null;
+  /** Rounded delta vs the best value; null on the winner or when incomparable. */
+  deltaVsBest: (number | null)[];
+}
+
+function rankLowerIsBetter(values: (number | null)[]): LiveMetricRank {
+  const numeric: { index: number; value: number }[] = [];
+  values.forEach((value, index) => {
+    if (finitePositive(value)) {
+      numeric.push({ index, value });
+    }
+  });
+  if (numeric.length < 2) {
+    return { values, bestIndex: null, deltaVsBest: values.map(() => null) };
+  }
+  let bestIndex = numeric[0].index;
+  let bestValue = numeric[0].value;
+  for (const item of numeric) {
+    if (item.value < bestValue) {
+      bestIndex = item.index;
+      bestValue = item.value;
+    }
+  }
+  return {
+    values,
+    bestIndex,
+    deltaVsBest: values.map((value, index) => {
+      if (index === bestIndex || !finitePositive(value)) {
+        return null;
+      }
+      return Math.round(value - bestValue);
+    }),
+  };
+}
+
+/** Compare already-displayed live metrics. Lower is better. No new formulas. */
+export function compareLiveMetrics(
+  samples: Array<{
+    e2e_latency_ms?: number;
+    playback_ttff_ms?: number;
+    net_rtt_ms?: number;
+    transport_rtt_ms?: number;
+  } | null>,
+): { latency: LiveMetricRank; ttff: LiveMetricRank; rtt: LiveMetricRank } {
+  return {
+    latency: rankLowerIsBetter(samples.map((sample) => sample?.e2e_latency_ms ?? null)),
+    ttff: rankLowerIsBetter(samples.map((sample) => sample?.playback_ttff_ms ?? null)),
+    rtt: rankLowerIsBetter(
+      samples.map((sample) => sample?.net_rtt_ms ?? sample?.transport_rtt_ms ?? null),
+    ),
+  };
+}
