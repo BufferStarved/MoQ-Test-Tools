@@ -7,7 +7,11 @@ from typing import Callable, Dict, List, Optional
 
 import psutil
 
-from latency_budget import build_frame_row, build_latency_budget
+from latency_budget import (
+    E2E_SCOPE_CAPTURE_TO_GLASS,
+    build_frame_row,
+    build_latency_budget,
+)
 from srt_stats import SrtStatsSummary, summarize_srt_rows
 from stats_window import RollingWindow
 
@@ -34,9 +38,16 @@ CSV_COLUMNS = [
     "fps_stability",
     "speed",
     "encode_lag_ms",
+    # One-shot STARTUP measurement (encoder-ready → first confirmed publish),
+    # not a per-sample stage. It is deliberately not part of the latency
+    # budget below; adding a startup constant to every steady-state sample
+    # inflated accounted_ms for whole runs.
     "upload_latency_ms",
-    # Per-component latency decomposition (see src/latency_budget.py). These
-    # sum to latency_accounted_ms; e2e_latency_ms minus that is the residual.
+    # Per-component latency decomposition (see src/latency_budget.py). The
+    # components in scope for this leg's e2e estimator sum to
+    # latency_accounted_ms; the signed difference against e2e_latency_ms is
+    # split into latency_residual_ms (unexplained) and latency_overcount_ms
+    # (over-attributed). latency_unmeasured names stages with no instrument.
     "latency_encode_ms",
     "latency_publish_ms",
     "latency_network_ms",
@@ -44,6 +55,9 @@ CSV_COLUMNS = [
     "latency_player_buffer_ms",
     "latency_accounted_ms",
     "latency_residual_ms",
+    "latency_overcount_ms",
+    "latency_unmeasured",
+    "latency_e2e_scope",
     # Frame accounting, normalized so encoder and glass use the same
     # denominator convention (see src/latency_budget.py).
     "encode_frames_total",
@@ -325,8 +339,12 @@ class MetricsCollector:
         encode_frames_total: int = 0,
         encode_frames_dropped: int = 0,
         encode_frames_duped: int = 0,
-        packager_transit_ms: float = 0.0,
+        # None means "no instrument on this leg" (Zixi carries no PDT) and is
+        # reported as an unmeasured stage; 0.0 means "measured, and it was
+        # zero". Do not default a missing instrument to 0.
+        packager_transit_ms: Optional[float] = None,
         upload_latency_ms: Optional[float] = None,
+        e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
         net_rtt_ms: float = 0.0,
         net_jitter_ms: float = 0.0,
         net_send_mbps: float = 0.0,
@@ -418,12 +436,22 @@ class MetricsCollector:
             budget = build_latency_budget(
                 pipeline_baseline_ms=baseline_ms,
                 encode_lag_ms=resolved_encode_lag,
-                upload_latency_ms=upload_latency_ms,
-                net_rtt_ms=resolved_net_rtt,
+                # upload_latency_ms is startup-only and must not enter the
+                # per-sample chain; no protocol measures steady-state publish
+                # transit yet, so the stage reports as unmeasured.
+                publish_transit_ms=None,
+                # A protocol with no RTT source at all (MoQ today) must land in
+                # `unmeasured`, not report a confident 0 ms network hop.
+                net_rtt_ms=resolved_net_rtt if resolved_net_rtt > 0 else None,
                 packager_transit_ms=packager_transit_ms,
                 playback_buffer_sec=playback_buffer_sec,
                 e2e_latency_ms=e2e_latency_ms,
+                e2e_scope=e2e_scope,
             )
+            # The encoder loop has no player counters, so there is no common
+            # window here and frame_delivery_pct stays blank; it is filled in
+            # once against merged playback values by
+            # playback_metrics._recompute_derived.
             frame_row = build_frame_row(
                 encode_frames_total=encode_frames_total,
                 encode_frames_dropped=encode_frames_dropped,
@@ -595,9 +623,9 @@ class MetricsCollector:
             "latency_player_buffer_ms",
             "latency_accounted_ms",
             "latency_residual_ms",
+            "latency_overcount_ms",
             "encode_frame_drop_pct",
             "playback_frame_drop_pct",
-            "frame_delivery_pct",
             "transport_rtt_ms",
             "transport_rtt_jitter_ms",
             "net_rtt_ms",
@@ -623,6 +651,50 @@ class MetricsCollector:
                 sum(float(row.get(key, 0) or 0) for row in self._rows) / count,
                 3,
             )
+        # Headline fps from the frame COUNTER over wall time, not from the mean
+        # of ffmpeg's instantaneous `fps=` readings.
+        #
+        # The per-sample rate is honest — the MoQ publisher pipe applies
+        # backpressure, so ffmpeg genuinely alternates ~24.9 and ~37.4 fps
+        # (fps_stability, the coefficient of variation, is the metric that
+        # reports that, and it correctly reads 0.198 on MoQ vs 0.019 on SRT).
+        # What is not honest is averaging an instantaneous rate over unequal
+        # sample intervals: it over-weights the short fast ticks and reported
+        # 32.2-32.7 fps for a 30fps source on every MoQ leg (2026-08-22), and
+        # 31.7 on WebRTC. The counter is exact and interval-independent:
+        # 29.78 and 29.75 for those same MoQ legs.
+        frames = [
+            float(row["encode_frames_total"])
+            for row in self._rows
+            if str(row.get("encode_frames_total", "")).strip() not in ("", "0")
+        ]
+        stamps = [
+            float(row["timestamp"])
+            for row in self._rows
+            if str(row.get("timestamp", "")).strip() != ""
+        ]
+        if len(frames) > 1 and len(stamps) > 1:
+            wall_sec = max(stamps) - min(stamps)
+            produced = max(frames) - min(frames)
+            if wall_sec > 0 and produced > 0:
+                averages["fps"] = round(produced / wall_sec, 3)
+
+        # frame_delivery_pct is blank on samples with no common encoder/player
+        # window. Averaging blanks as 0 would report "nothing was delivered"
+        # for "not yet comparable", so only real values count.
+        delivery = [
+            float(row["frame_delivery_pct"])
+            for row in self._rows
+            if str(row.get("frame_delivery_pct", "")).strip() not in ("", "0.00")
+        ]
+        if delivery:
+            averages["frame_delivery_pct"] = round(sum(delivery) / len(delivery), 3)
+
+        # upload_latency_ms is a ONE-SHOT startup measurement (encoder-ready →
+        # first confirmed publish) that the sample loop repeats verbatim once
+        # settled. The settled value is the measurement, so the last one is
+        # taken deliberately — this is not a mean and must not be read as a
+        # per-sample publish stage (see latency_budget.build_latency_budget).
         latencies = [
             float(row["upload_latency_ms"])
             for row in self._rows

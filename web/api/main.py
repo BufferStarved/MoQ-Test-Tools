@@ -187,7 +187,13 @@ class PlaybackSampleRequest(BaseModel):
     playback_hls_buffer_stalls: int = 0
     playback_hls_frag_loads: int = 0
     playback_video_time_sec: float = 0.0
+    #: Seconds queued AHEAD of the playhead. The only quantity the latency
+    #: budget's player-buffer stage consumes.
     playback_buffer_sec: float = 0.0
+    #: Seconds the glass is BEHIND live (MoQ LOC canvas only). Opposite
+    #: direction from playback_buffer_sec, so it is kept separate and never
+    #: summed into the latency chain.
+    playback_behind_live_sec: float = 0.0
     playback_rebuffer_sec: float = 0.0
     playback_error_count: int = 0
     e2e_latency_ms: float = 0.0

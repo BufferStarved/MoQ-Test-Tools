@@ -1432,6 +1432,40 @@ def read_result_summary(csv_path: str) -> dict:
         for key in numeric_keys
     }
 
+    # Headline fps from the frame counter over wall time. ffmpeg's per-sample
+    # `fps=` is a true instantaneous rate, but the sample interval is not
+    # constant, so an unweighted mean over-weights the short fast ticks — it
+    # read 32.2-32.7 fps for a 30fps source on MoQ legs where the counter says
+    # 29.78. See MetricsCollector._compute_averages for the same correction on
+    # the write path; this is the read path that rebuilds from CSV.
+    frame_counts = [
+        _row_value(r, "encode_frames_total")
+        for r in rows
+        if str(r.get("encode_frames_total", "")).strip() not in ("", "0")
+    ]
+    stamps = [
+        _row_value(r, "timestamp")
+        for r in rows
+        if str(r.get("timestamp", "")).strip() != ""
+    ]
+    if len(frame_counts) > 1 and len(stamps) > 1:
+        wall_sec = max(stamps) - min(stamps)
+        produced = max(frame_counts) - min(frame_counts)
+        if wall_sec > 0 and produced > 0:
+            averages["fps"] = round(produced / wall_sec, 3)
+
+    # Live playback gauges are blanked once the player stops reporting (see
+    # playback_metrics.PLAYBACK_STALE_AFTER_SEC). Averaging a blank as 0 would
+    # replace "we stopped measuring" with "it dropped to zero", which is the
+    # same forward-fill dishonesty in the other direction.
+    for gauge in ("playback_buffer_sec", "playback_bitrate_bps", "playback_video_time_sec"):
+        live = [
+            _row_value(r, gauge)
+            for r in rows
+            if str(r.get(gauge, "")).strip() != ""
+        ]
+        averages[gauge] = round(sum(live) / len(live), 3) if live else 0.0
+
     counter_keys = (
         "pkt_rcv_drop",
         "pkt_snd_drop",

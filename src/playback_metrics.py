@@ -19,6 +19,11 @@ PLAYBACK_FIELD_NAMES = [
     "playback_hls_frag_loads",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    # Seconds the glass is BEHIND live. MoQ LOC only, and the opposite
+    # direction from playback_buffer_sec (which is seconds queued AHEAD).
+    # Kept in its own column precisely so it can never be summed into the
+    # player-buffer stage of the latency chain.
+    "playback_behind_live_sec",
     "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
@@ -34,8 +39,12 @@ PLAYBACK_DERIVED_FIELD_NAMES = [
     "latency_player_buffer_ms",
     "latency_accounted_ms",
     "latency_residual_ms",
+    "latency_overcount_ms",
+    "latency_unmeasured",
+    "latency_e2e_scope",
     "playback_frame_drop_pct",
     "frame_delivery_pct",
+    "playback_sample_age_sec",
 ]
 
 PLAYBACK_GAUGE_KEYS = (
@@ -43,8 +52,28 @@ PLAYBACK_GAUGE_KEYS = (
     "playback_ttff_ms",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    "playback_behind_live_sec",
     "e2e_latency_ms",
 )
+
+# Instantaneous gauges that describe "what the player is doing right now".
+# Once the player stops reporting these are no longer measurements, so they
+# are blanked rather than forward-filled — a repeated value made a detached
+# leg look rock-steady (Linode WebRTC repeated one e2e for 22 of 30 samples,
+# Zixi RTMP for 24 of 30) and dragged the mean toward whatever the last live
+# reading happened to be. playback_ttff_ms is excluded on purpose: a join
+# time is a fact about the run, not a live gauge.
+PLAYBACK_LIVE_GAUGE_KEYS = (
+    "playback_bitrate_bps",
+    "playback_video_time_sec",
+    "playback_buffer_sec",
+    "playback_behind_live_sec",
+    "e2e_latency_ms",
+)
+
+# The browser reports every 1s (playbackMetrics.REPORT_INTERVAL_MS). Two
+# missed reports is a detached or dead player, not jitter.
+PLAYBACK_STALE_AFTER_SEC = 3
 
 PLAYBACK_COUNTER_KEYS = (
     "playback_stats_events",
@@ -115,40 +144,86 @@ def _playback_high_water(dest: dict, incoming: dict) -> dict:
     return merged
 
 
-def _recompute_derived(row: dict) -> None:
+def _unmeasured_from_row(row: dict) -> set:
+    """Re-read the stage names the encoder loop already marked unmeasured."""
+    from latency_budget import LATENCY_COMPONENTS, STAGE_NAMES
+
+    by_stage = dict(zip(STAGE_NAMES, LATENCY_COMPONENTS))
+    names = str(row.get("latency_unmeasured", "") or "").split(",")
+    return {by_stage[name] for name in (n.strip() for n in names) if name in by_stage}
+
+
+def _recompute_derived(
+    row: dict,
+    *,
+    engine: str = "",
+    encode_frames_at_attach: Optional[float] = None,
+    playback_frames_at_attach: Optional[float] = None,
+    playback_live: bool = True,
+) -> None:
     """Refresh latency/frame columns that depend on merged playback values.
 
     Only rows that already carry the encoder-side columns are touched, so CSVs
     written before the latency decomposition existed pass through unchanged.
+
+    ``playback_live`` is False once the player has stopped reporting. The
+    player-side stages are then *unmeasured* for that row rather than zero,
+    which is what stops a detached player from being charted as a 0 ms buffer
+    against a forward-filled glass delay.
     """
     if "latency_accounted_ms" not in row:
         return
     from latency_budget import (
         LatencyBudget,
+        e2e_scope_for,
         frame_delivery_pct,
         playback_frame_drop_pct,
         player_buffer_latency_ms,
     )
+
+    unmeasured = _unmeasured_from_row(row)
+    # Strictly seconds queued AHEAD of the playhead. MoQ LOC's "behind live"
+    # seconds arrive in playback_behind_live_sec and are deliberately not
+    # consulted here — they are the opposite direction and summing them
+    # charted a 10.9s "buffer" on the lowest-latency protocol.
+    buffer_sec = _as_float(row.get("playback_buffer_sec"))
+    player_buffer_ms = player_buffer_latency_ms(playback_buffer_sec=buffer_sec)
+    if not playback_live:
+        unmeasured.add("latency_player_buffer_ms")
+        player_buffer_ms = 0.0
 
     budget = LatencyBudget(
         encode_ms=_as_float(row.get("latency_encode_ms")),
         publish_ms=_as_float(row.get("latency_publish_ms")),
         network_ms=_as_float(row.get("latency_network_ms")),
         packager_ms=_as_float(row.get("latency_packager_ms")),
-        player_buffer_ms=player_buffer_latency_ms(
-            playback_buffer_sec=_as_float(row.get("playback_buffer_sec"))
-        ),
+        player_buffer_ms=player_buffer_ms,
         e2e_ms=_as_float(row.get("e2e_latency_ms")),
+        e2e_scope=e2e_scope_for(row.get("protocol"), engine),
+        unmeasured=frozenset(unmeasured),
     )
     row["latency_player_buffer_ms"] = f"{budget.player_buffer_ms:.1f}"
     row["latency_accounted_ms"] = f"{budget.accounted_ms:.1f}"
     row["latency_residual_ms"] = f"{budget.residual_ms:.1f}"
+    row["latency_overcount_ms"] = f"{budget.overcount_ms:.1f}"
+    row["latency_unmeasured"] = ",".join(budget.unmeasured_stages)
+    row["latency_e2e_scope"] = budget.e2e_scope
     row["playback_frame_drop_pct"] = (
         f"{playback_frame_drop_pct(frames_rendered=_as_float(row.get('playback_frames_rendered')), frames_dropped=_as_float(row.get('playback_frames_dropped'))):.3f}"
     )
-    row["frame_delivery_pct"] = (
-        f"{frame_delivery_pct(encode_frames_total=_as_float(row.get('encode_frames_total')), playback_frames_rendered=_as_float(row.get('playback_frames_rendered'))):.2f}"
+    # Only comparable while the player is still counting: once it detaches the
+    # encoder keeps incrementing and the ratio decays with nothing lost.
+    delivery = (
+        frame_delivery_pct(
+            encode_frames_total=_as_float(row.get("encode_frames_total")),
+            playback_frames_rendered=_as_float(row.get("playback_frames_rendered")),
+            encode_frames_at_attach=encode_frames_at_attach,
+            playback_frames_at_attach=playback_frames_at_attach,
+        )
+        if playback_live
+        else None
     )
+    row["frame_delivery_pct"] = "" if delivery is None else f"{delivery:.2f}"
 
 
 def merge_playback_into_csv(
@@ -156,6 +231,7 @@ def merge_playback_into_csv(
     playback_samples: List[dict],
     *,
     csv_columns: List[str],
+    playback_engine: str = "",
 ) -> List[dict]:
     """Return updated rows with playback columns filled by elapsed_sec."""
     if not playback_samples:
@@ -179,10 +255,17 @@ def merge_playback_into_csv(
     # left every playback_*/e2e column at 0. Forward-fill the latest playback
     # sample at-or-before each row's elapsed time instead.
     sorted_secs = sorted(by_sec)
+    last_playback_sec: Optional[int] = None
+    # Both frame counters when the player attached. They are cumulative from
+    # different zero points, so differencing against these is what puts them
+    # on one common window (see latency_budget.frame_delivery_pct).
+    encode_frames_at_attach: Optional[float] = None
+    playback_frames_at_attach: Optional[float] = None
     cursor = 0
     for index, row in enumerate(rows):
         elapsed = _row_elapsed_sec(rows, index)
         while cursor < len(sorted_secs) and sorted_secs[cursor] <= elapsed:
+            last_playback_sec = sorted_secs[cursor]
             last_values = {
                 name: _csv_number(value)
                 for name, value in _playback_high_water(
@@ -191,9 +274,30 @@ def merge_playback_into_csv(
                 ).items()
             }
             cursor += 1
+        age = None if last_playback_sec is None else max(0, elapsed - last_playback_sec)
+        playback_live = age is not None and age <= PLAYBACK_STALE_AFTER_SEC
+
         merged = dict(row)
         merged.update(last_values)
-        _recompute_derived(merged)
+        if not playback_live:
+            # Distinguish "steady" from "no longer being measured".
+            for name in PLAYBACK_LIVE_GAUGE_KEYS:
+                merged[name] = ""
+        merged["playback_sample_age_sec"] = "" if age is None else str(age)
+        if (
+            encode_frames_at_attach is None
+            and playback_live
+            and _as_float(merged.get("playback_frames_rendered")) > 0
+        ):
+            encode_frames_at_attach = _as_float(merged.get("encode_frames_total"))
+            playback_frames_at_attach = _as_float(merged.get("playback_frames_rendered"))
+        _recompute_derived(
+            merged,
+            engine=playback_engine,
+            encode_frames_at_attach=encode_frames_at_attach,
+            playback_frames_at_attach=playback_frames_at_attach,
+            playback_live=playback_live,
+        )
         updated.append(merged)
 
     fieldnames = list(csv_columns)
@@ -209,25 +313,30 @@ def merge_playback_into_csv(
     return updated
 
 
-def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
+def compute_playback_averages(rows: List[dict]) -> Dict[str, object]:
     if not rows:
         return {}
 
-    averages: Dict[str, float] = {}
+    averages: Dict[str, object] = {}
     count = len(rows)
 
     for key in PLAYBACK_GAUGE_KEYS:
         if key not in rows[0]:
             continue
-        values = [float(row.get(key, 0) or 0) for row in rows]
+        # Blank means "the player was not reporting for this sample". Counting
+        # those as 0 pulls a gauge toward zero for however long the player was
+        # detached, which is the mirror image of the forward-fill bug.
+        live_rows = [row for row in rows if str(row.get(key, "")).strip() != ""]
+        values = [float(row.get(key, 0) or 0) for row in live_rows]
         if key == "e2e_latency_ms":
             stats = robust_e2e_stats(values)
             if stats:
                 averages[key] = round(stats["avg"], 3)
                 averages["e2e_latency_max_ms"] = round(stats["max"], 3)
+                averages["e2e_latency_samples"] = len([v for v in values if v > 0])
             continue
         if any(value > 0 for value in values):
-            averages[key] = round(sum(values) / count, 3)
+            averages[key] = round(sum(values) / max(1, len(values)), 3)
 
     for key in PLAYBACK_COUNTER_KEYS:
         if key not in rows[0] and key not in rows[-1]:
@@ -252,15 +361,38 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
         "latency_player_buffer_ms",
         "latency_accounted_ms",
         "latency_residual_ms",
+        "latency_overcount_ms",
         "playback_frame_drop_pct",
         "frame_delivery_pct",
     ):
         if key not in rows[0]:
             continue
-        values = [float(row.get(key, 0) or 0) for row in rows]
+        values = [
+            float(row.get(key, 0) or 0)
+            for row in rows
+            if str(row.get(key, "")).strip() != ""
+        ]
         live = [value for value in values if value > 0]
         if live:
             averages[key] = round(sum(live) / len(live), 3)
+
+    # Which stages had no instrument on this leg. Without this the residual is
+    # just a large unexplained number; with it the operator can see that the
+    # packager (Zixi: no PDT) or the network (MoQ: no RTT source) was never
+    # measured, rather than measured at zero.
+    #
+    # Only stages unmeasured on *every* sample count. The player-side stages
+    # are legitimately unmeasured before the browser attaches, and reporting a
+    # stage that worked for most of the run as "unmeasured" would be its own
+    # small lie.
+    per_row = [
+        {stage.strip() for stage in str(row.get("latency_unmeasured", "") or "").split(",")}
+        for row in rows
+    ]
+    always = set.intersection(*per_row) if per_row else set()
+    always.discard("")
+    if always:
+        averages["latency_unmeasured_stages"] = ",".join(sorted(always))
 
     return averages
 
@@ -368,6 +500,7 @@ def patch_summary_with_playback(
         csv_path,
         playback_samples,
         csv_columns=CSV_COLUMNS,
+        playback_engine=playback_engine,
     )
     playback_averages = compute_playback_averages(rows)
     if not playback_averages:

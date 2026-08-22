@@ -32,7 +32,12 @@ from encode_profile import (
 )
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
-from latency_budget import build_latency_budget, encode_frame_drop_pct
+from latency_budget import (
+    E2E_SCOPE_CAPTURE_TO_GLASS,
+    build_latency_budget,
+    e2e_scope_for,
+    encode_frame_drop_pct,
+)
 from metrics import (
     EncodeLagTracker,
     MetricsCollector,
@@ -267,7 +272,11 @@ class UploadJob:
     # Last measured encoder→packager transit (ms). Kept on the job, not just
     # pushed to the callback, so the sample loop can attribute it as the
     # packager component of the latency budget.
-    _packager_transit_ms: float = field(default=0.0, init=False, repr=False)
+    # None until a packager transit is actually observed. A default of 0.0
+    # would report "the packager took no time" on every ingest that has no PDT
+    # to derive it from (all Zixi), which is what let 75–96% of a Zixi leg's
+    # glass delay sit in the residual while the docs blamed chunk packaging.
+    _packager_transit_ms: Optional[float] = field(default=None, init=False, repr=False)
     _media_zero_epoch: Optional[float] = field(default=None, init=False, repr=False)
     _delivery_origin_sent: bool = field(default=False, init=False, repr=False)
     # JobManager sets this so the UI can show "computing" the moment the
@@ -521,6 +530,9 @@ class UploadSample:
     latency_player_buffer_ms: float = 0.0
     latency_accounted_ms: float = 0.0
     latency_residual_ms: float = 0.0
+    latency_overcount_ms: float = 0.0
+    latency_unmeasured: str = ""
+    latency_e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS
     encode_frames_total: int = 0
     encode_frames_dropped: int = 0
     encode_frames_duped: int = 0
@@ -532,23 +544,30 @@ def _apply_latency_budget(
     *,
     status,
     pipeline_baseline_ms: float,
-    packager_transit_ms: float,
+    packager_transit_ms: Optional[float],
+    e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
 ) -> None:
     """Fill the live sample's latency components and frame ratios in place.
 
     Player-side inputs (buffer, e2e) are not visible to the encoder loop, so
-    the player-buffer component and residual stay 0 here and are recomputed
-    against merged playback values when the CSV is finalized
+    the player-buffer stage is *unmeasured* here and is recomputed against
+    merged playback values when the CSV is finalized
     (``playback_metrics._recompute_derived``). Everything upstream of the
     browser is exact at this point.
+
+    ``sample.upload_latency_ms`` is deliberately not passed: it is a one-shot
+    startup figure, and feeding it in as a per-sample stage added a fixed
+    ~2s "publish" to every steady-state row.
     """
     budget = build_latency_budget(
         pipeline_baseline_ms=pipeline_baseline_ms,
         encode_lag_ms=sample.encode_lag_ms,
-        upload_latency_ms=sample.upload_latency_ms,
-        net_rtt_ms=sample.net_rtt_ms,
+        publish_transit_ms=None,
+        net_rtt_ms=sample.net_rtt_ms if sample.net_rtt_ms > 0 else None,
         packager_transit_ms=packager_transit_ms,
+        playback_buffer_sec=None,
         e2e_latency_ms=sample.e2e_latency_ms,
+        e2e_scope=e2e_scope,
     )
     sample.latency_encode_ms = budget.encode_ms
     sample.latency_publish_ms = budget.publish_ms
@@ -557,6 +576,9 @@ def _apply_latency_budget(
     sample.latency_player_buffer_ms = budget.player_buffer_ms
     sample.latency_accounted_ms = budget.accounted_ms
     sample.latency_residual_ms = budget.residual_ms
+    sample.latency_overcount_ms = budget.overcount_ms
+    sample.latency_unmeasured = ",".join(budget.unmeasured_stages)
+    sample.latency_e2e_scope = budget.e2e_scope
     sample.encode_frames_total = max(0, int(getattr(status, "frame", 0) or 0))
     sample.encode_frames_dropped = max(0, int(getattr(status, "drop_frames", 0) or 0))
     sample.encode_frames_duped = max(0, int(getattr(status, "dup_frames", 0) or 0))
@@ -988,6 +1010,7 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
+                    e2e_scope=e2e_scope_for(job.destination.protocol),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=process.pid,
@@ -1012,6 +1035,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -2157,6 +2181,7 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
+                    e2e_scope=e2e_scope_for(job.destination.protocol),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
@@ -2183,6 +2208,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -2685,6 +2711,7 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
+                    e2e_scope=e2e_scope_for(job.destination.protocol),
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
@@ -2704,6 +2731,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=net_rtt,
                     net_jitter_ms=net_jitter,
                     net_send_mbps=send_mbps,

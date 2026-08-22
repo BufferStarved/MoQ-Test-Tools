@@ -109,6 +109,61 @@ class ProgressDeltaTests(unittest.TestCase):
         self.assertAlmostEqual(status.speed, 1.0, places=3)
 
 
+class HeadlineFpsTests(unittest.TestCase):
+    """The run's fps average comes from the frame counter, not from the mean of
+    ffmpeg's instantaneous `fps=` readings.
+
+    Live evidence (2026-08-22): every MoQ leg reported 32.2-32.7 fps for a 30fps
+    source. The per-sample readings were not wrong — the publisher pipe applies
+    backpressure, so ffmpeg really does alternate ~24.9 and ~37.4 fps. What was
+    wrong is averaging an instantaneous rate over unequal sample intervals: the
+    fast ticks are short and the slow ticks are long, so an unweighted mean
+    over-weights the fast ones. The frame counter is immune to that.
+    """
+
+    def _collector(self, rows):
+        import tempfile
+
+        from metrics import MetricsCollector
+
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = MetricsCollector("moq", "https://example/x", output_dir=tmp)
+            collector._rows = rows
+            return collector._compute_averages()
+
+    def test_backpressure_oscillation_does_not_inflate_the_headline(self):
+        # Reproduces the Linode MoQ leg: alternating 1.0s/1.5s ticks, 30 fps of
+        # media throughout, ffmpeg reporting 37.41 then 24.94.
+        rows = []
+        stamp, frames = 1000.0, 0
+        for index in range(16):
+            fast = index % 2 == 0
+            step = 1.0 if fast else 1.5
+            stamp += step
+            frames += int(round(30 * step))
+            rows.append(
+                {
+                    "timestamp": f"{stamp}",
+                    "fps": "37.41" if fast else "24.94",
+                    "encode_frames_total": str(frames),
+                }
+            )
+
+        averages = self._collector(rows)
+        naive = sum(float(row["fps"]) for row in rows) / len(rows)
+        self.assertGreater(naive, 31.0, "precondition: the old mean read high")
+        self.assertAlmostEqual(averages["fps"], 30.0, delta=0.2)
+
+    def test_missing_frame_counter_falls_back_to_the_rate_mean(self):
+        # Older CSVs and any leg whose encoder never reported `frame=` still
+        # need a number; the counter correction must not blank the column.
+        rows = [
+            {"timestamp": f"{1000.0 + i}", "fps": "29.97", "encode_frames_total": ""}
+            for i in range(5)
+        ]
+        self.assertAlmostEqual(self._collector(rows)["fps"], 29.97, places=2)
+
+
 class TickSchedulingTests(unittest.TestCase):
     def test_every_integer_second_is_sampled_despite_work_time(self):
         """work+sleep(1) drifted ~0.25s/iter and skipped one second in ~5;
