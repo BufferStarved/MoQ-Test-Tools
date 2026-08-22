@@ -18,6 +18,7 @@ from playback_metrics import PLAYBACK_FIELD_NAMES  # noqa: E402
 
 COMPARABLE_COLUMNS = (
     "encode_lag_ms",
+    "upload_latency_ms",
     "net_rtt_ms",
     "net_jitter_ms",
     "net_loss_pct",

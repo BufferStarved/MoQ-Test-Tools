@@ -26,6 +26,18 @@ PLAYBACK_FIELD_NAMES = [
 
 PLAYBACK_DEFAULTS = {name: "0" for name in PLAYBACK_FIELD_NAMES}
 
+# Columns the encoder loop can only write provisionally: they depend on
+# playback counters (buffer, e2e, rendered/dropped frames) that arrive from the
+# browser after the row was flushed. Recomputed from merged values below so the
+# persisted CSV is self-consistent instead of holding a stale zero.
+PLAYBACK_DERIVED_FIELD_NAMES = [
+    "latency_player_buffer_ms",
+    "latency_accounted_ms",
+    "latency_residual_ms",
+    "playback_frame_drop_pct",
+    "frame_delivery_pct",
+]
+
 PLAYBACK_GAUGE_KEYS = (
     "playback_bitrate_bps",
     "playback_ttff_ms",
@@ -103,6 +115,42 @@ def _playback_high_water(dest: dict, incoming: dict) -> dict:
     return merged
 
 
+def _recompute_derived(row: dict) -> None:
+    """Refresh latency/frame columns that depend on merged playback values.
+
+    Only rows that already carry the encoder-side columns are touched, so CSVs
+    written before the latency decomposition existed pass through unchanged.
+    """
+    if "latency_accounted_ms" not in row:
+        return
+    from latency_budget import (
+        LatencyBudget,
+        frame_delivery_pct,
+        playback_frame_drop_pct,
+        player_buffer_latency_ms,
+    )
+
+    budget = LatencyBudget(
+        encode_ms=_as_float(row.get("latency_encode_ms")),
+        publish_ms=_as_float(row.get("latency_publish_ms")),
+        network_ms=_as_float(row.get("latency_network_ms")),
+        packager_ms=_as_float(row.get("latency_packager_ms")),
+        player_buffer_ms=player_buffer_latency_ms(
+            playback_buffer_sec=_as_float(row.get("playback_buffer_sec"))
+        ),
+        e2e_ms=_as_float(row.get("e2e_latency_ms")),
+    )
+    row["latency_player_buffer_ms"] = f"{budget.player_buffer_ms:.1f}"
+    row["latency_accounted_ms"] = f"{budget.accounted_ms:.1f}"
+    row["latency_residual_ms"] = f"{budget.residual_ms:.1f}"
+    row["playback_frame_drop_pct"] = (
+        f"{playback_frame_drop_pct(frames_rendered=_as_float(row.get('playback_frames_rendered')), frames_dropped=_as_float(row.get('playback_frames_dropped'))):.3f}"
+    )
+    row["frame_delivery_pct"] = (
+        f"{frame_delivery_pct(encode_frames_total=_as_float(row.get('encode_frames_total')), playback_frames_rendered=_as_float(row.get('playback_frames_rendered'))):.2f}"
+    )
+
+
 def merge_playback_into_csv(
     csv_path: str,
     playback_samples: List[dict],
@@ -145,10 +193,11 @@ def merge_playback_into_csv(
             cursor += 1
         merged = dict(row)
         merged.update(last_values)
+        _recompute_derived(merged)
         updated.append(merged)
 
     fieldnames = list(csv_columns)
-    for name in PLAYBACK_FIELD_NAMES:
+    for name in (*PLAYBACK_FIELD_NAMES, *PLAYBACK_DERIVED_FIELD_NAMES):
         if name not in fieldnames:
             fieldnames.append(name)
 
@@ -196,15 +245,43 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, float]:
     if frames > 0 and count > 0:
         averages["playback_fps"] = round(frames / count, 2)
 
+    # Latency components / frame ratios: average over samples that actually
+    # carry a value, so a leg that only painted for part of the run is not
+    # diluted toward 0 by its dead samples.
+    for key in (
+        "latency_player_buffer_ms",
+        "latency_accounted_ms",
+        "latency_residual_ms",
+        "playback_frame_drop_pct",
+        "frame_delivery_pct",
+    ):
+        if key not in rows[0]:
+            continue
+        values = [float(row.get(key, 0) or 0) for row in rows]
+        live = [value for value in values if value > 0]
+        if live:
+            averages[key] = round(sum(live) / len(live), 3)
+
     return averages
 
 
 E2E_MIN_MS = 8.0
-E2E_MAX_MS = 30_000.0
+# Must match glassLatency.E2E_MAX_MS. A 30s ceiling here silently discarded
+# every sample from genuinely broken legs — job c49d2ef4 (WebRTC, 2026-08-22)
+# reached ~37s glass delay and its summary therefore reported *no* e2e at all,
+# which reads as "not measured" instead of "worst leg in the run".
+E2E_MAX_MS = 180_000.0
 
 
 def robust_e2e_stats(values: List[float]) -> Optional[Dict[str, float]]:
-    """Drop zeros / freeze runaways (values > 3× median), then average the rest."""
+    """Trimmed mean of plausible glass-delay samples, plus the true worst case.
+
+    ``avg`` drops zeros and single-sample freeze spikes (> 3× median) so a
+    momentary stall does not dominate the run's headline number. ``max`` is
+    deliberately taken *before* that trim: a metric labelled "max" must report
+    the worst glass delay actually observed, not the worst delay that survived
+    outlier rejection.
+    """
     filtered = sorted(
         value
         for value in values
@@ -223,8 +300,46 @@ def robust_e2e_stats(values: List[float]) -> Optional[Dict[str, float]]:
     pool = healthy or filtered
     return {
         "avg": sum(pool) / len(pool),
-        "max": pool[-1],
+        "max": filtered[-1],
     }
+
+
+# Playback engines that measure the protocol's own delivery path. Anything
+# else means the player consumed a remux, so the playback columns describe the
+# remux — not the protocol named in the `protocol` column.
+_NATIVE_PLAYBACK_ENGINES = {
+    "webrtc": {"whep"},
+    "moq": {"moq"},
+    "srt": {"mpegts", "hls", "ll-hls", "dash"},
+    "rtmp": {"mpegts", "hls", "ll-hls", "dash"},
+    "hls": {"hls", "ll-hls", "mpegts"},
+    "dash": {"dash"},
+    "http": {"mpegts", "hls", "ll-hls", "dash"},
+}
+
+
+def playback_engine_caveat(protocol: str, playback_engine: str) -> str:
+    """Warn when playback metrics do not describe the published protocol.
+
+    Job c49d2ef4 (2026-08-22) is the motivating case: it is tagged
+    ``protocol=webrtc`` but the tile played the LL-HLS remux of the WHIP
+    ingest, so its TTFF, stalls, rebuffer and e2e were HLS numbers being
+    compared against other legs as if they were WebRTC. Without this flag the
+    CSV gives no hint that the comparison is invalid.
+    """
+    proto = (protocol or "").strip().lower()
+    engine = (playback_engine or "").strip().lower()
+    if not proto or not engine:
+        return ""
+    native = _NATIVE_PLAYBACK_ENGINES.get(proto)
+    if not native or engine in native:
+        return ""
+    return (
+        f"Playback metrics were measured with the '{engine}' player, which is not "
+        f"{proto.upper()}'s own delivery path. TTFF, stalls, rebuffer and glass delay "
+        f"describe that remux, not {proto.upper()} — do not compare them directly "
+        "against legs played on their native path."
+    )
 
 
 def patch_summary_with_playback(
@@ -265,6 +380,9 @@ def patch_summary_with_playback(
     extra["playback_metrics_enabled"] = True
     if playback_engine:
         extra["playback_engine"] = playback_engine
+        caveat = playback_engine_caveat(payload.get("protocol", ""), playback_engine)
+        if caveat:
+            extra["playback_engine_caveat"] = caveat
     extra["playback_sample_count"] = len(playback_samples)
 
     with open(summary_path, mode="w", encoding="utf-8") as handle:

@@ -44,6 +44,12 @@ class UploadStatus:
     progress: str = "unknown"
     # Cumulative muxed output bytes (ffmpeg -progress total_size).
     total_bytes: int = 0
+    # ffmpeg's own exact frame accounting. drop_frames is the encoder-side
+    # counterpart to the player's droppedVideoFrames; dup_frames is what CFR
+    # normalization inserted for a VFR source (a duplicated frame is not a
+    # delivered frame, so it belongs in the frame budget too).
+    drop_frames: int = 0
+    dup_frames: int = 0
 
     def display_line(self, elapsed_sec: int, cpu_percent: float, memory_mb: float) -> str:
         return (
@@ -125,6 +131,10 @@ class ProgressDeltaTracker:
                 elif key == "total_size" and "N/A" not in value:
                     self._raw_total_size = int(float(value))
                     self._status.total_bytes = self._raw_total_size
+                elif key == "drop_frames" and "N/A" not in value:
+                    self._status.drop_frames = int(float(value))
+                elif key == "dup_frames" and "N/A" not in value:
+                    self._status.dup_frames = int(float(value))
                 elif key == "out_time_us" and "N/A" not in value:
                     # Modern ffmpeg often emits only out_time_us / out_time_ms.
                     # Without this, MoQ encode_lag_ms and out_time stay empty
@@ -191,6 +201,8 @@ class ProgressDeltaTracker:
                 speed=self._status.speed,
                 progress=self._status.progress,
                 total_bytes=self._status.total_bytes,
+                drop_frames=self._status.drop_frames,
+                dup_frames=self._status.dup_frames,
             )
 
 

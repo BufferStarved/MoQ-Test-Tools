@@ -123,14 +123,29 @@ class PlaybackMergeTests(unittest.TestCase):
 
 
 class RobustE2eTests(unittest.TestCase):
-    def test_trims_freeze_runaway(self):
+    def test_trims_freeze_runaway_from_the_average_only(self):
+        """The average ignores freeze spikes so one stall does not dominate the
+        headline number, but "max" must stay the worst glass delay actually
+        observed — a trimmed max understates exactly the legs that need
+        attention."""
         stats = robust_e2e_stats([0, 2900, 3100, 3300, 16000, 17000])
         self.assertIsNotNone(stats)
         self.assertLess(stats["avg"], 4000)
-        self.assertEqual(stats["max"], 3300)
+        self.assertEqual(stats["max"], 17000)
 
     def test_rejects_media_timeline_as_unix_epoch(self):
         self.assertIsNone(robust_e2e_stats([0, 0, 3, 5]))
+
+    def test_ceiling_matches_the_frontend_so_broken_legs_still_report(self):
+        """A 30s ceiling discarded every sample from job c49d2ef4 (WebRTC,
+        ~37s glass delay), so its summary read as "not measured" rather than
+        "worst leg in the run"."""
+        from playback_metrics import E2E_MAX_MS
+
+        self.assertEqual(E2E_MAX_MS, 180_000.0)
+        stats = robust_e2e_stats([31_000, 34_000, 37_000])
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats["max"], 37_000)
 
 
 if __name__ == "__main__":

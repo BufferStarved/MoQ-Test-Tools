@@ -89,6 +89,33 @@ class MoqGopLatencyTests(unittest.TestCase):
         keyint_index = cmd.index("-keyint_min")
         self.assertEqual(cmd[keyint_index + 1], "30")
 
+    def test_webcam_udp_moq_cmd_copies_broker_encode(self):
+        cmd = build_ffmpeg_moq_cmd(
+            "udp://127.0.0.1:50123?fifo_size=1000000",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=400,
+            duration_sec=60,
+        )
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertNotIn("-bsf:a", cmd)
+        self.assertEqual(cmd[cmd.index("-probesize") + 1], "2M")
+        self.assertEqual(cmd[cmd.index("-analyzeduration") + 1], "2000000")
+        self.assertNotIn("-preset", cmd)
+        self.assertNotIn("-g", cmd)
+        self.assertNotIn("use_wallclock_as_timestamps", cmd)
+
+    def test_file_moq_cmd_keeps_veryfast(self):
+        cmd = build_ffmpeg_moq_cmd(
+            "clip.mp4",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=400,
+            duration_sec=30,
+        )
+        self.assertEqual(cmd[cmd.index("-preset") + 1], "veryfast")
+
     def test_encode_args_include_utc_burnin(self):
         args = build_video_encode_args("720p", 4000, burnin_epoch_sec=1_700_000_000)
         vf = args[args.index("-vf") + 1]
@@ -113,9 +140,24 @@ class MoqGopLatencyTests(unittest.TestCase):
             encode_ladder="720p",
             target_latency_ms=4000,
         )
-        live_moq_vf = live_moq[live_moq.index("-vf") + 1]
-        self.assertIn("capture time %{pts\\:gmtime}Z", live_moq_vf)
-        self.assertNotIn("pts\\:gmtime\\:", live_moq_vf)
+        self.assertEqual(live_moq[live_moq.index("-c:v") + 1], "copy")
+        self.assertNotIn("-vf", live_moq)
+        cam = build_ffmpeg_moq_cmd(
+            "device:webcam",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=400,
+        )
+        joined_cam = " ".join(cam)
+        self.assertTrue("avfoundation" in joined_cam or "v4l2" in joined_cam)
+        self.assertNotIn("udp://", joined_cam)
+        self.assertEqual(cam[cam.index("-c:v") + 1], "libx264")
+        self.assertEqual(cam[cam.index("-preset") + 1], "ultrafast")
+        self.assertEqual(cam[cam.index("-g") + 1], "15")
+        self.assertIn("1280x720", joined_cam)
+        self.assertNotIn("-fps_mode", cam)
+        self.assertIn("setpts=PTS-STARTPTS", joined_cam)
+        self.assertIn("asetpts=PTS-STARTPTS", joined_cam)
 
 
 if __name__ == "__main__":

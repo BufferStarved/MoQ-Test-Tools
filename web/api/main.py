@@ -71,8 +71,10 @@ from encode_profile import (  # noqa: E402
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
     MPEGTS_VIDEO_BSF,
+    OBS_OPENMOQ_MEDIA,
     is_device_browser_source,
     is_device_webcam_source,
+    is_obs_openmoq_source,
     with_srt_stream_id,
     zixi_srt_streamid_value,
 )
@@ -132,6 +134,7 @@ class CreateUploadRequest(BaseModel):
     # "cloud" = encode on API host. "local" = laptop ffmpeg agent.
     # "browser" = in-page WebCodecs + WebTransport (no terminal agent).
     publisher_host: str = "cloud"
+    encoder: str = "ffmpeg"
 
 
 def probe_media_duration_sec(media_path: str) -> int:
@@ -263,6 +266,11 @@ def features():
         "local_publisher": bool(hub.get("enabled")),
         "local_publisher_connected": bool(hub.get("connected")),
         "local_publisher_whip": bool(hub.get("whip")),
+        "local_publisher_obs": hub.get("obs") or {
+            "websocket": False,
+            "plugin": False,
+            "detail": "",
+        },
         "local_publisher_agents": hub.get("agents") or [],
         "encode_hosts": encode_hosts_for_api(),
         "media_sources": media_source_catalog(ROOT_DIR),
@@ -648,11 +656,19 @@ def presets(protocol: Optional[str] = None):
 @app.post("/api/uploads")
 def create_upload(request: CreateUploadRequest):
     media_path = request.media_path.strip()
+    encoder = (request.encoder or "ffmpeg").strip().lower()
+    if encoder not in {"ffmpeg", "obs"}:
+        raise HTTPException(status_code=400, detail="encoder must be 'ffmpeg' or 'obs'")
+    if encoder == "obs":
+        media_path = OBS_OPENMOQ_MEDIA
     device_webcam = is_device_webcam_source(media_path)
     device_browser = is_device_browser_source(media_path)
-    is_live = device_webcam or device_browser
+    obs_source = is_obs_openmoq_source(media_path)
+    is_live = device_webcam or device_browser or obs_source
 
     publisher_host = (request.publisher_host or "cloud").strip().lower()
+    if encoder == "obs":
+        publisher_host = "local"
     if publisher_host not in {"cloud", "local", "browser"}:
         raise HTTPException(
             status_code=400,
@@ -676,9 +692,11 @@ def create_upload(request: CreateUploadRequest):
                     "Run ./scripts/run-local-publisher.sh in another terminal."
                 ),
             )
-        # Local acquisition: webcam device or a user-chosen file — not repo VOD.
+        # Local acquisition: webcam, OBS OpenMOQ, or a user-chosen file — not repo VOD.
         lower = media_path.lower()
-        if lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
+        if obs_source:
+            media_path = OBS_OPENMOQ_MEDIA
+        elif lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -686,7 +704,7 @@ def create_upload(request: CreateUploadRequest):
                     "Pick a local file or webcam (device:webcam) for This machine."
                 ),
             )
-        if not device_webcam:
+        if not device_webcam and not obs_source:
             if media_path.lower().startswith("udp://"):
                 raise HTTPException(
                     status_code=400,
@@ -756,6 +774,23 @@ def create_upload(request: CreateUploadRequest):
             detail="Browser publish supports MoQ and WebRTC (WHIP). Use a MoQ relay or MediaMTX WHIP destination.",
         )
 
+    if encoder == "obs" and destination.protocol == "webrtc":
+        raise HTTPException(
+            status_code=400,
+            detail="OBS encode supports SRT, RTMP, and MoQ — not WebRTC.",
+        )
+
+    if encoder == "obs" and destination.protocol == "moq":
+        haystack = f"{destination.url} {destination.preset_id}"
+        if ":14433" in haystack or "draft=18" in haystack or "_d18" in (destination.preset_id or ""):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 "
+                    "(:14433). Use ffmpeg (helper) for MoQ."
+                ),
+            )
+
     if publisher_host == "local" and destination.protocol == "webrtc":
         if not publisher_hub.can_publish_whip():
             raise HTTPException(
@@ -776,6 +811,7 @@ def create_upload(request: CreateUploadRequest):
     compute_vmaf_encoder = (
         request.compute_vmaf_encoder
         and not device_webcam
+        and not obs_source
         and not device_browser
         and destination.protocol != "webrtc"
     )
@@ -834,6 +870,7 @@ def create_upload(request: CreateUploadRequest):
         stream_index=request.stream_index,
         stream_label=request.stream_label,
         publisher_host=publisher_host,
+        encoder=encoder,
     )
     record = job_manager.create_job(job, preset_id=request.preset_id or destination.preset_id)
     return job_to_dict(record)
@@ -1002,10 +1039,14 @@ def get_playback_diag(job_id: str):
 
 @app.post("/api/uploads/{job_id}/stop")
 def stop_upload(job_id: str):
-    """Request cooperative cancel of a running upload (used by live webcam Stop)."""
-    if not job_manager.request_cancel(job_id):
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"ok": True, "status": "stopping"}
+    """Request cooperative cancel of a running upload (used by live webcam Stop).
+
+    Do not 404 when the in-memory job is gone (API restart). The helper may
+    still be encoding — fan the cancel out, and let the UI unwind.
+    """
+    found = job_manager.request_cancel(job_id)
+    publisher_hub.broadcast_cancel(job_id)
+    return {"ok": True, "status": "stopping" if found else "already_gone"}
 
 
 @app.get("/api/uploads/{job_id}/events")

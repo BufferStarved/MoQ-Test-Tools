@@ -218,6 +218,35 @@ class LocalPublisherApiGateTests(unittest.TestCase):
         self.assertIn("cannot publish webrtc", detail)
         self.assertIn("this laptop", detail)
 
+    def test_stop_unknown_job_still_ok(self) -> None:
+        with patch.object(api_main.publisher_hub, "broadcast_cancel", return_value=0) as broadcast:
+            resp = self.client.post("/api/uploads/missing-job/stop")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["status"], "already_gone")
+        broadcast.assert_called_once_with("missing-job")
+
+    def test_obs_rejected_on_draft_18_moq(self) -> None:
+        with patch.dict(os.environ, {"LOCAL_PUBLISHER_ENABLED": "1"}, clear=False):
+            with patch.object(
+                api_main.publisher_hub,
+                "status",
+                return_value={"enabled": True, "connected": True, "agents": [{"agent_id": "a"}]},
+            ):
+                resp = self.client.post(
+                    "/api/uploads",
+                    json={
+                        "media_path": "device:webcam",
+                        "preset_id": "moq_gcp_relay_d18",
+                        "duration_sec": 5,
+                        "publisher_host": "local",
+                        "encoder": "obs",
+                    },
+                )
+        self.assertEqual(resp.status_code, 400)
+        detail = resp.json()["detail"].lower()
+        self.assertIn("draft-16", detail)
+        self.assertIn("draft-18", detail)
+
     def test_features_exposes_local_publisher_whip(self) -> None:
         with patch.object(
             api_main.publisher_hub,

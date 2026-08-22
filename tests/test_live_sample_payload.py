@@ -37,6 +37,7 @@ class LiveSamplePayloadTests(unittest.TestCase):
         self.assertEqual(payload["net_recv_mbps"], 2.1)
         self.assertEqual(payload["net_rtt_ms"], 18.5)
         self.assertEqual(payload["encode_lag_ms"], 12.0)
+        self.assertIn("upload_latency_ms", payload)
 
     def test_keeps_explicit_net_fields(self) -> None:
         sample = UploadSample(

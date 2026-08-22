@@ -236,16 +236,15 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_gcp_relay",
-        name="OpenMOQ MOQ-X gcp-us-central1",
+        name="OpenMOQ MOQ-X draft-16 gcp-us-central1",
         protocol="moq",
         url="https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark",
         notes=(
-            "Prod relay on UDP 4433 (ghcr.io/openmoq/moqx:329b98b, draft-16 only). "
-            "Publishes fragmented MP4 from ffmpeg via openmoq-publisher. "
-            "Do not point draft-18 clients at this URL. Draft-18 canary is "
-            "moq_gcp_relay_d18 on :14433. "
+            "Legacy UDP 4433 (ghcr.io/openmoq/moqx:329b98b). Hidden from the UI. "
+            "Public MoQ is moq_gcp_relay_d18 on :14433. "
             "Ingest VMAF: ./scripts/install-openmoq-recorder.sh"
         ),
+        web_visible=False,
         supports_vmaf=True,
         ingest_agent_url=moq_recorder_agent_url(CENTRAL_WEB_INGEST_AGENT),
         ingest_recording_dir="/var/lib/moq-relay-recordings",
@@ -253,14 +252,12 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
     ),
     ServicePreset(
         id="moq_gcp_relay_d18",
-        name="OpenMOQ MOQ-X draft-18 canary gcp-us-central1",
+        name="OpenMOQ MOQ-X draft-18 gcp-us-central1",
         protocol="moq",
         url="https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
         notes=(
-            "Canary moqx on UDP 14433 (scripts/canary-moqx.sh). Speaks moqt-18. "
-            "ffmpeg → moq5-fmp4-publish (not openmoq-publisher). Prod :4433 stays "
-            "draft-16. Start/stop: ./scripts/canary-moqx.sh start|status|stop. "
-            "Do not deploy this as the public demo default."
+            "Public MoQ path. moqx on UDP 14433 (scripts/canary-moqx.sh). Speaks moqt-18. "
+            "ffmpeg → moq5-fmp4-publish. :4433 remains running as unused draft-16."
         ),
         supports_vmaf=True,
         ingest_agent_url=moq_recorder_agent_url(CENTRAL_WEB_INGEST_AGENT),
@@ -570,25 +567,24 @@ def _build_linode_presets() -> List[ServicePreset]:
         ),
         ServicePreset(
             id="moq_linode_relay",
-            name=f"OpenMOQ MOQ-X {region_label}",
+            name=f"OpenMOQ MOQ-X draft-16 {region_label}",
             protocol="moq",
             url=relay_publish,
-            notes=f"OpenMOQ moqx relay on Linode ({relay_base}).",
+            notes=f"Legacy :4433 draft-16 on Linode ({relay_base}). Hidden. Public MoQ is :14433.",
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="linode_moq_relay",
-            **common,
+            **{**common, "web_visible": False},
         ),
         ServicePreset(
             id="moq_linode_relay_d18",
-            name=f"OpenMOQ MOQ-X draft-18 canary {region_label}",
+            name=f"OpenMOQ MOQ-X draft-18 {region_label}",
             protocol="moq",
             url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
             notes=(
-                "Canary moqx on UDP 14433 (scripts/canary-moqx.sh with "
-                "MOQX_CANARY_INSTANCE / MOQX_CANARY_HOST). Speaks moqt-18. "
-                "ffmpeg → moq5-fmp4-publish. Prod :4433 stays draft-16."
+                "Public MoQ path. moqx on UDP 14433. Speaks moqt-18. "
+                "ffmpeg → moq5-fmp4-publish. Linode cloud fw must allow UDP 14433."
             ),
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),
@@ -712,26 +708,24 @@ def _build_gcp_east_presets() -> List[ServicePreset]:
         ),
         ServicePreset(
             id="moq_gcp_east_relay",
-            name=f"OpenMOQ MOQ-X {region_label}",
+            name=f"OpenMOQ MOQ-X draft-16 {region_label}",
             protocol="moq",
             url=relay_publish,
-            notes=f"OpenMOQ moqx relay on GCP {region} ({relay_base}).",
+            notes=f"Legacy :4433 draft-16 on GCP {region} ({relay_base}). Hidden. Public MoQ is :14433.",
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
             ingest_provider="gcp_east_moq_relay",
-            **common,
+            **{**common, "web_visible": False},
         ),
         ServicePreset(
             id="moq_gcp_east_relay_d18",
-            name=f"OpenMOQ MOQ-X draft-18 canary {region_label}",
+            name=f"OpenMOQ MOQ-X draft-18 {region_label}",
             protocol="moq",
             url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
             notes=(
-                "Canary moqx on UDP 14433 (GCP_ZONE=us-east1-b "
-                "MOQX_CANARY_INSTANCE=moq-relay-east-gcp "
-                "./scripts/canary-moqx.sh). Speaks moqt-18. ffmpeg → "
-                "moq5-fmp4-publish. Prod :4433 stays draft-16."
+                "Public MoQ path. moqx on UDP 14433. Speaks moqt-18. "
+                "ffmpeg → moq5-fmp4-publish."
             ),
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),

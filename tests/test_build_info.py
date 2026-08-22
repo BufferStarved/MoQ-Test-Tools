@@ -45,3 +45,4 @@ class BuildInfoTests(unittest.TestCase):
         )
         self.assertIn("VITE_GIT_SHA", text)
         self.assertIn(".build-sha", text)
+        self.assertIn("${GIT_SHA}-dirty", text)

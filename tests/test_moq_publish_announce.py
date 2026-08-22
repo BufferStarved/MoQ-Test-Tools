@@ -173,6 +173,8 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         self.assertIn("paced=should_pace_moq_publisher", body)
         self.assertIn("waiting for ftyp+moov", body)
         self.assertIn("publisher_exit_error", body)
+        self.assertIn("combine_ffmpeg_closed_pipe_error", body)
+        self.assertIn("looks_like_closed_pipe_eio", body)
         self.assertIn("_stop_moq_publisher", body)
         # Encode must die first; never SIGKILL a live publisher to "wait for CONNECT".
         stop = body.index("self._terminate_process(ffmpeg_proc)")

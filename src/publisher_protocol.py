@@ -76,6 +76,7 @@ def upload_job_to_dict(job: UploadJob) -> Dict[str, Any]:
         "ingest_agent_url": job.ingest_agent_url,
         "ingest_agent_token": job.ingest_agent_token,
         "publisher_host": getattr(job, "publisher_host", "local"),
+        "encoder": getattr(job, "encoder", "ffmpeg") or "ffmpeg",
     }
 
 
@@ -100,6 +101,7 @@ def upload_job_from_dict(data: Dict[str, Any]) -> UploadJob:
         ingest_agent_token=str(data.get("ingest_agent_token") or ""),
     )
     job.publisher_host = str(data.get("publisher_host") or "local")
+    job.encoder = str(data.get("encoder") or "ffmpeg")
     return job
 
 

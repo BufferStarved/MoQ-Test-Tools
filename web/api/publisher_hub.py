@@ -76,6 +76,7 @@ class AgentConnection:
 class PublisherHub:
     def __init__(self) -> None:
         self._agents: Dict[str, AgentConnection] = {}
+        self._comparison_agents: Dict[str, str] = {}
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -93,6 +94,9 @@ class PublisherHub:
                     "deps": (agent.capabilities or {}).get("deps") or [],
                     "webcam_devices": (agent.capabilities or {}).get("webcam_devices") or [],
                     "ffmpeg_whip": capabilities_allow_whip(agent.capabilities),
+                    "obs_websocket": bool((agent.capabilities or {}).get("obs_websocket")),
+                    "obs_plugin": bool((agent.capabilities or {}).get("obs_plugin")),
+                    "obs_detail": (agent.capabilities or {}).get("obs_detail") or "",
                     "connected_at": agent.connected_at,
                     "active_jobs": len(agent.pending),
                 }
@@ -102,6 +106,18 @@ class PublisherHub:
             "enabled": local_publisher_enabled(),
             "connected": len(agents) > 0,
             "whip": any(bool(agent.get("ffmpeg_whip")) for agent in agents),
+            "obs": {
+                "websocket": any(bool(agent.get("obs_websocket")) for agent in agents),
+                "plugin": any(bool(agent.get("obs_plugin")) for agent in agents),
+                "detail": next(
+                    (
+                        str(agent.get("obs_detail") or "")
+                        for agent in agents
+                        if agent.get("obs_detail")
+                    ),
+                    "",
+                ),
+            },
             "agents": agents,
         }
 
@@ -112,7 +128,34 @@ class PublisherHub:
         with self._lock:
             return any(capabilities_allow_whip(item.capabilities) for item in self._agents.values())
 
-    def pick_agent(self) -> Optional[AgentConnection]:
+    def broadcast_cancel(self, job_id: str) -> int:
+        """Ask every connected helper to stop this job.
+
+        After an API restart JobManager no longer has the record, but the
+        laptop agent may still be encoding. Fan-out by job_id.
+        """
+        job_id = (job_id or "").strip()
+        if not job_id:
+            return 0
+        loop = self._loop
+        with self._lock:
+            agents = list(self._agents.values())
+        if not agents or loop is None:
+            return 0
+        payload = {"type": "job_cancel", "job_id": job_id}
+        sent = 0
+        for agent in agents:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    agent.websocket.send_json(payload),
+                    loop,
+                ).result(timeout=5)
+                sent += 1
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to send job_cancel to %s", agent.agent_id, exc_info=True)
+        return sent
+
+    def pick_agent(self, comparison_id: str = "") -> Optional[AgentConnection]:
         with self._lock:
             ready = [
                 agent
@@ -121,9 +164,19 @@ class PublisherHub:
             ]
             if not ready:
                 return None
+            cid = (comparison_id or "").strip()
+            if cid:
+                sticky_id = self._comparison_agents.get(cid)
+                if sticky_id:
+                    for agent in ready:
+                        if agent.agent_id == sticky_id:
+                            return agent
             # Prefer the least-busy agent (comparison legs run in parallel).
             ready.sort(key=lambda item: len(item.pending))
-            return ready[0]
+            picked = ready[0]
+            if cid:
+                self._comparison_agents[cid] = picked.agent_id
+            return picked
 
     async def register(self, websocket: WebSocket, agent_id: str) -> AgentConnection:
         self._loop = asyncio.get_running_loop()
@@ -221,7 +274,7 @@ class PublisherHub:
                 success=False,
                 error="Local publisher is disabled (set LOCAL_PUBLISHER_ENABLED=1).",
             )
-        agent = self.pick_agent()
+        agent = self.pick_agent(getattr(job, "comparison_id", "") or "")
         if agent is None:
             return UploadResult(
                 success=False,

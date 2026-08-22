@@ -103,6 +103,51 @@ A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-
 
 ---
 
+## Latency breakdown (per-component)
+
+`e2e_latency_ms` alone tells you a leg is slow, never *where* the time went — and because each protocol estimates it differently (LOC CaptureTimestamp vs HLS PDT vs wall−playhead vs encode+RTT/2), comparing totals across legs can mislead. Every leg now also reports one ordered chain of components in the same units:
+
+```
+capture ──encode──> muxed ──publish──> ingest ──packager──> delivery ──network──> player ──buffer──> glass
+```
+
+| Column | Stage | Source |
+|--------|-------|--------|
+| `latency_encode_ms` | capture → muxed | Encoder pipeline offset (the baseline `encode_lag_ms` subtracts) + sustained lag |
+| `latency_publish_ms` | muxed → ingest | Same measurement as `upload_latency_ms` (one-shot) |
+| `latency_network_ms` | one-way path | `net_rtt_ms ÷ 2` (symmetric-path assumption) |
+| `latency_packager_ms` | ingest → delivery | Measured for MediaMTX LL-HLS via PROGRAM-DATE-TIME; ~0 for Zixi HTTP-TS (continuous TS) |
+| `latency_player_buffer_ms` | delivery → glass | `playback_buffer_sec × 1000` (HTML media / WebRTC jitter buffer) |
+| `latency_accounted_ms` | — | Sum of the five components |
+| `latency_residual_ms` | — | `e2e_latency_ms − latency_accounted_ms`, clamped at 0 |
+
+**The residual is a feature, not an error term.** A large residual means the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Expect a non-trivial residual on:
+
+- **Zixi Fast HLS** — chunk packaging time is not measured (only HTTP-TS is ~0 by construction).
+- **MoQ CMAF** — group accumulation plus join offset, neither of which is a measured stage today.
+- **Browser MoQ LOC** — reports 0 for the player-buffer component on purpose: its `playback_buffer_sec` means "seconds behind live", a different quantity that must not be summed into this chain.
+
+Formulas live in `src/latency_budget.py` and its browser mirror `web/frontend/src/latencyBudget.ts`; they are kept numerically identical and tested against each other.
+
+---
+
+## Frame accounting
+
+Drops are counted at both ends of the chain with the **same denominator convention**, which is what makes the two percentages comparable:
+
+| Column | Formula | Source |
+|--------|---------|--------|
+| `encode_frames_total` | ffmpeg `-progress frame` | Exact |
+| `encode_frames_dropped` | ffmpeg `-progress drop_frames` | Exact, not inferred |
+| `encode_frames_duped` | ffmpeg `-progress dup_frames` | CFR normalization of a VFR source |
+| `encode_frame_drop_pct` | `dropped / (encoded + dropped)` | Frames *offered* to the encoder |
+| `playback_frame_drop_pct` | `dropped / (rendered + dropped)` | Frames *delivered* to the player |
+| `frame_delivery_pct` | `playback_frames_rendered / encode_frames_total` | Spans the whole chain |
+
+Deliberately **not** `fps × elapsed`: a genuine 24fps source is not dropping 20% of a 30fps expectation. `frame_delivery_pct` is the only frame metric that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own.
+
+---
+
 ## Normalized transport (`net_*`)
 
 | Column | Typical source |
@@ -300,3 +345,13 @@ Empty / zero is often honest, not a CSV bug. After `100826e`, MoQ `e2e_latency_m
 - MoQ CMAF `e2e_latency_ms` ≈ TTFF + playhead drift or `encode_lag + RTT/2 + buffer`, not CaptureTimestamp glass-to-glass.
 - WebRTC `e2e_latency_ms` ≈ encode lag + RTT/2 + jitter buffer (no capture clock on RTP).
 - RTMP `net_rtt_ms` without Zixi REST ≈ TCP connect probe.
+- `encoder_send_rate_mbps` on direct-ffmpeg RTMP/SRT/MoQ ≈ a copy of `encoded_bitrate_kbps / 1000`, **not** an independent network measurement. Only `srt-live-transmit` supplies a measured libsrt send rate.
+- MoQ LOC `playback_buffer_sec` ≈ seconds the canvas is *behind live*, not seconds buffered *ahead* of the playhead. Same column, opposite direction — this is why LOC contributes 0 to `latency_player_buffer_ms`.
+
+**Playback engine vs published protocol.** The playback columns describe whatever the player actually consumed. When those disagree, the summary carries `extra.playback_engine_caveat`:
+
+> Job `c49d2ef4` (2026-08-22) is tagged `protocol=webrtc`, but the tile played the **LL-HLS remux** of the WHIP ingest — no WHEP reader session ever opened. Its TTFF (7.6s), 8 stalls, 28.2s rebuffer and ~37s glass delay are HLS numbers, and ranking them against native-path legs is invalid. Check `extra.playback_engine` before comparing.
+
+**Counter fields are run totals, not averages.** In `summary.averages`, every `pkt_*`, `cmaf_*_count`, `cmaf_tfdt_gap_ms`, `moqx_*`, `encode_frames_*`, and `playback_*` counter (plus `playback_rebuffer_sec`) is the value from the final sample. `averages_note` in the summary says so explicitly. Only rate/gauge columns are true means.
+
+**`e2e_latency_max_ms` is the observed worst case.** It is taken before the 3×-median outlier trim that produces the average, so a leg that froze once still reports the freeze. The plausibility ceiling is 180s on both the backend and the browser — a 30s backend ceiling previously discarded every sample from the worst legs in a run, which read as "not measured".

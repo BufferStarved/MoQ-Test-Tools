@@ -1,3 +1,4 @@
+import errno
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ DEFAULT_MOQ_PUBLISHER_BACKEND = "auto"  # auto | moq5 | openmoq
 
 # Default H.264 Main + yuv420p ladder (720p). Prefer build_video_encode_args()
 # from encode_profile when the UI supplies ladder + target latency.
+from avfoundation_modes import PREFERRED_FPS, PREFERRED_SIZE  # noqa: E402
 from encode_profile import (  # noqa: E402
     DEFAULT_ENCODE_LADDER_ID,
     DEFAULT_TARGET_LATENCY_MS,
@@ -284,6 +286,8 @@ def find_moq5_publisher() -> Optional[str]:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     candidates = [
         os.path.join(repo_root, "tools", "moq5-publisher", "bin", "moq5-fmp4-publish"),
+        # Local cmake build (install-moq5.sh copies this to bin/).
+        os.path.join(repo_root, "tools", "moq5-publisher", "build", "moq5-fmp4-publish"),
         os.path.expanduser("~/.local/bin/moq5-fmp4-publish"),
         shutil.which("moq5-fmp4-publish"),
     ]
@@ -291,6 +295,279 @@ def find_moq5_publisher() -> Optional[str]:
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+MOQ5_MISSING_HINT = "moq5-fmp4-publish not found, run scripts/install-moq5.sh"
+
+
+def _with_moq_spawn_context(message: str, *, binary: str = "", relay_url: str = "") -> str:
+    extras: List[str] = []
+    if relay_url and relay_url not in message:
+        extras.append(f"relay={relay_url}")
+    if binary and binary not in message:
+        extras.append(f"binary={binary}")
+    if not extras:
+        return message
+    return f"{message.rstrip('.')} ({', '.join(extras)})."
+
+
+CAMERA_EIO_HINT = (
+    "The camera may be busy, unplugged, "
+    "or already open in another app (AVFoundation exclusive open)."
+)
+PIPE_EIO_HINT = (
+    "The encoder wrote to a closed publisher pipe "
+    "(publisher exited before CMAF init, or stdin was not attached yet)."
+)
+
+
+def is_bare_eio_message(text: str) -> bool:
+    """True for a raw ``[Errno 5] Input/output error`` with no classifier prefix."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    lower = stripped.lower()
+    if lower in {"[errno 5] input/output error", "input/output error"}:
+        return True
+    return (
+        lower.startswith("[errno 5]")
+        and "input/output error" in lower
+        and "camera i/o" not in lower
+        and "failed to start moq publisher" not in lower
+        and "obs websocket" not in lower
+        and len(stripped) < 80
+    )
+
+
+def looks_like_camera_eio(text: str) -> bool:
+    """True when the I/O failure is the capture device, not the publisher pipe."""
+    lower = (text or "").lower()
+    return any(
+        token in lower
+        for token in (
+            "avfoundation",
+            "v4l2",
+            "shared webcam",
+            "/dev/video",
+            "selected framerate",
+            "opening input",
+        )
+    )
+
+
+def looks_like_closed_pipe_eio(text: str) -> bool:
+    """ffmpeg died writing stdout after the publisher closed stdin."""
+    lower = (text or "").lower()
+    if "input/output error" not in lower and "broken pipe" not in lower:
+        return False
+    if looks_like_camera_eio(text):
+        return False
+    return any(
+        token in lower
+        for token in (
+            "pipe:1",
+            "broken pipe",
+            "error writing",
+            "error muxing",
+            "error submitting a packet",
+            "closed publisher pipe",
+        )
+    )
+
+
+def looks_like_moq5_exit(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(
+        token in lower
+        for token in (
+            "endpoint connect failed",
+            "sender attach failed",
+            "before webtransport connect",
+            "stdin eof before ftyp",
+            "moq5 publisher exited",
+        )
+    )
+
+
+def combine_ffmpeg_closed_pipe_error(
+    ffmpeg_error: str,
+    publisher_detail: str,
+    *,
+    backend: str = "moq5",
+    code: Optional[int] = None,
+) -> str:
+    """Prefer publisher stderr when ffmpeg's only signal is a closed-pipe EIO."""
+    detail = (publisher_detail or "").strip()
+    if detail:
+        return publisher_exit_error(backend, code, detail)
+    ffmpeg_bit = (ffmpeg_error or "").strip() or "[Errno 5] Input/output error"
+    return f"ffmpeg I/O error: {ffmpeg_bit}. {PIPE_EIO_HINT}"
+
+
+def classify_spawn_oserror(
+    exc: BaseException,
+    *,
+    role: str,
+    binary: str = "",
+    media_path: str = "",
+    relay_url: str = "",
+) -> str:
+    """Human error for OSError from Popen of publisher / ffmpeg / tee / camera.
+
+    Bare ``[Errno 5] Input/output error`` used to leak to the job as-is
+    (agent ``str(exc)``, job_manager ``str(exc)``, classify role=job).
+    Distinguish a missing moq5 binary, a camera exclusive-open failure,
+    a publisher exec failure, and ffmpeg writing to a closed pipe.
+    """
+    err_no = getattr(exc, "errno", None)
+    text = str(exc)
+    is_eio = err_no == errno.EIO or "input/output error" in text.lower()
+    is_missing = isinstance(exc, FileNotFoundError) or err_no == errno.ENOENT
+    webcam = is_device_webcam_source(media_path) or role == "camera"
+
+    if role in {"publisher", "moq5"}:
+        name = os.path.basename(binary) if binary else "moq5-fmp4-publish"
+        if is_missing or not binary:
+            if "moq5" in name or role == "moq5" or not binary:
+                missing = MOQ5_MISSING_HINT
+            else:
+                missing = f"{name} not found. {MOQ5_MISSING_HINT}"
+            return _with_moq_spawn_context(missing, binary=binary, relay_url=relay_url)
+        return _with_moq_spawn_context(
+            f"Failed to start MoQ publisher {binary}: {text}",
+            binary=binary,
+            relay_url=relay_url,
+        )
+
+    if role == "camera" or looks_like_camera_eio(text):
+        if is_eio or role == "camera":
+            return f"camera I/O error: {text}. {CAMERA_EIO_HINT}"
+
+    if role in {"ffmpeg", "camera"}:
+        if is_missing:
+            return f"ffmpeg not found ({binary or 'ffmpeg'}): {text}"
+        if is_eio:
+            return f"ffmpeg I/O error: {text}. {PIPE_EIO_HINT}"
+        return f"Failed to start ffmpeg ({binary}): {text}"
+
+    if role == "tee":
+        if is_missing:
+            return f"tee not found for MoQ capture: {text}"
+        if is_eio:
+            return f"MoQ capture tee I/O error: {text}. {PIPE_EIO_HINT}"
+        return f"Failed to start MoQ capture tee: {text}"
+
+    if is_eio:
+        # After the webcam broker, job ffmpeg reads UDP and writes pipe:1.
+        # Bare EIO on device:webcam without avfoundation tokens is that pipe.
+        if webcam and looks_like_camera_eio(text):
+            return f"camera I/O error: {text}. {CAMERA_EIO_HINT}"
+        return f"publish I/O error: {text}. {PIPE_EIO_HINT}"
+    return text
+
+
+def classify_job_exception(
+    exc: BaseException,
+    *,
+    media_path: str = "",
+    role: str = "",
+    binary: str = "",
+    relay_url: str = "",
+) -> str:
+    """Classify any job-thread exception so last_error is never a bare errno 5."""
+    text = str(exc).strip() or type(exc).__name__
+    lower = text.lower()
+    if (
+        lower.startswith("camera i/o error")
+        or lower.startswith("failed to start moq publisher")
+        or lower.startswith("publish i/o error")
+        or lower.startswith("ffmpeg i/o error")
+        or lower.startswith("obs websocket")
+        or lower.startswith("obs startstream")
+        or lower.startswith("obs openmoq")
+    ):
+        return text
+    if "shared webcam capture" in lower and "input/output error" in lower:
+        return f"camera I/O error: {text}. {CAMERA_EIO_HINT}"
+    if looks_like_camera_eio(text) and "input/output error" in lower:
+        return f"camera I/O error: {text}. {CAMERA_EIO_HINT}"
+    if is_obs_openmoq_source(media_path) or role == "obs":
+        if is_bare_eio_message(text) or "input/output error" in lower:
+            return (
+                f"OBS WebSocket I/O error ({text}). Check Tools → WebSocket Server "
+                "and that OBS is still running."
+            )
+        return f"OBS OpenMOQ encode failed: {text}."
+
+    if role:
+        inferred = role
+    elif looks_like_camera_eio(text):
+        inferred = "camera"
+    elif looks_like_moq5_exit(text):
+        inferred = "moq5"
+    elif is_device_webcam_source(media_path) or media_path.startswith("udp://"):
+        # Webcam broker already holds the camera; job-thread EIO is the pipe.
+        inferred = "ffmpeg"
+    else:
+        inferred = "job"
+    if isinstance(exc, OSError):
+        return classify_spawn_oserror(
+            exc,
+            role=inferred,
+            binary=binary,
+            media_path=media_path,
+            relay_url=relay_url,
+        )
+    if is_bare_eio_message(text) or getattr(exc, "errno", None) == errno.EIO:
+        return classify_spawn_oserror(
+            OSError(errno.EIO, "Input/output error"),
+            role=inferred,
+            binary=binary,
+            media_path=media_path,
+            relay_url=relay_url,
+        )
+    return text
+
+
+def classify_result_error(
+    error: str,
+    *,
+    media_path: str = "",
+    original_media: str = "",
+    publisher_detail: str = "",
+    backend: str = "moq5",
+    code: Optional[int] = None,
+) -> str:
+    """Split a job result error into camera vs pipe vs moq5 exit. Never both."""
+    text = (error or "").strip()
+    if not text:
+        return text
+    lower = text.lower()
+    if (
+        lower.startswith("camera i/o error")
+        or lower.startswith("ffmpeg i/o error")
+        or lower.startswith("publish i/o error")
+        or lower.startswith("failed to start moq publisher")
+        or lower.startswith("moq5 publisher")
+        or lower.startswith("openmoq publisher")
+    ):
+        return text
+    if looks_like_camera_eio(text) or (
+        "shared webcam capture" in lower and "input/output error" in lower
+    ):
+        return f"camera I/O error: {text}. {CAMERA_EIO_HINT}"
+    detail = (publisher_detail or "").strip()
+    if looks_like_moq5_exit(text) or looks_like_moq5_exit(detail):
+        return publisher_exit_error(backend, code, detail or text)
+    if (
+        looks_like_closed_pipe_eio(text)
+        or is_bare_eio_message(text)
+        or "input/output error" in lower
+    ):
+        if detail:
+            return combine_ffmpeg_closed_pipe_error(text, detail, backend=backend, code=code)
+        return f"ffmpeg I/O error: {text}. {PIPE_EIO_HINT}"
+    return text
 
 
 # Force moq5-fmp4-publish on draft-18 canaries only. Prod :4433 presets
@@ -313,16 +590,35 @@ def resolve_moq_publisher_backend() -> str:
     return backend
 
 
-def moq_publisher_backend_for_preset(preset_id: str = "") -> str:
-    """Return publisher backend, forcing moq5 on the draft-18 canary preset."""
+def moq_publisher_backend_for_preset(
+    preset_id: str = "",
+    *,
+    url: str = "",
+    draft: Optional[int] = None,
+) -> str:
+    """Return publisher backend, forcing moq5 on draft-18 canaries.
+
+    Prod :4433 stays auto/openmoq. A lost preset_id must not fall back to
+    openmoq-publisher just because the URL still says draft=18 / :14433.
+    """
     if (preset_id or "").strip() in MOQ5_FORCED_PRESET_IDS:
+        return "moq5"
+    haystack = f"{preset_id} {url}"
+    # Prod :4433 URLs omit draft= and must stay openmoq. Parsed draft defaults
+    # to 18, so do not key off `draft == 18` alone.
+    if ":14433" in haystack or "draft=18" in (url or ""):
         return "moq5"
     return resolve_moq_publisher_backend()
 
 
-def find_moq_publisher(preset_id: str = "") -> tuple[Optional[str], str]:
+def find_moq_publisher(
+    preset_id: str = "",
+    *,
+    url: str = "",
+    draft: Optional[int] = None,
+) -> tuple[Optional[str], str]:
     """Return (binary_path, backend_name)."""
-    backend = moq_publisher_backend_for_preset(preset_id)
+    backend = moq_publisher_backend_for_preset(preset_id, url=url, draft=draft)
     moq5_bin = find_moq5_publisher()
     openmoq_bin = find_openmoq_publisher()
 
@@ -357,6 +653,53 @@ def find_openmoq_publisher() -> Optional[str]:
     return None
 
 
+def infer_moq_draft_from_url(url: str) -> int:
+    """Draft for a URL that omitted ``?draft=``.
+
+    Prod ``:4433`` is draft-16 only. Defaulting those URLs to
+    ``DEFAULT_MOQ_DRAFT`` (18) made openmoq-publisher offer moqt-18 against
+    ``ghcr.io/openmoq/moqx:329b98b`` and WebTransport never connected.
+    """
+    parsed = urlparse((url or "").strip())
+    netloc = parsed.netloc or ""
+    if parsed.port == 4433 or ":4433" in netloc:
+        return 16
+    if parsed.port == 14433 or ":14433" in netloc:
+        return 18
+    return DEFAULT_MOQ_DRAFT
+
+
+def describe_moq_connect_failure(
+    *,
+    endpoint: str,
+    backend: str,
+    binary: str,
+    draft: int,
+) -> str:
+    """Job error when the publisher process ran but WT never connected."""
+    loc = f"relay={endpoint} binary={binary or backend} draft={draft}"
+    if ":4433" in (endpoint or ""):
+        if backend == "moq5" or "moq5-fmp4-publish" in (binary or ""):
+            return (
+                "The publisher ran but did not connect to the relay "
+                f"(WebTransport session never connected; no connection_id). {loc}. "
+                "moq5-fmp4-publish offered draft-18 to prod :4433, which only "
+                "forwards draft-16 (ghcr.io/openmoq/moqx:329b98b). Pick "
+                "OpenMOQ draft-18 canary · GCP us-central1 (:14433) — do not "
+                "point draft-18 traffic at prod :4433."
+            )
+        return (
+            "The publisher ran but did not connect to the relay "
+            f"(WebTransport session never connected; no connection_id). {loc}. "
+            "openmoq-publisher never got a WebTransport session on prod :4433 "
+            "(draft-16 only). This is not a player or catalog problem."
+        )
+    return (
+        "The publisher ran but did not connect to the relay "
+        f"(WebTransport session never connected; no connection_id). {loc}."
+    )
+
+
 def parse_moq_publish_url(url: str) -> MoqPublishTarget:
     parsed = urlparse(url.strip())
     if parsed.scheme not in {"https", "http", "moqt"}:
@@ -376,11 +719,14 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
 
     query = parse_qs(parsed.query)
     namespace = (query.get("namespace") or [DEFAULT_MOQ_NAMESPACE])[0].strip() or DEFAULT_MOQ_NAMESPACE
-    draft_raw = (query.get("draft") or [str(DEFAULT_MOQ_DRAFT)])[0]
-    try:
-        draft = int(draft_raw)
-    except ValueError as exc:
-        raise ValueError(f"Invalid MOQ draft query parameter: {draft_raw}") from exc
+    if query.get("draft"):
+        draft_raw = query["draft"][0]
+        try:
+            draft = int(draft_raw)
+        except ValueError as exc:
+            raise ValueError(f"Invalid MOQ draft query parameter: {draft_raw}") from exc
+    else:
+        draft = infer_moq_draft_from_url(url)
 
     forward_raw = (query.get("forward") or [str(DEFAULT_MOQ_FORWARD)])[0]
     try:
@@ -405,6 +751,8 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
 DEVICE_WEBCAM_MEDIA = "device:webcam"
 # In-browser WebCodecs + WebTransport publisher (no laptop ffmpeg agent).
 DEVICE_BROWSER_MEDIA = "device:browser"
+# OBS Studio encodes; OpenMOQ plugin + OBS SRT/RTMP outputs publish.
+OBS_OPENMOQ_MEDIA = "obs:openmoq"
 
 
 def is_device_webcam_source(media_path: str) -> bool:
@@ -415,6 +763,11 @@ def is_device_webcam_source(media_path: str) -> bool:
 def is_device_browser_source(media_path: str) -> bool:
     value = (media_path or "").strip().lower()
     return value == DEVICE_BROWSER_MEDIA or value.startswith("device:browser")
+
+
+def is_obs_openmoq_source(media_path: str) -> bool:
+    value = (media_path or "").strip().lower()
+    return value == OBS_OPENMOQ_MEDIA or value.startswith("obs:openmoq")
 
 
 def device_webcam_index(media_path: str) -> Optional[int]:
@@ -439,7 +792,12 @@ def is_live_media_source(media_path: str) -> bool:
     value = (media_path or "").strip().lower()
     return value.startswith(("udp://", "tcp://", "rtsp://", "srt://")) or is_device_webcam_source(
         media_path
-    ) or is_device_browser_source(media_path)
+    ) or is_device_browser_source(media_path) or is_obs_openmoq_source(media_path)
+
+
+def is_brokered_webcam_udp(media_path: str) -> bool:
+    """Local publisher already encoded this hop (webcam broker → loopback MPEG-TS)."""
+    return (media_path or "").strip().lower().startswith("udp://")
 
 
 def build_device_webcam_input_args(
@@ -527,13 +885,38 @@ def build_device_webcam_input_args(
 
 def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = None) -> List[str]:
     if is_device_webcam_source(media_path):
+        # Prefer a real advertised mode (same defaults as the broker).
+        # Do not leave size unset — Macs then pick portrait 1080x1920 at
+        # 1000k tbr and speed oscillates. Encode ladder still scales.
         return build_device_webcam_input_args(
             duration_sec=duration_sec,
             device_index=device_webcam_index(media_path),
+            video_size=PREFERRED_SIZE,
+            framerate=str(int(PREFERRED_FPS)),
         )
     if is_live_media_source(media_path):
-        # Webcam bridge → UDP is often VFR / discontinuous; regenerate PTS so
-        # the second encode + MoQ fMP4 tfdt stay monotonic.
+        # Copy remux must keep the broker's DTS. wallclock+genpts+igndts on a
+        # second encode made catch-up bursts look like timeline holes.
+        if is_brokered_webcam_udp(media_path):
+            # Copy → fMP4 needs SPS (width/height) before write_header.
+            # 32k / analyzeduration 0 sees "Video: h264, none" and the mp4
+            # muxer exits 234: "dimensions not set". Broker GOP is 1s with
+            # repeat-headers=1; wait one IDR, not a second encode.
+            return [
+                "-fflags",
+                "+nobuffer+discardcorrupt",
+                "-flags",
+                "low_delay",
+                "-f",
+                "mpegts",
+                "-probesize",
+                "2M",
+                "-analyzeduration",
+                "2000000",
+                "-i",
+                media_path,
+            ]
+        # Other live URLs (SRT/RTSP) still regenerate PTS for a second encode.
         return [
             "-fflags",
             "+nobuffer+genpts+discardcorrupt+igndts",
@@ -570,13 +953,46 @@ def build_ffmpeg_moq_cmd(
     # player joins on NextGroupStart with no rate catch-up — so GOP duration
     # is paid twice (fragment accumulation + join offset) and persists all
     # session. See moq_gop_frames_for_latency for the sizing rationale.
-    wallclock_pts = is_live_media_source(media_path) and not is_device_webcam_source(media_path)
-    video_args = build_video_encode_args(
-        encode_ladder,
-        target_latency_ms,
-        gop_frames=moq_gop_frames_for_latency(target_latency_ms),
-        wallclock_pts=wallclock_pts,
-    )
+    #
+    # Webcam UDP is already H.264 from the broker. A second x264 (even
+    # ultrafast) still ran at 24↔37 fps / 0.84↔1.28× while the RTMP sibling
+    # held 30/0.99 (comparison CSV 2026-08-21). Remux copy; groups follow
+    # the master's 1s IDRs.
+    if is_brokered_webcam_udp(media_path):
+        # Video copy. Audio must be re-encoded: empty_moov writes the
+        # header before the first ADTS packet, so -c:a copy leaves no
+        # AudioSpecificConfig and moq5 fails "CMAF track 1" (job 7037dc27).
+        video_args = ["-c:v", "copy"]
+        audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
+    elif is_device_webcam_source(media_path):
+        # Solo webcam MoQ: one encode, same GOP/preset as the broker master.
+        # Isolates the UDP remux hop we already proved is not the stall.
+        video_args = build_video_encode_args(
+            encode_ladder,
+            target_latency_ms,
+            # 0.5s groups: if visible freezes shrink vs 1s GOP, it's
+            # NextGroupStart wait. Publisher logs obj vide wall_dt_ms.
+            gop_frames=max(1, int(round(PREFERRED_FPS / 2))),
+            preset="ultrafast",
+            output_cfr=False,
+            rebase_pts=True,
+        )
+        audio_args = [
+            *BROWSER_COMPAT_AUDIO_ARGS,
+            "-af",
+            "asetpts=PTS-STARTPTS",
+        ]
+    else:
+        wallclock_pts = is_live_media_source(media_path) and not is_device_webcam_source(
+            media_path
+        )
+        video_args = build_video_encode_args(
+            encode_ladder,
+            target_latency_ms,
+            gop_frames=moq_gop_frames_for_latency(target_latency_ms),
+            wallclock_pts=wallclock_pts,
+        )
+        audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
     return [
         find_ffmpeg(),
         *build_ffmpeg_input_args(media_path, duration_sec=duration_sec),
@@ -589,7 +1005,7 @@ def build_ffmpeg_moq_cmd(
         "-sn",
         "-dn",
         *video_args,
-        *BROWSER_COMPAT_AUDIO_ARGS,
+        *audio_args,
         "-progress",
         progress_path,
         "-nostats",
@@ -668,6 +1084,34 @@ def should_pace_moq_publisher(media_path: str = "") -> bool:
     """
     del media_path
     return False
+
+
+def publisher_first_object_sent(log_text: str) -> bool:
+    """True when the publisher logged a successful first media object.
+
+    ``live: sent track=`` is moq5 / openmoq first-group write (MOQ_OK).
+    CONNECT / ``connection_id=`` alone is not publish success.
+    """
+    text = log_text or ""
+    return "live: sent track=" in text or "MOQ_OK" in text
+
+
+def publisher_catalog_published(log_text: str) -> bool:
+    """True when the first live catalog already has vide (not CONNECT alone).
+
+    Linode canary admin :18000 is not public, so the moqx poller cannot
+    confirm announce. ``sender ready`` / attach-after-moov is the local
+    proof the retained catalog is fetchable. ``live: sent`` without that
+    is the old attach-before-moov binary (empty group-0 catalog).
+    """
+    text = log_text or ""
+    if "sender ready (namespace + catalog published)" in text:
+        return True
+    return (
+        "attaching sender after CMAF init" in text
+        and "track added: vide" in text
+        and ("obj vide wall_dt_ms=" in text or "live: sent track=vide" in text)
+    )
 
 
 def publisher_webtransport_connected(log_text: str) -> bool:

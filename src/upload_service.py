@@ -25,13 +25,20 @@ from encode_profile import (
     build_video_encode_args,
     clamp_srt_target_latency_ms,
     clamp_target_latency_ms,
+    delivery_gop_frames,
     effective_srt_caller_latency_ms,
     encode_profile_summary,
     with_srt_latency,
 )
 from endpoint_probe import probe_endpoint
 from ingest_host_metrics import IngestHostMetricsPoller
-from metrics import EncodeLagTracker, MetricsCollector
+from latency_budget import build_latency_budget, encode_frame_drop_pct
+from metrics import (
+    EncodeLagTracker,
+    MetricsCollector,
+    UploadLatencyTracker,
+    ffmpeg_bits_ready,
+)
 from moq_preview import (
     moq_job_should_fail_without_namespace,
     moq_publish_missing_error,
@@ -40,7 +47,14 @@ from moq_preview import (
 from moq_publish import (
     BROWSER_COMPAT_AUDIO_ARGS,
     WHIP_COMPAT_AUDIO_ARGS,
+    MOQ5_MISSING_HINT,
+    classify_spawn_oserror,
+    combine_ffmpeg_closed_pipe_error,
+    looks_like_closed_pipe_eio,
+    describe_moq_connect_failure,
     publisher_exit_error,
+    publisher_catalog_published,
+    publisher_first_object_sent,
     publisher_webtransport_connected,
     should_pace_moq_publisher,
     MPEGTS_VIDEO_BSF,
@@ -51,6 +65,7 @@ from moq_publish import (
     ffmpeg_has_whip_muxer,
     find_moq_publisher,
     whip_ffmpeg_missing_error,
+    is_brokered_webcam_udp,
     is_device_webcam_source,
     is_live_media_source,
     mediamtx_loopback_publish_url,
@@ -226,6 +241,8 @@ class UploadJob:
     # "cloud" = encode on the API host (default). "local" = dispatch to a
     # connected publisher agent (laptop) for true internet-acquisition tests.
     publisher_host: str = "cloud"
+    # "ffmpeg" (default) or "obs" (OpenMOQ plugin + OBS SRT/RTMP outputs).
+    encoder: str = "ffmpeg"
     cancel_event: Optional[threading.Event] = None
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
@@ -247,6 +264,10 @@ class UploadJob:
         default=None, repr=False
     )
     _media_zero_sent: bool = field(default=False, init=False, repr=False)
+    # Last measured encoder→packager transit (ms). Kept on the job, not just
+    # pushed to the callback, so the sample loop can attribute it as the
+    # packager component of the latency budget.
+    _packager_transit_ms: float = field(default=0.0, init=False, repr=False)
     _media_zero_epoch: Optional[float] = field(default=None, init=False, repr=False)
     _delivery_origin_sent: bool = field(default=False, init=False, repr=False)
     # JobManager sets this so the UI can show "computing" the moment the
@@ -290,19 +311,24 @@ class UploadJob:
             self.media_path
         )
         vbv_stable = self.destination.protocol == "srt"
-        if self._is_mediamtx_destination():
-            return build_video_encode_args(
-                self.encode_ladder,
-                self.target_latency_ms,
-                gop_frames=ASSUMED_FPS,  # 1s keyframe interval
-                wallclock_pts=wallclock_pts,
-                vbv_stability=vbv_stable,
-            )
+        live_udp = self.media_path.startswith("udp://")
+        child_preset = "ultrafast" if live_udp else None
+        # Webcam broker already emitted H.264. A second x264 plus the WHIP
+        # muxer is what died at ~20s on c49d2ef4 (fps→0, encode_lag 31s,
+        # 8 stalls). Copy video; Opus is still required for `-f whip`.
+        if self.destination.protocol == "webrtc" and is_brokered_webcam_udp(self.media_path):
+            return ["-c:v", "copy"]
+        # One IDR cadence for every delivery path (MediaMTX LL-HLS, Zixi Fast
+        # HLS / HTTP-TS): 1s. Zixi used to inherit the 2s chunk duration as its
+        # GOP, which put a 2s floor under RTMP TTFF for no packager benefit —
+        # 1s still divides the 2s chunk exactly. See delivery_gop_frames().
         return build_video_encode_args(
             self.encode_ladder,
             self.target_latency_ms,
+            gop_frames=delivery_gop_frames(self.target_latency_ms),
             wallclock_pts=wallclock_pts,
             vbv_stability=vbv_stable,
+            preset=child_preset,
         )
 
     def _uses_zixi_mpegts_output(self) -> bool:
@@ -484,6 +510,60 @@ class UploadSample:
     quic_rtt_ms: float = 0.0
     quic_cwnd_bytes: int = 0
     quic_packets_lost: int = 0
+    upload_latency_ms: Optional[float] = None
+    # Latency decomposition + frame accounting (src/latency_budget.py). Streamed
+    # live so the operator can attribute a slow leg while it is still running,
+    # not only after the CSV lands.
+    latency_encode_ms: float = 0.0
+    latency_publish_ms: float = 0.0
+    latency_network_ms: float = 0.0
+    latency_packager_ms: float = 0.0
+    latency_player_buffer_ms: float = 0.0
+    latency_accounted_ms: float = 0.0
+    latency_residual_ms: float = 0.0
+    encode_frames_total: int = 0
+    encode_frames_dropped: int = 0
+    encode_frames_duped: int = 0
+    encode_frame_drop_pct: float = 0.0
+
+
+def _apply_latency_budget(
+    sample: "UploadSample",
+    *,
+    status,
+    pipeline_baseline_ms: float,
+    packager_transit_ms: float,
+) -> None:
+    """Fill the live sample's latency components and frame ratios in place.
+
+    Player-side inputs (buffer, e2e) are not visible to the encoder loop, so
+    the player-buffer component and residual stay 0 here and are recomputed
+    against merged playback values when the CSV is finalized
+    (``playback_metrics._recompute_derived``). Everything upstream of the
+    browser is exact at this point.
+    """
+    budget = build_latency_budget(
+        pipeline_baseline_ms=pipeline_baseline_ms,
+        encode_lag_ms=sample.encode_lag_ms,
+        upload_latency_ms=sample.upload_latency_ms,
+        net_rtt_ms=sample.net_rtt_ms,
+        packager_transit_ms=packager_transit_ms,
+        e2e_latency_ms=sample.e2e_latency_ms,
+    )
+    sample.latency_encode_ms = budget.encode_ms
+    sample.latency_publish_ms = budget.publish_ms
+    sample.latency_network_ms = budget.network_ms
+    sample.latency_packager_ms = budget.packager_ms
+    sample.latency_player_buffer_ms = budget.player_buffer_ms
+    sample.latency_accounted_ms = budget.accounted_ms
+    sample.latency_residual_ms = budget.residual_ms
+    sample.encode_frames_total = max(0, int(getattr(status, "frame", 0) or 0))
+    sample.encode_frames_dropped = max(0, int(getattr(status, "drop_frames", 0) or 0))
+    sample.encode_frames_duped = max(0, int(getattr(status, "dup_frames", 0) or 0))
+    sample.encode_frame_drop_pct = encode_frame_drop_pct(
+        frames_total=sample.encode_frames_total,
+        frames_dropped=sample.encode_frames_dropped,
+    )
 
 
 @dataclass
@@ -514,6 +594,26 @@ def _sample_cloud_fields(destination: DestinationProfile) -> dict[str, str]:
 
 def _is_mediamtx_provider(ingest_provider: str) -> bool:
     return (ingest_provider or "").strip().lower().endswith("_mediamtx")
+
+
+def _observe_upload_latency(
+    tracker: UploadLatencyTracker,
+    *,
+    encode_ready: bool,
+    publish_success: bool,
+) -> Optional[float]:
+    tracker.note_encode_ready(encode_ready)
+    tracker.note_publish_success(publish_success)
+    return tracker.value_ms
+
+
+def _ingest_receive_observed(mtx=None, *, send_mbps: float = 0.0) -> bool:
+    if mtx is not None and (
+        float(getattr(mtx, "bytes_received", 0) or 0) > 0
+        or float(getattr(mtx, "net_recv_mbps", 0) or 0) > 0
+    ):
+        return True
+    return send_mbps > 0
 
 
 def _is_zixi_provider(ingest_provider: str) -> bool:
@@ -577,6 +677,8 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
+        if (getattr(job, "encoder", "ffmpeg") or "ffmpeg").strip().lower() == "obs":
+            return self._run_obs_monitor(job, on_sample=on_sample)
         if job.destination.protocol == "srt":
             if job.managed_zixi_stream_id():
                 logger.info(
@@ -604,6 +706,51 @@ class UploadService:
         if job.destination.protocol == "moq":
             return self._run_moq_pipeline(job, on_sample=on_sample)
         return self._run_direct_ffmpeg(job, on_sample=on_sample)
+
+    def _run_obs_monitor(
+        self,
+        job: UploadJob,
+        on_sample: Optional[SampleCallback] = None,
+    ) -> UploadResult:
+        """OBS is encoding; this job only keeps the comparison live until Stop."""
+        collector = MetricsCollector(
+            protocol=job.destination.protocol,
+            endpoint_url=job.destination.url,
+            run_id=job.job_id,
+            cloud_provider=job.destination.cloud_provider or "",
+            cloud_region=job.destination.cloud_region or "",
+        )
+        if job.on_media_zero:
+            try:
+                job.on_media_zero(time.time())
+            except Exception:  # noqa: BLE001
+                logger.debug("on_media_zero failed for OBS job", exc_info=True)
+        if job.on_preview_ready:
+            try:
+                job.on_preview_ready(True)
+            except Exception:  # noqa: BLE001
+                logger.debug("on_preview_ready failed for OBS job", exc_info=True)
+        started = time.monotonic()
+        duration = max(5, int(job.duration_sec or 60))
+        while time.monotonic() - started < duration:
+            if job.is_cancelled():
+                break
+            if on_sample is not None:
+                on_sample(
+                    UploadSample(
+                        elapsed_sec=int(time.monotonic() - started),
+                        encoded_bitrate_kbps=0.0,
+                        fps=0.0,
+                        fps_stability=1.0,
+                        speed=1.0,
+                        out_time="",
+                        cpu_percent=0.0,
+                        memory_mb=0.0,
+                        progress="continue",
+                    )
+                )
+            time.sleep(1.0)
+        return self._finalize_result(job, collector)
 
     def _run_direct_ffmpeg(
         self,
@@ -663,6 +810,17 @@ class UploadService:
         except FileNotFoundError:
             stop_preview.set()
             return UploadResult(success=False, error="ffmpeg not found in PATH")
+        except OSError as exc:
+            stop_preview.set()
+            return UploadResult(
+                success=False,
+                error=classify_spawn_oserror(
+                    exc,
+                    role="ffmpeg",
+                    binary=ffmpeg_cmd[0] if ffmpeg_cmd else "",
+                    media_path=job.media_path,
+                ),
+            )
 
         progress_reader = FfmpegProgressReader(process.stdout)
         zixi_stats_url = (
@@ -688,6 +846,7 @@ class UploadService:
         path_rtt_probe = self._path_rtt_probe_for_job(job)
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
+        upload_latency_tracker = UploadLatencyTracker()
         sample_tick = 1
         had_samples = False
         # Zixi tears down and recreates its RTMP push input between runs; a
@@ -737,7 +896,10 @@ class UploadService:
                             early_exit_retries,
                             _EARLY_EXIT_MAX_RETRIES,
                         )
-                        time.sleep(2.0)
+                        # Zixi accepts the recreated RTMP input almost
+                        # immediately; a 2s sleep was pure added TTFF on a leg
+                        # that has to retry.
+                        time.sleep(0.75)
                         # Source restarts from media 0 — move the anchor too.
                         self._stamp_media_zero(job, restamp=True)
                         process = subprocess.Popen(
@@ -748,6 +910,7 @@ class UploadService:
                         progress_reader = FfmpegProgressReader(process.stdout)
                         start_time = time.time()
                         encode_lag_tracker = EncodeLagTracker()
+                        upload_latency_tracker = UploadLatencyTracker()
                         sample_tick = 1
                         had_samples = False
                         continue
@@ -776,6 +939,15 @@ class UploadService:
                     ffmpeg_kbps=status.bitrate_kbps,
                     merged_send_mbps=merged["net_send_mbps"],
                 )
+                upload_latency_ms = _observe_upload_latency(
+                    upload_latency_tracker,
+                    encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
+                    publish_success=_ingest_receive_observed(mtx_stats)
+                    or (
+                        job.destination.protocol == "rtmp"
+                        and (zixi_stats.rtt_ms or 0) > 0
+                    ),
+                )
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
@@ -796,6 +968,7 @@ class UploadService:
                     net_loss_pct=merged["net_loss_pct"],
                     net_retrans_pct=merged["net_retrans_pct"],
                     encode_lag_ms=encode_lag_ms,
+                    upload_latency_ms=upload_latency_ms,
                     pkt_rcv_drop=merged["pkt_rcv_drop"],
                     pkt_snd_drop=merged["pkt_snd_drop"],
                     pkt_snd_loss=merged["pkt_snd_loss"],
@@ -809,6 +982,12 @@ class UploadService:
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
                     **_sample_cloud_fields(job.destination),
+                )
+                _apply_latency_budget(
+                    sample,
+                    status=status,
+                    pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    packager_transit_ms=job._packager_transit_ms,
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=process.pid,
@@ -827,6 +1006,12 @@ class UploadService:
                     encoder_send_rate_mbps=sample.encoder_send_rate_mbps,
                     transport_recv_rate_mbps=sample.transport_recv_rate_mbps,
                     encode_lag_ms=encode_lag_ms,
+                    encode_pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    encode_frames_total=status.frame,
+                    encode_frames_dropped=status.drop_frames,
+                    encode_frames_duped=status.dup_frames,
+                    packager_transit_ms=job._packager_transit_ms,
+                    upload_latency_ms=sample.upload_latency_ms,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -890,6 +1075,10 @@ class UploadService:
             logger.warning("on_media_zero callback failed", exc_info=True)
 
     def _notify_packager_transit(self, job: UploadJob, transit_ms: float) -> None:
+        try:
+            job._packager_transit_ms = max(0.0, float(transit_ms))
+        except (TypeError, ValueError):
+            job._packager_transit_ms = 0.0
         callback = job.on_packager_transit
         if not callback:
             return
@@ -1240,10 +1429,14 @@ class UploadService:
             rolling_sig: Optional[tuple] = None
             rolling_since: Optional[float] = None
             while not stop_event.is_set():
+                # Short timeout: the probe reads 8×188B, which returns in tens
+                # of ms on a healthy origin. A 2.5s ceiling only ever paid for
+                # itself on a dead origin, where it serialized with the 0.5s
+                # sleep into a ~3s quantum on the RTMP join path.
                 ts_ok = probe_http_ts_ready(
                     http_ts_id,
                     endpoint_url=job.destination.url,
-                    timeout=2.5,
+                    timeout=1.2,
                 ).ok
                 manifest_url = self._managed_hls_manifest_url(job)
                 hls = None
@@ -1307,7 +1500,9 @@ class UploadService:
                             bad_since = None
                             rolling_sig = None
                             rolling_since = None
-                stop_event.wait(0.5)
+                # Poll hard until the gate opens (this interval is directly on
+                # the join path), then back off to the heal-watch cadence.
+                stop_event.wait(0.5 if notified else 0.2)
             return
         manifest_url = self._managed_hls_manifest_url(job)
         if not manifest_url:
@@ -1701,6 +1896,7 @@ class UploadService:
         path_rtt_probe = self._path_rtt_probe_for_job(job)
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
+        upload_latency_tracker = UploadLatencyTracker()
         sample_tick = 1
         manifest_url = self._managed_hls_manifest_url(job)
         had_samples = False
@@ -1914,6 +2110,12 @@ class UploadService:
                 )
                 transport_rtt_ms = merged["net_rtt_ms"]
                 transport_rtt_jitter_ms = merged["net_jitter_ms"]
+                upload_latency_ms = _observe_upload_latency(
+                    upload_latency_tracker,
+                    encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
+                    publish_success=(srt_stats.mbps_send_rate or 0) > 0
+                    or _ingest_receive_observed(mtx_stats),
+                )
 
                 sample = UploadSample(
                     elapsed_sec=elapsed,
@@ -1934,6 +2136,7 @@ class UploadService:
                     net_loss_pct=merged["net_loss_pct"],
                     net_retrans_pct=merged["net_retrans_pct"],
                     encode_lag_ms=encode_lag_ms,
+                    upload_latency_ms=upload_latency_ms,
                     pkt_rcv_drop=merged["pkt_rcv_drop"],
                     pkt_snd_drop=merged["pkt_snd_drop"],
                     pkt_snd_loss=merged["pkt_snd_loss"],
@@ -1948,6 +2151,12 @@ class UploadService:
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
                     **_sample_cloud_fields(job.destination),
+                )
+                _apply_latency_budget(
+                    sample,
+                    status=status,
+                    pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    packager_transit_ms=job._packager_transit_ms,
                 )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
@@ -1968,6 +2177,12 @@ class UploadService:
                     encoder_send_rate_mbps=sample.encoder_send_rate_mbps,
                     transport_recv_rate_mbps=sample.transport_recv_rate_mbps,
                     encode_lag_ms=encode_lag_ms,
+                    encode_pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    encode_frames_total=status.frame,
+                    encode_frames_dropped=status.drop_frames,
+                    encode_frames_duped=status.dup_frames,
+                    packager_transit_ms=job._packager_transit_ms,
+                    upload_latency_ms=sample.upload_latency_ms,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -2032,17 +2247,27 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
-        publisher_bin, publisher_backend = find_moq_publisher(job.destination.preset_id)
+        target = job.destination.moq_target
+        publisher_bin, publisher_backend = find_moq_publisher(
+            job.destination.preset_id,
+            url=job.destination.url,
+            draft=target.draft if target is not None else None,
+        )
         if not publisher_bin:
+            relay = (target.endpoint if target is not None else "") or job.destination.url
+            if publisher_backend == "moq5":
+                return UploadResult(
+                    success=False,
+                    error=f"{MOQ5_MISSING_HINT} (relay={relay}, backend=moq5).",
+                )
             return UploadResult(
                 success=False,
                 error=(
                     "MoQ publisher not found. Install moq5 with ./scripts/install-moq5.sh "
-                    "or openmoq with ./scripts/install-openmoq-publisher.sh."
+                    "or openmoq with ./scripts/install-openmoq-publisher.sh. "
+                    f"(relay={relay}, backend={publisher_backend})."
                 ),
             )
-
-        target = job.destination.moq_target
         if target is None:
             return UploadResult(success=False, error="MOQ destination is missing publish settings.")
 
@@ -2088,7 +2313,8 @@ class UploadService:
         ffmpeg_log_path = os.path.join(temp_dir, "ffmpeg-stderr.log")
         print(
             f"MoQ publish via {publisher_backend}: namespace={target.namespace} "
-            f"log={publisher_log_path} ffmpeg_log={ffmpeg_log_path} cmd={' '.join(publisher_cmd)}",
+            f"log={publisher_log_path} ffmpeg_log={ffmpeg_log_path} "
+            f"ffmpeg={' '.join(ffmpeg_cmd)} publisher={' '.join(publisher_cmd)}",
             flush=True,
         )
 
@@ -2109,12 +2335,23 @@ class UploadService:
             # pays container startup before WebTransport CONNECT. Starting
             # ffmpeg first (bench-733f1d7c) let encode finish 240 CMAF
             # fragments while the relay never saw PUBLISH_NAMESPACE.
-            publisher_proc = subprocess.Popen(
-                publisher_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
+            try:
+                publisher_proc = subprocess.Popen(
+                    publisher_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError as exc:
+                return UploadResult(
+                    success=False,
+                    error=classify_spawn_oserror(
+                        exc,
+                        role="moq5" if publisher_backend == "moq5" else "publisher",
+                        binary=publisher_bin,
+                        relay_url=target.endpoint,
+                    ),
+                )
             if publisher_proc.stdout is not None:
                 stdout_drain_thread = threading.Thread(
                     target=self._drain_stream_to_file,
@@ -2129,20 +2366,46 @@ class UploadService:
                     daemon=True,
                 )
                 drain_thread.start()
+            # Publisher Popen must own stdin BEFORE ffmpeg writes. Draft-18
+            # delays CONNECT/catalog attach until moov (C-side
+            # ensure_sender_attached) — that must not delay this process.
+            # Webcam's first moov is slower than file; if moq5 is not
+            # already reading the pipe, ffmpeg hits SIGPIPE/EIO (bare
+            # errno 5 on the job).
             # Feed ftyp immediately. openmoq-publisher often CONNECTs only
             # after it sees init (west smoke: ftyp → discovered → connection_id).
             # Waiting on an empty stdin (job 265e8f25) SIGKILL'd the publisher
             # at code -9 while it was still sitting on "waiting for ftyp+moov".
-            ffmpeg_proc = subprocess.Popen(
-                ffmpeg_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            if ffmpeg_proc.stdout is not None and publisher_proc.stdin is not None:
-                tee_proc = start_moq_capture_tee(
-                    ffmpeg_proc.stdout,
-                    job.encoder_capture_path,
+            try:
+                ffmpeg_proc = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
+            except OSError as exc:
+                self._terminate_process(publisher_proc)
+                return UploadResult(
+                    success=False,
+                    error=classify_spawn_oserror(
+                        exc,
+                        role="ffmpeg",
+                        binary=ffmpeg_cmd[0] if ffmpeg_cmd else "",
+                        media_path=job.media_path,
+                    ),
+                )
+            if ffmpeg_proc.stdout is not None and publisher_proc.stdin is not None:
+                try:
+                    tee_proc = start_moq_capture_tee(
+                        ffmpeg_proc.stdout,
+                        job.encoder_capture_path,
+                    )
+                except OSError as exc:
+                    self._terminate_process(publisher_proc)
+                    self._terminate_process(ffmpeg_proc)
+                    return UploadResult(
+                        success=False,
+                        error=classify_spawn_oserror(exc, role="tee"),
+                    )
                 ffmpeg_proc.stdout.close()
                 if tee_proc.stdout is not None:
                     fanout_thread = threading.Thread(
@@ -2185,6 +2448,7 @@ class UploadService:
         path_rtt_probe = PathRttProbe(job.destination.url)
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
+        upload_latency_tracker = UploadLatencyTracker()
         sample_tick = 1
         prev_moqx_loss = 0
         prev_moqx_retrans = 0
@@ -2231,6 +2495,29 @@ class UploadService:
                     if outcome is None:
                         logger.info("ffmpeg finished before duration; finalizing MoQ job")
                         break
+                    ffmpeg_err = outcome.error or ""
+                    if looks_like_closed_pipe_eio(ffmpeg_err) or (
+                        "input/output error" in ffmpeg_err.lower()
+                    ):
+                        if drain_thread is not None:
+                            drain_thread.join(timeout=1)
+                        if stdout_drain_thread is not None:
+                            stdout_drain_thread.join(timeout=1)
+                        pub_log = (
+                            self._tail_file(publisher_log_path)
+                            or self._tail_file(publisher_stdout_path)
+                        )
+                        pub_code = publisher_proc.poll()
+                        if pub_log or pub_code is not None:
+                            return UploadResult(
+                                success=False,
+                                error=combine_ffmpeg_closed_pipe_error(
+                                    ffmpeg_err,
+                                    pub_log,
+                                    backend=publisher_backend,
+                                    code=pub_code,
+                                ),
+                            )
                     return outcome
                 if publisher_proc.poll() is not None:
                     if drain_thread is not None:
@@ -2285,9 +2572,14 @@ class UploadService:
                 moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
                 moqx_deltas = moqx_poller.job_window_deltas() if moqx_poller.enabled else None
                 if not preview_ready_notified:
-                    publish_confirmed = (
-                        moqx_poller.enabled and moqx_poller.publish_namespace_success_delta() >= 1
+                    pub_ready_log = (
+                        f"{self._tail_file(publisher_log_path)}\n"
+                        f"{self._tail_file(publisher_stdout_path)}"
                     )
+                    publish_confirmed = (
+                        moqx_poller.enabled
+                        and moqx_poller.publish_namespace_success_delta() >= 1
+                    ) or publisher_catalog_published(pub_ready_log)
                     if should_mark_moq_preview_ready(
                         publish_confirmed=publish_confirmed,
                         poller_enabled=moqx_poller.observing,
@@ -2331,6 +2623,23 @@ class UploadService:
                         net_loss_pct = min(100.0, (loss_delta / denom) * 100.0)
                         net_retrans_pct = min(100.0, (retrans_delta / denom) * 100.0)
 
+                wt_log = (
+                    f"{self._tail_file(publisher_log_path)}\n"
+                    f"{self._tail_file(publisher_stdout_path)}"
+                )
+                upload_latency_ms = _observe_upload_latency(
+                    upload_latency_tracker,
+                    encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
+                    publish_success=(
+                        publisher_first_object_sent(wt_log)
+                        or (
+                            moqx_poller.enabled
+                            and moqx_poller.publish_namespace_success_delta() >= 1
+                        )
+                        or (moqx_stats is not None and (moqx_stats.publish_received or 0) > 0)
+                    ),
+                )
+
                 sample = UploadSample(
                     elapsed_sec=elapsed,
                     encoded_bitrate_kbps=encoded_bitrate_kbps,
@@ -2350,6 +2659,7 @@ class UploadService:
                     net_loss_pct=net_loss_pct,
                     net_retrans_pct=net_retrans_pct,
                     encode_lag_ms=encode_lag_ms,
+                    upload_latency_ms=upload_latency_ms,
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
                     server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
@@ -2370,6 +2680,12 @@ class UploadService:
                     quic_packets_lost=quic_packets_lost,
                     **_sample_cloud_fields(job.destination),
                 )
+                _apply_latency_budget(
+                    sample,
+                    status=status,
+                    pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    packager_transit_ms=job._packager_transit_ms,
+                )
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
                     encoded_bitrate_kbps=encoded_bitrate_kbps,
@@ -2382,6 +2698,12 @@ class UploadService:
                     transport_rtt_jitter_ms=net_jitter,
                     encoder_send_rate_mbps=send_mbps,
                     encode_lag_ms=encode_lag_ms,
+                    encode_pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
+                    encode_frames_total=status.frame,
+                    encode_frames_dropped=status.drop_frames,
+                    encode_frames_duped=status.dup_frames,
+                    packager_transit_ms=job._packager_transit_ms,
+                    upload_latency_ms=sample.upload_latency_ms,
                     net_rtt_ms=net_rtt,
                     net_jitter_ms=net_jitter,
                     net_send_mbps=send_mbps,
@@ -2411,6 +2733,15 @@ class UploadService:
         except KeyboardInterrupt:
             logger.info("Upload interrupted.")
             return UploadResult(success=False, error="Upload interrupted")
+        except OSError as exc:
+            return UploadResult(
+                success=False,
+                error=classify_spawn_oserror(
+                    exc,
+                    role="ffmpeg",
+                    media_path=job.media_path,
+                ),
+            )
         finally:
             # Stop encode first so the publisher sees stdin EOF and can
             # finish in-flight groups. SIGKILL-ing the Docker wrapper while
@@ -2447,7 +2778,7 @@ class UploadService:
                 stdout_drain_thread.join(timeout=2)
             if ffmpeg_drain_thread is not None:
                 ffmpeg_drain_thread.join(timeout=2)
-            tail = self._tail_file(publisher_log_path, max_lines=15)
+            tail = self._tail_file(publisher_log_path, max_lines=40)
             if tail:
                 print(f"MoQ publisher log tail ({publisher_log_path}):\n{tail}", flush=True)
             stdout_tail = self._tail_file(publisher_stdout_path, max_lines=10)
@@ -2476,17 +2807,21 @@ class UploadService:
                 quic_qlog_dir=qlog_dir,
             )
             finalized.success = False
-            finalized.error = moq_publish_missing_error(
-                namespace=namespace,
-                observing=True,
-            )
             wt_log = (
                 f"{self._tail_file(publisher_stdout_path, max_lines=20)}\n"
                 f"{self._tail_file(publisher_log_path, max_lines=20)}"
             )
             if not publisher_webtransport_connected(wt_log):
-                finalized.error += (
-                    " WebTransport session never connected (no connection_id)."
+                finalized.error = describe_moq_connect_failure(
+                    endpoint=target.endpoint,
+                    backend=publisher_backend,
+                    binary=publisher_bin,
+                    draft=target.draft,
+                )
+            else:
+                finalized.error = moq_publish_missing_error(
+                    namespace=namespace,
+                    observing=True,
                 )
             return finalized
 
@@ -2796,6 +3131,15 @@ class UploadService:
             )
         detail = ffmpeg_stderr_useful_detail(stderr) or "unknown error"
         message = f"ffmpeg exited with code {process.returncode}: {detail}"
+        if "Input/output error" in stderr and (
+            "avfoundation" in stderr.lower() or "v4l2" in stderr.lower()
+        ):
+            message = (
+                f"camera I/O error: {message} The camera may be busy, unplugged, "
+                "or already open in another app (AVFoundation exclusive open)."
+            )
+        elif looks_like_closed_pipe_eio(stderr) or looks_like_closed_pipe_eio(message):
+            message = combine_ffmpeg_closed_pipe_error(message, "")
         if "Input/output error" in stderr and "rtmp://" in stderr.lower():
             message += (
                 " Zixi RTMP push requires an ONLINE push input whose Stream ID matches "

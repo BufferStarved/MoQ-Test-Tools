@@ -26,7 +26,7 @@ from playback_metrics import (
     robust_e2e_stats,
 )
 from encode_profile import encode_profile_summary
-from moq_publish import is_device_browser_source
+from moq_publish import classify_job_exception, classify_result_error, is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
 from publisher_protocol import sample_to_dict
@@ -472,7 +472,10 @@ class JobManager:
                 self._update(
                     job_id,
                     status=JobStatus.FAILED,
-                    error=result.error or "Upload failed",
+                    error=classify_result_error(
+                        result.error or "Upload failed",
+                        media_path=str(getattr(job, "media_path", "") or ""),
+                    ),
                     csv_path=csv_path,
                     summary_path=result.summary_path,
                     vmaf_status=VmafStatus.FAILED.value if job.compute_vmaf_on_ingest else VmafStatus.DISABLED.value,
@@ -486,7 +489,11 @@ class JobManager:
             self._update(
                 job_id,
                 status=JobStatus.FAILED,
-                error=str(exc) or "Upload failed",
+                error=classify_job_exception(
+                    exc,
+                    media_path=str(getattr(job, "media_path", "") or ""),
+                )
+                or "Upload failed",
             )
             raise
         finally:

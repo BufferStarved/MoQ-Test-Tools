@@ -3,10 +3,11 @@ import json
 import logging
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import psutil
 
+from latency_budget import build_frame_row, build_latency_budget
 from srt_stats import SrtStatsSummary, summarize_srt_rows
 from stats_window import RollingWindow
 
@@ -33,6 +34,24 @@ CSV_COLUMNS = [
     "fps_stability",
     "speed",
     "encode_lag_ms",
+    "upload_latency_ms",
+    # Per-component latency decomposition (see src/latency_budget.py). These
+    # sum to latency_accounted_ms; e2e_latency_ms minus that is the residual.
+    "latency_encode_ms",
+    "latency_publish_ms",
+    "latency_network_ms",
+    "latency_packager_ms",
+    "latency_player_buffer_ms",
+    "latency_accounted_ms",
+    "latency_residual_ms",
+    # Frame accounting, normalized so encoder and glass use the same
+    # denominator convention (see src/latency_budget.py).
+    "encode_frames_total",
+    "encode_frames_dropped",
+    "encode_frames_duped",
+    "encode_frame_drop_pct",
+    "playback_frame_drop_pct",
+    "frame_delivery_pct",
     "out_time",
     "transport_rtt_ms",
     "transport_rtt_jitter_ms",
@@ -143,6 +162,61 @@ class EncodeLagTracker:
             self._baseline_ms = raw_ms
         return round(max(0.0, raw_ms - self._baseline_ms), 1)
 
+    @property
+    def pipeline_baseline_ms(self) -> float:
+        """The constant startup offset this tracker subtracts from every sample.
+
+        Not encoder *lag*, but real capture→muxed delay that the glass sees.
+        ``latency_budget.encode_latency_ms`` adds it back so the latency
+        decomposition accounts for it exactly once instead of dropping it.
+        """
+        return round(self._baseline_ms or 0.0, 1)
+
+
+def ffmpeg_bits_ready(out_time: str, total_bytes: int = 0) -> bool:
+    """Encode-ready: ffmpeg has muxed at least one packet."""
+    return parse_out_time_seconds(out_time) > 0 or int(total_bytes or 0) > 0
+
+
+class UploadLatencyTracker:
+    """Publisher→ingest: encode-ready wall time to first confirmed publish.
+
+    One-shot like TTFF. Not RTT and not glass-to-glass. Stays None until both
+    signals exist so the UI can show "—" instead of a fake 0.
+    """
+
+    def __init__(self) -> None:
+        self._encode_ready_mono: Optional[float] = None
+        self._latency_ms: Optional[float] = None
+
+    def note_encode_ready(
+        self,
+        ready: bool,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if ready and self._encode_ready_mono is None:
+            self._encode_ready_mono = clock()
+
+    def note_publish_success(
+        self,
+        success: bool,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[float]:
+        if self._latency_ms is not None:
+            return self._latency_ms
+        if not success:
+            return None
+        if self._encode_ready_mono is None:
+            self._encode_ready_mono = clock()
+        self._latency_ms = max(0.0, round((clock() - self._encode_ready_mono) * 1000.0, 1))
+        return self._latency_ms
+
+    @property
+    def value_ms(self) -> Optional[float]:
+        return self._latency_ms
+
 
 class MetricsCollector:
     def __init__(
@@ -247,6 +321,12 @@ class MetricsCollector:
         playback_error_count: int = 0,
         e2e_latency_ms: float = 0.0,
         encode_lag_ms: float = 0.0,
+        encode_pipeline_baseline_ms: float = 0.0,
+        encode_frames_total: int = 0,
+        encode_frames_dropped: int = 0,
+        encode_frames_duped: int = 0,
+        packager_transit_ms: float = 0.0,
+        upload_latency_ms: Optional[float] = None,
         net_rtt_ms: float = 0.0,
         net_jitter_ms: float = 0.0,
         net_send_mbps: float = 0.0,
@@ -329,6 +409,28 @@ class MetricsCollector:
             resolved_playback_errors = playback_error_count or (
                 playback_hls_errors + playback_hls_fatal_errors
             )
+            # The baseline the sample loop's tracker subtracted is real glass
+            # delay; fall back to our own tracker when the caller passes
+            # encode_lag_ms without it so the component is never silently 0.
+            baseline_ms = encode_pipeline_baseline_ms or (
+                self._encode_lag_tracker.pipeline_baseline_ms
+            )
+            budget = build_latency_budget(
+                pipeline_baseline_ms=baseline_ms,
+                encode_lag_ms=resolved_encode_lag,
+                upload_latency_ms=upload_latency_ms,
+                net_rtt_ms=resolved_net_rtt,
+                packager_transit_ms=packager_transit_ms,
+                playback_buffer_sec=playback_buffer_sec,
+                e2e_latency_ms=e2e_latency_ms,
+            )
+            frame_row = build_frame_row(
+                encode_frames_total=encode_frames_total,
+                encode_frames_dropped=encode_frames_dropped,
+                encode_frames_duped=encode_frames_duped,
+                playback_frames_rendered=playback_frames_rendered,
+                playback_frames_dropped=playback_frames_dropped,
+            )
 
             row = {
                 "timestamp": now,
@@ -351,6 +453,11 @@ class MetricsCollector:
                 "fps_stability": f"{fps_stability:.4f}",
                 "speed": f"{speed:.2f}",
                 "encode_lag_ms": f"{resolved_encode_lag:.1f}",
+                "upload_latency_ms": (
+                    "" if upload_latency_ms is None else f"{float(upload_latency_ms):.1f}"
+                ),
+                **budget.as_row(),
+                **frame_row,
                 "out_time": out_time,
                 "transport_rtt_ms": f"{transport_rtt_ms:.3f}",
                 "transport_rtt_jitter_ms": f"{transport_rtt_jitter_ms:.3f}",
@@ -439,9 +546,11 @@ class MetricsCollector:
             # cmaf_*_count, cmaf_tfdt_gap_ms, moqx_*, playback counters/
             # rebuffer) are run TOTALS taken from the last sample, not means.
             "averages_note": (
-                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, playback "
-                "counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
-                "totals from the final sample, not per-sample averages."
+                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, encode_frames_*, "
+                "playback counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
+                "totals from the final sample, not per-sample averages. "
+                "e2e_latency_max_ms is the worst observed sample, taken before the "
+                "outlier trim that produces e2e_latency_ms."
             ),
             "srt": srt_summary.__dict__ if srt_summary else {},
             "throughput": {
@@ -479,6 +588,16 @@ class MetricsCollector:
             "fps_stability",
             "speed",
             "encode_lag_ms",
+            "latency_encode_ms",
+            "latency_publish_ms",
+            "latency_network_ms",
+            "latency_packager_ms",
+            "latency_player_buffer_ms",
+            "latency_accounted_ms",
+            "latency_residual_ms",
+            "encode_frame_drop_pct",
+            "playback_frame_drop_pct",
+            "frame_delivery_pct",
             "transport_rtt_ms",
             "transport_rtt_jitter_ms",
             "net_rtt_ms",
@@ -504,6 +623,13 @@ class MetricsCollector:
                 sum(float(row.get(key, 0) or 0) for row in self._rows) / count,
                 3,
             )
+        latencies = [
+            float(row["upload_latency_ms"])
+            for row in self._rows
+            if row.get("upload_latency_ms") not in (None, "")
+        ]
+        if latencies:
+            averages["upload_latency_ms"] = round(latencies[-1], 3)
 
         if self._rows:
             for counter_key in (
@@ -524,6 +650,9 @@ class MetricsCollector:
                 "moqx_publish_received",
                 "moqx_publish_done",
                 "quic_packets_lost",
+                "encode_frames_total",
+                "encode_frames_dropped",
+                "encode_frames_duped",
                 "playback_stats_events",
                 "playback_stall_count",
                 "playback_frames_rendered",

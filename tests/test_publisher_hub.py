@@ -76,6 +76,39 @@ class PublisherHubTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_pick_agent_pins_comparison_to_one_helper(self) -> None:
+        async def _run() -> None:
+            ws_a = MagicMock()
+            ws_b = MagicMock()
+            a = await self.hub.register(ws_a, "a")
+            b = await self.hub.register(ws_b, "b")
+            a.capabilities = {"ready": True, "hostname": "host-a"}
+            b.capabilities = {"ready": True, "hostname": "host-b"}
+            first = self.hub.pick_agent("cmp-1")
+            first.pending["busy"] = MagicMock()
+            second = self.hub.pick_agent("cmp-1")
+            other = self.hub.pick_agent("cmp-2")
+            self.assertIs(second, first)
+            self.assertIs(other, b if first is a else a)
+
+        asyncio.run(_run())
+
+    def test_pick_agent_repins_when_sticky_helper_disconnects(self) -> None:
+        async def _run() -> None:
+            ws_a = MagicMock()
+            ws_b = MagicMock()
+            a = await self.hub.register(ws_a, "a")
+            b = await self.hub.register(ws_b, "b")
+            a.capabilities = {"ready": True}
+            b.capabilities = {"ready": True}
+            first = self.hub.pick_agent("cmp-sticky")
+            self.hub.unregister(first.agent_id, first.websocket)
+            leftover = self.hub.pick_agent("cmp-sticky")
+            self.assertIsNotNone(leftover)
+            self.assertIsNot(leftover, first)
+
+        asyncio.run(_run())
+
     def test_run_remote_disabled(self) -> None:
         with patch.dict(os.environ, {"LOCAL_PUBLISHER_ENABLED": "0"}, clear=False):
             result = self.hub.run_remote(_job())
@@ -163,6 +196,28 @@ class PublisherHubTests(unittest.TestCase):
         start_msg = ws.send_json.call_args.args[0]
         self.assertEqual(start_msg["type"], "job_start")
         self.assertEqual(start_msg["job_id"], "job-dispatch")
+
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+    def test_broadcast_cancel_fans_out_without_pending_job(self) -> None:
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        self.hub.set_loop(loop)
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        async def _register() -> None:
+            await self.hub.register(ws, "helper")
+
+        asyncio.run_coroutine_threadsafe(_register(), loop).result(timeout=2)
+        sent = self.hub.broadcast_cancel("ghost-job")
+        self.assertEqual(sent, 1)
+        ws.send_json.assert_awaited()
+        self.assertEqual(ws.send_json.await_args.args[0]["type"], "job_cancel")
+        self.assertEqual(ws.send_json.await_args.args[0]["job_id"], "ghost-job")
 
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)

@@ -156,6 +156,26 @@ class WhipAudioWiringTests(unittest.TestCase):
             self.assertIn("http://34.9.217.178:8889/benchmark/whip", cmd)
             self.assertNotIn("127.0.0.1:8889", cmd)
 
+    @patch("upload_service.find_ffmpeg", return_value="ffmpeg")
+    def test_webcam_whip_copies_brokered_h264(self, _ffmpeg) -> None:
+        with patch.dict(os.environ, {"MEDIAMTX_LOOPBACK_PUBLISH": "0"}, clear=False):
+            job = UploadJob(
+                media_path="udp://127.0.0.1:50000",
+                destination=DestinationProfile(
+                    protocol="webrtc",
+                    url="http://34.9.217.178:8889/benchmark/whip",
+                    preset_id="moq_mediamtx_gcp_whip",
+                    ingest_provider="gcp_mediamtx",
+                ),
+                duration_sec=5,
+                job_id="t",
+            )
+            cmd = job.ffmpeg_cmd
+            self.assertIn("-c:v", cmd)
+            self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
+            self.assertIn("libopus", cmd)
+            self.assertNotIn("libx264", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
