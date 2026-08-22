@@ -49,6 +49,16 @@ export SRT_USE_LIVE_TRANSMIT="${SRT_USE_LIVE_TRANSMIT:-0}"
 # "just works" — no second terminal. Set LOCAL_PUBLISHER_AUTOSTART=0 to opt out.
 export LOCAL_PUBLISHER_AUTOSTART="${LOCAL_PUBLISHER_AUTOSTART:-1}"
 
+# Drop ghost :8000 / :5173 / publisher_agent from earlier sessions. Those
+# leftovers were why jobs hit a stale helper (no -c:v copy) while a new
+# agent sat idle.
+bash "$ROOT_DIR/scripts/reset-local-stack.sh"
+
+cleanup() {
+  bash "$ROOT_DIR/scripts/reset-local-stack.sh" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
 uvicorn main:app --reload --host 127.0.0.1 --port 8000 --app-dir web/api &
 API_PID=$!
 
@@ -68,22 +78,56 @@ if [[ "$LOCAL_PUBLISHER_ENABLED" != "0" && "$LOCAL_PUBLISHER_AUTOSTART" == "1" ]
   AGENT_PID=$!
 fi
 
-cleanup() {
-  kill "$API_PID" 2>/dev/null || true
-  if [[ -n "$AGENT_PID" ]]; then
-    kill "$AGENT_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-echo "API running at http://127.0.0.1:8000"
+echo "API starting at http://127.0.0.1:8000"
 if [[ -n "$AGENT_PID" ]]; then
   echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN) — agent auto-started"
 else
   echo "Local publisher: ENABLED (token=$LOCAL_PUBLISHER_TOKEN)"
   echo "  In another terminal: ./scripts/run-local-publisher.sh"
 fi
-echo "Starting frontend at http://127.0.0.1:5173"
+
+AGENT_ID=""
+if [[ -n "$AGENT_PID" ]]; then
+  # run-local-publisher.sh runs pip + tool checks before the websocket.
+  for _ in $(seq 1 90); do
+    if curl -sf http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+      set +e
+      WAIT_OUT="$(
+        curl -s http://127.0.0.1:8000/api/features | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ids = [a.get("agent_id") for a in (d.get("local_publisher_agents") or [])]
+if len(ids) == 1:
+    print(ids[0])
+    sys.exit(0)
+if len(ids) > 1:
+    sys.stderr.write("dev.sh: expected 1 agent, got %s\n" % ids)
+    sys.exit(2)
+sys.exit(1)
+' 2>&1
+      )"
+      WAIT_RC=$?
+      set -e
+      if [[ "$WAIT_RC" -eq 0 ]]; then
+        AGENT_ID="$WAIT_OUT"
+        break
+      fi
+      if [[ "$WAIT_RC" -eq 2 ]]; then
+        echo "$WAIT_OUT" >&2
+        exit 1
+      fi
+    fi
+    sleep 0.5
+  done
+  if [[ -z "$AGENT_ID" ]]; then
+    echo "dev.sh: publisher agent did not connect (exactly one). API logs above." >&2
+    exit 1
+  fi
+  echo "Agent: $AGENT_ID  (only this helper — do not start run-local-publisher.sh)"
+fi
+echo "UI: http://127.0.0.1:5173/"
+echo "Webcam MoQ canary: This machine · Webcam · MoQ only · draft-18 canary"
+echo "After a job: ./scripts/last-moq-job.sh"
 echo ""
 
 if [[ ! -x "$ROOT_DIR/web/frontend/node_modules/.bin/vite" ]]; then

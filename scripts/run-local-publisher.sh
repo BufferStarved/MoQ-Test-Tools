@@ -27,6 +27,9 @@ if [[ -x "/opt/homebrew/bin/srt-live-transmit" ]]; then
 elif [[ -x "/usr/local/bin/srt-live-transmit" ]]; then
   export PATH="/usr/local/bin:$PATH"
 fi
+if [[ -x "$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish" ]]; then
+  export PATH="$ROOT_DIR/tools/moq5-publisher/bin:$PATH"
+fi
 if [[ -x "$ROOT_DIR/tools/openmoq-publisher/bin/openmoq-publisher" ]]; then
   export PATH="$ROOT_DIR/tools/openmoq-publisher/bin:$PATH"
 fi
@@ -52,4 +55,5 @@ if [[ -f "$ROOT_DIR/.publisher-tools.env" ]]; then
   source "$ROOT_DIR/.publisher-tools.env"
 fi
 
-python -m publisher_agent "$@"
+# exec so Ctrl+C / reset kill this PID, not a bash parent that orphans the agent.
+exec python -m publisher_agent "$@"

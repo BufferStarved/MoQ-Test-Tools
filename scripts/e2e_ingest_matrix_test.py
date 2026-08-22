@@ -143,9 +143,9 @@ CASES = [
     },
     {
         "id": "moq_relay_playa",
-        "preset_id": "moq_gcp_relay",
+        "preset_id": "moq_gcp_relay_d18",
         "playback": "moq",
-        "url": "https://34-28-164-90.sslip.io:4433/moq-relay",
+        "url": "https://34-28-164-90.sslip.io:14433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
         # Headless Playwright cannot complete WebTransport/MoQ. A real Chrome
@@ -172,9 +172,9 @@ EAST_CASES = [
     },
     {
         "id": "east_moq_relay_playa",
-        "preset_id": "moq_gcp_east_relay",
+        "preset_id": "moq_gcp_east_relay_d18",
         "playback": "moq",
-        "url": f"https://{EAST_RELAY}:4433/moq-relay",
+        "url": f"https://{EAST_RELAY}:14433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
         "requires_webtransport": True,
@@ -269,9 +269,9 @@ LINODE_CASES = [
     },
     {
         "id": "linode_moq_relay_playa",
-        "preset_id": "moq_linode_relay",
+        "preset_id": "moq_linode_relay_d18",
         "playback": "moq",
-        "url": f"https://{LINODE_RELAY}:4433/moq-relay",
+        "url": f"https://{LINODE_RELAY}:14433/moq-relay",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
         "requires_webtransport": True,

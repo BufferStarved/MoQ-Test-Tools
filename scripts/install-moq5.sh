@@ -7,8 +7,12 @@ MOQ5_DIR="$ROOT_DIR/tools/moq5"
 DEPS_DIR="$ROOT_DIR/tools/deps"
 INSTALL_PREFIX="$MOQ5_DIR/install"
 PUBLISHER_BIN="$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish"
-MOQ5_REPO="${MOQ5_REPO:-https://github.com/openmoq/moq5.git}"
-MOQ5_REF="${MOQ5_REF:-main}"
+# Canary pin: BufferStarved live-write publish_tracks (openmoq/moq5#9).
+# Branch feat/publish-tracks-live-catalog @ 1ce1cfc. Override to stay on
+# upstream: MOQ5_REPO=https://github.com/openmoq/moq5.git MOQ5_REF=main
+# Do not grow a private libmoq (no new dual-emit / catalog-refresh-off / qlog-as-product).
+MOQ5_REPO="${MOQ5_REPO:-https://github.com/BufferStarved/moq5.git}"
+MOQ5_REF="${MOQ5_REF:-feat/publish-tracks-live-catalog}"
 PICOQUIC_REPO="${PICOQUIC_REPO:-https://github.com/private-octopus/picoquic.git}"
 PICOTLS_REPO="${PICOTLS_REPO:-https://github.com/h2o/picotls.git}"
 
@@ -87,15 +91,23 @@ clone_dep() {
 }
 
 ensure_moq5() {
-  if [[ -d "$MOQ5_DIR/.git" ]]; then
+  if [[ ! -d "$MOQ5_DIR/.git" ]]; then
+    if [[ -d "$MOQ5_DIR" ]]; then
+      echo "Replacing non-git moq5 checkout at $MOQ5_DIR"
+      rm -rf "$MOQ5_DIR"
+    fi
+    echo "Cloning moq5 into $MOQ5_DIR ($MOQ5_REPO @$MOQ5_REF)"
+    git clone --depth 1 --branch "$MOQ5_REF" "$MOQ5_REPO" "$MOQ5_DIR"
     return 0
   fi
-  if [[ -d "$MOQ5_DIR" ]]; then
-    echo "Replacing non-git moq5 checkout at $MOQ5_DIR"
-    rm -rf "$MOQ5_DIR"
+  echo "Pinning moq5 checkout to $MOQ5_REPO @$MOQ5_REF (canary live-write publish_tracks)"
+  if git -C "$MOQ5_DIR" remote get-url canary >/dev/null 2>&1; then
+    git -C "$MOQ5_DIR" remote set-url canary "$MOQ5_REPO"
+  else
+    git -C "$MOQ5_DIR" remote add canary "$MOQ5_REPO"
   fi
-  echo "Cloning moq5 into $MOQ5_DIR"
-  git clone --depth 1 --branch "$MOQ5_REF" "$MOQ5_REPO" "$MOQ5_DIR"
+  git -C "$MOQ5_DIR" fetch --depth 1 canary "$MOQ5_REF"
+  git -C "$MOQ5_DIR" checkout -B "$MOQ5_REF" FETCH_HEAD
 }
 
 build_picotls() {
@@ -153,13 +165,19 @@ build_publisher() {
 }
 
 main() {
+  local rebuild=0
+  if [[ "${1:-}" == "--rebuild" ]]; then
+    rebuild=1
+  fi
   if [[ -x "$PUBLISHER_BIN" ]] && file "$PUBLISHER_BIN" | grep -qE 'ELF|Mach-O'; then
     if [[ "$(uname -s)" == "Linux" ]]; then
       file "$PUBLISHER_BIN" | grep -q 'ELF' || rm -f "$PUBLISHER_BIN"
     fi
   fi
-  if [[ -x "$PUBLISHER_BIN" ]]; then
+  if [[ $rebuild -eq 0 && -x "$PUBLISHER_BIN" ]]; then
     echo "moq5-fmp4-publish already installed at $PUBLISHER_BIN"
+    echo "Canary pin: $MOQ5_REPO @$MOQ5_REF"
+    echo "Re-pin and rebuild: $0 --rebuild"
     exit 0
   fi
 

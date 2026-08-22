@@ -23,6 +23,9 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_mediamtx_stats \
   tests.test_job_manager_preview_gate \
   tests.test_playback_merge \
+  tests.test_latency_budget \
+  tests.test_metric_honesty \
+  tests.test_rtmp_startup \
   tests.test_vod_assets \
   tests.test_bbb_deploy_and_whep_import \
   tests.test_cloud_placement \

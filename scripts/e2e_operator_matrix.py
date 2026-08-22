@@ -46,6 +46,8 @@ LOCAL_PUBLISHER_TOKEN = os.environ.get("LOCAL_PUBLISHER_TOKEN", "dev-local-publi
 
 BROWSER4_PATH = "/?operator=browser4"
 WEBCAM_PATH = "/?source=webcam"
+WEBCAM_FFMPEG_PATH = "/?source=webcam&encoder=ffmpeg"
+WEBCAM_OBS_PATH = "/?source=webcam&encoder=obs"
 HARNESS_TMPL = "/?harnessJob={job}&playback={playback}"
 
 EXPECT_BROWSER4 = (
@@ -55,8 +57,9 @@ EXPECT_BROWSER4 = (
     "(not a catalog-miss)."
 )
 EXPECT_WEBCAM = (
-    "Source = Webcam, Camera = OBS Virtual Camera (1080p60). "
-    "Start a comparison. Capture must not die on 720p30 (ffmpeg 251)."
+    "Source = Webcam. Encode = ffmpeg (helper, default) or Browser. "
+    "OBS is unavailable while public MoQ is draft-18 (plugin is draft-16 only). "
+    "Deep-link: /?source=webcam&encoder=ffmpeg. Capture must not die on 720p30 (ffmpeg 251)."
 )
 EXPECT_CLOUD_MOQ = (
     "Real Chrome tab (not headless, not Cursor WebView). "
@@ -322,6 +325,8 @@ def run_units() -> CaseResult:
         ROOT / "web" / "frontend" / "scripts" / "unit-whep-end-verdict.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-job-error-catalog.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-operator-recipe.mjs",
+        ROOT / "web" / "frontend" / "scripts" / "unit-recipe-support.mjs",
+        ROOT / "web" / "frontend" / "scripts" / "unit-obs.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-browser-moq-outputs.mjs",
     ]
     py_mods = [
@@ -358,6 +363,7 @@ def run_units() -> CaseResult:
     ts_tests = [
         ROOT / "web" / "frontend" / "src" / "webrtcPlayback.test.ts",
         ROOT / "web" / "frontend" / "src" / "moqCmafPlayback.test.ts",
+        ROOT / "web" / "frontend" / "src" / "moqLibmoqCatalog.test.ts",
         ROOT / "web" / "frontend" / "src" / "playbackEndVerdict.test.ts",
         ROOT / "web" / "frontend" / "src" / "playbackGate.ts",
     ]
@@ -439,7 +445,8 @@ def run_webcam(features: Optional[Dict[str, Any]], feature_err: Optional[str]) -
         f"  LOCAL_PUBLISHER_API={LOCAL_PUBLISHER_API} \\",
         f"  LOCAL_PUBLISHER_TOKEN={LOCAL_PUBLISHER_TOKEN} \\",
         "  ./scripts/run-local-publisher.sh",
-        "Then Source=Webcam, Camera=OBS Virtual Camera, pick outputs, Start.",
+        f"Then {site_url(WEBCAM_FFMPEG_PATH)} (default helper) or {site_url(WEBCAM_OBS_PATH)}.",
+        "Source=Webcam, Encode=ffmpeg (default) or OBS + OpenMOQ, pick outputs, Start.",
     ]
     if feature_err:
         return CaseResult("webcam", "FAIL", f"features: {feature_err}", notes)
@@ -608,7 +615,7 @@ def main() -> int:
         print()
 
     if include("webcam"):
-        print("== webcam (OBS Virtual Camera + local ffmpeg) ==")
+        print("== webcam (last-mile: ffmpeg helper default, OBS optional) ==")
         res = run_webcam(features, feature_err)
         results.append(res)
         print(f" {res.status} {res.detail}")
