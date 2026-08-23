@@ -43,6 +43,32 @@ CSV_COLUMNS = [
     # budget below; adding a startup constant to every steady-state sample
     # inflated accounted_ms for whole runs.
     "upload_latency_ms",
+    # Startup phase decomposition (see src/startup_budget.py). Two chains kept
+    # apart on purpose: the publisher chain (job start → first byte at the
+    # ingest) and the player chain (attach → first paint), each reconciling
+    # against its own measured total. Blank means "no instrument"; 0.0 means
+    # "measured, and it was zero". startup_not_applicable names phases that do
+    # not exist on the protocol at all (SRT has no TCP connect).
+    "startup_dns_ms",
+    "startup_connect_ms",
+    "startup_handshake_ms",
+    "startup_publish_accept_ms",
+    "startup_first_idr_ms",
+    "startup_first_byte_ingest_ms",
+    "startup_player_request_ms",
+    "startup_manifest_ms",
+    "startup_first_media_ms",
+    "startup_first_paint_ms",
+    "startup_publisher_accounted_ms",
+    "startup_publisher_measured_ms",
+    "startup_publisher_residual_ms",
+    "startup_publisher_overcount_ms",
+    "startup_player_accounted_ms",
+    "startup_player_measured_ms",
+    "startup_player_residual_ms",
+    "startup_player_overcount_ms",
+    "startup_unmeasured",
+    "startup_not_applicable",
     # Per-component latency decomposition (see src/latency_budget.py). The
     # components in scope for this leg's e2e estimator sum to
     # latency_accounted_ms; the signed difference against e2e_latency_ms is
