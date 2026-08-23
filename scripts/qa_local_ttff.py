@@ -43,7 +43,15 @@ def start_local_job(preset_id: str) -> str:
             "stream_label": "laptop TTFF",
         },
     )
-    return str(job["job_id"])
+    # POST /api/uploads returns the job record, whose identifier field is `id`.
+    # This script read `job_id` and died with a KeyError *after* successfully
+    # starting the job, which is why the laptop leg looked blocked on the API
+    # rejecting the media file — the media had already been accepted and the
+    # encoder was running.
+    job_id = job.get("id") or job.get("job_id")
+    if not job_id:
+        raise RuntimeError(f"no job id in response: {json.dumps(job)[:800]}")
+    return str(job_id)
 
 
 def wait_for_ingest(job_id: str, timeout: float = 60.0) -> dict:

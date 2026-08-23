@@ -76,7 +76,11 @@ def start_job(preset_id: str, *, publisher_host: str = "cloud") -> str:
             "stream_label": "startup matrix",
         },
     )
-    return str(job["job_id"])
+    # The job record's identifier field is `id`; `job_id` does not exist on it.
+    job_id = job.get("id") or job.get("job_id")
+    if not job_id:
+        raise RuntimeError(f"no job id in response: {json.dumps(job)[:600]}")
+    return str(job_id)
 
 
 def wait_for_ingest(job_id: str, timeout: float = 90.0) -> dict:
