@@ -7,7 +7,7 @@ whether the value is populated / zero / empty, whether a zero is the honest
 answer for that protocol or a collection failure, and whether the latency
 components reconcile with the measured end-to-end number.
 
-Two checks are worth calling out because they cannot be seen in a single
+Three checks are worth calling out because they cannot be seen in a single
 sample:
 
 * ``latency_residual_ms`` only reports *under*-attribution. A model that
@@ -17,6 +17,16 @@ sample:
   the player detaches early the encoder keeps counting, so the ratio decays
   even though nothing is being lost. The script reports the trend, not just
   the mean.
+* ``fps`` is cross-checked against ``encode_frames_total`` over the encoder's
+  *active* window, never the whole run. Any rate derived from a counter has to
+  divide by the span the counter actually covers; see ``fps_truth``.
+
+Known limits, so a clean verdict is not read as more than it is: every
+invariant below is of the form "there is data and it is wrong". A column that
+is absent, unparseable, or zero for a whole leg is therefore reported in the
+tables but does not fail it, and ``PLAUSIBLE`` / ``HONEST_ZEROS`` are printed
+or unused rather than asserted. Absence-of-signal gates are the outstanding
+work here.
 
 With ``--assert`` the audit stops describing and starts judging: it exits
 non-zero if any of the invariants below is violated on any leg. That is the
@@ -58,8 +68,11 @@ FRAME_COLUMNS = (
     "frame_delivery_pct",
 )
 
-# Columns a protocol is not expected to populate. A zero here is honest, not a
-# collection failure, and the audit says so instead of flagging it.
+# Columns a protocol is not expected to populate: a zero here is honest, not a
+# collection failure. Reference data only — nothing below consults it yet, so
+# the transport columns are neither excused nor checked. Wiring it in is what
+# would let the audit flag the inverse case, a protocol reporting a column it
+# has no business populating.
 HONEST_ZEROS: Dict[str, tuple] = {
     "srt": ("moqx_*", "quic_*", "cmaf_*"),
     "rtmp": ("moqx_*", "quic_*", "cmaf_*", "pkt_*"),
@@ -79,6 +92,18 @@ PLAUSIBLE = {
     "speed": (0.05, 20.0),
 }
 
+# D8b. Beyond this the two fps numbers are describing different encoders and one
+# of them is wrong — but the gap alone does not say which, so it is only the
+# trigger for the attribution below.
+FPS_GAP_MAX = 1.5
+# fps_stability is the coefficient of variation of the rate column
+# (src/metrics.py). MoQ's publisher pipe applies backpressure and reads ~0.19;
+# a steady SRT leg reads ~0.0006. 0.05 sits an order of magnitude clear of both
+# clusters, so it distinguishes "the encoder really does oscillate, and the two
+# fps numbers are both honest views of that" from "the encoder is steady and the
+# numbers still disagree", which can only be a formula bug.
+FPS_UNSTEADY_CV = 0.05
+
 
 def fetch(path: str) -> bytes:
     with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=45) as resp:
@@ -91,6 +116,14 @@ def list_results(limit: int) -> List[dict]:
 
 
 def load_rows(filename: str) -> List[dict]:
+    """Rows for one result: a local path if it resolves, else the archive API.
+
+    Accepting a path is what makes a change to a formula in this file provable
+    against an already-archived leg, offline and without a throwaway driver.
+    """
+    if os.path.exists(filename):
+        with open(filename, newline="") as handle:
+            return list(csv.DictReader(handle))
     raw = fetch(f"/api/results/{filename}/download?kind=csv").decode()
     return list(csv.DictReader(io.StringIO(raw)))
 
@@ -220,38 +253,71 @@ def fps_truth(rows: List[dict]) -> dict:
     """Headline fps from the frame counter versus the mean of the rate column.
 
     The counter is interval-independent; the rate mean over-weights short fast
-    ticks. A large gap means the encoder throughput is oscillating (check
-    fps_stability), not that either number is broken.
+    ticks. A large gap therefore has two possible causes, and ``stability_mean``
+    is what separates them: an encoder that genuinely oscillates makes both
+    numbers honest, while a steady encoder means one of the two is broken.
+
+    The counter is divided by the encoder's **active** window — first to last
+    sample carrying a live frame count — and the pair is read row-aligned. The
+    earlier version took the numerator from the samples that had a frame count
+    and the denominator from *every* sample, so the leading samples recorded
+    before the encoder produced its first frame padded the divisor without
+    adding to the dividend. On the 2026-08-23 RTMP leg that turned 810 frames
+    in 27.0 s — exactly 30.0 fps — into 810 over 29.0 s, and the invented
+    2.07 fps shortfall was then reported as an encoder defect.
     """
-    stamps = series(rows, "timestamp")
-    frames = [v for v in series(rows, "encode_frames_total") if v > 0]
+    live = [
+        (stamp, count)
+        for stamp, count in (
+            (num(row.get("timestamp")), num(row.get("encode_frames_total")))
+            for row in rows
+        )
+        if stamp is not None and count is not None and count > 0
+    ]
     rates = [v for v in series(rows, "fps") if v > 0]
+    stability = [v for v in series(rows, "fps_stability") if v > 0]
     counter = None
-    if len(stamps) > 1 and len(frames) > 1:
-        wall = max(stamps) - min(stamps)
-        produced = max(frames) - min(frames)
-        if wall > 0 and produced > 0:
-            counter = round(produced / wall, 3)
+    window = None
+    produced = None
+    if len(live) > 1:
+        window = live[-1][0] - live[0][0]
+        produced = live[-1][1] - live[0][1]
+        if window > 0 and produced > 0:
+            counter = round(produced / window, 3)
+    rate_mean = sum(rates) / len(rates) if rates else None
     return {
         "counter_fps": counter,
-        "rate_mean_fps": round(sum(rates) / len(rates), 3) if rates else None,
-        "gap": round(abs((sum(rates) / len(rates)) - counter), 3)
-        if rates and counter
+        "rate_mean_fps": round(rate_mean, 3) if rate_mean else None,
+        "gap": round(abs(rate_mean - counter), 3) if rate_mean and counter else None,
+        # Reported even when counter_fps could not be derived (a counter that
+        # resets mid-leg yields produced <= 0), so a skipped check is visible
+        # rather than looking like a pass.
+        "active_window_sec": round(window, 3) if window is not None else None,
+        "frames_produced": produced,
+        "active_samples": f"{len(live)}/{len(rows)}",
+        # Coefficient of variation of the rate column (src/metrics.py). This is
+        # what separates a genuinely unsteady encoder from a broken formula.
+        "stability_mean": round(sum(stability) / len(stability), 4)
+        if stability
         else None,
     }
 
 
 def frame_trend(rows: List[dict]) -> dict:
     delivery = series(rows, "frame_delivery_pct")
-    rendered = series(rows, "playback_frames_rendered")
     encoded = series(rows, "encode_frames_total")
+    # Row-aligned, like fps_truth: an index into the blank-filtered list is not a
+    # sample number, and this figure is quoted as one. Advancing at the very
+    # first sample counts as frozen from the start rather than never frozen.
+    rendered_by_row = [num(row.get("playback_frames_rendered")) for row in rows]
+    rendered = [v for v in rendered_by_row if v is not None]
     frozen_at = None
     if rendered:
         last = rendered[-1]
-        for i in range(len(rendered) - 1, -1, -1):
-            if rendered[i] != last:
-                frozen_at = i + 1
-                break
+        frozen_at = next(
+            (i for i, v in enumerate(rendered_by_row) if v is not None and v == last),
+            None,
+        )
     return {
         "delivery_first": delivery[0] if delivery else None,
         "delivery_peak": max(delivery) if delivery else None,
@@ -298,7 +364,6 @@ def check_invariants(rows: List[dict], protocol: str) -> List[str]:
             f"{rec['accounted_mismatch']} samples (scope-aware sum)"
         )
     # Over-attribution is now reportable, so it must actually be reported.
-    over_rows = [r for r in rows if (num(r.get("latency_overcount_ms")) or 0.0) > 0.5]
     silent_over = [
         r
         for r in rows
@@ -351,12 +416,36 @@ def check_invariants(rows: List[dict], protocol: str) -> List[str]:
             f"{stale['repeated_tail']}/{stale['of_samples']} samples (stale, not stable)"
         )
 
-    # Defect 8: headline fps must track the frame counter.
-    if fps["counter_fps"] and fps["gap"] and fps["gap"] > 1.5:
-        failures.append(
-            f"fps rate-mean {fps['rate_mean_fps']} is {fps['gap']} off the "
-            f"counter-derived {fps['counter_fps']}"
+    # Defect 8b: headline fps must track the frame counter. The gap on its own
+    # is not a verdict — fps_truth's own docstring says a large gap can mean the
+    # encoder is oscillating — so fps_stability decides what the finding says.
+    # Reporting startup oscillation as a formula defect sent one investigation
+    # after a bug that did not exist; the two cases need different owners.
+    if fps["counter_fps"] and fps["gap"] and fps["gap"] > FPS_GAP_MAX:
+        cv = fps["stability_mean"]
+        observed = (
+            f"rate-mean {fps['rate_mean_fps']} vs counter-derived "
+            f"{fps['counter_fps']} ({fps['frames_produced']:.0f} frames over a "
+            f"{fps['active_window_sec']}s active window), gap {fps['gap']}"
         )
+        if cv is None:
+            failures.append(
+                f"fps gap unattributed: {observed}; fps_stability is absent, so "
+                f"the audit cannot tell an oscillating encoder from a bad formula"
+            )
+        elif cv >= FPS_UNSTEADY_CV:
+            failures.append(
+                f"unstable encode: {observed}; fps_stability {cv} >= "
+                f"{FPS_UNSTEADY_CV} means the encoder throughput genuinely "
+                f"oscillates, so both numbers are honest — a product "
+                f"observation, not a metric formula defect"
+            )
+        else:
+            failures.append(
+                f"fps formula defect: {observed}; fps_stability {cv} < "
+                f"{FPS_UNSTEADY_CV} means the encoder was steady, so two fps "
+                f"numbers this far apart cannot both be right"
+            )
 
     if protocol == "moq":
         # Defect 6: LOC "behind live" seconds must not land in the buffer stage.
