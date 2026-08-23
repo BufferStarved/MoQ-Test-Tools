@@ -1,4 +1,5 @@
 import errno
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 from urllib.parse import parse_qs, quote, urlparse, urlunparse
 
+logger = logging.getLogger("MoQ-SRT-Bench")
 
 DEFAULT_MOQ_NAMESPACE = "benchmark"
 DEFAULT_MOQ_DRAFT = 18
@@ -114,9 +116,26 @@ def _ffmpeg_has_srt_output(ffmpeg_bin: str) -> bool:
 
 
 def find_ffmpeg() -> str:
-    """Prefer an ffmpeg that can speak SRT (Homebrew ffmpeg-full), not PATH ffmpeg."""
+    """Prefer an ffmpeg that can speak SRT (Homebrew ffmpeg-full), not PATH ffmpeg.
+
+    An explicit ``FFMPEG`` override always wins — it is the escape hatch for
+    testing a purpose-built binary. But it also skips the SRT capability check
+    the candidate search exists to perform, so a build made for one protocol
+    silently becomes the binary for all of them. The patched WHIP build from
+    tools/ffmpeg-whip is exactly that shape: it reports ``http rtmp rtmps tcp
+    udp`` and no ``srt``, so exporting it globally would route SRT publishes to
+    a binary that cannot speak SRT. Honour the override, but never let that
+    happen quietly.
+    """
     override = os.environ.get("FFMPEG", "").strip()
     if override and os.path.isfile(override) and os.access(override, os.X_OK):
+        if not _ffmpeg_has_srt_output(override):
+            logger.warning(
+                "FFMPEG override %s has no srt output protocol; SRT publishes "
+                "with this binary will fail. Scope the override to the "
+                "protocol you are testing, or rebuild it with --enable-libsrt.",
+                override,
+            )
         return override
     candidates = [
         "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",

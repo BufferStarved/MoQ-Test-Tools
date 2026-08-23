@@ -35,6 +35,49 @@ class FfmpegWhipMuxerTests(unittest.TestCase):
         self.assertIn("cannot publish WebRTC", text)
 
 
+class FfmpegOverrideSrtWarningTests(unittest.TestCase):
+    """A WHIP-only build exported as FFMPEG must not silently take SRT too.
+
+    tools/ffmpeg-whip builds report `http rtmp rtmps tcp udp` and no `srt`.
+    find_ffmpeg() honours an explicit override before it runs the SRT
+    capability check that the candidate search exists to perform, so exporting
+    that binary globally would route SRT publishes to something that cannot
+    speak SRT — with no error until the publish fails.
+    """
+
+    def _find_with_override(self, path: str, *, has_srt: bool):
+        import moq_publish
+
+        with mock.patch.dict("os.environ", {"FFMPEG": path}):
+            with mock.patch("os.path.isfile", return_value=True):
+                with mock.patch("os.access", return_value=True):
+                    with mock.patch.object(
+                        moq_publish, "_ffmpeg_has_srt_output", return_value=has_srt
+                    ):
+                        with self.assertLogs("MoQ-SRT-Bench", level="WARNING") as logs:
+                            # assertLogs fails the test if nothing is logged, so
+                            # emit a sentinel and filter it back out.
+                            moq_publish.logger.warning("sentinel")
+                            resolved = moq_publish.find_ffmpeg()
+        warnings = [line for line in logs.output if "sentinel" not in line]
+        return resolved, warnings
+
+    def test_srt_incapable_override_is_honoured_but_warns(self) -> None:
+        path = "/tmp/ffmpeg-whip/prefix/bin/ffmpeg"
+        resolved, warnings = self._find_with_override(path, has_srt=False)
+        self.assertEqual(resolved, path, "an explicit override must still win")
+        self.assertTrue(warnings, "an SRT-incapable override must warn")
+        joined = " ".join(warnings)
+        self.assertIn(path, joined, "the warning must name the binary")
+        self.assertIn("srt", joined.lower())
+
+    def test_srt_capable_override_is_silent(self) -> None:
+        path = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+        resolved, warnings = self._find_with_override(path, has_srt=True)
+        self.assertEqual(resolved, path)
+        self.assertEqual(warnings, [], "a capable override must not cry wolf")
+
+
 class DirectWhipJobPreflightTests(unittest.TestCase):
     def test_webrtc_job_fails_before_ffmpeg_234(self) -> None:
         from destinations import DestinationProfile

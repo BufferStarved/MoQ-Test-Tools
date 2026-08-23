@@ -698,19 +698,22 @@ class MetricsCollector:
         # 32.2-32.7 fps for a 30fps source on every MoQ leg (2026-08-22), and
         # 31.7 on WebRTC. The counter is exact and interval-independent:
         # 29.78 and 29.75 for those same MoQ legs.
-        frames = [
-            float(row["encode_frames_total"])
+        #
+        # Numerator and denominator have to span the same rows. Counting frames
+        # only over samples where the encoder had started, while timing across
+        # every sample including the leading idle ones, divides a real 810 RTMP
+        # frames by the full 29.0s run instead of the 27.0s the encoder was
+        # actually producing — and archived 27.933 fps for a leg that held
+        # 30.003 (2026-08-23, upload_20260823-014026_f37981b8).
+        active = [
+            (float(row["timestamp"]), float(row["encode_frames_total"]))
             for row in self._rows
             if str(row.get("encode_frames_total", "")).strip() not in ("", "0")
+            and str(row.get("timestamp", "")).strip() != ""
         ]
-        stamps = [
-            float(row["timestamp"])
-            for row in self._rows
-            if str(row.get("timestamp", "")).strip() != ""
-        ]
-        if len(frames) > 1 and len(stamps) > 1:
-            wall_sec = max(stamps) - min(stamps)
-            produced = max(frames) - min(frames)
+        if len(active) > 1:
+            wall_sec = max(stamp for stamp, _ in active) - min(stamp for stamp, _ in active)
+            produced = max(count for _, count in active) - min(count for _, count in active)
             if wall_sec > 0 and produced > 0:
                 averages["fps"] = round(produced / wall_sec, 3)
 

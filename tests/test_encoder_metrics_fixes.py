@@ -154,6 +154,36 @@ class HeadlineFpsTests(unittest.TestCase):
         self.assertGreater(naive, 31.0, "precondition: the old mean read high")
         self.assertAlmostEqual(averages["fps"], 30.0, delta=0.2)
 
+    def test_leading_idle_samples_do_not_stretch_the_denominator(self):
+        """The counter window and the clock window must be the same window.
+
+        Replay of upload_20260823-014026_f37981b8: the encoder is idle for the
+        first two samples, then produces 810 frames over 27.0s of a 29.0s run.
+        Counting frames only over the active samples while timing across all of
+        them archived 27.933 fps for a leg that held 30.003 — the same
+        arithmetic error the QA audit was making in its own checker.
+        """
+        rows = [
+            {"timestamp": "1000.0", "fps": "0.00", "encode_frames_total": "0"},
+            {"timestamp": "1001.0", "fps": "0.00", "encode_frames_total": "0"},
+        ]
+        stamp, frames = 1001.0, 0
+        for _ in range(27):
+            stamp += 1.0
+            frames += 30
+            rows.append(
+                {
+                    "timestamp": f"{stamp}",
+                    "fps": "30.00",
+                    "encode_frames_total": str(frames),
+                }
+            )
+
+        # The first active sample already carries 30 frames, so the shared
+        # window is 780 frames over the 26.0s between first and last active
+        # sample. Timing across all 29 rows instead gives 780/28.0 = 27.86.
+        self.assertAlmostEqual(self._collector(rows)["fps"], 30.0, delta=0.2)
+
     def test_missing_frame_counter_falls_back_to_the_rate_mean(self):
         # Older CSVs and any leg whose encoder never reported `frame=` still
         # need a number; the counter correction must not blank the column.
