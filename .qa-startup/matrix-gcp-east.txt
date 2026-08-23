@@ -1,0 +1,91 @@
+BASE_URL=https://moq.sean-mccarthy.net duration=30s player=20.0s
+
+=== srt / gcp-east (moq_zixi_gcp_east) ===
+  job edc7b596-bd65-44c8-be15-b4c11e541897
+  player[mpegts] ok=True playing site_player frames=55 video_s=1.86 e2e=4173
+--- srt / gcp-east ---
+  publisher:
+    dns                        0.2 ms
+    connect              n/a
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          0.2 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request            64.4 ms
+    manifest             n/a
+    first_media              513.1 ms
+    first_paint             1924.5 ms
+    = accounted          2502.0 vs TTFF 2502.0 (residual 0.0, over 0.0)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        connect,manifest
+  rendered:   55.0
+
+=== rtmp / gcp-east (moq_zixi_gcp_east_rtmp) ===
+  job 72699c63-f6f3-41ce-8284-ee7fa215bfdd
+  player[mpegts] ok=True playing site_player frames=71 video_s=2.35 e2e=3604
+--- rtmp / gcp-east ---
+  publisher:
+    dns                        0.1 ms
+    connect                   35.2 ms
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          35.3 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request            63.8 ms
+    manifest             n/a
+    first_media              332.4 ms
+    first_paint             1156.8 ms
+    = accounted          1553.0 vs TTFF 1553.0 (residual 0.0, over 0.0)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        manifest
+  rendered:   71.0
+
+=== moq / gcp-east (moq_gcp_east_relay_d18) ===
+  job b2b0850e-0e8c-4adc-ab1b-2ed26f161384
+  player[moq] ok=True playing site_player frames=80 video_s=2.55 e2e=5361
+--- moq / gcp-east ---
+  publisher:
+    dns                       50.8 ms
+    connect              unmeasured
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          50.8 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request           313.0 ms
+    manifest                 176.0 ms
+    first_media              691.0 ms
+    first_paint               71.0 ms
+    = accounted          1251.0 vs TTFF 1251.0 (residual 0.0, over 0.0)
+  unmeasured: connect,handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        (none)
+  rendered:   80.0
+
+=== webrtc / gcp-east (moq_mediamtx_gcp_east_whip) ===
+  job 76b0d357-2c74-4f4d-98c7-0a0f1b263087
+  player[whep] ok=True playing site_player frames=73 video_s=2.31 e2e=28
+--- webrtc / gcp-east ---
+  publisher:
+    dns                        0.2 ms
+    connect                   34.7 ms
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr               1001.0 ms
+    first_byte_ingest    unmeasured
+    = accounted          1035.9 vs measured 2320.2 (residual 1284.3, over 0.0)
+  player:
+    player_request           256.4 ms
+    manifest                 195.6 ms
+    first_media              276.0 ms
+    first_paint          unmeasured
+    = accounted          728.0 vs TTFF 748.0 (residual 20.0, over 0.0)
+  unmeasured: handshake,publish_accept,first_byte_ingest,first_paint
+  n/a:        (none)
+  rendered:   73.0
+
+wrote .qa-startup/startup-matrix.json (4 legs)

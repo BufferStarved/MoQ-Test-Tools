@@ -1,0 +1,91 @@
+BASE_URL=https://moq.sean-mccarthy.net duration=30s player=20.0s
+
+=== srt / linode (moq_zixi_linode) ===
+  job 319662fb-1f6b-4a36-821b-24b14f48c604
+  player[mpegts] ok=True playing site_player frames=58 video_s=1.84 e2e=4161
+--- srt / linode ---
+  publisher:
+    dns                        0.1 ms
+    connect              n/a
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          0.1 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request            65.3 ms
+    manifest             unmeasured
+    first_media              567.7 ms
+    first_paint             1797.0 ms
+    = accounted          None vs TTFF None (residual None, over None)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        connect
+  rendered:   58.0
+
+=== rtmp / linode (moq_zixi_linode_rtmp) ===
+  job e64e5f31-1468-4442-a050-92293a519c68
+  player[mpegts] ok=True playing site_player frames=50 video_s=1.33 e2e=3650
+--- rtmp / linode ---
+  publisher:
+    dns                        0.2 ms
+    connect                   39.6 ms
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          39.8 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request            68.7 ms
+    manifest             unmeasured
+    first_media              322.1 ms
+    first_paint             1611.2 ms
+    = accounted          None vs TTFF None (residual None, over None)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        (none)
+  rendered:   50.0
+
+=== moq / linode (moq_linode_relay_d18) ===
+  job af05d604-e08e-4ba6-ba59-d8942d80abef
+  player[moq] ok=True playing site_player frames=79 video_s=2.54 e2e=5341
+--- moq / linode ---
+  publisher:
+    dns                      138.3 ms
+    connect              unmeasured
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          138.3 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request           268.0 ms
+    manifest                 168.0 ms
+    first_media              710.0 ms
+    first_paint               69.0 ms
+    = accounted          None vs TTFF None (residual None, over None)
+  unmeasured: connect,handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        (none)
+  rendered:   79.0
+
+=== webrtc / linode (moq_mediamtx_linode_whip) ===
+  job 2481c294-ff7e-4702-8be4-de6898e1625e
+  player[whep] ok=True playing site_player frames=80 video_s=2.54 e2e=20
+--- webrtc / linode ---
+  publisher:
+    dns                        0.2 ms
+    connect                   39.0 ms
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr                984.4 ms
+    first_byte_ingest    unmeasured
+    = accounted          1023.6 vs measured 2364.3 (residual 1340.7, over 0.0)
+  player:
+    player_request           245.8 ms
+    manifest                 194.2 ms
+    first_media              164.0 ms
+    first_paint          unmeasured
+    = accounted          None vs TTFF None (residual None, over None)
+  unmeasured: handshake,publish_accept,first_byte_ingest
+  n/a:        (none)
+  rendered:   80.0
+
+wrote .qa-startup/startup-matrix.json (4 legs)

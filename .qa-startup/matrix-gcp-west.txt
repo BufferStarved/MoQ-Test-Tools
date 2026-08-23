@@ -1,0 +1,69 @@
+BASE_URL=https://moq.sean-mccarthy.net duration=30s player=20.0s
+
+=== srt / gcp-west (moq_zixi_gcp) ===
+  job 6efe4856-5130-4227-95ff-e6fed5f31e1f
+  player[mpegts] ok=False site_player_no_playback_samples {"state":{"currentTime":0,"videoWidth":0,"paused":false,"readyState":0,"hint":"Playing (HTTP-TS)"},"logs":["error:Failed to load resource: the server responded with a status of 404 ()","log:[MSEController] > MediaSource onSourceOpen"]}
+--- srt / gcp-west ---
+  publisher:
+    dns                        0.2 ms
+    connect              n/a
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          0.2 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request       unmeasured
+    manifest             n/a
+    first_media          unmeasured
+    first_paint          unmeasured
+    = accounted          0.0 vs TTFF 0.0 (residual 0.0, over 0.0)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest,player_request,first_media,first_paint
+  n/a:        connect,manifest
+  rendered:   0.0
+
+=== rtmp / gcp-west (moq_zixi_gcp_rtmp) ===
+  job f5b3eb24-d684-4741-bfeb-89a3eb46db18
+  player[mpegts] ok=True playing site_player frames=75 video_s=2.12 e2e=5191
+--- rtmp / gcp-west ---
+  publisher:
+    dns                        0.2 ms
+    connect                    2.8 ms
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          3.0 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request            61.7 ms
+    manifest             n/a
+    first_media             2060.8 ms
+    first_paint             1765.5 ms
+    = accounted          3888.0 vs TTFF 3888.0 (residual 0.0, over 0.0)
+  unmeasured: handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        manifest
+  rendered:   75.0
+
+=== moq / gcp-west (moq_gcp_relay_d18) ===
+  job 3649d5ea-ea5d-4de3-b48f-2a4bfa3fad86
+  player[moq] ok=True playing site_player frames=64 video_s=2.03 e2e=6742
+--- moq / gcp-west ---
+  publisher:
+    dns                       52.5 ms
+    connect              unmeasured
+    handshake            unmeasured
+    publish_accept       unmeasured
+    first_idr            unmeasured
+    first_byte_ingest    unmeasured
+    = accounted          52.5 vs measured None (residual 0.0, over 0.0)
+  player:
+    player_request           321.0 ms
+    manifest                 173.0 ms
+    first_media              217.0 ms
+    first_paint               63.0 ms
+    = accounted          774.0 vs TTFF 774.0 (residual 0.0, over 0.0)
+  unmeasured: connect,handshake,publish_accept,first_idr,first_byte_ingest
+  n/a:        (none)
+  rendered:   64.0
+
+wrote .qa-startup/startup-matrix.json (3 legs)

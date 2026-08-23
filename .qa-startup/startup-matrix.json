@@ -1,0 +1,107 @@
+[
+  {
+    "protocol": "srt",
+    "provider": "gcp-west",
+    "publisher_phases_ms": {
+      "dns": 0.2,
+      "connect": null,
+      "handshake": null,
+      "publish_accept": null,
+      "first_idr": null,
+      "first_byte_ingest": null
+    },
+    "publisher_accounted_ms": 0.2,
+    "publisher_measured_ms": null,
+    "publisher_residual_ms": 0.0,
+    "publisher_overcount_ms": 0.0,
+    "player_phases_ms": {
+      "player_request": null,
+      "manifest": null,
+      "first_media": null,
+      "first_paint": null
+    },
+    "player_accounted_ms": 0.0,
+    "player_measured_ms": 0.0,
+    "player_residual_ms": 0.0,
+    "player_overcount_ms": 0.0,
+    "playback_ttff_ms": 0.0,
+    "unmeasured": "handshake,publish_accept,first_idr,first_byte_ingest,player_request,first_media,first_paint",
+    "not_applicable": "connect,manifest",
+    "playback_frames_rendered": 0.0,
+    "job_id": "6efe4856-5130-4227-95ff-e6fed5f31e1f",
+    "preset_id": "moq_zixi_gcp",
+    "player_mode": "mpegts",
+    "job_status": "completed",
+    "job_error": null
+  },
+  {
+    "protocol": "rtmp",
+    "provider": "gcp-west",
+    "publisher_phases_ms": {
+      "dns": 0.2,
+      "connect": 2.8,
+      "handshake": null,
+      "publish_accept": null,
+      "first_idr": null,
+      "first_byte_ingest": null
+    },
+    "publisher_accounted_ms": 3.0,
+    "publisher_measured_ms": null,
+    "publisher_residual_ms": 0.0,
+    "publisher_overcount_ms": 0.0,
+    "player_phases_ms": {
+      "player_request": 61.7,
+      "manifest": null,
+      "first_media": 2060.8,
+      "first_paint": 1765.5
+    },
+    "player_accounted_ms": 3888.0,
+    "player_measured_ms": 3888.0,
+    "player_residual_ms": 0.0,
+    "player_overcount_ms": 0.0,
+    "playback_ttff_ms": 3888.0,
+    "unmeasured": "handshake,publish_accept,first_idr,first_byte_ingest",
+    "not_applicable": "manifest",
+    "playback_frames_rendered": 75.0,
+    "job_id": "f5b3eb24-d684-4741-bfeb-89a3eb46db18",
+    "preset_id": "moq_zixi_gcp_rtmp",
+    "player_mode": "mpegts",
+    "job_status": "completed",
+    "job_error": null
+  },
+  {
+    "protocol": "moq",
+    "provider": "gcp-west",
+    "publisher_phases_ms": {
+      "dns": 52.5,
+      "connect": null,
+      "handshake": null,
+      "publish_accept": null,
+      "first_idr": null,
+      "first_byte_ingest": null
+    },
+    "publisher_accounted_ms": 52.5,
+    "publisher_measured_ms": null,
+    "publisher_residual_ms": 0.0,
+    "publisher_overcount_ms": 0.0,
+    "player_phases_ms": {
+      "player_request": 321.0,
+      "manifest": 173.0,
+      "first_media": 217.0,
+      "first_paint": 63.0
+    },
+    "player_accounted_ms": 774.0,
+    "player_measured_ms": 774.0,
+    "player_residual_ms": 0.0,
+    "player_overcount_ms": 0.0,
+    "playback_ttff_ms": 774.0,
+    "unmeasured": "connect,handshake,publish_accept,first_idr,first_byte_ingest",
+    "not_applicable": "",
+    "playback_frames_rendered": 64.0,
+    "job_id": "3649d5ea-ea5d-4de3-b48f-2a4bfa3fad86",
+    "preset_id": "moq_gcp_relay_d18",
+    "player_mode": "moq",
+    "job_status": "completed",
+    "job_error": null
+  }
+]
