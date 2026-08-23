@@ -21,6 +21,7 @@ from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
 from playback_metrics import (
     PLAYBACK_FIELD_NAMES,
+    PLAYBACK_NULLABLE_KEYS,
     _playback_high_water,
     patch_summary_with_playback,
     robust_e2e_stats,
@@ -54,7 +55,10 @@ def live_sample_payload(sample: UploadSample) -> dict:
     if not payload.get("net_rtt_ms") and payload.get("transport_rtt_ms"):
         payload["net_rtt_ms"] = payload["transport_rtt_ms"]
     for name in PLAYBACK_FIELD_NAMES:
-        payload.setdefault(name, 0)
+        # The startup phases default to None: on those columns a 0 asserts the
+        # stage was measured and instant, so the live charts have to receive
+        # the same blank the CSV carries.
+        payload.setdefault(name, None if name in PLAYBACK_NULLABLE_KEYS else 0)
     return payload
 
 try:
@@ -734,10 +738,15 @@ class JobManager:
         engine = str(sample.get("engine", "") or "").strip().lower()
         payload = {"elapsed_sec": elapsed_sec}
         for name in PLAYBACK_FIELD_NAMES:
+            # A startup phase the browser could not source arrives as null and
+            # must stay null; every other playback column is a counter or gauge
+            # whose absence really is zero.
+            absent = None if name in PLAYBACK_NULLABLE_KEYS else 0
             try:
-                payload[name] = sample.get(name, 0)
+                value = sample.get(name, absent)
             except (TypeError, ValueError):
-                payload[name] = 0
+                value = absent
+            payload[name] = absent if value is None else value
 
         with self._lock:
             record = self._jobs.get(job_id)
@@ -1168,7 +1177,7 @@ class JobManager:
         if matched is None:
             matched = playback_samples[-1]
         for name in PLAYBACK_FIELD_NAMES:
-            payload[name] = matched.get(name, 0)
+            payload[name] = matched.get(name, None if name in PLAYBACK_NULLABLE_KEYS else 0)
 
     def _persist_playback_metrics(self, job_id: str, summary_path: Optional[str]) -> None:
         with self._lock:

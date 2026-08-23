@@ -5,6 +5,13 @@ import { playbackGateLabel } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import {
+  EMPTY_STARTUP_PHASES,
+  findStartupResourceTiming,
+  latchStartupPhases,
+  startupPhasesFromMilestones,
+  type StartupPlayerPhases,
+} from "../startupTiming";
+import {
   attachHtmlPlaybackMonitors,
   loadJobRebuffer,
   persistJobRebuffer,
@@ -106,7 +113,12 @@ export default function WhepPlayer({
     framesRendered: 0,
     framesDecoded: 0,
     framesDropped: 0,
+    // Startup milestones (epoch ms) for the player-chain decomposition.
+    sdpAnsweredAtMs: 0,
+    firstMediaAtMs: 0,
+    firstPaintAtMs: 0,
   });
+  const startupPhasesRef = useRef<StartupPlayerPhases>({ ...EMPTY_STARTUP_PHASES });
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0 });
   lagRef.current = { bridgeMs: bridgeLagMs, encoderMs: encoderLagMs };
   const jobStatusRef = useRef(jobStatus);
@@ -119,6 +131,47 @@ export default function WhepPlayer({
   encodeElapsedRef.current = encodeElapsedSec ?? 0;
   const runStoppedRef = useRef(runStopped);
   runStoppedRef.current = runStopped;
+
+  /**
+   * Player-chain startup phases (see src/startup_budget.py).
+   *
+   * `player_request` is Resource Timing on the WHEP POST (`fetchStart →
+   * requestStart`), and on WHEP that span legitimately contains more than DNS +
+   * connect + TLS: the offer cannot be posted until local ICE gathering
+   * finishes (up to 4s in whepSession), and gathering is genuinely part of
+   * "attach → request sent" here.
+   *
+   * `manifest` is the SDP exchange, closed by wall clock when the answer has
+   * been applied rather than by the POST's own Resource Timing entry. The
+   * negotiation retries a 404/425 up to twelve times while MediaMTX comes up,
+   * reusing one gathered offer; the *first* entry is only the first attempt, so
+   * timing the exchange from the entry would charge every retry to first_media
+   * instead. The Resource Timing entry is still the cross-check — with the
+   * signaling proxy in play (an https page cannot POST to http://host:8889) the
+   * entry is same-origin and visible; a direct POST to the MediaMTX host is
+   * cross-origin, so `player_request` reports unmeasured unless MediaMTX sends
+   * `Timing-Allow-Origin`. That is the one phase most likely to be blank on
+   * this engine.
+   *
+   * `first_media` runs from the answer to the first `inbound-rtp` byte and
+   * therefore contains ICE connectivity checks and the DTLS handshake, matching
+   * PLAYER_PHASE_NOTES["whep"].
+   */
+  function startupPhases(): StartupPlayerPhases {
+    const session = sessionRef.current;
+    const post = findStartupResourceTiming(url);
+    startupPhasesRef.current = latchStartupPhases(
+      startupPhasesRef.current,
+      startupPhasesFromMilestones({
+        attachAtMs: session.liveStartedAtMs,
+        requestSentAtMs: post.requestSentAtMs,
+        manifestReceivedAtMs: session.sdpAnsweredAtMs,
+        firstMediaAtMs: session.firstMediaAtMs,
+        firstPaintAtMs: session.firstPaintAtMs,
+      }),
+    );
+    return startupPhasesRef.current;
+  }
 
   const getPlaybackSnapshot = useCallback((): PlaybackMetricsSnapshot => {
     const frames = readVideoFrameStats(videoRef.current);
@@ -162,6 +215,7 @@ export default function WhepPlayer({
       }),
       playback_rebuffer_sec: rebufferRef.current.totalSec,
       e2e_latency_ms: e2e && isPlausibleE2eMs(e2e) ? e2e : undefined,
+      ...startupPhases(),
     };
   }, [jobId]);
 
@@ -228,7 +282,11 @@ export default function WhepPlayer({
       framesRendered: 0,
       framesDecoded: 0,
       framesDropped: 0,
+      sdpAnsweredAtMs: 0,
+      firstMediaAtMs: 0,
+      firstPaintAtMs: 0,
     };
+    startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
 
@@ -240,9 +298,10 @@ export default function WhepPlayer({
       if (vt > 0.05) {
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, vt);
         if (sessionRef.current.ttffMs <= 0 && sessionRef.current.liveStartedAtMs > 0) {
+          sessionRef.current.firstPaintAtMs = Date.now();
           sessionRef.current.ttffMs = Math.max(
             1,
-            Math.round(Date.now() - sessionRef.current.liveStartedAtMs),
+            Math.round(sessionRef.current.firstPaintAtMs - sessionRef.current.liveStartedAtMs),
           );
         }
       }
@@ -258,6 +317,85 @@ export default function WhepPlayer({
         window.clearInterval(statsTimer);
         statsTimer = null;
       }
+    };
+
+    /**
+     * Close the `first_media` phase at the first `inbound-rtp` byte.
+     *
+     * Deliberately not folded into the 1s stats timer above: that is a gauge
+     * cadence, and reading the milestone there would quantise both `first_media`
+     * and `first_paint` to whole seconds — coarser than the phases themselves.
+     *
+     * The transport-state listeners are what make a fast poll cheap. RTP cannot
+     * arrive before ICE has a working candidate pair and DTLS has completed, so
+     * polling only starts once the peer connection reports connected, and stops
+     * at the first byte. `transport.dtlsState` is read in the same pass, so the
+     * poll cannot mistake a stray pre-handshake counter for media.
+     */
+    const FIRST_MEDIA_POLL_MS = 100;
+    let firstMediaTimer: number | null = null;
+    let detachTransportWatch: (() => void) | null = null;
+
+    const stopFirstMediaWatch = () => {
+      if (firstMediaTimer != null) {
+        window.clearInterval(firstMediaTimer);
+        firstMediaTimer = null;
+      }
+      detachTransportWatch?.();
+      detachTransportWatch = null;
+    };
+
+    const watchFirstMedia = (pc: RTCPeerConnection) => {
+      stopFirstMediaWatch();
+      const poll = () => {
+        if (destroyed || sessionRef.current.firstMediaAtMs > 0) {
+          stopFirstMediaWatch();
+          return;
+        }
+        void pc
+          .getStats()
+          .then((report) => {
+            if (destroyed || sessionRef.current.firstMediaAtMs > 0) {
+              return;
+            }
+            let dtlsConnected = false;
+            let bytes = 0;
+            report.forEach((stat) => {
+              if (stat.type === "transport") {
+                const transport = stat as RTCTransportStats;
+                if (transport.dtlsState === "connected") {
+                  dtlsConnected = true;
+                }
+              }
+              if (stat.type === "inbound-rtp" && (stat as RTCInboundRtpStreamStats).kind !== "audio") {
+                bytes = Math.max(bytes, (stat as RTCInboundRtpStreamStats).bytesReceived ?? 0);
+              }
+            });
+            if (dtlsConnected && bytes > 0) {
+              sessionRef.current.firstMediaAtMs = Date.now();
+              stopFirstMediaWatch();
+            }
+          })
+          .catch(() => undefined);
+      };
+      const onTransportState = () => {
+        if (destroyed || firstMediaTimer != null) {
+          return;
+        }
+        const ice = pc.iceConnectionState;
+        if (pc.connectionState === "connected" || ice === "connected" || ice === "completed") {
+          firstMediaTimer = window.setInterval(poll, FIRST_MEDIA_POLL_MS);
+          poll();
+        }
+      };
+      pc.addEventListener("connectionstatechange", onTransportState);
+      pc.addEventListener("iceconnectionstatechange", onTransportState);
+      detachTransportWatch = () => {
+        pc.removeEventListener("connectionstatechange", onTransportState);
+        pc.removeEventListener("iceconnectionstatechange", onTransportState);
+      };
+      // Connection may already be up by the time the answer was applied.
+      onTransportState();
     };
 
     const startStatsTimer = () => {
@@ -334,6 +472,14 @@ export default function WhepPlayer({
           }
           sessionRefHandle.current = session;
           pcRef.current = session.pc;
+          // startWhepSession resolves once the answer SDP has been applied, so
+          // this closes the WHEP exchange including any 404/425 retries while
+          // MediaMTX came up. Latched: a reconnect renegotiates against a
+          // warm gateway and would describe a different join.
+          if (sessionRef.current.sdpAnsweredAtMs <= 0) {
+            sessionRef.current.sdpAnsweredAtMs = Date.now();
+          }
+          watchFirstMedia(session.pc);
           setStatus("Waiting for video...");
           await waitForWhepMedia(video, session.pc, 12_000, abort.signal);
           if (destroyed) {
@@ -355,6 +501,7 @@ export default function WhepPlayer({
           startStatsTimer();
           const iceState = await waitForWhepIceTerminal(session.pc, abort.signal);
           clearStatsTimer();
+          stopFirstMediaWatch();
           if (destroyed) {
             return;
           }
@@ -382,6 +529,7 @@ export default function WhepPlayer({
           throw new Error(`WHEP ICE ${iceState}.`);
         } catch (err) {
           clearStatsTimer();
+          stopFirstMediaWatch();
           sessionRefHandle.current?.stop();
           sessionRefHandle.current = null;
           pcRef.current = null;
@@ -432,6 +580,7 @@ export default function WhepPlayer({
       persistJobRebuffer(jobId, rebufferRef.current);
       detachHtmlMonitors?.();
       clearStatsTimer();
+      stopFirstMediaWatch();
       video.removeEventListener("timeupdate", onTimeUpdate);
       sessionRefHandle.current?.stop();
       sessionRefHandle.current = null;

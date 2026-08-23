@@ -197,6 +197,20 @@ class PlaybackSampleRequest(BaseModel):
     playback_rebuffer_sec: float = 0.0
     playback_error_count: int = 0
     e2e_latency_ms: float = 0.0
+    #: Startup decomposition, player half (src/startup_budget.py). Durations in
+    #: ms from the browser's own instruments, reconciling against
+    #: playback_ttff_ms.
+    #:
+    #: These default to None, not 0.0, and that is the point: a phase the
+    #: browser cannot source (no manifest on a raw MPEG-TS pull, or Resource
+    #: Timing marks zeroed by cross-origin opacity) has to stay distinguishable
+    #: from a phase that completed inside the measurement resolution. A 0.0
+    #: default here would silently convert every unmeasured phase into a
+    #: confident zero before it ever reached the CSV.
+    startup_player_request_ms: Optional[float] = None
+    startup_manifest_ms: Optional[float] = None
+    startup_first_media_ms: Optional[float] = None
+    startup_first_paint_ms: Optional[float] = None
 
 
 def job_to_dict(job) -> dict:

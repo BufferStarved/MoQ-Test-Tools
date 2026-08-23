@@ -35,11 +35,34 @@ const PLAYBACK_COUNTER_KEYS = [
 
 const PLAYBACK_GAUGE_KEYS = ["playback_bitrate_bps", "playback_buffer_sec", "e2e_latency_ms"] as const;
 
+/**
+ * One-shot join facts whose absence is a measurement, not a zero (see
+ * PlaybackMetricsSnapshot). They are excluded from the counter high-water on
+ * purpose: `Math.max(null, x)` is 0, which would report every unmeasured
+ * startup phase as an instant one.
+ */
+const PLAYBACK_ONE_SHOT_KEYS = [
+  "startup_player_request_ms",
+  "startup_manifest_ms",
+  "startup_first_media_ms",
+  "startup_first_paint_ms",
+] as const;
+
 /** Read one playback metric off any object that may carry it. Callers pass
  *  upload samples, SSE snapshots and merged spreads, none of which declare an
  *  index signature, so the lookup is done through a widened view. */
 function metricNumber(source: object, key: string): number {
   return Number((source as Record<string, unknown>)[key] ?? 0);
+}
+
+/** As metricNumber, but keeping "no reading" distinct from a reading of 0. */
+function metricNullable(source: object, key: string): number | null {
+  const raw = (source as Record<string, unknown>)[key];
+  if (raw == null) {
+    return null;
+  }
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
 }
 
 /** Keep painted-glass high-water. A reconnect snapshot of zeros must not
@@ -60,6 +83,13 @@ export function applyPlaybackHighWater<T extends object>(
     if (value > 0) {
       next[key] = value;
     }
+  }
+  for (const key of PLAYBACK_ONE_SHOT_KEYS) {
+    // First honest reading wins. `incoming` is the value already on the
+    // series, so a later sample cannot overwrite a measured phase with a
+    // null (a reconnect restarts the chain) — and cannot overwrite a null
+    // with a 0 either.
+    next[key] = metricNullable(incoming, key) ?? metricNullable(dest, key);
   }
   return next as T;
 }

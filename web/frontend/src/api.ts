@@ -200,6 +200,25 @@ export interface PlaybackMetricsSnapshot {
   playback_rebuffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
+  /**
+   * Startup decomposition, player half (src/startup_budget.py ↔
+   * startupTiming.ts): attach → request sent → manifest received → first media
+   * → first painted frame. Durations in ms, not offsets; they reconcile
+   * against the measured playback_ttff_ms.
+   *
+   * `null` is load-bearing and means "no instrument backs this phase on this
+   * engine" — a raw MPEG-TS pull has no manifest at all, and Resource Timing
+   * marks are zeroed on a cross-origin response without Timing-Allow-Origin.
+   * Sending 0 for either case would report the phase as measured and free, so
+   * these are the one group of playback fields that must never be defaulted.
+   *
+   * One-shot join facts like playback_ttff_ms, not live gauges: they are not
+   * blanked when the player detaches.
+   */
+  startup_player_request_ms?: number | null;
+  startup_manifest_ms?: number | null;
+  startup_first_media_ms?: number | null;
+  startup_first_paint_ms?: number | null;
 }
 
 export function postEncodeSample(

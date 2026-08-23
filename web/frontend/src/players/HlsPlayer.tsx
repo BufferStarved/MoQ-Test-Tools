@@ -9,6 +9,13 @@ import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
 import { usePlaybackMetricsReporter } from "../playbackMetrics";
 import {
+  EMPTY_STARTUP_PHASES,
+  findStartupResourceTiming,
+  latchStartupPhases,
+  startupPhasesFromMilestones,
+  type StartupPlayerPhases,
+} from "../startupTiming";
+import {
   attachHtmlPlaybackMonitors,
   loadJobRebuffer,
   persistJobRebuffer,
@@ -378,6 +385,12 @@ export default function HlsPlayer({
     fragTimelineOffsetSec: null as number | null,
     wallOriginCalibrated: false,
     bitrateBps: 0,
+    // Startup milestones (epoch ms), for the player-chain decomposition. Both
+    // are event instants rather than derived durations: first_paint is timed
+    // from the frame that actually appeared, not by subtracting the earlier
+    // phases out of ttff, so the chain can disagree with ttff and say so.
+    firstMediaAtMs: 0,
+    firstPaintAtMs: 0,
   });
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
@@ -406,6 +419,36 @@ export default function HlsPlayer({
     return Math.max(0, raw - session.videoTimeOrigin);
   }
   const rebufferRef = useRef(new RebufferTracker());
+  const startupPhasesRef = useRef<StartupPlayerPhases>({ ...EMPTY_STARTUP_PHASES });
+
+  /**
+   * Player-chain startup phases (see src/startup_budget.py).
+   *
+   * The manifest request is the only one of the four boundaries the player does
+   * not observe directly, so it comes from Resource Timing on the playlist URL:
+   * `fetchStart → requestStart` is DNS + connect + TLS, `requestStart →
+   * responseEnd` is the playlist itself. Playback normally goes through the
+   * app's own `/api/playback/fetch` proxy, which makes those entries
+   * same-origin and fully visible; a direct playlist URL on a packager host is
+   * cross-origin and its interior marks are zeroed unless the packager sends
+   * `Timing-Allow-Origin`, in which case both phases report unmeasured rather
+   * than a 0 ms connect (see startupTiming.isOpaqueResourceTiming).
+   */
+  function startupPhases(): StartupPlayerPhases {
+    const session = sessionRef.current;
+    const manifest = findStartupResourceTiming(url);
+    startupPhasesRef.current = latchStartupPhases(
+      startupPhasesRef.current,
+      startupPhasesFromMilestones({
+        attachAtMs: session.liveStartedAtMs,
+        requestSentAtMs: manifest.requestSentAtMs,
+        manifestReceivedAtMs: manifest.responseEndAtMs,
+        firstMediaAtMs: session.firstMediaAtMs,
+        firstPaintAtMs: session.firstPaintAtMs,
+      }),
+    );
+    return startupPhasesRef.current;
+  }
 
   // Live upstream lag components (props change every sample poll); refs keep
   // the memoized snapshot getter reading fresh values.
@@ -509,9 +552,9 @@ export default function HlsPlayer({
         playback_buffer_sec: sessionRef.current.bufferSec,
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         e2e_latency_ms: captureAnchoredE2eMs(),
+        ...startupPhases(),
       };
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [jobId],
   );
 
@@ -627,7 +670,10 @@ export default function HlsPlayer({
       fragTimelineOffsetSec: null,
       wallOriginCalibrated: false,
       bitrateBps: 0,
+      firstMediaAtMs: 0,
+      firstPaintAtMs: 0,
     };
+    startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
     setElapsedSec(0);
     rebufferRef.current.reset();
     loadJobRebuffer(jobId, rebufferRef.current);
@@ -1034,6 +1080,13 @@ export default function HlsPlayer({
 
         instance.on(Hls.Events.FRAG_LOADED, () => {
           sessionRef.current.fragmentLoads += 1;
+          if (sessionRef.current.firstMediaAtMs <= 0) {
+            // First media response completed. Everything between the playlist
+            // arriving and this instant is the packager: on the 23s RTMP join
+            // the playlist was served immediately and no decodable chunk
+            // existed yet, which is exactly the span this milestone closes.
+            sessionRef.current.firstMediaAtMs = Date.now();
+          }
           const level = instance.levels?.[instance.currentLevel];
           const estimate = instance.bandwidthEstimate;
           sessionRef.current.bitrateBps = Math.round(
@@ -1368,9 +1421,10 @@ export default function HlsPlayer({
           }
         }
         if (sessionRef.current.ttffMs <= 0 && relTime > 0.25) {
+          sessionRef.current.firstPaintAtMs = Date.now();
           sessionRef.current.ttffMs = Math.max(
             0,
-            Date.now() - sessionRef.current.liveStartedAtMs,
+            sessionRef.current.firstPaintAtMs - sessionRef.current.liveStartedAtMs,
           );
           pushDiag(`ttff_ms=${sessionRef.current.ttffMs}`);
         }

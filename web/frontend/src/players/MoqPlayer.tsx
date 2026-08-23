@@ -47,6 +47,13 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { computeMoqE2eMs } from "../glassLatency";
+import {
+  EMPTY_STARTUP_PHASES,
+  latchStartupPhases,
+  readPlayaTtffBreakdown,
+  startupPhasesFromPlayaBreakdown,
+  type StartupPlayerPhases,
+} from "../startupTiming";
 import { canvasBehindLiveSec, inferDroppedFrames } from "../playbackTruth";
 import { isGracefulMoqEncodeOver, isGracefulMoqReset } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
@@ -203,6 +210,14 @@ export default function MoqPlayer({
     lastFrameAtMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
+  /**
+   * Startup phases from playa's own TTFF breakdown — the only engine here that
+   * instruments every milestone itself, on one clock, with load() as t0. Held
+   * outside sessionRef because a session restart must not clear it: the phases
+   * describe the join that actually painted, and a reconnect's chain starts
+   * over from a relay that is already warm.
+   */
+  const startupPhasesRef = useRef<StartupPlayerPhases>({ ...EMPTY_STARTUP_PHASES });
   const lastGoodE2eRef = useRef<number | undefined>(undefined);
   const userPausedRef = useRef(false);
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0, rttMs: 0 });
@@ -249,6 +264,7 @@ export default function MoqPlayer({
       return;
     }
     lastJobIdRef.current = jobId;
+    startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
     // Never clobber a successful outcome on remount (Strict Mode / prop churn).
     if (!getMoqPlaybackOutcome(jobId)) {
       resetMoqPlaybackOutcome(jobId);
@@ -367,6 +383,7 @@ export default function MoqPlayer({
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         playback_error_count: lastErrorRef.current ? 1 : 0,
         e2e_latency_ms: captureAnchoredE2eMs(),
+        ...startupPhasesRef.current,
       };
     },
     [jobId, mediaPackaging],
@@ -1029,6 +1046,20 @@ export default function MoqPlayer({
         });
 
         player.on("stats", (stats) => {
+          // playa instruments every join milestone itself (transport connect,
+          // SETUP, catalog, first object, first frame) as cumulative offsets
+          // from load(), so the four startup phases are exact differences
+          // rather than anything reconstructed from the total. Each phase is
+          // latched on its first reading: milestones land progressively, and a
+          // later reconnect would describe a join against an already-warm
+          // relay instead of the one the operator watched.
+          const breakdown = readPlayaTtffBreakdown(player);
+          if (breakdown) {
+            startupPhasesRef.current = latchStartupPhases(
+              startupPhasesRef.current,
+              startupPhasesFromPlayaBreakdown(breakdown),
+            );
+          }
           const prevRendered = sessionRef.current.framesRendered;
           sessionRef.current.framesRendered = stats.framesRendered;
           sessionRef.current.framesDropped = stats.framesDropped;

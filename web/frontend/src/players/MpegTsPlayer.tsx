@@ -13,6 +13,13 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { proxiedPlaybackUrl } from "../playbackUrls";
+import {
+  EMPTY_STARTUP_PHASES,
+  findStartupResourceTiming,
+  latchStartupPhases,
+  startupPhasesFromMilestones,
+  type StartupPlayerPhases,
+} from "../startupTiming";
 import { isGracefulMpegTsEos } from "../playbackEos";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 
@@ -66,8 +73,10 @@ export default function MpegTsPlayer({
     ttffMs: 0,
     liveStartedAtMs: 0,
     errorCount: 0,
+    firstPaintAtMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
+  const startupPhasesRef = useRef<StartupPlayerPhases>({ ...EMPTY_STARTUP_PHASES });
   const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0 });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
@@ -114,6 +123,37 @@ export default function MpegTsPlayer({
     return undefined;
   }
 
+  /**
+   * Player-chain startup phases (see src/startup_budget.py).
+   *
+   * **There is no manifest phase here, and it is not zero.** A raw MPEG-TS pull
+   * has nothing to fetch before the media: the first response *is* the stream.
+   * Reporting `startup_manifest_ms` as 0 would claim an instant manifest fetch
+   * on an engine that never performs one, so the phase is omitted and the time
+   * between the request going out and the first TS byte is attributed to
+   * `first_media`, where it actually happened
+   * (startup_budget.PLAYER_PHASE_NOTES["mpegts"] declares the same).
+   *
+   * `first_media` closes at Resource Timing's `responseStart` — the only
+   * milestone a never-ending response has, since a live TS pull's `responseEnd`
+   * stays 0 for the whole run.
+   */
+  function startupPhases(): StartupPlayerPhases {
+    const session = sessionRef.current;
+    const stream = findStartupResourceTiming(url);
+    startupPhasesRef.current = latchStartupPhases(
+      startupPhasesRef.current,
+      startupPhasesFromMilestones({
+        attachAtMs: session.liveStartedAtMs,
+        requestSentAtMs: stream.requestSentAtMs,
+        manifestApplicable: false,
+        firstMediaAtMs: stream.responseStartAtMs,
+        firstPaintAtMs: session.firstPaintAtMs,
+      }),
+    );
+    return startupPhasesRef.current;
+  }
+
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => {
       const frames = readVideoFrameStats(videoRef.current);
@@ -133,9 +173,9 @@ export default function MpegTsPlayer({
         playback_buffer_sec: bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         e2e_latency_ms: captureAnchoredE2eMs(),
+        ...startupPhases(),
       };
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [jobId],
   );
 
@@ -178,7 +218,9 @@ export default function MpegTsPlayer({
       ttffMs: 0,
       liveStartedAtMs: Date.now(),
       errorCount: 0,
+      firstPaintAtMs: 0,
     };
+    startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
     rebufferRef.current = new RebufferTracker();
     loadJobRebuffer(jobId, rebufferRef.current);
     let detachHtmlMonitors: (() => void) | undefined;
@@ -272,9 +314,10 @@ export default function MpegTsPlayer({
       if (relative > 0.05) {
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relative);
         if (sessionRef.current.ttffMs <= 0 && sessionRef.current.liveStartedAtMs > 0) {
+          sessionRef.current.firstPaintAtMs = Date.now();
           sessionRef.current.ttffMs = Math.max(
             1,
-            Math.round(Date.now() - sessionRef.current.liveStartedAtMs),
+            Math.round(sessionRef.current.firstPaintAtMs - sessionRef.current.liveStartedAtMs),
           );
           pushDiag(
             `first_frame time=${relative.toFixed(2)} ttff=${sessionRef.current.ttffMs}ms size=${video.videoWidth}x${video.videoHeight}`,

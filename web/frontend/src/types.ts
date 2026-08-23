@@ -109,6 +109,14 @@ export interface UploadSample {
   playback_video_time_sec?: number;
   playback_buffer_sec?: number;
   playback_rebuffer_sec?: number;
+  // Startup decomposition, player half (src/startup_budget.py ↔
+  // startupTiming.ts). Durations in ms that reconcile against
+  // playback_ttff_ms. `null` means no instrument backs the phase on this
+  // engine — never 0, which would read as "measured, and it was free".
+  startup_player_request_ms?: number | null;
+  startup_manifest_ms?: number | null;
+  startup_first_media_ms?: number | null;
+  startup_first_paint_ms?: number | null;
 }
 
 export interface EndpointConfig {
