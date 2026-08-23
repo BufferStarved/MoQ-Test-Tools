@@ -10,11 +10,16 @@
 # Usage:
 #   scripts/deploy-web-targeted.sh [web-ip]
 #
+# This is the prod deploy. It exports `git archive HEAD` and syncs that, so
+# uncommitted OBS / moq5 / infra work on the laptop never reaches
+# moq.sean-mccarthy.net. The SHA is the short commit with no suffix.
+#
 # Env:
 #   WEB_IP        default 34.9.217.178 (moq-web-gcp, reached via the IAP
 #                 ProxyCommand in ~/.ssh/config)
 #   SKIP_BUILD=1  sync + restart only, no npm build
 #   SKIP_RESTART=1 sync (+build) only, leave the service alone
+#   MOQ_ENV       must be prod (default). Dev is local: scripts/dev.sh.
 
 set -euo pipefail
 
@@ -48,14 +53,20 @@ print(sum(1 for j in items if isinstance(j,dict) and j.get("status") in ("runnin
   echo "    idle"
 fi
 
-# Build sha marker: rsync deploys the working tree, not a commit, so a clean
-# HEAD sha would make a dirty deploy indistinguishable from the last tagged one.
-GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal 2>/dev/null || true)" ]]; then
-  GIT_SHA="${GIT_SHA}-dirty"
+# One prod build: committed HEAD only. A dirty working tree is the other
+# environment (dev) and is never what this script ships.
+export MOQ_ENV="${MOQ_ENV:-prod}"
+if [[ "$MOQ_ENV" != "prod" ]]; then
+  echo "REFUSING: deploy-web-targeted.sh is the prod deploy. Dev is local (scripts/dev.sh)." >&2
+  exit 2
 fi
-printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
-echo "==> build sha $GIT_SHA"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/build-identity.sh"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/moq-prod-XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+git -C "$ROOT_DIR" archive HEAD | tar -x -C "$STAGE"
+printf '%s\n' "$GIT_SHA" > "$STAGE/.build-sha"
+echo "==> prod sha $GIT_SHA (git archive HEAD, not the working tree)"
 
 echo "==> rsync app tree"
 rsync -az \
@@ -65,22 +76,22 @@ rsync -az \
   --exclude 'dist' \
   --exclude '.venv' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/src/" "$WEB_IP:$INSTALL_ROOT/src/"
+  "$STAGE/src/" "$WEB_IP:$INSTALL_ROOT/src/"
 
 rsync -az --exclude '__pycache__' --exclude '*.pyc' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/web/api/" "$WEB_IP:$INSTALL_ROOT/web/api/"
+  "$STAGE/web/api/" "$WEB_IP:$INSTALL_ROOT/web/api/"
 
 rsync -az --exclude '__pycache__' --exclude '*.pyc' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/tests/" "$WEB_IP:$INSTALL_ROOT/tests/"
+  "$STAGE/tests/" "$WEB_IP:$INSTALL_ROOT/tests/"
 
 rsync -az --exclude '__pycache__' --exclude '*.pyc' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/scripts/" "$WEB_IP:$INSTALL_ROOT/scripts/"
+  "$STAGE/scripts/" "$WEB_IP:$INSTALL_ROOT/scripts/"
 
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/docs/" "$WEB_IP:$INSTALL_ROOT/docs/"
+  "$STAGE/docs/" "$WEB_IP:$INSTALL_ROOT/docs/"
 
 # Frontend sources only. node_modules and dist stay remote: node_modules is
 # huge and already correct, dist is rebuilt on the VM below.
@@ -88,17 +99,29 @@ rsync -az \
   --exclude 'node_modules' \
   --exclude 'dist' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/web/frontend/" "$WEB_IP:$INSTALL_ROOT/web/frontend/"
+  "$STAGE/web/frontend/" "$WEB_IP:$INSTALL_ROOT/web/frontend/"
 
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
-  "$ROOT_DIR/.build-sha" "$WEB_IP:$INSTALL_ROOT/.build-sha"
+  "$STAGE/.build-sha" "$WEB_IP:$INSTALL_ROOT/.build-sha"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> npm build (SPA)"
-  remote "cd $INSTALL_ROOT/web/frontend && npm run build 2>&1 | tail -15"
+  remote "cd $INSTALL_ROOT/web/frontend && VITE_GIT_SHA=$GIT_SHA npm run build 2>&1 | tail -15"
 fi
 
 if [[ "${SKIP_RESTART:-0}" != "1" ]]; then
+  echo "==> stamp MOQ_ENV=prod on the unit"
+  remote 'sudo bash -s' <<'ENV'
+set -euo pipefail
+ENV_FILE=/etc/moq-web.env
+if [[ -f "$ENV_FILE" ]]; then
+  if grep -q '^MOQ_ENV=' "$ENV_FILE"; then
+    sed -i 's/^MOQ_ENV=.*/MOQ_ENV=prod/' "$ENV_FILE"
+  else
+    printf '\nMOQ_ENV=prod\n' >> "$ENV_FILE"
+  fi
+fi
+ENV
   echo "==> restart $SERVICE_NAME"
   remote "sudo systemctl restart $SERVICE_NAME && sleep 4 && systemctl is-active $SERVICE_NAME"
 fi

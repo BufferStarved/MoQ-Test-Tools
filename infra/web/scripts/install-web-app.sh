@@ -36,10 +36,13 @@ INGEST_HOST="${INGEST_AGENT_HOST:-ubuntu@35.222.33.58}"
 INGEST_KEY="${INGEST_SSH_KEY:-$SSH_KEY}"
 GIT_REMOTE="${GIT_REMOTE:-https://github.com/BufferStarved/MoQ-Test-Tools.git}"
 GIT_REF="${GIT_REF:-main}"
-GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
-if [[ -n "$GIT_SHA" ]]; then
-  printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
-fi
+# Hosted install is prod. Dev is local (scripts/dev.sh) and stamps SHA-dev.
+# There is no -dirty suffix: a dirty tree is either kept off this host or it
+# is not what we sync (prod exports git archive HEAD).
+export MOQ_ENV="${MOQ_ENV:-prod}"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/build-identity.sh"
+printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
 
 SSH_PORT="${WEB_SSH_PORT:-22}"
 
@@ -140,6 +143,14 @@ fi
 
 echo "Syncing local repo to ${WEB_IP}:${INSTALL_ROOT} (preferred over git clone)..."
 remote "sudo mkdir -p ${INSTALL_ROOT} && sudo chown ${SSH_USER}:${SSH_USER} ${INSTALL_ROOT}"
+SYNC_ROOT="$ROOT_DIR"
+if [[ "$MOQ_ENV" == "prod" ]]; then
+  SYNC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/moq-prod-XXXXXX")"
+  trap 'rm -rf "$SYNC_ROOT"' EXIT
+  git -C "$ROOT_DIR" archive HEAD | tar -x -C "$SYNC_ROOT"
+  printf '%s\n' "$GIT_SHA" > "$SYNC_ROOT/.build-sha"
+  echo "Prod sync from git archive HEAD (sha=$GIT_SHA), not the working tree."
+fi
 rsync -az --delete \
   --exclude '.git' \
   --exclude 'venv' \
@@ -150,6 +161,10 @@ rsync -az --delete \
   --exclude 'uploads' \
   --exclude 'web/frontend/dist' \
   --exclude 'tools/moq5' \
+  --exclude 'tools/moq5-publisher/build' \
+  --exclude 'tools/moq5-publisher/bin' \
+  --exclude 'tools/ffmpeg-moq' \
+  --exclude 'tools/ffmpeg-whip' \
   --exclude 'tools/openmoq-publisher' \
   --exclude 'tools/*/node_modules' \
   --exclude 'MoQ-Test-Tools' \
@@ -162,7 +177,7 @@ rsync -az --delete \
   --exclude 'infra/**/tfplan' \
   --exclude 'infra/**/terraform.tfvars' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "${ROOT_DIR}/" \
+  "${SYNC_ROOT}/" \
   "${SSH_USER}@${WEB_IP}:${INSTALL_ROOT}/"
 
 # Fallback clone marker if rsync left an empty tree (should not happen)
@@ -288,6 +303,7 @@ GCP_INSTANCE_MOQX=\${GCP_INSTANCE_MOQX}
 FFMPEG=\${FFMPEG_BIN}
 PATH=\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
 PYTHONPATH=\${INSTALL_ROOT}/src:\${INSTALL_ROOT}/web/api
+MOQ_ENV=prod
 MEDIAMTX_LOOPBACK_PUBLISH=1
 # Local publisher agent is a laptop/dev feature — keep off on the hosted web VM.
 LOCAL_PUBLISHER_ENABLED=1

@@ -15,6 +15,11 @@ fi
 pip install -q -r requirements.txt
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/web/api"
+export MOQ_ENV=dev
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/build-identity.sh"
+printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
+export VITE_GIT_SHA="$GIT_SHA"
 
 # Load .env (preset credentials, ingest agent config) plus East/Linode stacks.
 # shellcheck disable=SC1091

@@ -33,6 +33,11 @@ elif [ -x "$ROOT_DIR/tools/openmoq-publisher/bin/openmoq-publisher" ]; then
 fi
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/web/api"
+export MOQ_ENV=dev
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/build-identity.sh"
+printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
+export VITE_GIT_SHA="$GIT_SHA"
 
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/load-dev-env.sh"
@@ -125,7 +130,7 @@ sys.exit(1)
   fi
   echo "Agent: $AGENT_ID  (only this helper — do not start run-local-publisher.sh)"
 fi
-echo "UI: http://127.0.0.1:5173/"
+echo "UI: http://127.0.0.1:5173/  (dev sha=$GIT_SHA)"
 echo "Webcam MoQ canary: This machine · Webcam · MoQ only · draft-18 canary"
 echo "After a job: ./scripts/last-moq-job.sh"
 echo ""

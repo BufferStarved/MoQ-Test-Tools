@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from build_info import read_build_sha
+from build_info import read_build_sha, read_moq_env
 
 # Max duration for a live source (device webcam via the local publisher
 # agent) — user can stop earlier from the UI.
@@ -261,7 +261,11 @@ def job_to_dict(job) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "git_sha": read_build_sha(ROOT_DIR)}
+    return {
+        "status": "ok",
+        "git_sha": read_build_sha(ROOT_DIR),
+        "env": read_moq_env(),
+    }
 
 
 @app.get("/api/time")
