@@ -221,6 +221,55 @@ def _unmeasured_from_row(row: dict) -> set:
     return {by_stage[name] for name in (n.strip() for n in names) if name in by_stage}
 
 
+def _recompute_startup_player(row: dict, *, engine: str = "") -> None:
+    """Reconcile the player half of the startup chain after the merge.
+
+    The encoder loop writes the publisher half, but it cannot write the player
+    half's arithmetic: the phases and the ``playback_ttff_ms`` they reconcile
+    against both arrive from the browser afterwards. Without this the phase
+    columns populate and every reconciliation column stays blank — the leg
+    reports where its join time went and then declines to say whether the
+    parts add up, which is the one question the family exists to answer.
+
+    Recomputed from the merged row rather than carried from the browser so the
+    CSV is self-consistent, and so the not-applicable set is decided by the
+    engine (raw MPEG-TS has no manifest) rather than by whatever the player
+    happened to send.
+    """
+    from startup_budget import STARTUP_PLAYER_COMPONENTS, build_player_startup
+
+    if not any(name in row for name in STARTUP_PLAYER_COMPONENTS):
+        return
+    half = build_player_startup(
+        engine=engine,
+        request_ms=_nullable_float(row.get("startup_player_request_ms")),
+        manifest_ms=_nullable_float(row.get("startup_manifest_ms")),
+        first_media_ms=_nullable_float(row.get("startup_first_media_ms")),
+        first_paint_ms=_nullable_float(row.get("startup_first_paint_ms")),
+        ttff_ms=_nullable_float(row.get("playback_ttff_ms")),
+    )
+    row["startup_player_accounted_ms"] = f"{half.accounted_ms:.1f}"
+    row["startup_player_measured_ms"] = _csv_nullable(half.measured_ms)
+    row["startup_player_residual_ms"] = f"{half.residual_ms:.1f}"
+    row["startup_player_overcount_ms"] = f"{half.overcount_ms:.1f}"
+
+    # Merge the player-half stage names into the shared columns without
+    # disturbing the publisher-half names the encoder loop already wrote.
+    from startup_budget import PLAYER_STAGE_NAMES
+
+    player_stages = set(PLAYER_STAGE_NAMES)
+    for column, stages in (
+        ("startup_unmeasured", half.stage_names(half.unmeasured)),
+        ("startup_not_applicable", half.stage_names(half.not_applicable)),
+    ):
+        existing = [
+            name
+            for name in str(row.get(column, "") or "").split(",")
+            if name and name not in player_stages
+        ]
+        row[column] = ",".join([*existing, *stages])
+
+
 def _recompute_derived(
     row: dict,
     *,
@@ -240,6 +289,7 @@ def _recompute_derived(
     which is what stops a detached player from being charted as a 0 ms buffer
     against a forward-filled glass delay.
     """
+    _recompute_startup_player(row, engine=engine)
     if "latency_accounted_ms" not in row:
         return
     from latency_budget import (

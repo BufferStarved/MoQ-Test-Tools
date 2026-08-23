@@ -349,5 +349,98 @@ class StartupPhaseSummaryTests(unittest.TestCase):
         self.assertNotIn("startup_manifest_ms", averages)
 
 
+class StartupPlayerReconciliationTests(unittest.TestCase):
+    """The merge must do the arithmetic, not just carry the phases.
+
+    The encoder loop cannot: the phases and the ``playback_ttff_ms`` they
+    reconcile against both arrive from the browser after the row was flushed.
+    Live legs on 2026-08-23 (Linode, all four protocols) populated every phase
+    column and left every reconciliation column blank, so each leg said where
+    its join time went and then declined to say whether the parts added up.
+    """
+
+    def _merged(self, engine: str, sample: dict) -> dict:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = f"{tmp}/run.csv"
+            _write_csv(csv_path, 4)
+            rows = merge_playback_into_csv(
+                csv_path,
+                [{"elapsed_sec": 1, **sample}],
+                csv_columns=CSV_COLUMNS,
+                playback_engine=engine,
+            )
+        return rows[-1]
+
+    def test_phases_that_add_up_reconcile_to_zero_residual(self):
+        row = self._merged(
+            "hls",
+            {
+                "startup_player_request_ms": 30.0,
+                "startup_manifest_ms": 120.0,
+                "startup_first_media_ms": 800.0,
+                "startup_first_paint_ms": 551.0,
+                "playback_ttff_ms": 1501.0,
+            },
+        )
+        self.assertEqual(row["startup_player_accounted_ms"], "1501.0")
+        self.assertEqual(row["startup_player_measured_ms"], "1501.0")
+        self.assertEqual(row["startup_player_residual_ms"], "0.0")
+        self.assertEqual(row["startup_player_overcount_ms"], "0.0")
+
+    def test_a_missing_phase_becomes_residual_and_is_named(self):
+        row = self._merged(
+            "hls",
+            {
+                "startup_player_request_ms": 30.0,
+                "startup_manifest_ms": 120.0,
+                "playback_ttff_ms": 1501.0,
+            },
+        )
+        self.assertEqual(row["startup_player_accounted_ms"], "150.0")
+        self.assertEqual(row["startup_player_residual_ms"], "1351.0")
+        self.assertIn("first_media", row["startup_unmeasured"])
+        self.assertIn("first_paint", row["startup_unmeasured"])
+
+    def test_the_engine_decides_not_applicable_not_the_player(self):
+        """Raw MPEG-TS has no manifest; a null there is n/a, not unmeasured."""
+        row = self._merged(
+            "mpegts",
+            {"startup_player_request_ms": 20.0, "playback_ttff_ms": 900.0},
+        )
+        self.assertIn("manifest", row["startup_not_applicable"])
+        self.assertNotIn("manifest", row["startup_unmeasured"].split(","))
+
+    def test_publisher_stage_names_survive_the_player_merge(self):
+        """The two halves share the columns; one must not erase the other."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = f"{tmp}/run.csv"
+            _write_csv(csv_path, 4)
+            with open(csv_path, newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            for row in rows:
+                row["startup_unmeasured"] = "handshake,publish_accept"
+                row["startup_not_applicable"] = "connect"
+            with open(csv_path, "w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows)
+            merged = merge_playback_into_csv(
+                csv_path,
+                [{"elapsed_sec": 1, "startup_player_request_ms": 30.0,
+                  "playback_ttff_ms": 900.0}],
+                csv_columns=CSV_COLUMNS,
+                playback_engine="hls",
+            )
+        last = merged[-1]
+        self.assertIn("handshake", last["startup_unmeasured"])
+        self.assertIn("publish_accept", last["startup_unmeasured"])
+        self.assertIn("manifest", last["startup_unmeasured"])
+        self.assertEqual(last["startup_not_applicable"], "connect")
+
+
 if __name__ == "__main__":
     unittest.main()
