@@ -13,6 +13,8 @@ from latency_budget import (
     build_latency_budget,
 )
 from srt_stats import SrtStatsSummary, summarize_srt_rows
+from startup_budget import StartupHalf
+from startup_probe import publisher_startup_row
 from stats_window import RollingWindow
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -377,6 +379,11 @@ class MetricsCollector:
         # zero". Do not default a missing instrument to 0.
         packager_transit_ms: Optional[float] = None,
         upload_latency_ms: Optional[float] = None,
+        # Publisher half of the startup decomposition (see src/startup_probe.py).
+        # None means this caller has no startup instrument at all, and every
+        # startup column is written blank — not 0, which would claim the leg
+        # started instantly.
+        startup: Optional[StartupHalf] = None,
         e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
         net_rtt_ms: float = 0.0,
         net_jitter_ms: float = 0.0,
@@ -517,6 +524,9 @@ class MetricsCollector:
                 "upload_latency_ms": (
                     "" if upload_latency_ms is None else f"{float(upload_latency_ms):.1f}"
                 ),
+                # Publisher phases only; the player half stays blank until
+                # playback data is merged in.
+                **publisher_startup_row(startup),
                 **budget.as_row(),
                 **frame_row,
                 "out_time": out_time,

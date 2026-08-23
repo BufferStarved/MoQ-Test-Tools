@@ -103,6 +103,7 @@ from network_metrics import (
     find_srt_live_transmit,
 )
 from srt_stats import SrtStatsReader
+from startup_probe import StartupTracker, probe_startup
 from system_metrics import read_client_host_metrics
 from encoder_capture import (
     build_tee_output_args,
@@ -779,6 +780,14 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
+        # First thing the job does, so `t0` is job start on every protocol
+        # rather than "whenever this protocol finished its own preflight".
+        # Everything after this point — endpoint preflight, encoder spawn,
+        # RTMP handshake — is attributed to a later phase.
+        startup_tracker = StartupTracker(
+            job.destination.protocol,
+            preflight=probe_startup(job.destination.protocol, job.destination.url),
+        )
         if job.destination.protocol in {"rtmp", "hls", "dash"}:
             ok, probe_error = probe_endpoint(
                 job.destination.protocol,
@@ -933,6 +942,15 @@ class UploadService:
                         start_time = time.time()
                         encode_lag_tracker = EncodeLagTracker()
                         upload_latency_tracker = UploadLatencyTracker()
+                        # A retried connect is a new startup, not a
+                        # continuation: re-probe so dns/connect belong to the
+                        # attempt that actually carried the media.
+                        startup_tracker = StartupTracker(
+                            job.destination.protocol,
+                            preflight=probe_startup(
+                                job.destination.protocol, job.destination.url
+                            ),
+                        )
                         sample_tick = 1
                         had_samples = False
                         continue
@@ -961,14 +979,29 @@ class UploadService:
                     ffmpeg_kbps=status.bitrate_kbps,
                     merged_send_mbps=merged["net_send_mbps"],
                 )
+                publish_success = _ingest_receive_observed(mtx_stats) or (
+                    job.destination.protocol == "rtmp" and (zixi_stats.rtt_ms or 0) > 0
+                )
                 upload_latency_ms = _observe_upload_latency(
                     upload_latency_tracker,
                     encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
-                    publish_success=_ingest_receive_observed(mtx_stats)
+                    publish_success=publish_success,
+                )
+                # publish_accept is the ingest admitting the session (path
+                # ready / Zixi input answering with an RTT); first_byte_ingest
+                # is media actually landing there, which is the same signal
+                # upload_latency_ms uses. They are frequently the same 1 Hz
+                # tick, and a 0.0 ms phase is the correct reading when they are.
+                startup_half = startup_tracker.observe(
+                    encode_frames=status.frame,
+                    # Zixi's RTT is only read as an accept on RTMP, matching the
+                    # gate on publish_success above: on the HTTP-TS presets the
+                    # poller can be answering for a different input object.
+                    publish_accepted=bool(getattr(mtx_stats, "ready", False))
                     or (
-                        job.destination.protocol == "rtmp"
-                        and (zixi_stats.rtt_ms or 0) > 0
+                        job.destination.protocol == "rtmp" and (zixi_stats.rtt_ms or 0) > 0
                     ),
+                    first_byte_ingest=publish_success,
                 )
 
                 sample = UploadSample(
@@ -1035,6 +1068,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
@@ -1832,6 +1866,14 @@ class UploadService:
             finally:
                 stop_preview.set()
 
+        # Startup anchor for the live-transmit path (the direct ffmpeg→SRT
+        # branch above delegates and takes its own). SRT has no TCP connect to
+        # time — the contract marks that phase not-applicable — so this only
+        # resolves the ingest host.
+        startup_tracker = StartupTracker(
+            job.destination.protocol,
+            preflight=probe_startup(job.destination.protocol, job.destination.url),
+        )
         udp_port = _pick_udp_port()
         udp_url = f"udp://127.0.0.1:{udp_port}?pkt_size=1316"
         temp_dir = tempfile.mkdtemp(prefix="moq-bench-")
@@ -2134,11 +2176,22 @@ class UploadService:
                 )
                 transport_rtt_ms = merged["net_rtt_ms"]
                 transport_rtt_jitter_ms = merged["net_jitter_ms"]
+                publish_success = (srt_stats.mbps_send_rate or 0) > 0 or (
+                    _ingest_receive_observed(mtx_stats)
+                )
                 upload_latency_ms = _observe_upload_latency(
                     upload_latency_tracker,
                     encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
-                    publish_success=(srt_stats.mbps_send_rate or 0) > 0
-                    or _ingest_receive_observed(mtx_stats),
+                    publish_success=publish_success,
+                )
+                # No handshake instrument on SRT: libsrt reports stats once it
+                # is already sending, which is publish/first-byte, not the
+                # caller handshake completing. That phase stays unmeasured.
+                startup_half = startup_tracker.observe(
+                    encode_frames=status.frame,
+                    publish_accepted=bool(getattr(mtx_stats, "ready", False))
+                    or (zixi_stats.rtt_ms or 0) > 0,
+                    first_byte_ingest=publish_success,
                 )
 
                 sample = UploadSample(
@@ -2208,6 +2261,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
@@ -2273,6 +2327,15 @@ class UploadService:
         job: UploadJob,
         on_sample: Optional[SampleCallback] = None,
     ) -> UploadResult:
+        # `connect` on MoQ means the QUIC handshake (transport + crypto in one
+        # exchange) and `handshake` the WebTransport session on top of it.
+        # Nothing in this process observes the QUIC exchange, and a TCP connect
+        # to the relay port would not be it, so only DNS is probed here and the
+        # WebTransport milestone comes from the publisher log below.
+        startup_tracker = StartupTracker(
+            job.destination.protocol,
+            preflight=probe_startup(job.destination.protocol, job.destination.url),
+        )
         target = job.destination.moq_target
         publisher_bin, publisher_backend = find_moq_publisher(
             job.destination.preset_id,
@@ -2653,17 +2716,28 @@ class UploadService:
                     f"{self._tail_file(publisher_log_path)}\n"
                     f"{self._tail_file(publisher_stdout_path)}"
                 )
+                publish_success = (
+                    publisher_first_object_sent(wt_log)
+                    or (
+                        moqx_poller.enabled
+                        and moqx_poller.publish_namespace_success_delta() >= 1
+                    )
+                    or (moqx_stats is not None and (moqx_stats.publish_received or 0) > 0)
+                )
                 upload_latency_ms = _observe_upload_latency(
                     upload_latency_tracker,
                     encode_ready=ffmpeg_bits_ready(status.out_time, status.total_bytes),
-                    publish_success=(
-                        publisher_first_object_sent(wt_log)
-                        or (
-                            moqx_poller.enabled
-                            and moqx_poller.publish_namespace_success_delta() >= 1
-                        )
-                        or (moqx_stats is not None and (moqx_stats.publish_received or 0) > 0)
-                    ),
+                    publish_success=publish_success,
+                )
+                # MoQ is the one protocol with a real handshake instrument: the
+                # publisher logs its WebTransport session, and "sender ready
+                # (namespace + catalog published)" is the publish accept a
+                # subscriber can actually FETCH against.
+                startup_half = startup_tracker.observe(
+                    encode_frames=status.frame,
+                    handshake=publisher_webtransport_connected(wt_log),
+                    publish_accepted=publisher_catalog_published(wt_log),
+                    first_byte_ingest=publish_success,
                 )
 
                 sample = UploadSample(
@@ -2731,6 +2805,7 @@ class UploadService:
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
                     upload_latency_ms=sample.upload_latency_ms,
+                    startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
                     net_rtt_ms=net_rtt,
                     net_jitter_ms=net_jitter,
