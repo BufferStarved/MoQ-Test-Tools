@@ -21,12 +21,18 @@ sample:
   *active* window, never the whole run. Any rate derived from a counter has to
   divide by the span the counter actually covers; see ``fps_truth``.
 
-Known limits, so a clean verdict is not read as more than it is: every
-invariant below is of the form "there is data and it is wrong". A column that
-is absent, unparseable, or zero for a whole leg is therefore reported in the
-tables but does not fail it, and ``PLAUSIBLE`` / ``HONEST_ZEROS`` are printed
-or unused rather than asserted. Absence-of-signal gates are the outstanding
-work here.
+Absence is gated, not just described. Every invariant used to be of the form
+"there is data and it is wrong", which meant a column that was never collected
+read as compliance — the cleanest possible verdict was also exactly what a
+totally broken collector produced. Two gates close that: ``REQUIRED_NONZERO``
+fails a leg whose instrumented columns went quiet, and ``PLAUSIBLE`` now
+asserts instead of only printing ``<- N implausible``. The encoder ramp is the
+one carve-out — a first non-zero sample covers a partial interval and reads low
+by construction — so it reports as an observation.
+
+Still descriptive rather than asserted: ``HONEST_ZEROS`` is reference data, so
+the audit does not yet flag the inverse case of a protocol reporting a column
+it has no business populating.
 
 With ``--assert`` the audit stops describing and starts judging: it exits
 non-zero if any of the invariants below is violated on any leg. That is the
@@ -77,15 +83,37 @@ FRAME_COLUMNS = (
 )
 
 # Columns a protocol is not expected to populate: a zero here is honest, not a
-# collection failure. Reference data only — nothing below consults it yet, so
-# the transport columns are neither excused nor checked. Wiring it in is what
-# would let the audit flag the inverse case, a protocol reporting a column it
-# has no business populating.
+# collection failure. Reference data for the reader; the actionable inverse is
+# REQUIRED_NONZERO below.
 HONEST_ZEROS: Dict[str, tuple] = {
     "srt": ("moqx_*", "quic_*", "cmaf_*"),
     "rtmp": ("moqx_*", "quic_*", "cmaf_*", "pkt_*"),
     "webrtc": ("moqx_*", "quic_*", "cmaf_*", "pkt_*"),
     "moq": ("pkt_*", "ts_continuity_counter_errors"),
+}
+
+# The audit's blind spot was absence. Every other rule is of the form "there is
+# data and it is wrong", so a column that was never collected read as
+# compliance — the cleanest possible verdict was also exactly what a totally
+# broken collector would produce. These are the columns whose silence on a
+# given protocol is a collection failure rather than an honest zero.
+_CORE_REQUIRED = (
+    "encode_frames_total",
+    "fps",
+    "encoded_bitrate_kbps",
+    "cpu_percent",
+    "latency_encode_ms",
+)
+REQUIRED_NONZERO: Dict[str, tuple] = {
+    "srt": _CORE_REQUIRED + ("net_rtt_ms",),
+    "rtmp": _CORE_REQUIRED + ("net_rtt_ms",),
+    "webrtc": _CORE_REQUIRED + ("net_rtt_ms",),
+    "http": _CORE_REQUIRED + ("net_rtt_ms",),
+    # MoQ has no RTT source wired for the openmoq publisher, which is why
+    # quic_rtt_ms reads 0 for the same reason (docs/METRICS.md). Requiring it
+    # would fail every MoQ leg for a gap already tracked as known-unmeasured,
+    # so it stays out until an instrument exists.
+    "moq": _CORE_REQUIRED,
 }
 
 # Sanity windows. Outside these a value is reported as implausible rather than
@@ -374,6 +402,47 @@ def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[s
     unm = unmeasured_stages(rows)
     stale = stale_e2e(rows)
     fps = fps_truth(rows)
+
+    # Absence gate. A required column that never arrived is a broken collector,
+    # and until now it produced the same "invariants OK" as a healthy leg.
+    for column in REQUIRED_NONZERO.get(protocol, _CORE_REQUIRED):
+        s = summarize_column(rows, column)
+        if s["nonzero"] == 0:
+            state = "never emitted" if s["empty"] == s["n"] else "zero on every sample"
+            failures.append(
+                f"{column} is {state} on a {protocol} leg that instruments it — "
+                f"a required column going quiet is a collection failure, and "
+                f"reading it as an honest zero is how a broken collector passes"
+            )
+
+    # Plausibility gate. PLAUSIBLE has always been computed and printed as
+    # "<- N implausible", and never gated, so a value outside its own sanity
+    # window did not cost the leg anything. The encoder ramp is the one honest
+    # exception: the first non-zero sample covers a partial interval, which is
+    # why the 2026-08-23 MoQ leg opens at 10.6 kbps before settling above 2900.
+    for column, (low, high) in PLAUSIBLE.items():
+        values = series(rows, column)
+        nonzero_idx = [i for i, v in enumerate(values) if v != 0.0]
+        if not nonzero_idx:
+            continue
+        ramp = nonzero_idx[0]
+        bad = [(i, v) for i, v in enumerate(values) if v != 0.0 and not low <= v <= high]
+        if not bad:
+            continue
+        sustained = [(i, v) for i, v in bad if i != ramp]
+        if sustained:
+            failures.append(
+                f"{column} leaves its plausible window [{low}, {high}] on "
+                f"{len(sustained)} sample(s) past the encoder ramp (e.g. "
+                f"{sustained[0][1]}) — that far out is a formula or unit error, "
+                f"not a measurement"
+            )
+        else:
+            observations.append(
+                f"{column} reads {bad[0][1]} on its first non-zero sample, under "
+                f"the plausible floor {low} — a partial interval at encoder "
+                f"start, not sustained"
+            )
 
     if rec["accounted_mismatch"]:
         failures.append(

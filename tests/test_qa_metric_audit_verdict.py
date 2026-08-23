@@ -121,6 +121,108 @@ class MoqBufferRuleTests(unittest.TestCase):
         self.assertFalse([o for o in observations if "buffer" in o], observations)
 
 
+class AbsenceGateTests(unittest.TestCase):
+    """A column that never arrived must not read as compliance.
+
+    Every other rule in the audit is "there is data and it is wrong", so before
+    these gates a totally broken collector produced the same ``invariants OK``
+    as a healthy leg — the false-pass vector left open by the 2026-08-23 round.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.audit = _load_audit()
+
+    def _leg(self, protocol: str = "rtmp") -> List[dict]:
+        rows = _rows(protocol=protocol)
+        for row in rows:
+            row["net_rtt_ms"] = "37.6"
+            row["cpu_percent"] = "66.9"
+            row["latency_encode_ms"] = "549.3"
+            row["encoded_bitrate_kbps"] = "2981.1"
+        return rows
+
+    def test_a_healthy_leg_clears_the_absence_gate(self) -> None:
+        failures, _ = self.audit.check_invariants(self._leg(), "rtmp")
+        self.assertFalse(
+            [f for f in failures if "collection failure" in f],
+            f"a fully populated leg must not trip the absence gate: {failures}",
+        )
+
+    def test_a_silent_required_column_fails(self) -> None:
+        rows = self._leg()
+        for row in rows:
+            row["net_rtt_ms"] = ""
+        failures, _ = self.audit.check_invariants(rows, "rtmp")
+
+        self.assertTrue(
+            [f for f in failures if "net_rtt_ms" in f and "never emitted" in f],
+            f"a collector that stopped reporting RTT must fail: {failures}",
+        )
+
+    def test_a_column_zeroed_for_the_whole_leg_fails(self) -> None:
+        rows = self._leg()
+        for row in rows:
+            row["cpu_percent"] = "0"
+        failures, _ = self.audit.check_invariants(rows, "rtmp")
+
+        self.assertTrue(
+            [f for f in failures if "cpu_percent" in f and "zero on every sample" in f],
+            f"an all-zero required column is not an honest zero here: {failures}",
+        )
+
+    def test_moq_is_not_failed_for_the_rtt_it_has_no_instrument_for(self) -> None:
+        """quic_rtt_ms/net_rtt_ms are known-unmeasured on the openmoq publisher."""
+        rows = self._leg(protocol="moq")
+        for row in rows:
+            row["net_rtt_ms"] = "0"
+        failures, _ = self.audit.check_invariants(rows, "moq")
+
+        self.assertFalse(
+            [f for f in failures if "net_rtt_ms" in f],
+            f"a documented unmeasured stage must not be a failure: {failures}",
+        )
+
+
+class PlausibilityGateTests(unittest.TestCase):
+    """PLAUSIBLE was computed and printed for months without ever gating."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.audit = _load_audit()
+
+    def test_a_unit_error_across_the_run_fails(self) -> None:
+        rows = _rows(protocol="rtmp")
+        for row in rows:
+            row["encoded_bitrate_kbps"] = "2981100.0"
+        failures, _ = self.audit.check_invariants(rows, "rtmp")
+
+        self.assertTrue(
+            [f for f in failures if "plausible window" in f],
+            f"bitrate off by 1000x for the whole run must fail: {failures}",
+        )
+
+    def test_the_encoder_ramp_is_an_observation_not_a_failure(self) -> None:
+        """Replays the MoQ leg's 10.6 kbps opening sample.
+
+        The first non-zero sample covers a partial interval, so it reads low by
+        construction. Failing a leg for it would make the gate unusable.
+        """
+        rows = _rows(protocol="moq")
+        for i, row in enumerate(rows):
+            row["encoded_bitrate_kbps"] = "10.6" if i == 0 else "5447.3"
+        failures, observations = self.audit.check_invariants(rows, "moq")
+
+        self.assertFalse(
+            [f for f in failures if "plausible window" in f],
+            f"a partial first interval is not a formula error: {failures}",
+        )
+        self.assertTrue(
+            [o for o in observations if "partial interval at encoder start" in o],
+            f"the ramp sample should still be visible: {observations}",
+        )
+
+
 class FpsVerdictChannelTests(unittest.TestCase):
     """An oscillating encoder is a product owner's problem, not a formula bug."""
 
