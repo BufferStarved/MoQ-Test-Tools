@@ -1,5 +1,6 @@
 import type { ResultSummary, UploadSample } from "./types";
 import { assignStreamColors, STREAM_COLORS } from "./protocolTheme.ts";
+import { STARTUP_NUMERIC_COLUMNS } from "./startupBudget.ts";
 
 export interface ChartPoint {
   second: number;
@@ -130,6 +131,68 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "e2e_latency_ms", label: "Measured glass delay", color: "#f472b6", unit: "ms" },
     ],
   },
+  {
+    id: "startup_breakdown",
+    // Chain order again, but two chains: the publisher half then the player
+    // half. They are separate spans on purpose (see startupBudget.ts), so they
+    // are never summed into one "total startup" here either.
+    title: "Startup breakdown",
+    series: [
+      { key: "startup_dns_ms", label: "DNS", color: "#38bdf8", unit: "ms" },
+      { key: "startup_connect_ms", label: "Connect", color: "#22d3ee", unit: "ms" },
+      { key: "startup_handshake_ms", label: "Handshake", color: "#818cf8", unit: "ms" },
+      { key: "startup_publish_accept_ms", label: "Publish accept", color: "#a78bfa", unit: "ms" },
+      { key: "startup_first_idr_ms", label: "First IDR", color: "#fbbf24", unit: "ms" },
+      {
+        key: "startup_first_byte_ingest_ms",
+        label: "First byte at ingest",
+        color: "#f59e0b",
+        unit: "ms",
+      },
+      { key: "startup_player_request_ms", label: "Player request", color: "#60a5fa", unit: "ms" },
+      { key: "startup_manifest_ms", label: "Manifest / catalog", color: "#c084fc", unit: "ms" },
+      { key: "startup_first_media_ms", label: "First media", color: "#e879f9", unit: "ms" },
+      { key: "startup_first_paint_ms", label: "First paint", color: "#4ade80", unit: "ms" },
+      {
+        key: "startup_publisher_accounted_ms",
+        label: "Publisher accounted",
+        color: "#34d399",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_measured_ms",
+        label: "Publisher measured (→ ingest)",
+        color: "#2dd4bf",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_residual_ms",
+        label: "Publisher unattributed",
+        color: "#f87171",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_overcount_ms",
+        label: "Publisher over-attributed",
+        color: "#fb7185",
+        unit: "ms",
+      },
+      { key: "startup_player_accounted_ms", label: "Player accounted", color: "#86efac", unit: "ms" },
+      {
+        key: "startup_player_measured_ms",
+        label: "Player measured (TTFF)",
+        color: "#22d3ee",
+        unit: "ms",
+      },
+      { key: "startup_player_residual_ms", label: "Player unattributed", color: "#f97316", unit: "ms" },
+      {
+        key: "startup_player_overcount_ms",
+        label: "Player over-attributed",
+        color: "#ef4444",
+        unit: "ms",
+      },
+    ],
+  },
 ];
 
 /** @deprecated Use id encode / client / ingest */
@@ -179,6 +242,35 @@ function rowMetric(row: Record<string, string>, key: string, legacyKey?: string)
   return parseNumber(row[key] ?? (legacyKey ? row[legacyKey] : undefined));
 }
 
+/**
+ * Startup phases onto the chart plane.
+ *
+ * `ChartPoint` is `Record<string, number>`, so it structurally cannot carry the
+ * blank-vs-`0.0` distinction the CSV goes to some trouble to keep: a blank
+ * phase arrives here as 0. These points therefore only decide whether the tab
+ * appears and feed the comparison plane — `StartupBreakdown` reads the row or
+ * sample directly through `startupBudgetFromColumns()`, because telling "no
+ * instrument" from "measured zero" is the whole point of that view.
+ */
+function startupRowMetrics(row: Record<string, string>): Record<string, number> {
+  return Object.fromEntries(STARTUP_NUMERIC_COLUMNS.map((key) => [key, rowMetric(row, key)]));
+}
+
+/**
+ * Same mapping for a live sample, read by column name rather than through
+ * `UploadSample` fields so that the group keeps charting whatever subset of the
+ * startup payload the collection side is currently streaming.
+ */
+function startupSampleMetrics(sample: UploadSample): Record<string, number> {
+  const source = sample as unknown as Record<string, unknown>;
+  return Object.fromEntries(
+    STARTUP_NUMERIC_COLUMNS.map((key) => {
+      const value = source[key];
+      return [key, typeof value === "number" && Number.isFinite(value) ? value : 0];
+    }),
+  );
+}
+
 export function rowsToChartPoints(rows: Record<string, string>[] | null | undefined): ChartPoint[] {
   if (!rows || rows.length === 0) {
     return [];
@@ -201,6 +293,7 @@ export function rowsToChartPoints(rows: Record<string, string>[] | null | undefi
     const hlsFatal = rowMetric(row, "playback_hls_fatal_errors");
 
     return {
+      ...startupRowMetrics(row),
       second,
       encoded_bitrate_kbps: rowMetric(row, "encoded_bitrate_kbps", "bitrate_kbps"),
       fps: rowMetric(row, "fps"),
@@ -435,6 +528,7 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
   const hlsFatal = sample.playback_hls_fatal_errors ?? 0;
 
   return {
+    ...startupSampleMetrics(sample),
     second: clampChartSecond(sample.elapsed_sec),
     encoded_bitrate_kbps: sample.encoded_bitrate_kbps,
     fps: sample.fps,

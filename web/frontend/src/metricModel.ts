@@ -95,6 +95,49 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   latency_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_e2e_scope: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
+  // Startup phase decomposition (src/startup_budget.py). Two chains that stay
+  // apart: the publisher half is keyed on the *publish protocol*, so it only
+  // exists on the four protocols that have a documented milestone per phase.
+  // The player half is keyed on the playback *engine*, and any protocol can be
+  // watched in the site player, so those columns are available everywhere.
+  //
+  // Support here means "an instrument can exist on this path". A phase that
+  // structurally cannot exist is a different statement and travels in
+  // startup_not_applicable, so it is excluded here rather than listed as a
+  // protocol that reports zero.
+  startup_dns_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // SRT is absent on purpose, and not because it is unwired: its caller
+  // handshake IS its connect, so there is no separate UDP connect to time.
+  // MoQ maps the QUIC handshake (transport + crypto in one exchange) here and
+  // the WebTransport session onto handshake, so it does have a connect phase.
+  startup_connect_ms: ["rtmp", "webrtc", "moq"],
+  startup_handshake_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publish_accept_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_first_idr_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_first_byte_ingest_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // Player phases: measured by the browser player on whatever it consumed.
+  // startup_manifest_ms is deliberately NOT restricted here even though a raw
+  // MPEG-TS pull has no manifest — that absence belongs to the engine, and the
+  // same protocol (SRT, RTMP) can be watched over MPEG-TS or over LL-HLS in
+  // the same run. Encoding it as a protocol gap would be wrong for half the
+  // legs; the per-row startup_not_applicable annotation is what carries it.
+  startup_player_request_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_manifest_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_first_media_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_first_paint_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_publisher_accounted_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_measured_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_residual_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_overcount_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_player_accounted_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_measured_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_overcount_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // Self-describing annotations. They exist wherever either chain does, since
+  // naming what is missing is the point even when nothing was measured.
+  startup_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_not_applicable: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+
   // Frame accounting. Encoder counters come from ffmpeg -progress, so browser
   // publish paths (no ffmpeg) cannot fill them.
   encode_frames_total: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],

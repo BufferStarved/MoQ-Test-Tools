@@ -25,6 +25,7 @@ This document describes the normalized metrics model used for cross-protocol com
 | Ingest | `ingest` | Normalized path health (`net_rtt_ms`, `net_jitter_ms`, merged `net_retrans_pct`, `net_loss_pct`) + ingest-host CPU/memory/disk, protocol-native recovery (moqx relay Δ, Zixi/libsrt, **receive loss** `quic_packets_lost`, **send loss** `pkt_snd_loss`), and **ingest-side** VMAF / PSNR / SSIM |
 | Media Health | `media_health` | Container/timeline integrity (not transport) |
 | Browser playback | `playback` | Glass delay, **playback FPS / dropped frames**, stalls, rebuffer, buffer. TTFF is a single join event, not a latency series. |
+| Startup breakdown | `startup_breakdown` | Where the join time went: two separate phase chains (publisher → ingest, player → glass), each reconciled against its own measured total. Stacked bars, not a series — startup happens once. |
 
 Encode and Ingest each chart **stage-specific** VMAF/PSNR/SSIM (`vmaf_score_encoder`/`psnr_db_encoder`/`ssim_encoder`
 vs. `vmaf_score_ingest`/`psnr_db_ingest`/`ssim_ingest`) rather than one combined score, so a quality
@@ -143,6 +144,138 @@ Formulas live in `src/latency_budget.py` and its browser mirror `web/frontend/sr
 **`upload_latency_ms` is not a stage.** It is a one-shot *startup* measurement (encoder-ready → first confirmed publish) and it is deliberately excluded from the chain above. Adding a startup constant to every steady-state sample inflated `latency_accounted_ms` for whole runs. Read it in its own column.
 
 Run `scripts/qa_metric_audit.py --latest N --assert` to check these properties against finished legs; it exits non-zero if any of them is violated.
+
+---
+
+## Startup breakdown (per-phase)
+
+`playback_ttff_ms` says a leg took 23 seconds to join. It never says *which* component spent them.
+That gap is not academic: the RTMP startup win already banked — **23s → 1501 ms** — came from
+*reasoning* about phases. The GOP was pinned to the HLS chunk duration, so the first decodable frame
+could not arrive until a whole chunk had been packaged, and nothing in the tool measured it. This
+family turns that reasoning into a measurement.
+
+Startup is modelled as **two ordered chains, deliberately kept apart**:
+
+```
+publisher   job start ──dns──> ──connect──> ──handshake──>
+            ──publish_accept──> ──first_idr──> ──first_byte_ingest──> ingest
+
+player      player attach ──player_request──> ──manifest──>
+            ──first_media──> ──first_paint──> glass
+```
+
+**They are two spans, not one.** Between "ingest has the first byte" and "an operator opened the
+tile" sits however long the operator took — dwell time that belongs to nobody's pipeline. Summing
+across the join would produce a "total startup" dominated by human reaction time, so there is no
+such column. Each half reconciles against **its own** measured total: the publisher chain against
+job-start → first-byte-at-ingest (`startup_publisher_measured_ms`), the player chain against
+`playback_ttff_ms` (`startup_player_measured_ms`).
+
+Every phase is a **duration**, not an offset from t0, and a phase is measured only when *both* its
+bounding milestones are. A missing middle milestone does not get papered over by stretching its
+neighbour across the gap — that would silently move real time into whichever phase happened to have
+an instrument, which is the exact misattribution the family exists to prevent.
+
+### Publisher chain: protocol × phase
+
+| Phase | Column | RTMP | SRT | WebRTC (WHIP) | MoQ |
+|-------|--------|------|-----|---------------|-----|
+| dns | `startup_dns_ms` | `getaddrinfo()` on the ingest host (preflight probe) | same | same, on the WHIP host | same, on the relay host |
+| connect | `startup_connect_ms` | TCP connect to 1935 (preflight probe) | **n/a** — the caller handshake *is* the connect | TCP/TLS connect to the WHIP endpoint (8889) | QUIC handshake (transport + crypto in one exchange) |
+| handshake | `startup_handshake_ms` | C0/C1/S0/S1/S2 plus connect/createStream/publish | SRT caller handshake including key material | ICE establishment and DTLS setup | WebTransport session over the completed QUIC connection |
+| publish_accept | `startup_publish_accept_ms` | ingest reports the input live (Zixi input ready / MediaMTX path ready) | same | WHIP POST offer → 201 Created with the answer SDP (that response *is* the accept) | SETUP/ANNOUNCE accepted and catalog published (`sender ready (namespace + catalog published)`) |
+| first_idr | `startup_first_idr_ms` | encoder emits its first frame (H.264 → IDR) | same | same | same |
+| first_byte_ingest | `startup_first_byte_ingest_ms` | ingest reports bytes received on the path | libsrt non-zero send rate / ingest bytes received | MediaMTX reports bytes received (first RTP landed) | first object on the wire (`obj vide wall_dt_ms=`) |
+
+Mapping QUIC onto `connect` and WebTransport onto `handshake` keeps all six MoQ phases meaningful
+without inventing a TCP connect that never happens. Folding SRT's connect into `handshake` keeps
+that column comparable with RTMP's — both are "after the socket, before publish is accepted".
+
+### Player chain: engine × phase
+
+The player half is keyed on the **playback engine**, because the player is what measures it. A
+protocol watched over a remux is measured by the remux's engine (see *Playback engine vs published
+protocol* below).
+
+| Phase | HLS / LL-HLS | DASH | MPEG-TS | WHEP | MoQ (playa) |
+|-------|--------------|------|---------|------|-------------|
+| `startup_player_request_ms` | Resource Timing on the manifest: `fetchStart → requestStart` (DNS + connect + TLS) | same, on the MPD | same, on the TS request | same, on the WHEP POST | `load()` → WebTransport session connected |
+| `startup_manifest_ms` | Resource Timing on the manifest: `requestStart → responseEnd` | same, on the MPD | **n/a** — a TS pull has no manifest; the first response *is* the media | SDP exchange: POST offer → 201 answer (`responseEnd`) | SETUP complete → catalog received (SUBSCRIBE, plus joining FETCH) |
+| `startup_first_media_ms` | first media segment response completes (LL-HLS: first partial) | first media segment completes | first bytes of the TS response (`responseStart`) | `getStats()`: candidate-pair succeeded + DTLS connected, then first `inbound-rtp` bytes | first group/object received, then decoder configured |
+| `startup_first_paint_ms` | first frame painted (`currentTime` advances past the session origin) | same | same | first frame painted | first frame rendered to the canvas |
+
+### The three states — blank, zero, and not-applicable
+
+1. **Blank ≠ 0.** `0.0` means "measured, and it was zero" — a warm resolver cache really does
+   resolve inside the measurement resolution. A **blank** cell means no instrument, and the phase is
+   named in `startup_unmeasured`. That list is *why* a residual is large.
+2. **A phase that cannot exist is a third state.** SRT has no TCP connect; raw MPEG-TS playback has
+   no manifest. Reporting those as "unmeasured" would send an operator hunting for an instrument
+   that cannot exist, and reporting them as `0.0` would claim an exchange completed instantly. They
+   go in `startup_not_applicable`. Their time is **not lost**: the chain anchors the next phase to
+   the last milestone that *did* happen, so an n/a phase's duration is attributed to the phase that
+   genuinely contains it — SRT's handshake is timed from DNS completion and spans the whole caller
+   exchange.
+3. **A phase past the sanity ceiling is dropped, not clamped.** The ceiling is a generous 120 s per
+   phase (180 s for a measured total) precisely because the 23 s baseline this family exists to
+   explain *was* a single phase. Above it the number is a clock artifact, and a clamped artifact
+   charts exactly like a real 120 s phase.
+
+### Reconciliation
+
+| Column | Meaning |
+|--------|---------|
+| `startup_publisher_accounted_ms` / `startup_player_accounted_ms` | Sum of that half's phases that have a reading |
+| `startup_publisher_measured_ms` | Job start → first media confirmed at the ingest |
+| `startup_player_measured_ms` | `playback_ttff_ms` — player attach → first painted frame |
+| `startup_publisher_residual_ms` / `startup_player_residual_ms` | Measured startup the phases cannot explain. Never negative |
+| `startup_publisher_overcount_ms` / `startup_player_overcount_ms` | Phases **in excess of** the measured total. Never negative |
+| `startup_unmeasured` | Comma-separated stage names with no instrument on this leg |
+| `startup_not_applicable` | Comma-separated stage names that structurally do not exist here |
+
+**Disagreement is signed, per half.** Exactly one of residual and overcount can be non-zero in each
+chain, for the same reason `latency_overcount_ms` exists: with the residual alone clamped at 0, an
+over-attributing model is indistinguishable from one that reconciles. A non-zero overcount means two
+phases share a span somewhere — a modelling bug, but one an operator can only find if the column
+admits it.
+
+**A large residual is a signal, not a failure.** It is the honest report that the measured total is
+real and the phases explaining it are not all instrumented yet. Read `startup_unmeasured` first: on
+a leg where the player half reconciles to 10% and 90% is unattributed, the phases that *are* measured
+have ruled themselves out, which is exactly how the RTMP chunk-duration problem was found by hand.
+
+### What is unmeasured today, and why
+
+Support is declared per protocol in `METRIC_PROTOCOL_SUPPORT` and per leg in `startup_unmeasured`.
+The structural gaps as this family lands:
+
+- **Publisher `dns` / `connect`** need the preflight probe to run before the encoder spawns. A leg
+  published without it reports both blank rather than folding the time into `handshake`.
+- **Publisher `publish_accept`** depends on the ingest admitting it is live: Zixi input ready or a
+  MediaMTX path ready for RTMP/SRT, the WHIP 201, the MoQ `sender ready` line. An ingest with no
+  status endpoint (or a provider whose API is not reachable from the collector) leaves it blank —
+  and because it is the phase most likely to hold a packaging delay, that blank is usually the
+  reason a publisher residual is large.
+- **Player `player_request` / `manifest` / `first_media`** on HLS / LL-HLS / DASH / MPEG-TS / WHEP
+  come from `PerformanceResourceTiming` and `getStats()`. Resource Timing was not used anywhere in
+  the frontend before this family, so any player not yet reading those marks reports the phases
+  blank and its whole TTFF lands in `startup_player_residual_ms`.
+- **Player phases on MoQ** are nearly free: `@playa/player` already computes a `TTFFBreakdown`
+  (`transportConnectedMs`, `setupCompleteMs`, `catalogReceivedMs`, `firstObjectReceivedMs`,
+  `decoderConfiguredMs`, `firstFrameRenderedMs`) that the tile used to discard in favour of
+  `timeToFirstFrameMs` alone.
+- **`startup_manifest_ms` is never restricted by protocol** even though a raw MPEG-TS pull has no
+  manifest. The same SRT or RTMP leg can be watched over MPEG-TS or over LL-HLS in one run, so the
+  absence belongs to the engine and travels in the per-row `startup_not_applicable` annotation
+  instead of being encoded as a protocol gap.
+
+Formulas live in `src/startup_budget.py` and its browser mirror `web/frontend/src/startupBudget.ts`;
+`web/frontend/scripts/unit-startup-budget.mjs` cross-checks the column set across the contract, the
+mirror, the metric definitions, the protocol matrix, the chart group and `CSV_COLUMNS`, which is what
+stops the mirror drifting. The UI renders both chains as stacked horizontal bars under the **Startup
+breakdown** tab — one bar per chain, never concatenated, with unmeasured phases hatched,
+not-applicable phases outlined, and the residual as an explicit trailing segment.
 
 ---
 

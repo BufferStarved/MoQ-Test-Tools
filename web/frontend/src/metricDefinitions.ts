@@ -127,6 +127,106 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description:
       "Which span this leg's e2e_latency_ms actually measures, and therefore which components may be summed against it. 'capture_to_glass' (HLS PDT, HTTP-TS, MoQ) includes the sender's encode pipeline, so all five stages are in scope. 'ingest_to_glass' (WHEP) is a receiver-side estimate built from ICE RTT/2 plus jitterBufferDelay and structurally cannot see the sender: latency_encode_ms is still reported there so the operator knows the pipeline exists, but it is excluded from the accounted total. Two legs with different scopes are not measuring the same thing — a WHEP number is not comparable to an HLS number without adding the encode column back.",
   },
+  startup_dns_ms: {
+    label: "Startup · DNS",
+    description:
+      "Publisher phase 1 of 6: job start → the ingest hostname resolved. getaddrinfo() timed in the preflight probe on every protocol — RTMP/SRT on the ingest host, WHIP on the WHIP host, MoQ on the relay host. Phases are durations, not offsets from t0: this is the cost of resolution itself, not the distance from job start. A warm resolver cache genuinely reads 0.0, which is a measurement; blank is the value that means nothing measured it.",
+  },
+  startup_connect_ms: {
+    label: "Startup · connect",
+    description:
+      "Publisher phase 2: resolved address → transport connected. RTMP: TCP connect to the RTMP port (1935), timed in the preflight probe. WHIP: TCP/TLS connect to the WHIP endpoint (8889), same probe. MoQ: the QUIC handshake, which folds transport and crypto into one exchange, so it is mapped here and the WebTransport session that follows is mapped to handshake. SRT: not applicable — there is no separate transport connect over UDP to time, its caller handshake IS the connect, so SRT names 'connect' in startup_not_applicable and the time lands in startup_handshake_ms. Not-applicable is not unmeasured: there is no instrument to go looking for.",
+  },
+  startup_handshake_ms: {
+    label: "Startup · handshake",
+    description:
+      "Publisher phase 3: transport connected → the protocol session is up. RTMP: C0/C1/S0/S1/S2 plus connect/createStream/publish. SRT: the caller handshake including key material exchange — and SRT's connect phase is folded in here, reported as not-applicable rather than zero, which is what keeps this column comparable with RTMP's 'after the socket, before publish is accepted'. WHIP: ICE establishment and DTLS setup. MoQ: the WebTransport session established over the already-completed QUIC handshake.",
+  },
+  startup_publish_accept_ms: {
+    label: "Startup · publish accept",
+    description:
+      "Publisher phase 4: session up → the ingest confirmed it will accept the publish. RTMP/SRT: the ingest reports the input live (Zixi input ready / MediaMTX path ready). WHIP: the POST offer returning 201 Created with the answer SDP — that response IS the accept, so WHIP has no separate accept round trip. MoQ: SETUP/ANNOUNCE accepted and the catalog published ('sender ready (namespace + catalog published)'). A slow ingest, a rejected key, or an ingest waiting on packaging all land here rather than being smeared across the neighbouring phases.",
+  },
+  startup_first_idr_ms: {
+    label: "Startup · first IDR",
+    description:
+      "Publisher phase 5: publish accepted → the encoder emitted its first frame, which for H.264 is an IDR. The same instrument on all four protocols (the encoder's own first output), which makes it the one publisher phase directly comparable across legs. GOP structure is paid here: the RTMP 23s → 1501 ms win came from decoupling the GOP from the HLS chunk duration, and a long keyframe interval is charged once here and again at the player's first media.",
+  },
+  startup_first_byte_ingest_ms: {
+    label: "Startup · first byte at ingest",
+    description:
+      "Publisher phase 6, the last: first frame encoded → the ingest confirmed bytes on the path. RTMP: ingest reports bytes received on the path. SRT: libsrt reports a non-zero send rate, or the ingest reports bytes received. WHIP: MediaMTX reports bytes received (first RTP landed). MoQ: the first object on the wire ('obj vide wall_dt_ms='). This is where the publisher chain ends, and startup_publisher_measured_ms is job start to exactly this point. Distinct from upload_latency_ms, which measures encoder-ready → first confirmed write as one opaque number with no phase breakdown.",
+  },
+  startup_player_request_ms: {
+    label: "Startup · player request",
+    description:
+      "Player phase 1 of 4: the player attached → its first request is on the wire. HLS/LL-HLS/DASH: Resource Timing on the manifest or MPD request, fetchStart → requestStart, which folds in DNS, connect and TLS for the playback path. MPEG-TS: the same marks on the TS request. WHEP: the same marks on the WHEP POST. MoQ: playa's load() → WebTransport session connected. This chain starts at player attach, not at job start — the operator's dwell before opening the tile belongs to neither pipeline and is deliberately inside neither total.",
+  },
+  startup_manifest_ms: {
+    label: "Startup · manifest",
+    description:
+      "Player phase 2: request on the wire → a manifest or catalog in hand. HLS/LL-HLS: Resource Timing on the manifest, requestStart → responseEnd. DASH: the same on the MPD. WHEP: the SDP exchange, POST offer → 201 answer (responseEnd). MoQ: playa's SETUP complete → catalog received (SUBSCRIBE, plus the joining FETCH). Raw MPEG-TS playback: not applicable — a TS pull has no manifest at all, the first response IS the media, and a 0 ms manifest would imply an instant fetch of something that does not exist. It is named in startup_not_applicable, never in startup_unmeasured.",
+  },
+  startup_first_media_ms: {
+    label: "Startup · first media",
+    description:
+      "Player phase 3: manifest or catalog → the first media has arrived and the decoder is configured. HLS/DASH: the first media segment response completes. LL-HLS: the first partial segment. MPEG-TS: the first bytes of the TS response (responseStart). WHEP: getStats() shows the ICE candidate pair succeeded and DTLS connected, then the first inbound-rtp bytes. MoQ: playa's first group/object received, then decoder configured. Segment and group duration are paid here: this is the phase that held the 23-second RTMP join, because nothing was decodable until a whole HLS chunk had been packaged.",
+  },
+  startup_first_paint_ms: {
+    label: "Startup · first paint",
+    description:
+      "Player phase 4, the last: first media → the first frame on glass. HLS/LL-HLS/MPEG-TS/DASH: currentTime advances past the session origin. WHEP: first frame painted. MoQ: playa's first frame rendered to the canvas. Decoder start-up and the player's own gate live here. Because the player chain reconciles against playback_ttff_ms, a blank here does not make the TTFF disappear — it moves into startup_player_residual_ms, which is the signal that this phase has no instrument on that engine yet.",
+  },
+  startup_publisher_accounted_ms: {
+    label: "Startup · publisher accounted",
+    description:
+      "Sum of the six publisher phases that actually have a reading. Compare against startup_publisher_measured_ms: close together means the chain explains the whole publisher startup, and the gap in either direction is split into startup_publisher_residual_ms and startup_publisher_overcount_ms. Blank phases contribute nothing, so a small accounted total beside a large measured one means instruments are missing (read startup_unmeasured) — it does not mean startup was fast.",
+  },
+  startup_publisher_measured_ms: {
+    label: "Startup · publisher measured",
+    description:
+      "The publisher chain's measured total: job start → first media confirmed at the ingest. This is the number the six publisher phases reconcile against, and it is deliberately never added to the player total. Between 'ingest has the first byte' and 'an operator opened the tile' sits dwell time belonging to neither pipeline, so a joined 'total startup' would be dominated by human reaction time. Blank when either end of the span was never observed — blank, not 0, because a job that never confirmed ingest did not start up instantly.",
+  },
+  startup_publisher_residual_ms: {
+    label: "Startup · publisher unattributed",
+    description:
+      "Measured publisher startup the six phases do not explain. A deliberate part of the model rather than an error term to ignore: a large residual says which part of the chain has no instrument, and startup_unmeasured names it. It is also the honest home for a phase whose bounding milestone was missing — the model refuses to stretch a neighbouring phase across the gap, because that silently moves real time into whichever phase happened to have an instrument. Never negative: phases exceeding the measurement is a different fact and lands in startup_publisher_overcount_ms.",
+  },
+  startup_publisher_overcount_ms: {
+    label: "Startup · publisher over-attributed",
+    description:
+      "How far the publisher phases exceed the measured publisher total. Non-zero means two phases share a span somewhere — a modelling bug, but one an operator can only find if the column admits it. It exists for the same reason latency_overcount_ms does: with the residual alone clamped at 0, a leg over-attributing by 1.7 s looked exactly like one that reconciled perfectly. Exactly one of this and startup_publisher_residual_ms can be non-zero.",
+  },
+  startup_player_accounted_ms: {
+    label: "Startup · player accounted",
+    description:
+      "Sum of the four player phases that actually have a reading. Compare against startup_player_measured_ms (which is playback_ttff_ms): together they turn a single join number into an attribution. A phase reported as not-applicable contributes nothing and is not a gap — its time is inside the phase that genuinely contains it, so an MPEG-TS leg reconciles with three phases rather than four.",
+  },
+  startup_player_measured_ms: {
+    label: "Startup · player measured",
+    description:
+      "The player chain's measured total, which is playback_ttff_ms: player attach → first painted frame. This is what the four player phases reconcile against. It is a single join event, not a series, and it is not comparable with startup_publisher_measured_ms — the two spans do not touch. Blank when no frame ever painted, which is why an all-black tile shows a blank total rather than a confident 0.",
+  },
+  startup_player_residual_ms: {
+    label: "Startup · player unattributed",
+    description:
+      "Measured time-to-first-frame the four player phases do not explain. This is the column that made the RTMP investigation reproducible: a 23-second TTFF with almost all of it unattributed points straight at the phases with no instrument, and the phases that do have one rule themselves out. Read startup_unmeasured alongside it. Never negative — over-attribution is startup_player_overcount_ms.",
+  },
+  startup_player_overcount_ms: {
+    label: "Startup · player over-attributed",
+    description:
+      "How far the player phases exceed measured TTFF. On the player side this usually means two phases were derived from overlapping browser marks (Resource Timing spans that nest, or a getStats() transition already counted in the SDP exchange), which is a mapping bug to fix at the source. Exactly one of this and startup_player_residual_ms can be non-zero.",
+  },
+  startup_unmeasured: {
+    label: "Startup · unmeasured phases",
+    description:
+      "Which startup phases had no instrument on this leg, comma separated, in chain order, using the short stage names (dns, connect, handshake, publish_accept, first_idr, first_byte_ingest, player_request, manifest, first_media, first_paint). A phase column that is blank and named here means 'nothing measures this here'; a phase reading 0.0 means 'measured, and it was zero'. Those are different facts and the CSV keeps them apart, which is why an unmeasured phase is blank rather than zero. This list is the first thing to read when a residual is large. A phase that structurally cannot exist on this protocol is not here — it is in startup_not_applicable.",
+  },
+  startup_not_applicable: {
+    label: "Startup · not-applicable phases",
+    description:
+      "Which startup phases structurally do not exist on this protocol or player engine, comma separated. The third state, and not a synonym for unmeasured: SRT has no TCP connect (its caller handshake IS the connect) and a raw MPEG-TS pull has no manifest (the first response IS the media). Calling those unmeasured would send an operator hunting for an instrument that cannot exist; calling them 0.0 would claim an exchange completed instantly. Their time is not lost — the chain anchors the next phase to the last milestone that did happen, so an n/a phase's duration is attributed to the phase that genuinely contains it (SRT's handshake is timed from DNS completion and spans the whole caller exchange).",
+  },
   encode_frames_total: {
     label: "Frames encoded",
     description: "Cumulative frames ffmpeg has written to the output muxer (-progress frame).",

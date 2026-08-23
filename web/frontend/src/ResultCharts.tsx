@@ -9,6 +9,7 @@ import {
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
+import { StartupBreakdown } from "./StartupBreakdown";
 import { metricUnavailableMessage, metricSupportedForProtocol, WHIP_ENCODE_BITRATE_NOTE, webrtcEncodeBitrateUnreported } from "./metricModel";
 import type { ResultSummary, UploadSample } from "./types";
 
@@ -414,6 +415,21 @@ export function ResultCharts({
               />
             )}
           </>
+        )}
+
+        {/*
+          Startup happens once, so it draws stacked bars instead of a time
+          series. This block has to stay paired with the chartData mapping: a
+          group with a CHART_GROUPS entry and no mapped keys — or no render
+          block — shows an empty grid, which is how `latency_budget` reads.
+        */}
+        {currentGroup.id === "startup_breakdown" && (
+          <StartupBreakdown
+            result={result}
+            liveSamples={liveSamples}
+            protocol={resolvedProtocol}
+            playbackEngine={result?.summary_extra?.playback_engine}
+          />
         )}
       </div>
     </div>
