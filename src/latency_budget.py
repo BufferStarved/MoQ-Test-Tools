@@ -421,6 +421,13 @@ def frame_delivery_pct(
     point there is no shared window, and the honest answer is ``None``
     (unknown) rather than a number that looks like loss.
 
+    Callers must also pass counters read at the *same instant*. A player
+    value forward-filled across a staleness window divided by a live encoder
+    total decays on its own — 100.00 → 66.67 → 50.00 → 40.00 on the
+    2026-08-23 RTMP leg with the player parked at 73 rendered and nothing
+    lost. ``playback_metrics`` upholds this by pinning the encoder total to
+    its value at the player's last report.
+
     Not capped at 100%: a player reading ahead of the encoder counter means
     clock skew or a mis-placed attach point, and silently clamping that to a
     perfect 100% hides it. Only an absurd ratio is rejected outright.

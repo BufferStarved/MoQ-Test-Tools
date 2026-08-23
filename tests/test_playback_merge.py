@@ -254,8 +254,13 @@ class MergedLatencyBudgetTests(unittest.TestCase):
         self.assertEqual(rows[5]["frame_delivery_pct"], "100.00")
 
     def test_a_frozen_player_reads_zero_delivery_then_stops_reporting(self):
-        """Linode Zixi RTMP decayed 48.0% -> 10.1% while rendered froze at 84
-        and encoded climbed to 835, with nothing actually lost."""
+        """A stalled glass must be visible; a silent player must not fake one.
+
+        Linode Zixi RTMP decayed 48.0% -> 10.1% while rendered froze at 84 and
+        encoded climbed to 835, with nothing actually lost. After the attach
+        windowing fix it still slid 100.00 -> 40.00 across the staleness grace
+        window for the same reason at a smaller scale.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = str(Path(tmp) / "run.csv")
             with open(csv_path, mode="w", newline="") as handle:
@@ -279,15 +284,66 @@ class MergedLatencyBudgetTests(unittest.TestCase):
                 csv_path, playback, csv_columns=CSV_COLUMNS, playback_engine="hls"
             )
 
-        # Frozen while still reporting: the ratio really should fall, because
-        # the glass really is not painting frames the encoder is producing.
-        # (Attach at 130 encoded / 54 rendered; by row 4 that is 30 painted of
-        # 90 encoded.) What must not happen is the same decay on a *healthy*
-        # player that merely attached late.
-        self.assertEqual(rows[4]["frame_delivery_pct"], "33.33")
-        self.assertEqual(rows[6]["frame_delivery_pct"], "20.00")
-        # Detached: no longer measurable, so no number at all.
+        # Two different freezes, and only one of them is evidence.
+        #
+        # Row 2: the player reported 84 against 160 encoded — every frame since
+        # attach painted, 100%.
+        self.assertEqual(rows[2]["frame_delivery_pct"], "100.00")
+        # Row 3: the player reported *again* and the counter had not moved. That
+        # is a fresh observation of a stalled glass, so the ratio must fall:
+        # 30 painted of the 60 encoded since attach.
+        self.assertEqual(rows[3]["frame_delivery_pct"], "50.00")
+        # Rows 4-6: no new playback sample at all — the 84 is forward-filled
+        # while the encoder climbs to 220, 250, 280. Dividing a frozen numerator
+        # by a live denominator invented the old 33.33 -> 25.00 -> 20.00 slide,
+        # which is the same shape as real loss and was none. Pinning the encoder
+        # total to the last report holds the last real measurement instead.
+        self.assertEqual(rows[4]["frame_delivery_pct"], "50.00")
+        self.assertEqual(rows[5]["frame_delivery_pct"], "50.00")
+        self.assertEqual(rows[6]["frame_delivery_pct"], "50.00")
+        # Detached past the grace window: no longer measurable, so no number.
         self.assertEqual(rows[7]["frame_delivery_pct"], "")
+
+    def test_the_2026_08_23_rtmp_grace_window_slide_does_not_return(self):
+        """Replay of the trace that kept the RTMP leg failing after the fix.
+
+        Audited samples 7-11 of upload_20260823-014026_f37981b8: the encoder
+        climbs 175 -> 295 at 30/s, the player is parked at 73 rendered and has
+        stopped sending samples (age 0,1,2,3,4), and delivery read
+        100.00 -> 66.67 -> 50.00 -> 40.00 before blanking. Nothing was lost;
+        the whole slide was the forward-filled numerator.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            with open(csv_path, mode="w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                for second, encoded in enumerate([145, 175, 205, 235, 265, 295]):
+                    row = {name: "0" for name in CSV_COLUMNS}
+                    row["timestamp"] = str(1000.0 + second)
+                    row["protocol"] = "rtmp"
+                    row["encode_frames_total"] = str(encoded)
+                    row["latency_accounted_ms"] = "0.0"
+                    writer.writerow(row)
+            # The player reports twice and then goes quiet for the rest of the
+            # leg, exactly as it did on the real run.
+            playback = [
+                {"elapsed_sec": 0, "playback_frames_rendered": 43},
+                {"elapsed_sec": 1, "playback_frames_rendered": 73},
+            ]
+            rows = merge_playback_into_csv(
+                csv_path, playback, csv_columns=CSV_COLUMNS, playback_engine="mpegts"
+            )
+
+        self.assertEqual(rows[1]["frame_delivery_pct"], "100.00")
+        # Ages 1, 2, 3 — the grace window. Previously 66.67, 50.00, 40.00.
+        for index in (2, 3, 4):
+            self.assertEqual(
+                rows[index]["frame_delivery_pct"],
+                "100.00",
+                msg=f"row {index} (age {index - 1}) slid instead of holding",
+            )
+        self.assertEqual(rows[5]["frame_delivery_pct"], "")
 
     def test_unmeasured_stages_survive_into_the_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

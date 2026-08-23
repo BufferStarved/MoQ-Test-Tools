@@ -159,6 +159,7 @@ def _recompute_derived(
     engine: str = "",
     encode_frames_at_attach: Optional[float] = None,
     playback_frames_at_attach: Optional[float] = None,
+    encode_frames_at_report: Optional[float] = None,
     playback_live: bool = True,
 ) -> None:
     """Refresh latency/frame columns that depend on merged playback values.
@@ -213,9 +214,22 @@ def _recompute_derived(
     )
     # Only comparable while the player is still counting: once it detaches the
     # encoder keeps incrementing and the ratio decays with nothing lost.
+    #
+    # Both counters must come from the same instant. The player's value is
+    # forward-filled across the staleness grace window, so pairing it with a
+    # live encoder total divides a frozen numerator by a growing denominator
+    # and manufactures a decay: RTMP read 100.00 -> 66.67 -> 50.00 -> 40.00
+    # while the player sat at 73 rendered and nothing was actually lost.
+    # Forward-filling is safe for a gauge and wrong for a ratio of two
+    # counters, so the encoder total is pinned to its value at the player's
+    # last report and the ratio holds flat until the player reports again.
     delivery = (
         frame_delivery_pct(
-            encode_frames_total=_as_float(row.get("encode_frames_total")),
+            encode_frames_total=(
+                _as_float(row.get("encode_frames_total"))
+                if encode_frames_at_report is None
+                else encode_frames_at_report
+            ),
             playback_frames_rendered=_as_float(row.get("playback_frames_rendered")),
             encode_frames_at_attach=encode_frames_at_attach,
             playback_frames_at_attach=playback_frames_at_attach,
@@ -261,6 +275,9 @@ def merge_playback_into_csv(
     # on one common window (see latency_budget.frame_delivery_pct).
     encode_frames_at_attach: Optional[float] = None
     playback_frames_at_attach: Optional[float] = None
+    # Encoder total as of the player's most recent report, so the delivery
+    # ratio always pairs two co-temporal counters (see _recompute_derived).
+    encode_frames_at_report: Optional[float] = None
     cursor = 0
     for index, row in enumerate(rows):
         elapsed = _row_elapsed_sec(rows, index)
@@ -291,11 +308,14 @@ def merge_playback_into_csv(
         ):
             encode_frames_at_attach = _as_float(merged.get("encode_frames_total"))
             playback_frames_at_attach = _as_float(merged.get("playback_frames_rendered"))
+        if age == 0:
+            encode_frames_at_report = _as_float(merged.get("encode_frames_total"))
         _recompute_derived(
             merged,
             engine=playback_engine,
             encode_frames_at_attach=encode_frames_at_attach,
             playback_frames_at_attach=playback_frames_at_attach,
+            encode_frames_at_report=encode_frames_at_report,
             playback_live=playback_live,
         )
         updated.append(merged)
