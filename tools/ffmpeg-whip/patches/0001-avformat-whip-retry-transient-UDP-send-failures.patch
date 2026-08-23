@@ -1,0 +1,175 @@
+From bc75676c21569467657cf5cd5464dacc069bfde3 Mon Sep 17 00:00:00 2001
+From: BufferStarved <spmcc92@gmail.com>
+Date: Sat, 22 Aug 2026 20:46:09 -0400
+Subject: [PATCH 1/2] avformat/whip: retry transient UDP send failures
+
+The WHIP muxer fails the whole session on any error from the UDP send
+path other than EINVAL. On Wi-Fi that happens routinely: the driver
+transmit queue is far smaller than the ~25 RTP packet burst a 720p
+keyframe produces, so send() returns ENOBUFS and the publish terminates
+with "Failed to write packet=575B, ret=-55".
+
+Nothing below the muxer absorbs this. whip_open() sets AVIO_FLAG_NONBLOCK
+on the udp context so the read side does not stall the muxer thread, but
+that flag also makes retry_transfer_wrapper() return the raw errno
+instead of running the sleep-and-retry loop it applies to blocking
+sockets, and makes udp_write() skip its POLLOUT wait. The bare send()
+errno therefore reaches whip.c unfiltered.
+
+Add whip_udp_write(), which retries EAGAIN and ENOBUFS on a bounded
+sleep budget, following the convention the read side already uses with
+ICE_DTLS_READ_MAX_RETRY. The budget is capped below one frame interval
+at 30fps so that waiting for the queue to drain cannot itself become a
+source of back pressure.
+
+When the budget is exhausted, drop the RTP packet instead of failing the
+session. That is the correct trade for real-time media: RTP is lossy by
+design, video packets are already in the RTX history so a receiver can
+recover them with a NACK, and a link that is genuinely gone is still
+terminated by the ICE consent freshness timer (RFC 7675).
+
+Raising -ts_buffer_size is not an alternative. It sets SO_SNDBUF, and
+the back pressure is below the socket buffer in the driver queue.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ libavformat/whip.c | 81 +++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 73 insertions(+), 8 deletions(-)
+
+diff --git a/libavformat/whip.c b/libavformat/whip.c
+index cea9941878..d0acc88fab 100644
+--- a/libavformat/whip.c
++++ b/libavformat/whip.c
+@@ -77,6 +77,15 @@
+ #define ICE_DTLS_READ_MAX_RETRY 10
+ #define ICE_DTLS_READ_SLEEP_DURATION 5
+ 
++/**
++ * If a UDP send reports a full transmit queue, we sleep for 1ms and retry up
++ * to 20 times. This limits the total duration (in milliseconds, 20ms) to less
++ * than one frame interval at 30fps, so waiting for the queue to drain cannot
++ * itself become the source of the back pressure it is trying to absorb.
++ */
++#define UDP_WRITE_MAX_RETRY 20
++#define UDP_WRITE_SLEEP_DURATION 1
++
+ /* The magic cookie for Session Traversal Utilities for NAT (STUN) messages. */
+ #define STUN_MAGIC_COOKIE 0x2112A442
+ 
+@@ -1215,6 +1224,41 @@ static int media_is_rtcp(const uint8_t *b, int size)
+     return size >= WHIP_RTP_HEADER_SIZE && b[1] >= WHIP_RTCP_PT_START && b[1] <= WHIP_RTCP_PT_END;
+ }
+ 
++/**
++ * Write a packet to the UDP socket, retrying a full transmit queue.
++ *
++ * The socket is non-blocking because the read path must not stall the muxer
++ * thread. AVIO_FLAG_NONBLOCK also makes ffurl_write() hand back the raw errno
++ * from send() rather than running the retry loop retry_transfer_wrapper()
++ * applies to blocking sockets, and makes udp_write() skip its POLLOUT wait.
++ * A momentarily full interface transmit queue therefore arrives here as
++ * EAGAIN or ENOBUFS, the latter being common on Wi-Fi where the driver queue
++ * is smaller than a keyframe burst. Both are transient, so wait for the queue
++ * to drain and let the caller decide what to do if it never does.
++ *
++ * @return the number of bytes written, AVERROR(EAGAIN) if the transmit queue
++ *         did not drain within the retry budget, or another AVERROR.
++ */
++static int whip_udp_write(WHIPContext *whip, const uint8_t *buf, int size)
++{
++    int i, ret;
++
++    for (i = 0; i < UDP_WRITE_MAX_RETRY; i++) {
++        ret = ffurl_write(whip->udp, buf, size);
++        if (ret != AVERROR(EAGAIN) && ret != AVERROR(ENOBUFS)) {
++            if (i)
++                av_log(whip, AV_LOG_VERBOSE, "UDP send queue drained after %dms, size=%d\n",
++                       i * UDP_WRITE_SLEEP_DURATION, size);
++            return ret;
++        }
++        av_usleep(UDP_WRITE_SLEEP_DURATION * WHIP_US_PER_MS);
++    }
++
++    av_log(whip, AV_LOG_WARNING, "UDP send queue still full after %dms, size=%d\n",
++           UDP_WRITE_MAX_RETRY * UDP_WRITE_SLEEP_DURATION, size);
++    return AVERROR(EAGAIN);
++}
++
+ /**
+  * This function handles incoming binding request messages by responding to them.
+  * If the message is not a binding request, it will be ignored.
+@@ -1245,7 +1289,7 @@ static int ice_handle_binding_request(AVFormatContext *s, char *buf, int buf_siz
+         return ret;
+     }
+ 
+-    ret = ffurl_write(whip->udp, whip->buf, size);
++    ret = whip_udp_write(whip, whip->buf, size);
+     if (ret < 0) {
+         av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding response, size=%d\n", size);
+         return ret;
+@@ -1318,7 +1362,7 @@ static int ice_dtls_handshake(AVFormatContext *s)
+                 goto end;
+             }
+ 
+-            ret = ffurl_write(whip->udp, whip->buf, size);
++            ret = whip_udp_write(whip, whip->buf, size);
+             if (ret < 0) {
+                 av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
+                 goto end;
+@@ -1570,7 +1614,18 @@ static int on_rtp_write_packet(void *opaque, const uint8_t *buf, int buf_size)
+             return ret;
+     }
+ 
+-    ret = ffurl_write(whip->udp, whip->buf, cipher_size);
++    ret = whip_udp_write(whip, whip->buf, cipher_size);
++    if (ret == AVERROR(EAGAIN)) {
++        /**
++         * The transmit queue never drained, so drop this packet rather than
++         * fail the session. RTP is lossy by design; a video packet was stored
++         * in the RTX history above, so the receiver can still ask for it with
++         * a NACK; and a link that is genuinely gone is caught by the ICE
++         * consent freshness timer in whip_write_packet().
++         */
++        av_log(whip, AV_LOG_WARNING, "Dropped packet=%dB, UDP send queue full\n", cipher_size);
++        return 0;
++    }
+     if (ret < 0) {
+         av_log(whip, AV_LOG_ERROR, "Failed to write packet=%dB, ret=%d\n", cipher_size, ret);
+         return ret;
+@@ -1939,7 +1994,7 @@ static void handle_rtx_packet(AVFormatContext *s, uint16_t seq)
+                rtx_size, cipher_size);
+         goto end;
+     }
+-    ret = ffurl_write(whip->udp, whip->buf, cipher_size);
++    ret = whip_udp_write(whip, whip->buf, cipher_size);
+ end:
+     if (ret < 0)
+         av_log(whip, AV_LOG_WARNING, "Failed to send RTX packet, skip this one\n");
+@@ -2029,13 +2084,23 @@ static int whip_write_packet(AVFormatContext *s, AVPacket *pkt)
+             av_log(whip, AV_LOG_ERROR, "Failed to create STUN binding request, size=%d\n", size);
+             goto end;
+         }
+-        ret = ffurl_write(whip->udp, whip->buf, size);
+-        if (ret < 0) {
++        ret = whip_udp_write(whip, whip->buf, size);
++        if (ret == AVERROR(EAGAIN)) {
++            /**
++             * Do not fail the session because a consent check could not be
++             * queued. Leaving whip_last_consent_tx_time untouched retries it
++             * on the next packet, and the expiry check below still terminates
++             * the session if the peer really has gone away.
++             */
++            av_log(whip, AV_LOG_WARNING, "Skipped Consent Freshness check, UDP send queue full\n");
++            ret = 0;
++        } else if (ret < 0) {
+             av_log(whip, AV_LOG_ERROR, "Failed to send STUN binding request, size=%d\n", size);
+             goto end;
++        } else {
++            whip->whip_last_consent_tx_time = now;
++            av_log(whip, AV_LOG_DEBUG, "Consent Freshness check sent\n");
+         }
+-        whip->whip_last_consent_tx_time = now;
+-        av_log(whip, AV_LOG_DEBUG, "Consent Freshness check sent\n");
+     }
+ 
+     /**

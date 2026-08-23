@@ -1,0 +1,4 @@
+# ffmpeg checkout and build output: gigabytes, and reproducible from
+# patches/ via scripts. Never commit, never rsync to a VM.
+ffmpeg-src/
+prefix/
