@@ -136,6 +136,12 @@ CSV_COLUMNS = [
     "playback_hls_frag_loads",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    # Seconds the glass is BEHIND live (MoQ LOC canvas), the opposite direction
+    # from playback_buffer_sec. Declared here and not only in the playback merge
+    # so every archived run carries the column: without it a large buffer figure
+    # on a MoQ leg is indistinguishable from a behind-live leak, which is exactly
+    # the wrong call the 2026-08-23 audit made on a CMAF/MSE session.
+    "playback_behind_live_sec",
     "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
@@ -357,6 +363,7 @@ class MetricsCollector:
         playback_hls_frag_loads: int = 0,
         playback_video_time_sec: float = 0.0,
         playback_buffer_sec: float = 0.0,
+        playback_behind_live_sec: float = 0.0,
         playback_rebuffer_sec: float = 0.0,
         playback_error_count: int = 0,
         e2e_latency_ms: float = 0.0,
@@ -556,6 +563,7 @@ class MetricsCollector:
                 "playback_hls_frag_loads": str(playback_hls_frag_loads),
                 "playback_video_time_sec": f"{playback_video_time_sec:.3f}",
                 "playback_buffer_sec": f"{playback_buffer_sec:.3f}",
+                "playback_behind_live_sec": f"{playback_behind_live_sec:.3f}",
                 "playback_rebuffer_sec": f"{playback_rebuffer_sec:.3f}",
                 "playback_error_count": str(resolved_playback_errors),
                 "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
@@ -666,6 +674,7 @@ class MetricsCollector:
             "playback_ttff_ms",
             "playback_video_time_sec",
             "playback_buffer_sec",
+            "playback_behind_live_sec",
             "e2e_latency_ms",
             "psnr_db",
             "ssim",

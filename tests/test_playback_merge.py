@@ -345,6 +345,40 @@ class MergedLatencyBudgetTests(unittest.TestCase):
             )
         self.assertEqual(rows[5]["frame_delivery_pct"], "")
 
+    def test_behind_live_is_archived_exactly_once_on_every_run(self):
+        """A MoQ buffer figure is unreadable without its opposite number.
+
+        playback_behind_live_sec used to reach the CSV only when the playback
+        merge appended it, so an encoder-only run had a different header and the
+        archive could not tell 8s queued ahead from 8s behind live. That is the
+        ambiguity that made the 2026-08-23 audit call a genuine CMAF/MSE buffer
+        a LOC leak. It is now in CSV_COLUMNS, so the merge's append guard must
+        not add a second copy.
+        """
+        self.assertIn("playback_behind_live_sec", CSV_COLUMNS)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            with open(csv_path, mode="w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                for second in range(3):
+                    row = {name: "0" for name in CSV_COLUMNS}
+                    row["timestamp"] = str(1000.0 + second)
+                    row["protocol"] = "moq"
+                    row["latency_accounted_ms"] = "0.0"
+                    writer.writerow(row)
+            merge_playback_into_csv(
+                csv_path,
+                [{"elapsed_sec": 1, "playback_frames_rendered": 30}],
+                csv_columns=CSV_COLUMNS,
+                playback_engine="moq",
+            )
+            with open(csv_path, newline="") as handle:
+                header = next(csv.reader(handle))
+
+        self.assertEqual(header.count("playback_behind_live_sec"), 1)
+
     def test_unmeasured_stages_survive_into_the_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = str(Path(tmp) / "run.csv")

@@ -378,7 +378,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   playback_buffer_sec: {
     label: "Buffer size",
     description:
-      "Seconds of media queued ahead of the playhead for HLS/MPEG-TS/DASH (HTMLMediaElement.buffered) and WebRTC (RTC jitter buffer). Browser MoQ canvas has no HTML buffer — this is seconds the glass is behind the encode (missed frames / fps).",
+      "Seconds of media queued AHEAD of the playhead: HTMLMediaElement.buffered for HLS/MPEG-TS/DASH and MoQ CMAF-over-MSE, or the jitter buffer for WebRTC. The only quantity the latency budget's player-buffer stage consumes. Read it with the playhead: a large value while playback_video_time_sec advances is a deep safety buffer, but the same value while the playhead is frozen is delivered media the decoder never drained — a stall, not headroom. A MoQ LOC canvas has no HTML buffer and reports 0 here; its 'behind live' figure is a different quantity in playback_behind_live_sec.",
+  },
+  playback_behind_live_sec: {
+    label: "Seconds behind live",
+    description:
+      "How far the glass trails the encoder, for the browser MoQ LOC canvas only (missed frames / fps). This is the OPPOSITE direction from playback_buffer_sec, which is why it has its own column and is never summed into the latency chain — adding it there once charted a 10.9s 'buffer' on the protocol that should have been the lowest-latency one. Blank or 0 on every engine that owns a real HTMLMediaElement.",
   },
   playback_rebuffer_sec: {
     label: "Rebuffer time",

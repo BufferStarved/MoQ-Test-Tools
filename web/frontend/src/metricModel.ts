@@ -161,6 +161,10 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   playback_ttff_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_stall_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_buffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // MoQ only, and only the LOC canvas within it: every other engine has an
+  // HTMLMediaElement whose buffered range is a forward-looking quantity, so
+  // "behind live" has no meaning there and must not be charted as if it did.
+  playback_behind_live_sec: ["moq"],
   playback_rebuffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_bitrate_bps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_frames_rendered: ["moq", "srt", "hls", "webrtc", "rtmp", "dash"],
