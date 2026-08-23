@@ -73,4 +73,14 @@ resource "linode_firewall" "relay" {
     ports    = "${var.moqx_port},${var.moqx_pico_port}"
     ipv4     = [var.allowed_client_cidr]
   }
+
+  # Matches Cloud Manager rule moqx-d18. Prod :4433 stays 329b98b / unchanged.
+  inbound {
+    label    = "moqx-d18"
+    action   = "ACCEPT"
+    protocol = "UDP"
+    ports    = "14433"
+    ipv4     = [var.allowed_client_cidr]
+    ipv6     = ["::/0"]
+  }
 }
