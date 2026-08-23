@@ -381,6 +381,44 @@ def stale_e2e(rows: List[dict]) -> dict:
     return {"repeated_tail": tail, "value": last, "of_samples": len(rows)}
 
 
+def encoder_stalls(rows: List[dict], min_sec: float = 1.0) -> List[dict]:
+    """Spans where the frame counter stopped advancing mid-run.
+
+    Not the same thing as a slow encoder: the counter is frozen, so nothing was
+    produced for the span at all. Samples before the first frame and any freeze
+    still in progress when the run ends are excluded — a leading idle period is
+    startup and a trailing one is shutdown, and neither is a stall.
+
+    This exists because ``fps_stability`` cannot see a stall. It is the
+    coefficient of variation of the rate column, and a full stop enters that
+    column as a 0 that gets filtered out before the CV is taken, so a hard
+    freeze reads as *steadier* than a mild wobble. On
+    upload_20260823-022938_72699c63 the encoder froze 2.9s with ``fps`` at 0.00
+    and ``fps_stability`` still read 0.0305, so the audit called a stall-shaped
+    gap a formula defect.
+    """
+    live = [
+        (stamp, count)
+        for stamp, count in (
+            (num(row.get("timestamp")), num(row.get("encode_frames_total")))
+            for row in rows
+        )
+        if stamp is not None and count is not None and count > 0
+    ]
+    out: List[dict] = []
+    frozen_from: Optional[float] = None
+    for (t0, f0), (t1, f1) in zip(live, live[1:]):
+        if f1 == f0:
+            if frozen_from is None:
+                frozen_from = t0
+        elif frozen_from is not None:
+            span = t1 - frozen_from
+            if span >= min_sec:
+                out.append({"at": round(frozen_from, 3), "sec": round(span, 3), "frames": f0})
+            frozen_from = None
+    return out
+
+
 def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[str]]:
     """The properties every leg must now satisfy. Empty failures means clean.
 
@@ -402,6 +440,22 @@ def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[s
     unm = unmeasured_stages(rows)
     stale = stale_e2e(rows)
     fps = fps_truth(rows)
+    stalls = encoder_stalls(rows)
+
+    # An encoder that stops mid-run is worth surfacing on its own, not only as
+    # the explanation for some other number. Nothing else reports it: the frame
+    # counter simply resumes, encode_frames_dropped stays 0 because ffmpeg did
+    # not drop anything it had, and fps_stability cannot see a full stop.
+    if stalls:
+        worst = max(stalls, key=lambda s: s["sec"])
+        total = round(sum(s["sec"] for s in stalls), 3)
+        observations.append(
+            f"encoder stalled {len(stalls)} time(s) for {total}s total, longest "
+            f"{worst['sec']}s frozen at {worst['frames']:.0f} frames — the frame "
+            f"counter stopped advancing mid-run while the leg kept going. "
+            f"encode_frames_dropped stays 0 because nothing was dropped, it was "
+            f"never produced"
+        )
 
     # Absence gate. A required column that never arrived is a broken collector,
     # and until now it produced the same "invariants OK" as a healthy leg.
@@ -514,7 +568,20 @@ def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[s
             f"{fps['counter_fps']} ({fps['frames_produced']:.0f} frames over a "
             f"{fps['active_window_sec']}s active window), gap {fps['gap']}"
         )
-        if cv is None:
+        # A stall explains the gap before fps_stability gets a vote, because
+        # fps_stability is structurally blind to one: a full stop is a zero,
+        # and the zeros are filtered out before the CV is taken. The rate mean
+        # skips those samples too, while the counter spans them — so the two
+        # numbers disagree by exactly the stall, and both are honest.
+        if stalls:
+            observations.append(
+                f"fps gap explained by the stall above: {observed}. The rate mean "
+                f"skips the zero samples and the counter spans them, so the two "
+                f"disagree by roughly the stall and both are honest — "
+                f"fps_stability {cv} does not catch it because a full stop is a "
+                f"zero, not a wobble"
+            )
+        elif cv is None:
             failures.append(
                 f"fps gap unattributed: {observed}; fps_stability is absent, so "
                 f"the audit cannot tell an oscillating encoder from a bad formula"

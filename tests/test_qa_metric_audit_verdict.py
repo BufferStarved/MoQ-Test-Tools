@@ -223,6 +223,84 @@ class PlausibilityGateTests(unittest.TestCase):
         )
 
 
+class EncoderStallTests(unittest.TestCase):
+    """A mid-run freeze must be visible, and must explain the fps gap it causes.
+
+    Replays upload_20260823-022938_72699c63: the frame counter sat at 159 for
+    2.9s with ``fps`` reporting 0.00, then resumed. Nothing reported the freeze
+    — ``encode_frames_dropped`` stays 0 because nothing was dropped, it was
+    never produced — and the audit blamed the resulting fps gap on the formula.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.audit = _load_audit()
+
+    def _stalled_leg(self) -> List[dict]:
+        rows: List[dict] = []
+        frames, stamp = 0, 0.0
+        for i in range(30):
+            frozen = 6 <= i <= 8
+            if not frozen:
+                frames += 30
+            rows.append(
+                {
+                    "protocol": "rtmp",
+                    "timestamp": f"{stamp}",
+                    "encode_frames_total": f"{frames}",
+                    "fps": "0.0" if frozen else "31.5",
+                    "fps_stability": "0.0305",
+                    "cpu_percent": "66.9",
+                    "latency_encode_ms": "549.3",
+                    "encoded_bitrate_kbps": "2981.1",
+                    "net_rtt_ms": "37.6",
+                }
+            )
+            stamp += 1.0
+        return rows
+
+    def test_the_stall_is_reported_at_all(self) -> None:
+        failures, observations = self.audit.check_invariants(self._stalled_leg(), "rtmp")
+        self.assertTrue(
+            [o for o in observations if "encoder stalled" in o],
+            f"a mid-run freeze must be surfaced: {observations} / {failures}",
+        )
+
+    def test_the_stall_explains_the_gap_instead_of_the_formula(self) -> None:
+        failures, observations = self.audit.check_invariants(self._stalled_leg(), "rtmp")
+        self.assertFalse(
+            [f for f in failures if "fps formula defect" in f],
+            f"a stall-shaped gap is not a formula defect: {failures}",
+        )
+        self.assertTrue(
+            [o for o in observations if "explained by the stall" in o],
+            f"the gap should be attributed to the stall: {observations}",
+        )
+
+    def test_startup_idle_and_shutdown_are_not_stalls(self) -> None:
+        """Leading zeros are startup and a trailing freeze is the run ending."""
+        rows = self._stalled_leg()
+        for i in (0, 1, 2):
+            rows[i]["encode_frames_total"] = "0"
+        tail = rows[-1]["encode_frames_total"]
+        for row in rows[-4:]:
+            row["encode_frames_total"] = tail
+
+        stalls = self.audit.encoder_stalls(rows)
+        self.assertEqual(
+            1, len(stalls), f"only the mid-run freeze counts, got {stalls}"
+        )
+
+    def test_a_clean_leg_reports_no_stall(self) -> None:
+        rows = self._stalled_leg()
+        frames = 0
+        for row in rows:
+            frames += 30
+            row["encode_frames_total"] = f"{frames}"
+            row["fps"] = "30.0"
+        self.assertEqual([], self.audit.encoder_stalls(rows))
+
+
 class FpsVerdictChannelTests(unittest.TestCase):
     """An oscillating encoder is a product owner's problem, not a formula bug."""
 
