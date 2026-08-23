@@ -145,6 +145,10 @@ Formulas live in `src/latency_budget.py` and its browser mirror `web/frontend/sr
 
 Run `scripts/qa_metric_audit.py --latest N --assert` to check these properties against finished legs; it exits non-zero if any of them is violated.
 
+The audit reports on two channels and **only failures gate `--assert`**. A failure means a column is lying. An observation means a column is telling the truth about something that still deserves an owner — an encoder that genuinely oscillates (`fps_stability` ≥ 0.05, where the rate mean and the counter-derived fps are both honest views of the same wobble), or a CMAF/MSE buffer that is genuinely deep. Keeping them in one list made a passing verdict uninterpretable, because two rules concluded "this value is large and legitimate" and then failed the leg anyway.
+
+The MoQ buffer rule reads the evidence rather than inferring it. A deep `latency_player_buffer_ms` is a behind-live **leak** only when `playback_behind_live_sec` is what filled it; on a CMAF leg (`cmaf_fragment_count` > 0) with behind-live at 0 it is a real buffered range, and on a LOC leg with neither it is unexplained and fails. The earlier version read "MoQ" as "LOC canvas" and failed a CMAF leg for a leak its own CSV disproved.
+
 ---
 
 ## Startup breakdown (per-phase)

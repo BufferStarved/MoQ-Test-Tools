@@ -32,6 +32,14 @@ With ``--assert`` the audit stops describing and starts judging: it exits
 non-zero if any of the invariants below is violated on any leg. That is the
 acceptance gate for a matrix run.
 
+Findings come out on two channels, and only one of them gates. A **failure**
+means a column is lying. An **observation** means a column is telling the truth
+about something that deserves a look — an encoder that genuinely oscillates, a
+CMAF buffer that is genuinely deep. Both are worth printing and they have
+different owners, so collapsing them into one list made a passing verdict
+impossible to interpret: two of the rules here conclude "this value is large and
+legitimate" and then used to fail the leg anyway.
+
 Usage:
     scripts/qa_metric_audit.py JOB8 [JOB8 ...]
     scripts/qa_metric_audit.py --latest 6
@@ -345,13 +353,22 @@ def stale_e2e(rows: List[dict]) -> dict:
     return {"repeated_tail": tail, "value": last, "of_samples": len(rows)}
 
 
-def check_invariants(rows: List[dict], protocol: str) -> List[str]:
-    """The properties every leg must now satisfy. Empty list means clean.
+def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[str]]:
+    """The properties every leg must now satisfy. Empty failures means clean.
 
     Each entry corresponds to a defect found in the 2026-08-22 matrix; a
     regression re-opens exactly one of them.
+
+    Returns ``(failures, observations)``. Only failures gate ``--assert``. The
+    split exists because two rules here reach a conclusion of the form "this
+    number is large and the reason is legitimate" — an oscillating encoder, a
+    deep CMAF buffer — and a rule that has already decided the metric is honest
+    must not also fail the leg. Reporting those as failures made the verdict
+    mean "something is large" instead of "a metric is lying", which is the one
+    thing the verdict has to mean to be worth gating a matrix run on.
     """
     failures: List[str] = []
+    observations: List[str] = []
     rec = reconcile(rows)
     trend = frame_trend(rows)
     unm = unmeasured_stages(rows)
@@ -434,7 +451,7 @@ def check_invariants(rows: List[dict], protocol: str) -> List[str]:
                 f"the audit cannot tell an oscillating encoder from a bad formula"
             )
         elif cv >= FPS_UNSTEADY_CV:
-            failures.append(
+            observations.append(
                 f"unstable encode: {observed}; fps_stability {cv} >= "
                 f"{FPS_UNSTEADY_CV} means the encoder throughput genuinely "
                 f"oscillates, so both numbers are honest — a product "
@@ -449,13 +466,46 @@ def check_invariants(rows: List[dict], protocol: str) -> List[str]:
 
     if protocol == "moq":
         # Defect 6: LOC "behind live" seconds must not land in the buffer stage.
+        #
+        # The first form of this rule inferred the leak from the buffer alone,
+        # because it read "MoQ" as "the LOC canvas". MoQ is also the CMAF/MSE
+        # path, which owns a real HTMLMediaElement and can hold a genuinely deep
+        # buffered range. On 2026-08-23 that inference failed a leg whose
+        # playback_behind_live_sec was 0.0 on every row while
+        # cmaf_fragment_count climbed 2 -> 59: the 7134ms was real buffered
+        # media and the audit named a cause its own CSV contradicted.
+        #
+        # Both quantities are archived now, so stop inferring. A leak is the
+        # buffer stage *carrying the behind-live number*, and that is decidable.
         buffers = series(rows, "latency_player_buffer_ms")
-        if buffers and max(buffers) > 3000.0:
-            failures.append(
-                f"latency_player_buffer_ms peaks at {max(buffers):.0f}ms on MoQ "
-                f"— LOC behind-live seconds are leaking into the buffer stage"
-            )
-    return failures
+        peak = max(buffers) if buffers else 0.0
+        if peak > 3000.0:
+            behind = series(rows, "playback_behind_live_sec")
+            leaked_ms = (max(behind) if behind else 0.0) * 1000.0
+            fragments = series(rows, "cmaf_fragment_count")
+            is_cmaf = bool(fragments) and max(fragments) > 0
+            if leaked_ms and abs(peak - leaked_ms) <= max(250.0, 0.05 * leaked_ms):
+                failures.append(
+                    f"latency_player_buffer_ms peaks at {peak:.0f}ms on MoQ and "
+                    f"playback_behind_live_sec peaks at {leaked_ms / 1000.0:.3f}s "
+                    f"— behind-live seconds are leaking into the buffer stage"
+                )
+            elif is_cmaf:
+                observations.append(
+                    f"latency_player_buffer_ms peaks at {peak:.0f}ms on MoQ, but "
+                    f"this leg is CMAF/MSE (cmaf_fragment_count reaches "
+                    f"{max(fragments):.0f}) and playback_behind_live_sec stays at "
+                    f"{(max(behind) if behind else 0.0):.3f}s — a real buffered "
+                    f"range, not a leak. Deep for a low-latency transport, so it "
+                    f"is worth an owner, but the metric is telling the truth"
+                )
+            else:
+                failures.append(
+                    f"latency_player_buffer_ms peaks at {peak:.0f}ms on a MoQ leg "
+                    f"with no CMAF fragments, so there is no HTMLMediaElement to "
+                    f"hold that buffer and no behind-live value to explain it"
+                )
+    return failures, observations
 
 
 def audit(filename: str, rows: List[dict]) -> List[str]:
@@ -504,7 +554,11 @@ def audit(filename: str, rows: List[dict]) -> List[str]:
               f"mean={s.get('mean_nonzero')} max={s['max']}{note}")
     print(f"     fps truth: {fps_truth(rows)}")
 
-    failures = check_invariants(rows, protocol)
+    failures, observations = check_invariants(rows, protocol)
+    if observations:
+        print("  -- observations (honest metrics, product-side owners) --")
+        for line in observations:
+            print(f"     ~ {line}")
     if failures:
         print("  -- FAIL --")
         for line in failures:

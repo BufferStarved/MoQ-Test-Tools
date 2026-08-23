@@ -28,6 +28,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_startup_publisher \
   tests.test_startup_player \
   tests.test_metric_honesty \
+  tests.test_qa_metric_audit_verdict \
   tests.test_rtmp_startup \
   tests.test_vod_assets \
   tests.test_bbb_deploy_and_whep_import \
