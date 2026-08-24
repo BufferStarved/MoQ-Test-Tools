@@ -29,12 +29,18 @@ describe("local publisher help never shares an operator camera", () => {
     );
     assert.match(cmd, /LOCAL_PUBLISHER_API=https:\/\/moq\.sean-mccarthy\.net/);
     assert.match(cmd, /LOCAL_PUBLISHER_SESSION=sess-visitor-1/);
+    assert.match(cmd, /bash -c /);
+    assert.match(cmd, /HOME\/Developer\/moq-test-tools/);
+    assert.match(cmd, /run-local-publisher\.sh/);
     assert.doesNotMatch(cmd, /LOCAL_PUBLISHER_TOKEN=/);
+    assert.doesNotMatch(cmd, /(?:^|\s)\.\/scripts\/run-local-publisher\.sh/);
   });
 
   it("keeps the localhost one-liner", () => {
     const cmd = localPublisherAgentOneLiner("http://127.0.0.1:8000");
     assert.match(cmd, /LOCAL_PUBLISHER_API=http:\/\/127\.0\.0\.1:8000/);
+    assert.match(cmd, /bash -c /);
     assert.doesNotMatch(cmd, /sean-mccarthy/);
+    assert.doesNotMatch(cmd, /(?:^|\s)\.\/scripts\/run-local-publisher\.sh/);
   });
 });

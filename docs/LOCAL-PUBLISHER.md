@@ -6,6 +6,7 @@ ISP and Wi‑Fi sit between the encoder and the cloud ingest hosts.
 
 > **Public site:** Webcam+ffmpeg is supported, but the helper must be
 > started from **that browser's** command (`LOCAL_PUBLISHER_SESSION=…`).
+> Paste it in any directory — it finds a checkout (or clones one).
 > Jobs only go to the helper for that session — never a shared operator
 > laptop. A helper without a session is refused.
 >

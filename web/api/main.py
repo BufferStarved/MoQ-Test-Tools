@@ -312,6 +312,20 @@ def features(session: str = ""):
     }
 
 
+@app.get("/run-local-publisher.sh")
+def launch_local_publisher_script():
+    """Bootstrap the laptop helper from any cwd (the Webcam copy-paste command)."""
+    path = ROOT_DIR / "scripts" / "launch-local-publisher.sh"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Launcher script is not installed")
+    return FileResponse(
+        path,
+        media_type="text/x-shellscript",
+        filename="run-local-publisher.sh",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.post("/api/publisher-session")
 def create_publisher_session():
     """Mint a helper binding so Webcam+ffmpeg uses this browser's laptop only."""

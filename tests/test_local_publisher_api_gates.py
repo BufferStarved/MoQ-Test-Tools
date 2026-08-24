@@ -258,6 +258,12 @@ class LocalPublisherApiGateTests(unittest.TestCase):
         self.assertIn("local_publisher_whip", resp.json())
         self.assertFalse(resp.json()["local_publisher_whip"])
 
+    def test_helper_launcher_is_downloadable(self) -> None:
+        resp = self.client.get("/run-local-publisher.sh")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("run-local-publisher.sh", resp.text)
+        self.assertIn("MoQ-Test-Tools", resp.text)
+
     def test_media_upload_endpoint(self) -> None:
         files = {"file": ("clip.mp4", b"not-really-mp4", "video/mp4")}
         resp = self.client.post("/api/media/upload", files=files)

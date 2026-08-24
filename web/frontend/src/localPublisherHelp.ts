@@ -45,6 +45,22 @@ function apiBase(apiOrigin: string): string {
   return apiOrigin.replace(/\/$/, "");
 }
 
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Pasteable from any cwd. Finds a checkout, else downloads this site's launcher. */
+export function localPublisherLaunchSuffix(apiOrigin: string): string {
+  const scriptUrl = `${apiBase(apiOrigin)}/run-local-publisher.sh`;
+  const inner =
+    "set -euo pipefail; " +
+    "s=scripts/run-local-publisher.sh; " +
+    'for d in ${MOQ_TEST_TOOLS:-} "$HOME/Developer/moq-test-tools" "$HOME/Developer/MoQ-Test-Tools" "$HOME/src/moq-test-tools" "$HOME/moq-test-tools" "$PWD"; ' +
+    'do [ -n "$d" ] && [ -f "$d/$s" ] && exec bash "$d/$s"; done; ' +
+    `curl -fsSL ${shellSingleQuote(scriptUrl)} | bash`;
+  return `bash -c ${shellSingleQuote(inner)}`;
+}
+
 /**
  * Helper command for this browser. Public hosts require a session so ffmpeg
  * opens this visitor's camera, not a shared operator laptop.
@@ -76,7 +92,7 @@ export function localPublisherAgentOneLiner(
     if (!session.trim()) {
       return "";
     }
-    return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_SESSION=${session.trim()} ./scripts/run-local-publisher.sh`;
+    return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_SESSION=${session.trim()} ${localPublisherLaunchSuffix(api)}`;
   }
-  return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_TOKEN=${token} ./scripts/run-local-publisher.sh`;
+  return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_TOKEN=${token} ${localPublisherLaunchSuffix(api)}`;
 }

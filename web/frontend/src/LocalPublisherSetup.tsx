@@ -75,7 +75,7 @@ export function LocalPublisherSetup({
         <p className="field-hint">Preparing a helper command for this browser…</p>
       )}
       <p className="field-hint local-publisher-setup-links">
-        Run it from the repo root on the machine whose camera you want to use.{" "}
+        Paste it in a terminal on this computer — any directory is fine.{" "}
         {publicSite ? (
           <>
             Cloud publish URLs:{" "}
