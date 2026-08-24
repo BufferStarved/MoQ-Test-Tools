@@ -97,14 +97,16 @@ export function MetricChart({
   keepZeroSeries = false,
   caption,
 }: MetricChartProps) {
-  // Hide all-zero series unless the caller asked to keep them (stalls / loss
-  // counters where a flat zero next to a real series is the finding).
-  const nonzeroSeries = series.filter((item) => data.some((point) => (point[item.key] ?? 0) > 0));
+  // A measured 0 is a finding (encoder kept up, no stalls). Hide only when
+  // every point is null/undefined — that is "not collected yet", not zero.
+  const numericSeries = series.filter((item) =>
+    data.some((point) => typeof point[item.key] === "number" && Number.isFinite(point[item.key])),
+  );
   const activeSeries = keepZeroSeries
     ? data.length > 0
       ? series
       : []
-    : nonzeroSeries;
+    : numericSeries;
   const resolvedMetricKey = metricKey ?? (series.length === 1 ? series[0]?.key : undefined);
 
   if (activeSeries.length === 0) {

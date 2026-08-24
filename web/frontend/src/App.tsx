@@ -2739,6 +2739,7 @@ function App() {
                 <h2 className="live-charts-heading">Charts</h2>
                 <ResultsErrorBoundary label="live charts">
                 <ComparisonCharts
+                  minLegs={1}
                   legs={comparisonLegs.map((leg, index) => {
                     const endpoint = endpoints[index];
                     const filename = resultFilenameFromPath(leg.job.csv_path);

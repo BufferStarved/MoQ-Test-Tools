@@ -689,6 +689,11 @@ export function hasSeriesData(points: ChartPoint[], key: string): boolean {
   return points.some((point) => (point[key] ?? 0) > 0);
 }
 
+/** True when any point has a real number, including a measured 0. */
+export function hasFiniteSeries(points: ChartPoint[], key: string): boolean {
+  return points.some((point) => typeof point[key] === "number" && Number.isFinite(point[key]));
+}
+
 export function visibleGroups(points: ChartPoint[], protocol: string): ChartGroup[] {
   const proto = (protocol || "").toLowerCase();
   return CHART_GROUPS.filter((group) => {
@@ -710,6 +715,9 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
     }
     if (group.id === "media_health") {
       return (
+        proto === "moq" ||
+        proto === "srt" ||
+        proto === "rtmp" ||
         hasSeriesData(points, "ts_continuity_counter_errors") ||
         hasSeriesData(points, "cmaf_fragment_count") ||
         hasSeriesData(points, "cmaf_seq_gap_count") ||
@@ -718,7 +726,7 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
       );
     }
     if (group.id === "playback") {
-      return group.series.some((series) => hasSeriesData(points, series.key));
+      return points.length > 0;
     }
     return group.series.some((series) => hasSeriesData(points, series.key));
   });
@@ -1090,7 +1098,10 @@ export function comparisonVisibleGroups(
     { id: "encode", title: "Encode/Publish" },
   ];
 
-  if (comparisonHasMetric(points, "cpu_percent", legs.length)) {
+  if (
+    comparisonHasMetricPresent(points, "cpu_percent", legs.length) ||
+    comparisonHasMetricPresent(points, "memory_mb", legs.length)
+  ) {
     groups.push({ id: "client", title: "Client" });
   }
   if (
@@ -1101,25 +1112,12 @@ export function comparisonVisibleGroups(
   ) {
     groups.push({ id: "ingest", title: "Ingest" });
   }
-  if (
-    comparisonHasMetric(points, "ts_continuity_counter_errors", legs.length) ||
-    comparisonHasMetric(points, "cmaf_fragment_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_seq_gap_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_tfdt_gap_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_parse_errors", legs.length)
-  ) {
+  // Healthy runs report 0 errors — still show the tab so a flat zero is visible
+  // while the test is running, not only after a fault appears.
+  if (hasMoq || hasSrtOrRtmp) {
     groups.push({ id: "media_health", title: "Media Health" });
   }
-  if (
-    comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_fps", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_stall_count", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_frames_dropped", legs.length) ||
-    comparisonHasMetric(points, "playback_ttff_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_video_time_sec", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_buffer_sec", legs.length) ||
-    legs.some((leg) => leg.protocol === "webrtc")
-  ) {
+  if (points.length > 0) {
     groups.push({ id: "playback", title: "Browser playback" });
   }
   return groups;

@@ -237,6 +237,48 @@ describe("Results chart data cannot crash the tab", () => {
     assert.ok((at3?.e2e_latency_ms_0 ?? 0) > 0);
   });
 
+  it("keeps media-health and playback tabs on a clean live run", () => {
+    const legs: ComparisonLegData[] = [
+      {
+        id: "moq",
+        label: "MoQ",
+        protocol: "moq",
+        samples: [
+          {
+            elapsed_sec: 1,
+            encoded_bitrate_kbps: 2400,
+            fps: 30,
+            encode_lag_ms: 0,
+            cmaf_seq_gap_count: 0,
+            playback_stall_count: 0,
+          } as never,
+        ],
+      },
+      {
+        id: "srt",
+        label: "SRT",
+        protocol: "srt",
+        samples: [
+          {
+            elapsed_sec: 1,
+            encoded_bitrate_kbps: 2400,
+            fps: 30,
+            encode_lag_ms: 0,
+            ts_continuity_counter_errors: 0,
+          } as never,
+        ],
+      },
+    ];
+    const points = buildComparisonPoints(legs);
+    const groups = comparisonVisibleGroups(points, legs).map((group) => group.id);
+    assert.ok(groups.includes("encode"));
+    assert.ok(groups.includes("ingest"));
+    assert.ok(groups.includes("media_health"));
+    assert.ok(groups.includes("playback"));
+    assert.equal(points[0]?.encode_lag_ms_0, 0);
+    assert.equal(points[0]?.cmaf_seq_gap_count_0, 0);
+  });
+
   it("plots MoQ qlog RTT and nulls only the first unmeasured samples", () => {
     assert.equal(unmeasuredIngestValue("moq", "net_rtt_ms", 0), null);
     assert.equal(unmeasuredIngestValue("moq", "quic_rtt_ms", 0), null);
