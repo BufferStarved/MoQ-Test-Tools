@@ -46,7 +46,10 @@ try: d=json.load(sys.stdin)
 except Exception: print(0); raise SystemExit
 items=d if isinstance(d,list) else d.get("jobs",d.get("uploads",[]))
 print(sum(1 for j in items if isinstance(j,dict) and j.get("status") in ("running","starting","pending")))' 2>/dev/null || echo 0)"
-  if [[ "${ACTIVE:-0}" != "0" ]]; then
+  # pipefail + a down site yields "0\n0"; first line only so a 502 is idle, not a refuse.
+  ACTIVE="$(printf '%s' "${ACTIVE:-0}" | head -n1 | tr -cd '0-9')"
+  ACTIVE="${ACTIVE:-0}"
+  if [[ "$ACTIVE" != "0" ]]; then
     echo "REFUSING: $ACTIVE job(s) in flight. Re-run when idle or set SKIP_RESTART=1." >&2
     exit 3
   fi
