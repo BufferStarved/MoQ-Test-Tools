@@ -37,6 +37,12 @@ interface EndpointSectionProps {
   bootstrapping: boolean;
   apiOnline: boolean;
   canRemove: boolean;
+  /** Recipe locked the protocol mix — Destination stay editable. */
+  lockProtocol?: boolean;
+  /** Recipe locked the player — Destination stay editable. */
+  lockPlayer?: boolean;
+  /** Cloud compare: wired clouds only, never Custom URL. */
+  hideCustomDestinations?: boolean;
   onChange: (id: string, patch: Partial<EndpointConfig>) => void;
   onRemove: (id: string) => void;
 }
@@ -112,6 +118,9 @@ export function EndpointSection({
   bootstrapping,
   apiOnline,
   canRemove,
+  lockProtocol = false,
+  lockPlayer = false,
+  hideCustomDestinations = false,
   onChange,
   onRemove,
 }: EndpointSectionProps) {
@@ -129,7 +138,7 @@ export function EndpointSection({
     endpoint.protocol,
     recipeContext,
     occupiedCollisionKeys,
-  );
+  ).filter((item) => !hideCustomDestinations || !isCustomIngestEndpoint(item.id));
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
   const managedUrl = !isCustom ? managedDisplayUrl(endpoint, presets) : "";
@@ -183,8 +192,8 @@ export function EndpointSection({
         )}
       </div>
 
-      {liveProtocols.length <= 1 ? (
-        <p className="endpoint-static-field">
+      {lockProtocol || liveProtocols.length <= 1 ? (
+        <p className="endpoint-static-field" data-testid="output-protocol-locked">
           <span className="field-label-with-icon">
             <IconBroadcast size={14} /> Protocol
           </span>
@@ -224,6 +233,8 @@ export function EndpointSection({
           <IconTarget size={14} /> Destination
         </span>
         <select
+          data-testid="output-destination"
+          aria-label={`Output ${index + 1} destination`}
           value={
             hostOptions.some((item) => item.id === endpoint.ingestEndpointId)
               ? endpoint.ingestEndpointId
@@ -240,8 +251,15 @@ export function EndpointSection({
           disabled={controlsLocked}
         >
           {hostOptions.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
+            <option
+              key={item.id}
+              value={item.id}
+              disabled={!item.available && item.id !== "custom"}
+              className={!item.available && item.id !== "custom" ? "option-unavailable" : undefined}
+            >
+              {item.available || item.id === "custom"
+                ? item.label
+                : `${item.label} — Not deployed`}
             </option>
           ))}
         </select>
@@ -259,7 +277,7 @@ export function EndpointSection({
         </label>
       )}
 
-      {playerModes.length <= 1 ? (
+      {lockPlayer || playerModes.length <= 1 ? (
         <p className="endpoint-static-field">
           <span className="field-label-with-icon">
             <IconMonitor size={14} /> Player

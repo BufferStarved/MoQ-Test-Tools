@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 from gcp_host_metrics import GcpHostMetricsPoller
 from ingest_agent_client import IngestAgentClient, resolve_ingest_agent
@@ -14,6 +15,17 @@ class IngestHostMetricsSnapshot:
     memory_percent: float = 0.0
     disk_percent: float = 0.0
     source: str = ""
+
+
+def measured_server_cpu(snapshot: Optional[IngestHostMetricsSnapshot]) -> Optional[float]:
+    """Blank when this hop was never instrumented — never a fake 0.
+
+    MediaMTX on a laptop publisher is disabled; an empty agent poll has no
+    ``source``. A local/GCP reading of 0.0 is still a measurement.
+    """
+    if snapshot is None or not (snapshot.source or "").strip():
+        return None
+    return float(snapshot.cpu_percent)
 
 
 class IngestHostMetricsPoller:
@@ -42,7 +54,22 @@ class IngestHostMetricsPoller:
         # reported the laptop as the SRT server. Only take the local path when
         # we are actually on the API/ingest host.
         publisher = (publisher_host or "cloud").strip().lower()
-        self._use_local = self._ingest_provider == "gcp_mediamtx" and publisher != "local"
+        is_mediamtx = self._ingest_provider.endswith("_mediamtx")
+        # Laptop-published MediaMTX is not the ingest VM. Falling through to
+        # ingest-agent / GCP Monitoring hangs ~10s per tick and skips SRT
+        # sample seconds (comparison 2026-08-23: SRT only on even seconds,
+        # which then vanished from Recharts as isolated undotted points).
+        if is_mediamtx and publisher == "local":
+            self._config = None
+            self._client = None
+            self._gcp = GcpHostMetricsPoller(ingest_provider="", endpoint_url="")
+            self._gcp.enabled = False
+            self.enabled = False
+            self._use_local = False
+            self._prefer_gcp = False
+            return
+
+        self._use_local = is_mediamtx and publisher != "local"
         if self._use_local:
             self._config = None
             self._client = None

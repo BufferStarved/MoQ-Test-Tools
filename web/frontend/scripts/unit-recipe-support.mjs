@@ -21,6 +21,8 @@ assert.match(appSrc, /canAddRecipeOutput/);
 assert.match(appSrc, /Boolean\(startTitle\)/);
 assert.match(appSrc, /recipeBlockReason/);
 assert.match(endpointSrc, /destinationsForProtocol/);
+assert.match(endpointSrc, /lockProtocol/);
+assert.match(endpointSrc, /data-testid="output-destination"/);
 assert.match(endpointSrc, /selectablePlaybackModes/);
 assert.doesNotMatch(endpointSrc, /playbackModeBlockedReason/);
 assert.match(endpointSrc, /UPLOAD_PROTOCOLS_COMING_SOON = new Set\(\["hls", "dash"\]\)/);
@@ -28,9 +30,13 @@ assert.match(recipeSrc, /PUBLISH_PROTOCOL_IDS = \["srt", "rtmp", "webrtc", "moq"
 assert.match(playbackSrc, /Compatible players only/);
 assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS/);
 assert.match(ingestSrc, /_moq_relay_d18` as IngestEndpointId/);
-assert.match(ingestSrc, /label: "OpenMOQ · GCP us-central1"/);
-assert.match(ingestSrc, /OpenMOQ draft-16 · GCP us-central1/);
-assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*gcp_moq_relay/);
+assert.match(ingestSrc, /label: "GCP Central"/);
+assert.match(ingestSrc, /label: "GCP East"/);
+assert.match(ingestSrc, /label: "Linode East"/);
+assert.match(ingestSrc, /labelPrefix: "OpenMOQ"/);
+assert.match(ingestSrc, /labelPrefix: "OpenMOQ draft-16"/);
+assert.match(ingestSrc, /\$\{role\.labelPrefix\} · \$\{host\.label\}/);
+assert.match(ingestSrc, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*moq_relay/);
 assert.match(recipeSrc, /publishProtocolIdsForSource/);
 assert.match(recipeSrc, /isLocalAgentSource/);
 assert.match(recipeSrc, /recipeEncoderForSource/);
@@ -40,7 +46,7 @@ assert.match(recipeSrc, /effective === "obs"/);
 assert.match(appSrc, /encode-encoder-options/);
 assert.match(appSrc, /encoderModeExplainer/);
 assert.match(appSrc, /const MIN_ENDPOINTS = 1/);
-assert.match(appSrc, /canRemove=\{endpoints.length > minEndpointsForSource/);
+assert.match(appSrc, /canRemove=\{showOutputConfig && endpoints.length > minEndpointsForSource/);
 assert.doesNotMatch(appSrc, /OBS \+ OpenMOQ/);
 assert.match(appSrc, /Calculate VMAF, PSNR, and SSIM pre- and post-ingest/);
 assert.doesNotMatch(appSrc, /setMediaSource\("dummy"\);\s*setMediaPath\(OBS_OPENMOQ_MEDIA\)/);
@@ -64,7 +70,9 @@ const INGESTS = [
   "linode_mediamtx",
   "linode_moq_relay",
   "linode_moq_relay_d18",
-  "aws_zixi",
+  "aws_east_zixi",
+  "gcp_west_zixi",
+  "linode_central_mediamtx",
   "custom",
 ];
 const PLAYERS = [
@@ -130,11 +138,16 @@ function playerAllowed(mode, caps) {
 }
 
 function ingestHidden(id) {
+  if (String(id).includes("moq_relay") && !String(id).endsWith("_d18")) {
+    return true;
+  }
   return (
     id === "aws_zixi" ||
-    id === "gcp_moq_relay" ||
-    id === "gcp_east_moq_relay" ||
-    id === "linode_moq_relay"
+    id === "aws_east_zixi" ||
+    id.startsWith("gcp_west_") ||
+    id.startsWith("linode_central_") ||
+    id.startsWith("linode_west_") ||
+    id.startsWith("aws_")
   );
 }
 
@@ -231,7 +244,7 @@ for (const row of [
   ["dummy", "moq", "gcp_mediamtx", "moq"],
   ["dummy", "hls", "gcp_east_zixi", "mpegts"],
   ["dummy", "dash", "custom", "hls"],
-  ["dummy", "srt", "aws_zixi", "mpegts"],
+  ["dummy", "srt", "aws_east_zixi", "mpegts"],
   ["dummy", "moq", "gcp_moq_relay", "moq"],
   ["dummy", "moq", "linode_moq_relay", "moq"],
   ["dummy", "srt", "gcp_mediamtx", "dash"],

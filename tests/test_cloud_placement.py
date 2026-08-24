@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from cloud_placement import (
+    ENCODE_HOSTS,
     encode_hosts_for_api,
     gcp_east_stack_configured,
     ingest_endpoint_id_for_provider,
@@ -48,6 +53,51 @@ class CloudPlacementTests(unittest.TestCase):
         self.assertEqual(placement.cloud_provider, "gcp")
         self.assertEqual(placement.cloud_region, "us-east1")
 
+    def test_nine_host_registry_labels_and_slugs(self) -> None:
+        expected = [
+            ("gcp_east", "GCP East", "gcp", "east", "us-east1"),
+            ("gcp_central", "GCP Central", "gcp", "central", "us-central1"),
+            ("gcp_west", "GCP West", "gcp", "west", "us-west1"),
+            ("linode_east", "Linode East", "linode", "east", "us-east"),
+            ("linode_central", "Linode Central", "linode", "central", "us-central"),
+            ("linode_west", "Linode West", "linode", "west", "us-west"),
+            ("aws_east", "AWS East", "aws", "east", "us-east-1"),
+            ("aws_central", "AWS Central", "aws", "central", "us-east-2"),
+            ("aws_west", "AWS West", "aws", "west", "us-west-2"),
+        ]
+        self.assertEqual(len(ENCODE_HOSTS), 9)
+        self.assertEqual(
+            [
+                (host.id, host.label, host.provider, host.region, host.cloud_region)
+                for host in ENCODE_HOSTS
+            ],
+            expected,
+        )
+
+    def test_encode_hosts_api_shows_undeployed_grid(self) -> None:
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("GCP_EAST_", "GCP_WEST_", "LINODE_", "AWS_"))
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            hosts = {host["id"]: host for host in encode_hosts_for_api()}
+        self.assertEqual(len(hosts), 9)
+        self.assertEqual(hosts["gcp_central"]["label"], "GCP Central")
+        self.assertTrue(hosts["gcp_central"]["available"])
+        self.assertFalse(hosts["gcp_west"]["available"])
+        self.assertEqual(hosts["gcp_west"]["unavailable_reason"], "Not deployed")
+        self.assertFalse(hosts["aws_east"]["available"])
+        self.assertEqual(hosts["linode_central"]["cloud_region"], "us-central")
+        self.assertIn("Dallas", hosts["linode_central"]["subtitle"])
+        self.assertNotIn("4433", str(hosts))
+
+    def test_west_prefix_does_not_collapse_to_central(self) -> None:
+        with mock.patch.dict(os.environ, {"GCP_WEST_REGION": "us-west1"}, clear=False):
+            placement = placement_from_ingest_provider("gcp_west_moq_relay_d18")
+        self.assertEqual(placement.cloud_provider, "gcp")
+        self.assertEqual(placement.cloud_region, "us-west1")
+
 
 class LinodePresetTests(unittest.TestCase):
     def test_linode_presets_hidden_without_env(self) -> None:
@@ -61,8 +111,10 @@ class LinodePresetTests(unittest.TestCase):
             import destinations as dest_mod
 
             importlib.reload(dest_mod)
-            self.assertNotIn("moq_zixi_linode", dest_mod.PRESET_BY_ID)
-            self.assertIn("zixi_linode_srt", dest_mod.PRESET_BY_ID)
+            stub = dest_mod.PRESET_BY_ID["moq_zixi_linode"]
+            self.assertFalse(stub.web_available)
+            self.assertEqual(stub.notes, "Not deployed")
+            self.assertNotIn("zixi_linode_srt", dest_mod.PRESET_BY_ID)
 
     def test_linode_presets_registered_when_configured(self) -> None:
         env = {
@@ -85,6 +137,31 @@ class LinodePresetTests(unittest.TestCase):
             profile = dest_mod.resolve_preset("moq_zixi_linode")
             self.assertEqual(profile.cloud_provider, "linode")
             self.assertEqual(profile.cloud_region, "us-east")
+
+    def test_partial_stack_greys_missing_software(self) -> None:
+        env = {
+            "LINODE_STACK_ENABLED": "1",
+            "LINODE_ZIXI_IP": "203.0.113.10",
+            "LINODE_WEB_IP": "",
+            "LINODE_RELAY_IP": "",
+            "LINODE_REGION": "us-east",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            import importlib
+            import destinations as dest_mod
+            import cloud_placement as place_mod
+
+            importlib.reload(place_mod)
+            importlib.reload(dest_mod)
+            self.assertTrue(dest_mod.PRESET_BY_ID["moq_zixi_linode"].web_available)
+            self.assertFalse(dest_mod.PRESET_BY_ID["moq_mediamtx_linode_srt"].web_available)
+            self.assertFalse(dest_mod.PRESET_BY_ID["moq_linode_relay_d18"].web_available)
+            hosts = {row["id"]: row for row in place_mod.encode_hosts_for_api()}
+            self.assertTrue(hosts["linode_east"]["available"])
+            self.assertTrue(hosts["linode_east"]["roles"]["zixi"])
+            self.assertFalse(hosts["linode_east"]["roles"]["mediamtx"])
+            self.assertFalse(hosts["linode_east"]["roles"]["moq"])
+            self.assertIn("mediamtx", hosts["linode_east"]["unavailable_reason"])
 
 
 class MoqRecorderAgentTests(unittest.TestCase):
@@ -154,7 +231,8 @@ class GcpEastPresetTests(unittest.TestCase):
             import destinations as dest_mod
 
             importlib.reload(dest_mod)
-            self.assertNotIn("moq_zixi_gcp_east", dest_mod.PRESET_BY_ID)
+            stub = dest_mod.PRESET_BY_ID["moq_zixi_gcp_east"]
+            self.assertFalse(stub.web_available)
             self.assertFalse(gcp_east_stack_configured())
 
     def test_east_presets_registered_when_configured(self) -> None:
@@ -177,7 +255,11 @@ class GcpEastPresetTests(unittest.TestCase):
             self.assertEqual(preset.cloud_region, "us-east1")
             hosts = {host["id"]: host for host in encode_hosts_for_api()}
             self.assertTrue(hosts["gcp_east"]["available"])
-            self.assertTrue(hosts["gcp"]["available"])
+            self.assertTrue(hosts["gcp_central"]["available"])
+            self.assertFalse(hosts["gcp_west"]["available"])
+            self.assertIn("moq_gcp_east_relay_d18", dest_mod.PRESET_BY_ID)
+            self.assertIn(":14433", dest_mod.PRESET_BY_ID["moq_gcp_east_relay_d18"].url)
+            self.assertNotIn(":4433", dest_mod.PRESET_BY_ID["moq_gcp_east_relay_d18"].url)
 
     def test_east_agent_uses_region_token(self) -> None:
         env = {
@@ -200,6 +282,30 @@ class GcpEastPresetTests(unittest.TestCase):
         from ingest_agent_client import HEALTH_TIMEOUT_SEC
 
         self.assertLessEqual(HEALTH_TIMEOUT_SEC, 2.0)
+
+    def test_reserved_gcp_west_env_unlocks_fourth_stack(self) -> None:
+        env = {
+            "GCP_WEST_STACK_ENABLED": "1",
+            "GCP_WEST_ZIXI_IP": "203.0.113.70",
+            "GCP_WEST_WEB_IP": "203.0.113.80",
+            "GCP_WEST_RELAY_IP": "203.0.113.90",
+            "GCP_WEST_REGION": "us-west1",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            import importlib
+            import destinations as dest_mod
+
+            importlib.reload(dest_mod)
+            try:
+                preset = dest_mod.PRESET_BY_ID["moq_gcp_west_relay_d18"]
+                self.assertTrue(preset.web_available)
+                self.assertIn(":14433", preset.url)
+                self.assertEqual(preset.cloud_region, "us-west1")
+                hosts = {host["id"]: host for host in encode_hosts_for_api()}
+                self.assertTrue(hosts["gcp_west"]["available"])
+                self.assertEqual(hosts["gcp_west"]["label"], "GCP West")
+            finally:
+                importlib.reload(dest_mod)
 
     def test_linode_agent_does_not_fall_back_to_central_token(self) -> None:
         env = {

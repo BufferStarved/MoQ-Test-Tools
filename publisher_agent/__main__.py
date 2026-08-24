@@ -14,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from publisher_agent.agent import PublisherAgent, default_ws_url  # noqa: E402
+from publisher_agent.api_guard import assert_publisher_api_allowed  # noqa: E402
 from publisher_agent.deps import check_all, ensure_tool_path, required_ok  # noqa: E402
 
 
@@ -33,6 +34,11 @@ def main(argv: list[str] | None = None) -> int:
         "--agent-id",
         default=os.environ.get("LOCAL_PUBLISHER_AGENT_ID", ""),
         help="Optional stable agent id",
+    )
+    parser.add_argument(
+        "--session",
+        default=os.environ.get("LOCAL_PUBLISHER_SESSION", ""),
+        help="Browser session from the Webcam panel (required on the public site)",
     )
     parser.add_argument(
         "--check-only",
@@ -65,10 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         print("\nffmpeg with libx264 and a WHIP muxer is required. Re-run ./scripts/run-local-publisher.sh")
         return 1
 
+    assert_publisher_api_allowed(args.api, args.session)
+
     agent = PublisherAgent(
         api_ws_url=default_ws_url(args.api),
         token=args.token,
         agent_id=args.agent_id,
+        session=args.session,
     )
     print(f"\nConnecting to {args.api} as local publisher…")
     print("Leave this running while you start comparisons with Publisher = This machine.\n")

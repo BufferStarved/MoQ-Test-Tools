@@ -6,7 +6,9 @@ import {
   comparisonSeries,
   comparisonVisibleGroups,
   resultToSavedStream,
+  rowsToChartPoints,
   savedStreamsToLegs,
+  unmeasuredIngestValue,
   ttffEventSummaries,
   type ComparisonLegData,
 } from "./chartData.ts";
@@ -202,6 +204,64 @@ describe("Results chart data cannot crash the tab", () => {
     assert.equal(failed.legs.length, 1);
     assert.equal(failed.points.length, 0);
     assert.equal(failed.labels[0], "Stream 1 (Stream)");
+  });
+
+  it("carries sparse SRT points onto the 1s comparison axis", () => {
+    const legs: ComparisonLegData[] = [
+      {
+        id: "rtmp",
+        label: "RTMP",
+        protocol: "rtmp",
+        samples: [
+          { elapsed_sec: 1, encoded_bitrate_kbps: 2000, fps: 30, e2e_latency_ms: 9000 } as never,
+          { elapsed_sec: 2, encoded_bitrate_kbps: 2100, fps: 30, e2e_latency_ms: 9100 } as never,
+          { elapsed_sec: 3, encoded_bitrate_kbps: 2200, fps: 30, e2e_latency_ms: 9200 } as never,
+        ],
+      },
+      {
+        id: "srt",
+        label: "SRT",
+        protocol: "srt",
+        samples: [
+          { elapsed_sec: 2, encoded_bitrate_kbps: 3300, fps: 30, e2e_latency_ms: 8800 } as never,
+        ],
+      },
+    ];
+    const points = buildComparisonPoints(legs);
+    const at1 = points.find((point) => point.second === 1);
+    const at2 = points.find((point) => point.second === 2);
+    const at3 = points.find((point) => point.second === 3);
+    assert.equal(at1?.e2e_latency_ms_1, undefined);
+    assert.equal(at2?.e2e_latency_ms_1, 8800);
+    assert.equal(at3?.e2e_latency_ms_1, 8800);
+    assert.ok((at3?.e2e_latency_ms_0 ?? 0) > 0);
+  });
+
+  it("plots MoQ qlog RTT and nulls only the first unmeasured samples", () => {
+    assert.equal(unmeasuredIngestValue("moq", "net_rtt_ms", 0), null);
+    assert.equal(unmeasuredIngestValue("moq", "quic_rtt_ms", 0), null);
+    assert.equal(unmeasuredIngestValue("moq", "net_rtt_ms", 38.4), 38.4);
+    const points = rowsToChartPoints([
+      row({
+        protocol: "moq",
+        timestamp: "1",
+        net_rtt_ms: "0",
+        net_jitter_ms: "0",
+        quic_rtt_ms: "0",
+      }),
+      row({
+        protocol: "moq",
+        timestamp: "2",
+        net_rtt_ms: "38.4",
+        net_jitter_ms: "1.2",
+        quic_rtt_ms: "38.4",
+      }),
+    ]);
+    assert.equal(points[0].net_rtt_ms, null);
+    assert.equal(points[0].quic_rtt_ms, null);
+    assert.equal(points[1].net_rtt_ms, 38.4);
+    assert.equal(points[1].net_jitter_ms, 1.2);
+    assert.equal(points[1].quic_rtt_ms, 38.4);
   });
 
   it("does not allocate a unix-epoch x-axis", () => {

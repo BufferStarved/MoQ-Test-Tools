@@ -5,7 +5,9 @@ import {
   classifyMoqEndVerdict,
   cmafSubscribeOptions,
   moqLiveEdgePolicy,
-  CMAF_GOP_HOLD_FLOOR_SEC,
+  CMAF_HEALTHY_HOLD_CEILING_SEC,
+  CMAF_HEALTHY_HOLD_FLOOR_SEC,
+  CMAF_STARVE_HOLD_SEC,
   humanizeJobError,
   isCaptureOrPublishError,
   isPlayableCatalogReady,
@@ -15,6 +17,10 @@ import {
   noMediaFailMessage,
   noMediaTimeoutMs,
   playerErrorForFailedJob,
+  playaLatencyForMoqE2e,
+  isTransientMoqSessionDrop,
+  shouldSkipMoqSessionRestart,
+  MOQ_CONNECTION_LOST,
   shouldFailNoMediaWatchdog,
   shouldKeepSessionOnSubscribeError,
   CMAF_LATE_FRAME_THRESHOLD_MS,
@@ -25,19 +31,23 @@ import {
 } from "./moqCmafPlayback.ts";
 
 describe("moqLiveEdgePolicy", () => {
-  it("holds two 0.5s groups and catches up before a 3s balloon", () => {
+  it("chases a WebRTC-class hold when the playhead is healthy", () => {
     const policy = moqLiveEdgePolicy(400);
-    assert.equal(policy.holdBehindSec, CMAF_GOP_HOLD_FLOOR_SEC);
-    assert.ok(policy.holdBehindSec >= 1.0, "one-group hold still froze on late IDRs");
-    assert.ok(policy.rateOnSec < 3, "must not sit at 1.0x through a 3–6s stall balloon");
-    assert.ok(policy.seekThresholdSec >= 30, "must not restore the 7s seek freeze");
+    assert.equal(policy.holdBehindSec, CMAF_HEALTHY_HOLD_CEILING_SEC);
+    assert.ok(policy.holdBehindSec <= 0.4);
+    assert.ok(policy.holdBehindSec >= CMAF_HEALTHY_HOLD_FLOOR_SEC);
+    assert.equal(policy.starveHoldSec, CMAF_STARVE_HOLD_SEC);
+    assert.ok(policy.rateOnSec < 1, "must start catch-up well before a 1s HLS-like lead");
+    assert.ok(policy.seekThresholdSec < 4, "30s floor never trimmed a 6–10s balloon");
+    assert.ok(policy.catchUpSpanSec <= 2, "max rate must arrive before a 6s MSE balloon");
   });
 
-  it("still honors a larger explicit latency budget", () => {
+  it("does not inherit a 2s HLS-style hold as the MoQ live target", () => {
     const policy = moqLiveEdgePolicy(2000);
-    assert.equal(policy.holdBehindSec, 2);
-    assert.ok(policy.rateOnSec < 4);
-    assert.ok(policy.seekThresholdSec >= 30);
+    assert.equal(policy.holdBehindSec, CMAF_HEALTHY_HOLD_CEILING_SEC);
+    assert.ok(policy.rateOnSec < 1);
+    assert.ok(policy.seekThresholdSec < 4);
+    assert.ok(policy.starveHoldSec >= 1.0, "late-IDR starve hold stays the larger cushion");
   });
 });
 
@@ -410,6 +420,47 @@ describe("capture error mapping", () => {
       /could not start/i,
     );
   });
+
+  it("surfaces a slot-cancel as a player error even if status stayed completed", () => {
+    const shown = playerErrorForFailedJob({
+      jobStatus: "completed",
+      jobError: "Cancelled while waiting for a cloud encode slot",
+    });
+    assert.match(shown ?? "", /cancelled while waiting/i);
+    assert.equal(
+      playerErrorForFailedJob({ jobStatus: "completed", jobError: "encode finished" }),
+      null,
+    );
+  });
+});
+
+describe("MoQ 4099 reconnect", () => {
+  it("treats 4099 / Connection lost as a transient drop", () => {
+    assert.equal(isTransientMoqSessionDrop({ code: MOQ_CONNECTION_LOST }), true);
+    assert.equal(isTransientMoqSessionDrop({ message: "Connection lost" }), true);
+    assert.equal(isTransientMoqSessionDrop({ code: 4096, message: "RESET_STREAM" }), false);
+  });
+
+  it("reconnects on 4099 after job=completed unless the playhead covered the clip", () => {
+    assert.equal(
+      shouldSkipMoqSessionRestart({
+        firstFrame: true,
+        videoTimeSec: 2,
+        encodeDurationSec: 30,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldSkipMoqSessionRestart({
+        firstFrame: true,
+        videoTimeSec: 28,
+        encodeDurationSec: 30,
+      }),
+      true,
+    );
+    assert.equal(shouldSkipMoqSessionRestart({ runStopped: true, firstFrame: true }), true);
+    assert.equal(shouldSkipMoqSessionRestart({ firstFrame: false, videoTimeSec: 0 }), false);
+  });
 });
 
 describe("cmafSubscribeOptions", () => {
@@ -418,6 +469,14 @@ describe("cmafSubscribeOptions", () => {
     assert.equal(opts.subscriptionFilter.type, "NextGroupStart");
     assert.equal(opts.warmStartCurrentGroup, false);
     assert.equal(opts.lateFrameThresholdMs, CMAF_LATE_FRAME_THRESHOLD_MS);
+  });
+});
+
+describe("playaLatencyForMoqE2e", () => {
+  it("keeps playa latencyMs on LOC only", () => {
+    assert.equal(playaLatencyForMoqE2e("loc", 28), 28);
+    assert.equal(playaLatencyForMoqE2e("cmaf", 4750), undefined);
+    assert.equal(playaLatencyForMoqE2e("loc", 0), undefined);
   });
 });
 

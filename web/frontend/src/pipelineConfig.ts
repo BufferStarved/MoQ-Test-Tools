@@ -1,5 +1,5 @@
-import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles";
-import { ingestEndpointLabel, isCustomIngestEndpoint, isMoqRelayIngest } from "./ingestEndpoints";
+import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles.ts";
+import { ingestEndpointLabel, isCustomIngestEndpoint, isMoqRelayIngest } from "./ingestEndpoints.ts";
 import type { PlaybackMode } from "./playbackTypes";
 import type { EndpointConfig } from "./types";
 
@@ -132,6 +132,13 @@ function playbackLabel(mode?: string | null): string {
   }
 }
 
+/** File / cloud playout must not inherit the webcam-broker GOP comment. */
+export function encoderSectionMoqGopNote(kind: PipelineEncodeKind): string {
+  return kind === "ffmpeg-local"
+    ? "Shared webcam broker copies the 1s master — solo file GOP does not apply"
+    : "MoQ has no segments — player target";
+}
+
 function encoderSection(
   summary: EncodeProfileSummary,
   kind: PipelineEncodeKind = "ffmpeg",
@@ -202,8 +209,14 @@ function encoderSection(
       },
       {
         label: "MoQ GOP",
-        value: `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
-        note: `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
+        value:
+          kind === "ffmpeg-local"
+            ? "30 frames (~1s @ 30 fps, shared broker)"
+            : `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
+        note:
+          kind === "ffmpeg-local"
+            ? "Shared webcam broker copies the 1s master — solo file GOP does not apply"
+            : `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
       },
       {
         label: "VBV bufsize",
@@ -393,7 +406,7 @@ function playerRows(
     rows.push({
       label: "Catch-up",
       value: `maxRate ${catchUp.maxCatchUpRate} · threshold ${catchUp.catchUpThresholdMs} ms · recovery ${catchUp.catchUpRecoveryMs} ms`,
-      note: "CMAF live-edge rate catch-up in MoqPlayer; seek only on runaway lead",
+      note: "CMAF healthy hold 0.2–0.4s; starve hold 1.15s only while frozen",
     });
   } else if (mode === "whep") {
     rows.push({

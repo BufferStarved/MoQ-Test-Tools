@@ -1,8 +1,8 @@
 """In-process hub for connected local publisher agents.
 
-Set LOCAL_PUBLISHER_ENABLED=1 (default in scripts/dev.sh and the web VM
-install) so browsers can choose “This machine” and run ffmpeg on a laptop
-agent. Set LOCAL_PUBLISHER_ENABLED=0 to force cloud-only encode.
+Webcam+ffmpeg runs on the machine that started the helper — that user's
+camera. Jobs must only dispatch to the helper bound to the same browser
+session. A shared pool (one laptop serving every visitor) is never allowed.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import queue
+import secrets
 import threading
 import time
 import uuid
@@ -26,13 +27,32 @@ logger = logging.getLogger("publisher-hub")
 SampleCallback = Callable[[UploadSample], None]
 
 
-def local_publisher_enabled() -> bool:
-    raw = (os.environ.get("LOCAL_PUBLISHER_ENABLED") or "1").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+def _is_prod_env() -> bool:
+    return (os.environ.get("MOQ_ENV") or "").strip().lower() in {"prod", "production"}
 
 
 def local_publisher_token() -> str:
-    return (os.environ.get("LOCAL_PUBLISHER_TOKEN") or "dev-local-publisher").strip()
+    default = "" if _is_prod_env() else "dev-local-publisher"
+    return (os.environ.get("LOCAL_PUBLISHER_TOKEN") or default).strip()
+
+
+def local_publisher_enabled() -> bool:
+    """Webcam+ffmpeg last-mile is on. Prod uses per-browser sessions only."""
+    if _is_prod_env():
+        return True
+    raw = (os.environ.get("LOCAL_PUBLISHER_ENABLED") or "").strip().lower()
+    if not raw:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+PUBLISHER_SESSION_TTL_SEC = 12 * 3600
+
+
+def normalize_publisher_session(raw: Optional[str]) -> str:
+    return (raw or "").strip()
 
 
 def capabilities_allow_whip(capabilities: Optional[Dict[str, Any]]) -> bool:
@@ -63,10 +83,18 @@ class _PendingJob:
 
 
 @dataclass
+class PublisherSession:
+    session_id: str
+    created_at: float
+    expires_at: float
+
+
+@dataclass
 class AgentConnection:
     agent_id: str
     hostname: str
     websocket: WebSocket
+    session_id: str = ""
     capabilities: Dict[str, Any] = field(default_factory=dict)
     connected_at: float = field(default_factory=time.time)
     pending: Dict[str, _PendingJob] = field(default_factory=dict)
@@ -77,13 +105,45 @@ class PublisherHub:
     def __init__(self) -> None:
         self._agents: Dict[str, AgentConnection] = {}
         self._comparison_agents: Dict[str, str] = {}
+        self._sessions: Dict[str, PublisherSession] = {}
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def status(self) -> Dict[str, Any]:
+    def mint_session(self) -> PublisherSession:
+        now = time.time()
+        session = PublisherSession(
+            session_id=secrets.token_urlsafe(32),
+            created_at=now,
+            expires_at=now + PUBLISHER_SESSION_TTL_SEC,
+        )
+        with self._lock:
+            self._sessions[session.session_id] = session
+        return session
+
+    def valid_session(self, session_id: str) -> bool:
+        sid = normalize_publisher_session(session_id)
+        if not sid:
+            return False
+        now = time.time()
+        with self._lock:
+            session = self._sessions.get(sid)
+            if session is None or session.expires_at < now:
+                self._sessions.pop(sid, None)
+                return False
+            return True
+
+    def _visible_agents(self, session_id: str = "") -> List[AgentConnection]:
+        sid = normalize_publisher_session(session_id)
+        if sid:
+            return [agent for agent in self._agents.values() if agent.session_id == sid]
+        if _is_prod_env():
+            return []
+        return list(self._agents.values())
+
+    def status(self, session_id: str = "") -> Dict[str, Any]:
         with self._lock:
             agents = [
                 {
@@ -100,7 +160,7 @@ class PublisherHub:
                     "connected_at": agent.connected_at,
                     "active_jobs": len(agent.pending),
                 }
-                for agent in self._agents.values()
+                for agent in self._visible_agents(session_id)
             ]
         return {
             "enabled": local_publisher_enabled(),
@@ -121,12 +181,15 @@ class PublisherHub:
             "agents": agents,
         }
 
-    def can_publish_whip(self) -> bool:
-        agent = self.pick_agent()
+    def can_publish_whip(self, session_id: str = "") -> bool:
+        agent = self.pick_agent(session_id=session_id)
         if agent is not None:
             return capabilities_allow_whip(agent.capabilities)
         with self._lock:
-            return any(capabilities_allow_whip(item.capabilities) for item in self._agents.values())
+            return any(
+                capabilities_allow_whip(item.capabilities)
+                for item in self._visible_agents(session_id)
+            )
 
     def broadcast_cancel(self, job_id: str) -> int:
         """Ask every connected helper to stop this job.
@@ -155,36 +218,58 @@ class PublisherHub:
                 logger.warning("Failed to send job_cancel to %s", agent.agent_id, exc_info=True)
         return sent
 
-    def pick_agent(self, comparison_id: str = "") -> Optional[AgentConnection]:
+    def pick_agent(
+        self,
+        comparison_id: str = "",
+        session_id: str = "",
+    ) -> Optional[AgentConnection]:
+        sid = normalize_publisher_session(session_id)
+        if _is_prod_env() and not sid:
+            return None
         with self._lock:
             ready = [
                 agent
-                for agent in self._agents.values()
+                for agent in self._visible_agents(sid)
                 if agent.capabilities and bool(agent.capabilities.get("ready"))
             ]
             if not ready:
                 return None
             cid = (comparison_id or "").strip()
+            pin_key = f"{sid}:{cid}" if sid else cid
             if cid:
-                sticky_id = self._comparison_agents.get(cid)
+                sticky_id = self._comparison_agents.get(pin_key)
                 if sticky_id:
                     for agent in ready:
                         if agent.agent_id == sticky_id:
                             return agent
-            # Prefer the least-busy agent (comparison legs run in parallel).
+            # Prefer the least-busy helper in *this* session only.
             ready.sort(key=lambda item: len(item.pending))
             picked = ready[0]
             if cid:
-                self._comparison_agents[cid] = picked.agent_id
+                self._comparison_agents[pin_key] = picked.agent_id
             return picked
 
-    async def register(self, websocket: WebSocket, agent_id: str) -> AgentConnection:
+    async def register(
+        self,
+        websocket: WebSocket,
+        agent_id: str,
+        session_id: str = "",
+    ) -> AgentConnection:
         self._loop = asyncio.get_running_loop()
-        conn = AgentConnection(agent_id=agent_id, hostname="", websocket=websocket)
+        conn = AgentConnection(
+            agent_id=agent_id,
+            hostname="",
+            websocket=websocket,
+            session_id=normalize_publisher_session(session_id),
+        )
         with self._lock:
             # Replace prior connection for the same agent id.
             self._agents[agent_id] = conn
-        logger.info("Publisher agent connected: %s", agent_id)
+        logger.info(
+            "Publisher agent connected: %s session=%s",
+            agent_id,
+            conn.session_id or "-",
+        )
         return conn
 
     def unregister(self, agent_id: str, websocket: WebSocket) -> None:
@@ -274,7 +359,10 @@ class PublisherHub:
                 success=False,
                 error="Local publisher is disabled (set LOCAL_PUBLISHER_ENABLED=1).",
             )
-        agent = self.pick_agent(getattr(job, "comparison_id", "") or "")
+        agent = self.pick_agent(
+            getattr(job, "comparison_id", "") or "",
+            getattr(job, "publisher_session", "") or "",
+        )
         if agent is None:
             return UploadResult(
                 success=False,

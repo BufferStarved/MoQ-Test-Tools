@@ -1,0 +1,13 @@
+project_name = "moq-relay-west"
+project_id   = "your-gcp-project-id"
+region       = "us-west1"
+zone         = "us-west1-a"
+machine_type = "e2-standard-4"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+allowed_ssh_cidr = "YOUR.PUBLIC.IP/32"
+allowed_client_cidr = "0.0.0.0/0"
+moqx_port = 4433
+moqx_pico_port = 4434
+moqx_admin_port = 8000
+certbot_email = "you@example.com"
+existing_network = "moq-web-west-vpc"

@@ -374,6 +374,14 @@ export class MoqtPlayer {
   /** Whether the first catalog object has been received. */
   private catalogReceived = false;
 
+  /**
+   * Catalog FETCH request IDs (joining + standalone retries).
+   * Must be a set: overwriting a single id after an empty first FETCH
+   * dropped later objects on the original stream (headed one-shot miss).
+   * @see draft-ietf-moq-msf-01 §5 (SUBSCRIBE + Joining FETCH)
+   */
+  private readonly catalogFetchReqIds = new Set<bigint>();
+
   /** Stored catalog state for track switching. */
   private _catalogState: CatalogState | null = null;
 
@@ -1869,6 +1877,7 @@ export class MoqtPlayer {
         const reqId = await conn.subscribe(nsBytes, this.enc.encode(catalogTrackName()), catalogFilter);
         this.catalogRequestId = BigInt(reqId);
         // catalogTrackAlias set by SUBSCRIBE_OK — never assume alias=requestId
+        this.pullRetainedCatalog(this.catalogRequestId);
       })());
 
       // Pre-known media tracks (respecting disable flags)
@@ -1922,6 +1931,7 @@ export class MoqtPlayer {
       });
       this.catalogRequestId = BigInt(reqId);
       // catalogTrackAlias set by SUBSCRIBE_OK — never assume alias=requestId
+      this.pullRetainedCatalog(this.catalogRequestId);
     }
   }
 
@@ -2128,6 +2138,7 @@ export class MoqtPlayer {
     this.catalogReceived = false;
     this.catalogTrackAlias = null;
     this.catalogRequestId = null;
+    this.catalogFetchReqIds.clear();
 
     // Clear fetch state (fetches are per-session) and reject any
     // in-flight fetchCatalog promises — their request IDs/stream IDs
@@ -2155,6 +2166,7 @@ export class MoqtPlayer {
       subscriptionFilter: { type: 'AbsoluteStart', startGroup: varint(0n), startObject: varint(0n) },
     });
     this.catalogRequestId = BigInt(reqId);
+    this.pullRetainedCatalog(this.catalogRequestId);
 
     // Close old session (§3.5: "RECOMMENDED that the client waits until
     // there are no more Established subscriptions before closing")
@@ -2188,6 +2200,7 @@ export class MoqtPlayer {
     this.catalogReceived = false;
     this.catalogTrackAlias = null;
     this.catalogRequestId = null;
+    this.catalogFetchReqIds.clear();
 
     // Clear fetch state (fetches are per-session) and reject any
     // in-flight fetchCatalog promises — their request IDs/stream IDs
@@ -2212,6 +2225,7 @@ export class MoqtPlayer {
       subscriptionFilter: { type: 'AbsoluteStart', startGroup: varint(0n), startObject: varint(0n) },
     });
     this.catalogRequestId = BigInt(reqId);
+    this.pullRetainedCatalog(this.catalogRequestId);
 
     // Close old session
     if (oldConnection) {
@@ -2223,6 +2237,112 @@ export class MoqtPlayer {
     this.emitter.emit('session_migrated', {
       type: 'session_migrated',
     });
+  }
+
+  /**
+   * Pull the publisher's retained catalog via Joining FETCH.
+   *
+   * libmoq's media sender installs the initial catalog as a retained
+   * group and does not replay it on a plain SUBSCRIBE. MSF-01 §5 says
+   * the receiver obtains the catalog via SUBSCRIBE + Joining FETCH.
+   * Failure is never fatal — the subscribe path may still deliver a
+   * live-pushed catalog object.
+   *
+   * Webcam/live encodes often announce the namespace before group 0 is
+   * written. A one-shot FETCH then misses; retry a standalone FETCH of
+   * `{0,0}` until the publisher live-writes (PR #9) or subscribe delivers.
+   */
+  private pullRetainedCatalog(catalogReqId: bigint): void {
+    const conn = this.connection;
+    if (!conn || typeof conn.joiningFetch !== 'function') {
+      return;
+    }
+    void (async () => {
+      try {
+        const fetchReqId = await conn.joiningFetch({
+          joiningFetchType: 'relative',
+          joiningRequestId: catalogReqId,
+          joiningStart: 0n,
+        });
+        if (!this.connection || this.connection !== conn || this.catalogReceived) {
+          try { await conn.fetchCancel(fetchReqId); } catch { /* session gone */ }
+          return;
+        }
+        this.registerCatalogFetch(BigInt(fetchReqId));
+        this.log.info('Catalog joining FETCH requestId=%s (retained MSF catalog)', fetchReqId);
+      } catch (err) {
+        this.log.warn(
+          'Catalog joining FETCH failed — subscribe-only: %s',
+          err instanceof Error ? err.message : err,
+        );
+      }
+      if (this.catalogReceived || !this.connection || this.connection !== conn) {
+        return;
+      }
+      await this.retryStandaloneCatalogFetch(conn);
+    })();
+  }
+
+  /**
+   * Bind a catalog FETCH request id and replay any data streams that
+   * arrived before the joiningFetch()/fetch() continuation (§9.16.3).
+   * Media fetches already do this via {@link registerMediaFetch}; catalog
+   * used to keep a single request id — a later standalone retry then
+   * dropped objects on the original joining FETCH (headed one-shot miss).
+   */
+  private registerCatalogFetch(fetchReqId: bigint): void {
+    this.catalogFetchReqIds.add(fetchReqId);
+    for (const [streamId, pending] of this.pendingFetchStreams) {
+      if (pending.requestId !== fetchReqId) continue;
+      this.pendingFetchStreams.delete(streamId);
+      this.catalogFetchStreams.set(streamId, fetchReqId);
+      for (const obj of pending.objects) {
+        this.handleCatalogFetchObject(fetchReqId, obj);
+      }
+    }
+  }
+
+  /**
+   * Standalone FETCH of catalog groups after a joining FETCH miss or an
+   * empty first retained group. Does not disable catalog refresh —
+   * subscribe stays up for live writes. Keep retrying until a selectable
+   * catalog arrives or the refresh window ends: `{0,0}`-only, 2.7s
+   * retries stopped before libmoq's vide_1 live-write.
+   */
+  private async retryStandaloneCatalogFetch(conn: MoqtConnection): Promise<void> {
+    const delaysMs = [300, 800, 1600, 2500, 4000, 4000, 4000, 4000];
+    for (const delayMs of delaysMs) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (this.catalogReceived || !this.connection || this.connection !== conn) {
+        return;
+      }
+      if (typeof conn.fetch !== 'function') {
+        return;
+      }
+      try {
+        const nsBytes = encodeNamespace(this.config.namespace, this.enc);
+        const nameBytes = this.enc.encode(catalogTrackName());
+        // Groups 0..32: later live-write is often group 1+, not a
+        // rewrite of object {0,0}. Inclusive end matches draft FETCH.
+        const reqId = await conn.fetch(nsBytes, nameBytes, {
+          startGroup: varint(0n),
+          startObject: varint(0n),
+          endGroup: varint(32n),
+          endObject: varint(32n),
+        });
+        if (this.catalogReceived || this.connection !== conn) {
+          try { await conn.fetchCancel(reqId); } catch { /* session gone */ }
+          return;
+        }
+        this.registerCatalogFetch(BigInt(reqId));
+        this.log.info('Catalog standalone FETCH requestId=%s (retry retained groups 0-32)', reqId);
+      } catch (err) {
+        this.log.warn(
+          'Catalog standalone FETCH retry failed: %s',
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
   }
 
   /**
@@ -2438,6 +2558,12 @@ export class MoqtPlayer {
    * gap / empty payload / parse error.
    */
   private handleCatalogFetchObject(reqId: bigint, obj: MoqtObject): void {
+    if (this.catalogFetchReqIds.has(reqId)) {
+      if (!this.catalogReceived) {
+        this.handleCatalogObject(obj);
+      }
+      return;
+    }
     const pending = this.pendingCatalogFetches.get(reqId);
     if (!pending) return;
     if (obj.kind === 'gap') {
@@ -3121,7 +3247,8 @@ export class MoqtPlayer {
           // matching object reaches the pending fetchCatalog promise.
           // Kept separate from fetchStreamAliases because catalog
           // doesn't have (and shouldn't synthesize) a media alias.
-          if (this.pendingCatalogFetches.has(reqId)) {
+          if (this.pendingCatalogFetches.has(reqId) ||
+              this.catalogFetchReqIds.has(reqId)) {
             this.catalogFetchStreams.set(streamId, reqId);
             return;
           }
@@ -3253,7 +3380,11 @@ export class MoqtPlayer {
         this.catalogTrackAlias = alias;
         this.replayPendingObjects(alias);
       },
-      clearCatalogState: () => { this.catalogTrackAlias = null; this.catalogRequestId = null; },
+      clearCatalogState: () => {
+        this.catalogTrackAlias = null;
+        this.catalogRequestId = null;
+        this.catalogFetchReqIds.clear();
+      },
       onAliasResolved: (alias) => { this.replayPendingObjects(alias); },
       onGoaway: (newSessionUri) => {
         if (this.config.createConnection) {
@@ -3383,6 +3514,45 @@ export class MoqtPlayer {
     }
   }
 
+  /**
+   * True when playa's level mapper would expose a video rendition.
+   * libmoq `publish_tracks` live-writes a catalog as soon as the sender
+   * attaches — often `{tracks:[]}` — then refreshes after the first moov.
+   * Treating that first object as terminal skips subscribe forever.
+   */
+  private catalogHasSelectableVideo(catalog: CatalogState): boolean {
+    return catalog.tracks.some((track) => this.codecLooksLikeVideo(track.codec));
+  }
+
+  private codecLooksLikeVideo(codec: string | undefined): boolean {
+    return Boolean(
+      codec &&
+      (codec.startsWith('avc1') ||
+        codec.startsWith('hev1') ||
+        codec.startsWith('hvc1') ||
+        codec.startsWith('av01') ||
+        codec.startsWith('vp09') ||
+        codec.startsWith('vp8')),
+    );
+  }
+
+  /** Peek at raw catalog JSON without mutating CatalogManager state. */
+  private catalogPayloadHasSelectableVideo(payload: Uint8Array | undefined): boolean {
+    if (!payload || payload.byteLength === 0) return false;
+    try {
+      const raw: unknown = JSON.parse(new TextDecoder().decode(payload));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      const tracks = (raw as { tracks?: unknown }).tracks;
+      if (!Array.isArray(tracks)) return false;
+      return tracks.some((track) => {
+        if (!track || typeof track !== 'object') return false;
+        return this.codecLooksLikeVideo((track as { codec?: string }).codec);
+      });
+    } catch {
+      return false;
+    }
+  }
+
   private handleCatalogObject(obj: MoqtObject): void {
     // Gaps on the catalog track are ignored — the catalog will
     // be re-sent as a new independent object on the next group.
@@ -3403,6 +3573,20 @@ export class MoqtPlayer {
       const catalogState = this.catalogManager!.processCatalogObject(obj.payload);
 
       if (!this.catalogReceived) {
+        // Keep catalog SUBSCRIBE up. Do not disable refresh. Webcam/live
+        // announce often publishes an empty catalog before moov; FETCH of
+        // that object must not lock the player out of the later write.
+        if (!this.pipelinesCreated && !this.catalogHasSelectableVideo(catalogState)) {
+          this.log.info(
+            'Catalog not yet selectable (%d tracks) — waiting for refresh',
+            catalogState.tracks.length,
+          );
+          // Empty first FETCH is not terminal. Keep the catalog_received
+          // expectation alive so standalone FETCH / SUBSCRIBE can still
+          // apply vide_1 after libmoq's live-write.
+          this.watchdog.expect('catalog_received', 20_000);
+          return;
+        }
         this.catalogReceived = true;
         this._catalogState = catalogState;
         this._stats.recordCatalogReceived();
@@ -3444,12 +3628,37 @@ export class MoqtPlayer {
         }
       } else {
         this.log.info('Catalog updated');
+        this._catalogState = catalogState;
         this.emitter.emit('catalog_updated', {
           type: 'catalog_updated',
           catalog: catalogState,
         });
+        // Late bind: first object was accepted (knownTracks / injected) but
+        // media pipelines were never created — select now that video exists.
+        if (!this.pipelinesCreated && this.catalogHasSelectableVideo(catalogState)) {
+          this.subscribeToMediaTracks(catalogState).catch((err) => {
+            this.log.error('subscribeToMediaTracks failed: %s', err?.message ?? err);
+            this.emitError(createPlayerError(
+              'fatal', 'player', PlayerErrorCode.LOAD_FAILED,
+              `Media subscription failed: ${err?.message ?? err}`,
+              err instanceof Error ? { cause: err } : {},
+            ));
+          });
+        }
       }
     } catch (err) {
+      // A placeholder / empty first catalog that fails parse must not
+      // fatal — libmoq live-writes vide_1 on a later group. Real
+      // selectable payloads that fail still error as before.
+      if (!this.catalogReceived && !this.pipelinesCreated &&
+          !this.catalogPayloadHasSelectableVideo(obj.payload)) {
+        this.log.info(
+          'Placeholder catalog unusable — waiting for refresh: %s',
+          err instanceof Error ? err.message : err,
+        );
+        this.watchdog.expect('catalog_received', 20_000);
+        return;
+      }
       // First catalog failure = fatal (can't proceed without catalog).
       // Subsequent catalog failures = degraded (delta update failed, old catalog still valid).
       const severity: ErrorSeverity = this.catalogReceived ? 'degraded' : 'fatal';

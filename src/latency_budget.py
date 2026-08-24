@@ -6,8 +6,8 @@ never where the time went, and the per-protocol e2e estimators differ enough
 be misleading on its own. This module defines one ordered chain of components
 that every protocol reports in the same units, so a slow leg can be attributed:
 
-    capture ──encode──> muxed ──publish──> ingest ──packager──> delivery
-            ──network──> player ──buffer──> glass
+    capture ──encode──> muxed ──cmaf_group──> publish ──network──> ingest
+            ──packager──> player_buffer──> glass
 
 Three properties keep the attribution honest, and each exists because the
 first version of this model got it wrong in a way that live legs exposed:
@@ -46,14 +46,22 @@ from typing import Dict, FrozenSet, Optional, Tuple
 # stacks and what `accounted_ms` sums.
 LATENCY_COMPONENTS = (
     "latency_encode_ms",
+    "latency_segmentation_ms",
     "latency_publish_ms",
     "latency_network_ms",
     "latency_packager_ms",
     "latency_player_buffer_ms",
 )
 
-# Short stage names used by the `latency_unmeasured` column, in chain order.
-STAGE_NAMES = ("encode", "publish", "network", "packager", "player_buffer")
+# Short stage names used by latency_unmeasured / latency_not_applicable.
+STAGE_NAMES = (
+    "encode",
+    "segmentation",
+    "publish",
+    "network",
+    "packager",
+    "player_buffer",
+)
 _STAGE_BY_COLUMN = dict(zip(LATENCY_COMPONENTS, STAGE_NAMES))
 
 LATENCY_COLUMNS = (
@@ -62,8 +70,14 @@ LATENCY_COLUMNS = (
     "latency_residual_ms",
     "latency_overcount_ms",
     "latency_unmeasured",
+    "latency_not_applicable",
     "latency_e2e_scope",
 )
+
+# MediaMTX LL-HLS part duration. This is the HLS *object*, not a 1s CMAF group.
+LL_HLS_PART_MS = 200.0
+# Shared webcam broker master IDR cadence (webcam_broker.MASTER_GOP_FRAMES @ 30fps).
+BROKER_GOP_MS = 1000.0
 
 FRAME_COLUMNS = (
     "encode_frames_total",
@@ -79,20 +93,28 @@ FRAME_COLUMNS = (
 #
 # capture_to_glass — wall-clock now minus the encoder-timeline position of the
 #   frame on screen (HLS/LL-HLS PDT, HTTP-TS, MoQ CaptureTimestamp/join
-#   offset). Includes the sender's encode pipeline, so all five stages are in
-#   scope.
+#   offset). Includes the sender pipeline, so encode + CMAF group + publish +
+#   network + packager + player_buffer are in scope.
 # ingest_to_glass — a receiver-side path estimate built from what the viewer
 #   can see (WHEP: ICE RTT/2 + jitterBufferDelay). The sender pipeline is
 #   invisible to it. `latency_encode_ms` is still reported, because the
 #   operator needs to know the sender pipeline exists, but it is excluded from
 #   `accounted_ms` — otherwise every WebRTC leg over-attributes by roughly the
 #   whole encoder baseline.
+# capture_to_ingest — upload-only tests stop at ingest. Encode + CMAF
+#   group + publish + network + packager are in scope (segmentation happens
+#   before/at ingest on CMAF). player_buffer is out of scope and must not be
+#   copied from a confidence monitor into ranking e2e.
 E2E_SCOPE_CAPTURE_TO_GLASS = "capture_to_glass"
 E2E_SCOPE_INGEST_TO_GLASS = "ingest_to_glass"
+E2E_SCOPE_CAPTURE_TO_INGEST = "capture_to_ingest"
 
 # Stages a given scope's e2e estimator does not span.
+# ingest_to_glass also excludes CMAF group: WebRTC has no group hop, and a
+# WHEP estimate cannot see sender-side object cadence anyway.
 _OUT_OF_SCOPE: Dict[str, Tuple[str, ...]] = {
-    E2E_SCOPE_INGEST_TO_GLASS: ("latency_encode_ms",),
+    E2E_SCOPE_INGEST_TO_GLASS: ("latency_encode_ms", "latency_segmentation_ms"),
+    E2E_SCOPE_CAPTURE_TO_INGEST: ("latency_player_buffer_ms",),
 }
 
 # Sanity ceiling per component. Anything above this is a parse/clock artifact,
@@ -133,6 +155,7 @@ class LatencyBudget:
     """One sample's latency decomposition, in milliseconds."""
 
     encode_ms: float = 0.0
+    segmentation_ms: float = 0.0
     publish_ms: float = 0.0
     network_ms: float = 0.0
     packager_ms: float = 0.0
@@ -143,10 +166,14 @@ class LatencyBudget:
     #: These are why the residual is large; naming them is the difference
     #: between an unexplained gap and an unmeasured stage.
     unmeasured: FrozenSet[str] = field(default_factory=frozenset)
+    #: Stages that structurally do not exist on this protocol (WebRTC has no
+    #: CMAF group). Not unmeasured: there is no instrument to go looking for.
+    not_applicable: FrozenSet[str] = field(default_factory=frozenset)
 
     def _component(self, name: str) -> float:
         return {
             "latency_encode_ms": self.encode_ms,
+            "latency_segmentation_ms": self.segmentation_ms,
             "latency_publish_ms": self.publish_ms,
             "latency_network_ms": self.network_ms,
             "latency_packager_ms": self.packager_ms,
@@ -161,7 +188,7 @@ class LatencyBudget:
     @property
     def accounted_ms(self) -> float:
         """Sum of the components the measured e2e actually spans."""
-        skip = set(self.out_of_scope)
+        skip = set(self.out_of_scope) | set(self.not_applicable)
         return round(
             sum(self._component(name) for name in LATENCY_COMPONENTS if name not in skip),
             1,
@@ -200,9 +227,19 @@ class LatencyBudget:
             _STAGE_BY_COLUMN[name] for name in LATENCY_COMPONENTS if name in self.unmeasured
         )
 
+    @property
+    def not_applicable_stages(self) -> Tuple[str, ...]:
+        """Short stage names that do not exist on this protocol, in chain order."""
+        return tuple(
+            _STAGE_BY_COLUMN[name]
+            for name in LATENCY_COMPONENTS
+            if name in self.not_applicable
+        )
+
     def as_row(self) -> Dict[str, str]:
         return {
             "latency_encode_ms": f"{self.encode_ms:.1f}",
+            "latency_segmentation_ms": f"{self.segmentation_ms:.1f}",
             "latency_publish_ms": f"{self.publish_ms:.1f}",
             "latency_network_ms": f"{self.network_ms:.1f}",
             "latency_packager_ms": f"{self.packager_ms:.1f}",
@@ -211,6 +248,7 @@ class LatencyBudget:
             "latency_residual_ms": f"{self.residual_ms:.1f}",
             "latency_overcount_ms": f"{self.overcount_ms:.1f}",
             "latency_unmeasured": ",".join(self.unmeasured_stages),
+            "latency_not_applicable": ",".join(self.not_applicable_stages),
             "latency_e2e_scope": self.e2e_scope,
         }
 
@@ -219,19 +257,65 @@ def encode_latency_ms(
     *,
     pipeline_baseline_ms: Optional[float],
     encode_lag_ms: Optional[float],
+    segmentation_ms: Optional[float] = None,
+    split_gop_from_encode: bool = False,
 ) -> float:
-    """Capture→muxed-output delay: constant pipeline offset + sustained lag.
+    """Capture→encoded-AU delay: constant pipeline offset + sustained lag.
 
-    ``EncodeLagTracker`` deliberately reports only the *growth* of
-    (wall − out_time) so the chart answers "is the encoder falling further
-    behind". But the offset it subtracts (x264 lookahead, mux buffering,
-    device/broker warmup — ~1.2–2.4s measured) is real glass delay and has to
-    reappear somewhere in the budget. Here it does, once.
+    ``EncodeLagTracker`` reports only the *growth* of (wall − out_time). The
+    offset it subtracts (x264 lookahead, mux buffering, device warmup) is
+    still real glass delay and is added back here once.
 
-    Note this is a *sender-side* quantity. Whether it may be added to a leg's
-    measured e2e depends on that leg's ``e2e_scope`` — see ``LatencyBudget``.
+    On MoQ fMP4, ``out_time`` often advances only when a fragment closes, so
+    the baseline can include GOP-close wait. Pass ``split_gop_from_encode``
+    with the known group duration so encode stays capture→AU and
+    ``latency_segmentation_ms`` owns AU→closed group. Do not split on HLS
+    parts: those close at the packager, not in this baseline.
     """
-    return round(_clean_ms(pipeline_baseline_ms) + _clean_ms(encode_lag_ms), 1)
+    total = _clean_ms(pipeline_baseline_ms) + _clean_ms(encode_lag_ms)
+    if split_gop_from_encode:
+        total = max(0.0, total - _clean_ms(segmentation_ms))
+    return round(total, 1)
+
+
+def resolve_segmentation_ms(
+    *,
+    protocol: Optional[str] = None,
+    playback_engine: Optional[str] = None,
+    group_duration_ms: Optional[float] = None,
+) -> Tuple[Optional[float], bool]:
+    """Object/group cadence for the CMAF-group hop.
+
+    Returns ``(ms_or_none, not_applicable)``. ``None`` + not n/a means
+    unmeasured — never report that as 0. WebRTC (WHEP) has no CMAF group.
+    SRT/RTMP/HTTP-TS are continuous at muxed→publish; their object wait, if
+    any, is the packager. MoQ uses the GOP/group in force (1s brokered copy,
+    solo/file from ``moq_gop_frames_for_latency``). LL-HLS parts are 200 ms
+    — not a 1s CMAF group. 0.5s/1s on MoQ CMAF is group duration
+    (NextGroupStart), not ingest RTT.
+    """
+    proto = (protocol or "").strip().lower()
+    engine = (playback_engine or "").strip().lower()
+    if proto == "webrtc" and engine not in ("hls", "ll-hls", "dash"):
+        return None, True
+    if proto in {"srt", "rtmp", "http"} and engine not in ("hls", "ll-hls", "dash"):
+        return None, True
+    if engine == "whep":
+        return None, True
+    if engine == "ll-hls" or proto == "hls":
+        duration = group_duration_ms if group_duration_ms is not None else LL_HLS_PART_MS
+        return _clean_ms(duration), False
+    if proto == "moq" or engine == "moq":
+        if group_duration_ms is None:
+            return None, False
+        return _clean_ms(group_duration_ms), False
+    if proto == "dash" or engine == "dash":
+        if group_duration_ms is None:
+            return None, False
+        return _clean_ms(group_duration_ms), False
+    if group_duration_ms is not None:
+        return _clean_ms(group_duration_ms), False
+    return None, False
 
 
 def network_latency_ms(*, net_rtt_ms: Optional[float]) -> float:
@@ -240,10 +324,9 @@ def network_latency_ms(*, net_rtt_ms: Optional[float]) -> float:
     Symmetric-path assumption. It is the only network number available on
     most protocols (SRT libsrt, RTMP TCP probe, WebRTC ICE), so normalizing on
     it keeps the component comparable even though the underlying measurement
-    differs per protocol. MoQ has no RTT source wired today (the relay admin
-    TCP port the probe targets is not reachable and the openmoq publisher
-    emits no qlog), so MoQ legs report this stage as *unmeasured* rather than
-    as a 0 ms network.
+    differs per protocol. MoQ fills ``net_rtt_ms`` from picoquic qlog
+    (smoothed_rtt) on the moq5 canary; 0 / missing stays *unmeasured* until
+    the first qlog sample (and on openmoq, which has no qlog).
     """
     return round(_clean_ms(net_rtt_ms) / 2.0, 1)
 
@@ -276,6 +359,11 @@ def build_latency_budget(
     playback_buffer_sec: Optional[float] = None,
     e2e_latency_ms: Optional[float] = None,
     e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
+    protocol: Optional[str] = None,
+    playback_engine: Optional[str] = None,
+    segmentation_ms: Optional[float] = None,
+    segmentation_not_applicable: bool = False,
+    split_gop_from_encode: bool = False,
 ) -> LatencyBudget:
     """Assemble one sample's budget.
 
@@ -294,6 +382,17 @@ def build_latency_budget(
     still ships, in its own ``upload_latency_ms`` column, labelled as startup.
     """
     unmeasured = set()
+    not_applicable: set[str] = set()
+    resolved_ms, inferred_na = resolve_segmentation_ms(
+        protocol=protocol,
+        playback_engine=playback_engine,
+        group_duration_ms=segmentation_ms,
+    )
+    if segmentation_not_applicable or inferred_na:
+        not_applicable.add("latency_segmentation_ms")
+        resolved_ms = None
+    elif resolved_ms is None:
+        unmeasured.add("latency_segmentation_ms")
     if publish_transit_ms is None:
         unmeasured.add("latency_publish_ms")
     if net_rtt_ms is None:
@@ -307,7 +406,10 @@ def build_latency_budget(
         encode_ms=encode_latency_ms(
             pipeline_baseline_ms=pipeline_baseline_ms,
             encode_lag_ms=encode_lag_ms,
+            segmentation_ms=resolved_ms,
+            split_gop_from_encode=split_gop_from_encode and resolved_ms is not None,
         ),
+        segmentation_ms=_clean_ms(resolved_ms),
         publish_ms=_clean_ms(publish_transit_ms),
         network_ms=network_latency_ms(net_rtt_ms=net_rtt_ms),
         packager_ms=_clean_ms(packager_transit_ms),
@@ -315,6 +417,7 @@ def build_latency_budget(
         e2e_ms=_clean_ms(e2e_latency_ms, ceiling=_E2E_MAX_MS),
         e2e_scope=e2e_scope,
         unmeasured=frozenset(unmeasured),
+        not_applicable=frozenset(not_applicable),
     )
 
 
@@ -324,16 +427,24 @@ def build_latency_budget(
 _INGEST_SCOPE_PROTOCOLS = {"webrtc"}
 
 
-def e2e_scope_for(protocol: Optional[str], playback_engine: Optional[str] = None) -> str:
+def e2e_scope_for(
+    protocol: Optional[str],
+    playback_engine: Optional[str] = None,
+    test_scope: Optional[str] = None,
+) -> str:
     """Which span this leg's ``e2e_latency_ms`` covers.
 
     Keyed on the *player*, because that is what computes e2e. A WHIP publish
     watched through an LL-HLS remux is measured by the HLS player and really
     is capture-to-glass, even though the leg is tagged ``webrtc`` — the
     playback-engine caveat covers the fact that it is the wrong path, but the
-    span is not the reason.
+    span is not the reason. Upload-only tests stop at ingest.
     """
+    if (test_scope or "").strip().lower() == "upload":
+        return E2E_SCOPE_CAPTURE_TO_INGEST
     engine = (playback_engine or "").strip().lower()
+    if engine == "monitor":
+        return E2E_SCOPE_CAPTURE_TO_INGEST
     if engine:
         return E2E_SCOPE_INGEST_TO_GLASS if engine == "whep" else E2E_SCOPE_CAPTURE_TO_GLASS
     proto = (protocol or "").strip().lower()
@@ -476,9 +587,12 @@ def build_frame_row(
 __all__ = [
     "E2E_SCOPE_CAPTURE_TO_GLASS",
     "E2E_SCOPE_INGEST_TO_GLASS",
+    "E2E_SCOPE_CAPTURE_TO_INGEST",
+    "BROKER_GOP_MS",
     "FRAME_COLUMNS",
     "LATENCY_COLUMNS",
     "LATENCY_COMPONENTS",
+    "LL_HLS_PART_MS",
     "STAGE_NAMES",
     "LatencyBudget",
     "build_frame_row",
@@ -490,4 +604,5 @@ __all__ = [
     "network_latency_ms",
     "playback_frame_drop_pct",
     "player_buffer_latency_ms",
+    "resolve_segmentation_ms",
 ]

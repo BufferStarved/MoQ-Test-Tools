@@ -19,7 +19,11 @@ sys.path.insert(0, str(ROOT / "src"))
 import psutil  # noqa: E402
 
 import system_metrics  # noqa: E402
-from ingest_host_metrics import IngestHostMetricsPoller  # noqa: E402
+from ingest_host_metrics import (  # noqa: E402
+    IngestHostMetricsPoller,
+    IngestHostMetricsSnapshot,
+    measured_server_cpu,
+)
 from system_metrics import (  # noqa: E402
     HostCpuTracker,
     _cpu_percent_between,
@@ -127,6 +131,26 @@ class IngestPollerLocalPathTests(unittest.TestCase):
             publisher_host="local",
         )
         self.assertFalse(poller._use_local)
+        # Remote GCP/agent polls hang the SRT sample loop (~10s). Leave
+        # server host columns unmeasured rather than skipping ticks.
+        self.assertFalse(poller.enabled)
+
+
+class MeasuredServerCpuTests(unittest.TestCase):
+    def test_unmeasured_snapshot_is_blank_not_fake_zero(self):
+        self.assertIsNone(measured_server_cpu(None))
+        self.assertIsNone(measured_server_cpu(IngestHostMetricsSnapshot()))
+        self.assertIsNone(measured_server_cpu(IngestHostMetricsSnapshot(cpu_percent=0.0, source="")))
+
+    def test_local_mediamtx_zero_is_still_a_measurement(self):
+        self.assertEqual(
+            measured_server_cpu(IngestHostMetricsSnapshot(cpu_percent=0.0, source="local")),
+            0.0,
+        )
+        self.assertEqual(
+            measured_server_cpu(IngestHostMetricsSnapshot(cpu_percent=12.5, source="local")),
+            12.5,
+        )
 
 
 if __name__ == "__main__":

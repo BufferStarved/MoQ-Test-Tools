@@ -56,13 +56,19 @@ export function parseMsfCatalog(
 
     const obj = raw as Record<string, unknown>;
 
-    // §5.1.1: version — Required, must be MSF_VERSION (1)
-    if (!('version' in obj) || typeof obj['version'] !== 'number') {
+    // §5.1.1: version — Required, must be MSF_VERSION (1).
+    // MSF-00 on the wire is a JSON number. OpenMOQ libmoq / MSF-01 emit the
+    // JSON string "1" (see tools/moq5/media/msf/src/msf.c). Accept both so
+    // ffmpeg→moq5 canaries parse; cf01 already coerces string versions.
+    const rawVersion = obj['version'];
+    const version =
+        typeof rawVersion === 'string' ? Number(rawVersion) : rawVersion;
+    if (typeof version !== 'number' || !Number.isFinite(version)) {
         throw new Error('Catalog version is required and must be a number (§5.1.1)');
     }
-    if (obj['version'] !== MSF_VERSION) {
+    if (version !== MSF_VERSION) {
         throw new Error(
-            `Unsupported catalog version ${obj['version']}; expected ${MSF_VERSION} (§5.1.1)`,
+            `Unsupported catalog version ${String(rawVersion)}; expected ${MSF_VERSION} (§5.1.1)`,
         );
     }
 
@@ -71,8 +77,11 @@ export function parseMsfCatalog(
         throw new Error('Catalog tracks field is required and must be an array (§5.1.8)');
     }
 
-    const tracks = (obj['tracks'] as unknown[]).map(
-        (raw, i) => parseTrack(raw, i, catalogNamespace),
+    const tracks = resolveInitDataList(
+        (obj['tracks'] as unknown[]).map(
+            (raw, i) => parseTrack(raw, i, catalogNamespace),
+        ),
+        obj,
     );
 
     // §5.1.11: Track names must be unique per namespace
@@ -228,6 +237,7 @@ function parseTrack(
         ...(typeof obj['lang'] === 'string' ? { lang: obj['lang'] } : {}),
         ...(typeof obj['label'] === 'string' ? { label: obj['label'] } : {}),
         ...(typeof obj['initData'] === 'string' ? { initData: obj['initData'] } : {}),
+        ...(typeof obj['initRef'] === 'string' ? { initRef: obj['initRef'] } : {}),
         ...(typeof obj['initTrack'] === 'string' ? { initTrack: obj['initTrack'] } : {}),
         ...(Array.isArray(obj['depends']) ? { depends: obj['depends'] as string[] } : {}),
         ...(typeof obj['temporalId'] === 'number' ? { temporalId: obj['temporalId'] } : {}),
@@ -242,6 +252,74 @@ function parseTrack(
     };
 
     return track;
+}
+
+/**
+ * OpenMOQ libmoq publishes CMAF init as MSF-01 `initDataList[]` + per-track
+ * `initRef` (CMSF §3.1). Playa's MSE bootstrap only reads `initData` /
+ * `initTrack`. Flatten the list onto each referencing track so a catalog
+ * that already carries ftyp+moov is not treated as "init missing".
+ */
+function resolveInitDataList(
+    tracks: CatalogTrack[],
+    obj: Record<string, unknown>,
+): CatalogTrack[] {
+    const list = obj['initDataList'];
+    if (list === undefined) {
+        return tracks;
+    }
+    if (!Array.isArray(list)) {
+        throw new Error('initDataList must be an array (MSF §5.1.7)');
+    }
+
+    const byId = new Map<string, string>();
+    for (const raw of list) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+            throw new Error('initDataList entry must be an object (MSF §5.1.7)');
+        }
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry['id'] !== 'string' || entry['id'] === '') {
+            throw new Error('initDataList entry id is required (MSF §5.1.7)');
+        }
+        if (typeof entry['data'] !== 'string') {
+            throw new Error(
+                `initDataList "${entry['id']}": data is required (MSF §5.1.7)`,
+            );
+        }
+        const data = entry['data'];
+        if (data !== '' && !isValidBase64(data)) {
+            throw new Error(
+                `initDataList "${entry['id']}": data is not valid Base64 (MSF §5.1.20)`,
+            );
+        }
+        if (byId.has(entry['id'])) {
+            throw new Error(
+                `initDataList id "${entry['id']}" is not unique (MSF §5.1.7)`,
+            );
+        }
+        byId.set(entry['id'], data);
+    }
+
+    return tracks.map((track) => {
+        if (!track.initRef) {
+            return track;
+        }
+        const data = byId.get(track.initRef);
+        if (data === undefined) {
+            throw new Error(
+                `Track "${track.name}": initRef "${track.initRef}" is not in initDataList`,
+            );
+        }
+        if (track.initData !== undefined) {
+            return track;
+        }
+        if (data === '') {
+            throw new Error(
+                `Track "${track.name}": initRef "${track.initRef}" has empty init data`,
+            );
+        }
+        return { ...track, initData: data };
+    });
 }
 
 /**

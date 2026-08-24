@@ -77,6 +77,7 @@ CSV_COLUMNS = [
     # split into latency_residual_ms (unexplained) and latency_overcount_ms
     # (over-attributed). latency_unmeasured names stages with no instrument.
     "latency_encode_ms",
+    "latency_segmentation_ms",
     "latency_publish_ms",
     "latency_network_ms",
     "latency_packager_ms",
@@ -85,6 +86,7 @@ CSV_COLUMNS = [
     "latency_residual_ms",
     "latency_overcount_ms",
     "latency_unmeasured",
+    "latency_not_applicable",
     "latency_e2e_scope",
     # Frame accounting, normalized so encoder and glass use the same
     # denominator convention (see src/latency_budget.py).
@@ -147,6 +149,11 @@ CSV_COLUMNS = [
     "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
+    # Operator Go Live click: elapsed second and glass delay *before* the seek.
+    "go_live_at_sec",
+    "go_live_e2e_ms",
+    "playback_policy",
+    "test_scope",
 ]
 
 
@@ -342,7 +349,7 @@ class MetricsCollector:
         transport_recv_rate_mbps: float = 0.0,
         client_memory_percent: float = 0.0,
         client_disk_percent: float = 0.0,
-        server_cpu_percent: float = 0.0,
+        server_cpu_percent: Optional[float] = None,
         server_memory_percent: float = 0.0,
         server_disk_percent: float = 0.0,
         moqx_subscribe_success: int = 0,
@@ -378,6 +385,9 @@ class MetricsCollector:
         # reported as an unmeasured stage; 0.0 means "measured, and it was
         # zero". Do not default a missing instrument to 0.
         packager_transit_ms: Optional[float] = None,
+        segmentation_ms: Optional[float] = None,
+        segmentation_not_applicable: bool = False,
+        split_gop_from_encode: bool = False,
         upload_latency_ms: Optional[float] = None,
         # Publisher half of the startup decomposition (see src/startup_probe.py).
         # None means this caller has no startup instrument at all, and every
@@ -385,6 +395,7 @@ class MetricsCollector:
         # started instantly.
         startup: Optional[StartupHalf] = None,
         e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
+        test_scope: str = "e2e",
         net_rtt_ms: float = 0.0,
         net_jitter_ms: float = 0.0,
         net_send_mbps: float = 0.0,
@@ -487,6 +498,11 @@ class MetricsCollector:
                 playback_buffer_sec=playback_buffer_sec,
                 e2e_latency_ms=e2e_latency_ms,
                 e2e_scope=e2e_scope,
+                protocol=self.protocol,
+                segmentation_ms=segmentation_ms,
+                segmentation_not_applicable=segmentation_not_applicable
+                or self.protocol.strip().lower() == "webrtc",
+                split_gop_from_encode=split_gop_from_encode,
             )
             # The encoder loop has no player counters, so there is no common
             # window here and frame_delivery_pct stays blank; it is filled in
@@ -511,7 +527,9 @@ class MetricsCollector:
                 "memory_mb": f"{mem_total:.2f}",
                 "client_memory_percent": f"{client_memory_percent:.2f}",
                 "client_disk_percent": f"{client_disk_percent:.2f}",
-                "server_cpu_percent": f"{server_cpu_percent:.2f}",
+                "server_cpu_percent": (
+                    "" if server_cpu_percent is None else f"{float(server_cpu_percent):.2f}"
+                ),
                 "server_memory_percent": f"{server_memory_percent:.2f}",
                 "server_disk_percent": f"{server_disk_percent:.2f}",
                 "encoded_bitrate_kbps": f"{encoded_bitrate_kbps:.2f}",
@@ -576,8 +594,41 @@ class MetricsCollector:
                 "playback_behind_live_sec": f"{playback_behind_live_sec:.3f}",
                 "playback_rebuffer_sec": f"{playback_rebuffer_sec:.3f}",
                 "playback_error_count": str(resolved_playback_errors),
-                "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
+                "e2e_latency_ms": (
+                    f"{e2e_latency_ms:.0f}"
+                    if (test_scope or "").strip().lower() != "upload" or e2e_latency_ms
+                    else ""
+                ),
+                "go_live_at_sec": "" if (test_scope or "").strip().lower() == "upload" else "0",
+                "go_live_e2e_ms": "" if (test_scope or "").strip().lower() == "upload" else "0",
+                "playback_policy": "",
+                "test_scope": "upload" if (test_scope or "").strip().lower() == "upload" else "e2e",
             }
+            if (test_scope or "").strip().lower() == "upload":
+                # Full header stays; glass / Go Live / player columns stay empty.
+                # Ranking e2e is capture-to-ingest accounted, not monitor glass.
+                for name in (
+                    "playback_stats_events",
+                    "playback_stall_count",
+                    "playback_frames_rendered",
+                    "playback_frames_dropped",
+                    "playback_bitrate_bps",
+                    "playback_ttff_ms",
+                    "playback_hls_errors",
+                    "playback_hls_fatal_errors",
+                    "playback_hls_buffer_stalls",
+                    "playback_hls_frag_loads",
+                    "playback_video_time_sec",
+                    "playback_buffer_sec",
+                    "playback_behind_live_sec",
+                    "playback_rebuffer_sec",
+                    "playback_error_count",
+                    "go_live_at_sec",
+                    "go_live_e2e_ms",
+                    "playback_policy",
+                    "latency_player_buffer_ms",
+                ):
+                    row[name] = ""
             self._rows.append(row)
 
             with open(self.filename, mode="a", newline="") as file:
@@ -661,6 +712,7 @@ class MetricsCollector:
             "speed",
             "encode_lag_ms",
             "latency_encode_ms",
+            "latency_segmentation_ms",
             "latency_publish_ms",
             "latency_network_ms",
             "latency_packager_ms",
@@ -692,6 +744,17 @@ class MetricsCollector:
         count = len(self._rows)
         averages: Dict[str, float] = {}
         for key in numeric_keys:
+            if key == "server_cpu_percent":
+                # Blank means unmeasured (MediaMTX with no host poller). Do not
+                # average those as 0 and report "the server is free".
+                measured = [
+                    float(row[key])
+                    for row in self._rows
+                    if str(row.get(key, "")).strip() != ""
+                ]
+                if measured:
+                    averages[key] = round(sum(measured) / len(measured), 3)
+                continue
             averages[key] = round(
                 sum(float(row.get(key, 0) or 0) for row in self._rows) / count,
                 3,

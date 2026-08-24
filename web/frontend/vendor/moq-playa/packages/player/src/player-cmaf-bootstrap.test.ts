@@ -35,12 +35,14 @@ function createMockAdapter() {
     unsubscribe: vi.fn(async () => {}),
     fetch: vi.fn(async () => varint(nextRequestId++)),
     fetchCancel: vi.fn(async () => {}),
+    joiningFetch: vi.fn(async () => varint(nextRequestId++)),
     trackStatus: vi.fn(async () => varint(nextRequestId++)),
     subscribeNamespace: vi.fn(async () => varint(nextRequestId++)),
     cancelNamespace: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     _triggerMessage: (msg: ControlMessage) => adapter.onMessage?.(msg),
     _triggerObject: (streamId: bigint, obj: MoqtObject) => adapter.onObject?.(streamId, obj),
+    _triggerDataStream: (streamId: bigint, header: unknown) => adapter.onDataStream?.(streamId, header),
   };
   return adapter;
 }
@@ -161,6 +163,257 @@ describe('CMAF bootstrap validation (fail before SUBSCRIBE)', () => {
     )).toBe(true);
     expect(subscribedNames()).toEqual(['catalog']); // nothing else hit the wire
     await player.destroy();
+  });
+});
+
+describe('CMAF libmoq catalog (initDataList + initRef)', () => {
+  it('resolves initDataList before subscribe and initializes MSE immediately', async () => {
+    const videoInit = btoa('\x01\x02\x03\x04');
+    const audioInit = btoa('\x05\x06\x07\x08');
+    const { mockMs, subscribedNames, errors } = await bootPlayer(JSON.stringify({
+      version: '1',
+      tracks: [
+        { ...VIDEO_BASE, name: 'vide_1', initRef: 'vide_1' },
+        { ...AUDIO_BASE, name: 'soun_2', initRef: 'soun_2' },
+      ],
+      initDataList: [
+        { id: 'vide_1', type: 'inline', data: videoInit },
+        { id: 'soun_2', type: 'inline', data: audioInit },
+      ],
+    }));
+
+    expect(subscribedNames()).toEqual(['catalog', 'vide_1', 'soun_2']);
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    const cfg = mockMs.initialize.mock.calls[0]![0];
+    expect(cfg.video.initData).toEqual(Uint8Array.from(atob(videoInit), (c) => c.charCodeAt(0)));
+    expect(cfg.audio.initData).toEqual(Uint8Array.from(atob(audioInit), (c) => c.charCodeAt(0)));
+    expect(errors).toEqual([]);
+  });
+
+  it('bootstraps from a joining FETCH when SUBSCRIBE delivers no catalog object', async () => {
+    const adapter = createMockAdapter();
+    const mockMs = makeMockMs();
+    const assembler = {
+      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
+      setInitSegment: vi.fn(), clearPending: vi.fn(),
+    };
+    const videoInit = btoa('\x01\x02\x03\x04');
+    const catalogJson = JSON.stringify({
+      version: '1',
+      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
+    });
+    const player = new MoqtPlayer({
+      url: 'https://relay.example.com/moq',
+      namespace: 'live/broadcast',
+      createTransport: vi.fn(async () => ({}) as any),
+      createConnection: () => adapter as unknown as MoqtConnection,
+      createMediaSource: () => mockMs,
+      createCmafAssembler: () => assembler,
+    });
+
+    const loadPromise = player.load();
+    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+    adapter._connectResolve?.();
+    await loadPromise;
+    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
+
+    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
+    const fetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
+    adapter._triggerMessage({
+      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
+    } as unknown as ControlMessage);
+    adapter._triggerDataStream(5n, {
+      type: 'fetch',
+      header: { requestId: fetchReqId },
+    });
+    adapter._triggerObject(5n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(catalogJson),
+    } as MoqtObject);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const subscribedNames = adapter.subscribe.mock.calls
+      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
+    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    player.destroy();
+  });
+
+  it('replays a catalog FETCH stream that arrived before joiningFetch() resolved', async () => {
+    const adapter = createMockAdapter();
+    let resolveJoin: ((id: ReturnType<typeof varint>) => void) | undefined;
+    adapter.joiningFetch = vi.fn(() => new Promise((resolve) => {
+      resolveJoin = resolve;
+    }));
+    const mockMs = makeMockMs();
+    const assembler = {
+      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
+      setInitSegment: vi.fn(), clearPending: vi.fn(),
+    };
+    const videoInit = btoa('\x01\x02\x03\x04');
+    const catalogJson = JSON.stringify({
+      version: '1',
+      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
+    });
+    const player = new MoqtPlayer({
+      url: 'https://relay.example.com/moq',
+      namespace: 'live/broadcast',
+      createTransport: vi.fn(async () => ({}) as any),
+      createConnection: () => adapter as unknown as MoqtConnection,
+      createMediaSource: () => mockMs,
+      createCmafAssembler: () => assembler,
+    });
+
+    const loadPromise = player.load();
+    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+    adapter._connectResolve?.();
+    await loadPromise;
+    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
+
+    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
+    const fetchReqId = varint(99n);
+    adapter._triggerMessage({
+      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
+    } as unknown as ControlMessage);
+    adapter._triggerDataStream(5n, {
+      type: 'fetch',
+      header: { requestId: fetchReqId },
+    });
+    adapter._triggerObject(5n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(catalogJson),
+    } as MoqtObject);
+    resolveJoin?.(fetchReqId);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const subscribedNames = adapter.subscribe.mock.calls
+      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
+    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    player.destroy();
+  });
+
+  it('applies vide_1 on the original joining FETCH after an empty first object and a standalone retry', async () => {
+    const adapter = createMockAdapter();
+    const mockMs = makeMockMs();
+    const assembler = {
+      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
+      setInitSegment: vi.fn(), clearPending: vi.fn(),
+    };
+    const videoInit = btoa('\x01\x02\x03\x04');
+    const emptyCatalog = JSON.stringify({ version: 1, tracks: [] });
+    const liveCatalog = JSON.stringify({
+      version: '1',
+      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
+    });
+    const player = new MoqtPlayer({
+      url: 'https://relay.example.com/moq',
+      namespace: 'live/broadcast',
+      createTransport: vi.fn(async () => ({}) as any),
+      createConnection: () => adapter as unknown as MoqtConnection,
+      createMediaSource: () => mockMs,
+      createCmafAssembler: () => assembler,
+    });
+    const received = vi.fn();
+    player.on('catalog_received', received);
+
+    const loadPromise = player.load();
+    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+    adapter._connectResolve?.();
+    await loadPromise;
+    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
+
+    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
+    const joinFetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
+    adapter._triggerMessage({
+      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
+    } as unknown as ControlMessage);
+    adapter._triggerDataStream(5n, {
+      type: 'fetch',
+      header: { requestId: joinFetchReqId },
+    });
+    adapter._triggerObject(5n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(emptyCatalog),
+    } as MoqtObject);
+    expect(received).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => expect(adapter.fetch).toHaveBeenCalled());
+    adapter._triggerObject(5n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(1), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(liveCatalog),
+    } as MoqtObject);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(received).toHaveBeenCalled();
+    const subscribedNames = adapter.subscribe.mock.calls
+      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
+    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
+    player.destroy();
+  });
+
+  it('applies vide_1 from a later standalone FETCH after the empty group-0 object', async () => {
+    const adapter = createMockAdapter();
+    const mockMs = makeMockMs();
+    const assembler = {
+      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
+      setInitSegment: vi.fn(), clearPending: vi.fn(),
+    };
+    const videoInit = btoa('\x01\x02\x03\x04');
+    const emptyCatalog = JSON.stringify({ version: 1, tracks: [] });
+    const liveCatalog = JSON.stringify({
+      version: '1',
+      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
+    });
+    const player = new MoqtPlayer({
+      url: 'https://relay.example.com/moq',
+      namespace: 'live/broadcast',
+      createTransport: vi.fn(async () => ({}) as any),
+      createConnection: () => adapter as unknown as MoqtConnection,
+      createMediaSource: () => mockMs,
+      createCmafAssembler: () => assembler,
+    });
+    const received = vi.fn();
+    player.on('catalog_received', received);
+
+    const loadPromise = player.load();
+    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
+    adapter._connectResolve?.();
+    await loadPromise;
+    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
+
+    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
+    const joinFetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
+    adapter._triggerMessage({
+      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
+    } as unknown as ControlMessage);
+    adapter._triggerDataStream(5n, {
+      type: 'fetch',
+      header: { requestId: joinFetchReqId },
+    });
+    adapter._triggerObject(5n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(emptyCatalog),
+    } as MoqtObject);
+    expect(received).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => expect(adapter.fetch).toHaveBeenCalled());
+    const standaloneReqId = await adapter.fetch.mock.results[0]?.value;
+    adapter._triggerDataStream(6n, {
+      type: 'fetch',
+      header: { requestId: standaloneReqId },
+    });
+    adapter._triggerObject(6n, {
+      kind: 'data', trackAlias: varint(0), groupId: varint(1), subgroupId: varint(0),
+      objectId: varint(0), payload: new TextEncoder().encode(liveCatalog),
+    } as MoqtObject);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(received).toHaveBeenCalled();
+    const subscribedNames = adapter.subscribe.mock.calls
+      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
+    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
+    player.destroy();
   });
 });
 

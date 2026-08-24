@@ -206,7 +206,7 @@ export function ResultCharts({
                 "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
                 "SRT RTT: libsrt / Zixi receiver.",
                 "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
-                "MoQ RTT: QUIC qlog when available; otherwise a TCP probe to the relay (same host as WebTransport).",
+                "MoQ RTT/jitter: picoquic qlog from moq5-fmp4-publish. Blank only before the first qlog sample — not a TCP admin probe.",
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}
             />

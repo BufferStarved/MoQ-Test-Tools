@@ -149,6 +149,7 @@ export function MetricChart({
                 stroke={item.color}
                 strokeWidth={2}
                 dot={false}
+                connectNulls
                 activeDot={{ r: 4 }}
                 isAnimationActive={false}
               />

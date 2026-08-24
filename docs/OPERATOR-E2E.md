@@ -44,16 +44,14 @@ matrix is running.
 3. Start. Both MoQ tiles must paint. WHIP bitrate must not sit at ~30 kbps.
 4. Failures must stay on the tile (not a catalog-miss).
 
-**Webcam + local ffmpeg**
+**Webcam + local ffmpeg** — localhost only:
 
 ```bash
-LOCAL_PUBLISHER_API=https://moq.sean-mccarthy.net \
-LOCAL_PUBLISHER_TOKEN=dev-local-publisher \
-./scripts/run-local-publisher.sh
+./scripts/dev.sh
 ```
 
-Then `https://moq.sean-mccarthy.net/?source=webcam` — Camera = OBS Virtual Camera
-(1080p60). Capture must not die on 720p30 (ffmpeg 251).
+Then `http://127.0.0.1:5173/?source=webcam`. Do not point the laptop
+publisher at https://moq.sean-mccarthy.net.
 
 **Cloud dummy MoQ** — Cloud playout, one MoQ output, real Chrome (not Cursor
 WebView). Or attach: `JOB=<id>` as in command 3.

@@ -14,6 +14,8 @@ import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndV
 export const MOQ_ALL_TRACKS_REFUSED = 4867;
 export const MOQ_SUBSCRIPTION_REFUSED = 4866;
 export const MOQ_LOAD_FAILED = 4865;
+/** playa / WebTransport "Connection lost" — transient, reconnect. */
+export const MOQ_CONNECTION_LOST = 4099;
 
 /** Stay connected through publisher-not-ready; do not burn the one-shot catalog. */
 export const SUBSCRIBE_KEEPALIVE_ON_0X10 = true;
@@ -27,32 +29,58 @@ export const MOQ_NO_MEDIA_TIMEOUT_MS = 15_000;
 export const MOQ_CATALOG_REFRESH_WAIT_MS = 30_000;
 
 /**
- * Hold two 0.5s webcam groups (file path sat ~1.2s with 0 stalls).
- * One-group 0.65s hold still froze when the next IDR was late.
+ * Starve hold: two 0.5s webcam groups. One-group 0.65s froze on a late IDR.
+ * This is NOT the healthy live-edge — only sit here while the playhead is
+ * frozen or the next IDR is late. Healthy CMAF must compete with WebRTC.
  */
-export const CMAF_GOP_HOLD_FLOOR_SEC = 1.15;
+export const CMAF_STARVE_HOLD_SEC = 1.15;
+/** @deprecated Name kept for call sites; value is the starve hold, not live. */
+export const CMAF_GOP_HOLD_FLOOR_SEC = CMAF_STARVE_HOLD_SEC;
+/** Healthy live-edge: one-frame-class, GOP-aware. Not an HLS window. */
+export const CMAF_HEALTHY_HOLD_FLOOR_SEC = 0.2;
+export const CMAF_HEALTHY_HOLD_CEILING_SEC = 0.4;
 /**
- * Job 805b3146: wall_dt p50=501ms (publish paced). Stalls still happened
- * with 3–6s already buffered; 6.5s slack + 1.12× left e2e at 8–11s.
- * Catch up from ~2.4s. Do not restore the 7s seek (that was the freeze).
+ * Start catching up just past the healthy hold. A 1.25s slack on a 1.15s
+ * hold meant 1.0× through a 2.4s lead and looked like HLS.
  */
-export const CMAF_CATCH_UP_START_SLACK_SEC = 1.25;
-export const CMAF_CATCH_UP_STOP_SLACK_SEC = 0.35;
-export const CMAF_SEEK_FLOOR_SEC = 30;
+export const CMAF_CATCH_UP_START_SLACK_SEC = 0.15;
+export const CMAF_CATCH_UP_STOP_SLACK_SEC = 0.05;
+/**
+ * Seek once lead is a few seconds of runaway. 30s never fired on a 6–10s
+ * balloon (comparison 2026-08-23). The 7s seek froze only during a GOP-wait
+ * hole — the watchdog skips seek while frozen.
+ */
+export const CMAF_SEEK_FLOOR_SEC = 2.5;
+export const CMAF_SEEK_SLACK_SEC = 1.5;
+/** Reach max catch-up well before a 6–10s MSE balloon. */
+export const CMAF_CATCH_UP_SPAN_SEC = 1.5;
 export const CMAF_MAX_CATCH_UP_RATE = 1.35;
 
 export function moqLiveEdgePolicy(targetLatencyMs: number): {
   holdBehindSec: number;
+  starveHoldSec: number;
   rateOnSec: number;
   rateOffSec: number;
   seekThresholdSec: number;
+  catchUpSpanSec: number;
 } {
   const requested = Math.max(0.15, (targetLatencyMs || 400) / 1000);
-  const holdBehindSec = Math.max(CMAF_GOP_HOLD_FLOOR_SEC, requested);
+  // Cap at the healthy ceiling — a 2s HLS-style budget is not a MoQ target.
+  const holdBehindSec = Math.min(
+    CMAF_HEALTHY_HOLD_CEILING_SEC,
+    Math.max(CMAF_HEALTHY_HOLD_FLOOR_SEC, requested),
+  );
   const rateOnSec = holdBehindSec + CMAF_CATCH_UP_START_SLACK_SEC;
   const rateOffSec = holdBehindSec + CMAF_CATCH_UP_STOP_SLACK_SEC;
-  const seekThresholdSec = Math.max(CMAF_SEEK_FLOOR_SEC, rateOnSec + 8);
-  return { holdBehindSec, rateOnSec, rateOffSec, seekThresholdSec };
+  const seekThresholdSec = Math.max(CMAF_SEEK_FLOOR_SEC, rateOnSec + CMAF_SEEK_SLACK_SEC);
+  return {
+    holdBehindSec,
+    starveHoldSec: CMAF_STARVE_HOLD_SEC,
+    rateOnSec,
+    rateOffSec,
+    seekThresholdSec,
+    catchUpSpanSec: CMAF_CATCH_UP_SPAN_SEC,
+  };
 }
 
 /** MSE still has a GOP-sized lead — do not tear down a live-edge join. */
@@ -67,6 +95,7 @@ export const CMAF_LATE_FRAME_THRESHOLD_MS = 400;
  * FETCH of the open group. moqx honored a warm-start / mid-stream FETCH
  * for one GOP (~0.5–1s) and never attached later groups — same stall as
  * LOC. Catalog init comes from the publisher; do not fetch the open GOP.
+ * Revisit only after a headed check of estimator + policy + test scope.
  */
 export function cmafSubscribeOptions(): {
   subscriptionFilter: { type: "NextGroupStart" };
@@ -83,6 +112,21 @@ export function cmafSubscribeOptions(): {
 /** CMAF paints MSE on <video>; LOC paints WebCodecs on <canvas>. */
 export function moqRenderSink(mediaPackaging: "cmaf" | "loc"): "video" | "canvas" {
   return mediaPackaging === "loc" ? "canvas" : "video";
+}
+
+/**
+ * Playa `stats.latencyMs` is LOC CaptureTimestamp (Unix-epoch µs). CMAF
+ * ffmpeg has no such stamp — feeding it into `computeMoqE2eMs` short-circuits
+ * the encode-timeline estimator (comparison 26).
+ */
+export function playaLatencyForMoqE2e(
+  mediaPackaging: "cmaf" | "loc",
+  playaLatencyMs: number | undefined,
+): number | undefined {
+  if (mediaPackaging !== "loc") {
+    return undefined;
+  }
+  return playaLatencyMs != null && playaLatencyMs > 0 ? playaLatencyMs : undefined;
 }
 
 export type CmafStallAction = "ok" | "hold" | "restart" | "give_up";
@@ -270,10 +314,38 @@ export function playerErrorForFailedJob(options: {
   jobStatus?: string;
   jobError?: string | null;
 }): string | null {
-  if (options.jobStatus !== "failed") {
-    return null;
+  if (options.jobStatus === "failed") {
+    return humanizeJobError(options.jobError);
   }
-  return humanizeJobError(options.jobError);
+  if (
+    options.jobStatus === "completed" &&
+    /cancelled while waiting for a cloud encode slot/i.test(options.jobError || "")
+  ) {
+    return humanizeJobError(options.jobError);
+  }
+  return null;
+}
+
+export function isTransientMoqSessionDrop(options: {
+  code?: number | null;
+  message?: string | null;
+}): boolean {
+  const code = options.code ?? 0;
+  const text = options.message || "";
+  return code === MOQ_CONNECTION_LOST || /connection lost/i.test(text);
+}
+
+export function shouldSkipMoqSessionRestart(options: {
+  runStopped?: boolean;
+  firstFrame?: boolean;
+  videoTimeSec?: number;
+  encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+}): boolean {
+  if (options.runStopped) {
+    return true;
+  }
+  return Boolean(options.firstFrame) && playbackCoveredEncode(options);
 }
 
 export function noMediaFailMessage(options: {

@@ -55,5 +55,13 @@ if [[ -f "$ROOT_DIR/.publisher-tools.env" ]]; then
   source "$ROOT_DIR/.publisher-tools.env"
 fi
 
+# Refuse public orchestrator URLs even if .env or the caller set them.
+python - "$LOCAL_PUBLISHER_API" <<'PY'
+import sys
+from publisher_agent.api_guard import assert_publisher_api_allowed
+
+assert_publisher_api_allowed(sys.argv[1])
+PY
+
 # exec so Ctrl+C / reset kill this PID, not a bash parent that orphans the agent.
 exec python -m publisher_agent "$@"

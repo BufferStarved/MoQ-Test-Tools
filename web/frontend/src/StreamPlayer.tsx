@@ -38,7 +38,7 @@ interface StreamPlayerProps {
   encodeStartedAtEpoch?: number | null;
   /** LL-HLS: server-measured encoder→packager transit added to PDT latency. */
   packagerTransitMs?: number | null;
-  /** Zixi Fast HLS: encode-media seconds at hls.js buffer time 0. */
+  /** Zixi Fast HLS / HTTP-TS: encode-media seconds at buffer time 0. */
   deliveryMediaOriginSec?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
@@ -67,6 +67,8 @@ interface StreamPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (from -progress samples). */
   encoderLagMs?: number;
+  /** Full capture→muxed component (baseline + lag) for MoQ CMAF rebase. */
+  encodeLatencyMs?: number;
   /** Path RTT from the latest encode/transport sample (ms). */
   netRttMs?: number;
   /** MOQT draft the in-page publisher negotiated; ffmpeg/openmoq legs stay 16. */
@@ -75,6 +77,7 @@ interface StreamPlayerProps {
   moqPinTlsCert?: boolean;
   /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
   moqMediaPackaging?: "cmaf" | "loc";
+  playbackPolicy?: "live-edge" | "complete";
 }
 
 function PlayerFallback() {
@@ -121,10 +124,12 @@ export function StreamPlayer({
   moqVideoCodec,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  encodeLatencyMs = 0,
   netRttMs = 0,
   moqDraftVersion,
   moqPinTlsCert,
   moqMediaPackaging = "cmaf",
+  playbackPolicy = "live-edge",
 }: StreamPlayerProps) {
   const resolvedDraft = moqDraftVersion ?? moqDraftForIngest(ingestEndpointId);
   const pinTlsCert = moqPinTlsCert ?? moqPinTlsCertForIngest(ingestEndpointId);
@@ -203,7 +208,7 @@ export function StreamPlayer({
         <Suspense fallback={<PlayerFallback />}>
           {target.engine === "hls" && (
             <HlsPlayer
-              key={`${target.url}:sync${hlsLiveSyncDurationSec}`}
+              key={`${target.url}:sync${hlsLiveSyncDurationSec}:p${playbackPolicy}`}
               url={target.url}
               label={target.label}
               playbackGate={playbackGate}
@@ -222,6 +227,7 @@ export function StreamPlayer({
               targetLatencyMs={targetLatencyMs}
               zixiStreamId={zixiStreamId}
               lowLatencyMode={hlsLowLatency}
+              playbackPolicy={playbackPolicy}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               onUnrecoverableHls={
@@ -250,6 +256,7 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              playbackPolicy={playbackPolicy}
             />
           )}
           {target.engine === "mpegts" && (
@@ -260,6 +267,7 @@ export function StreamPlayer({
               playbackGate={playbackGate}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
+              deliveryMediaOriginSec={deliveryMediaOriginSec}
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
@@ -270,7 +278,11 @@ export function StreamPlayer({
               // burned 1.2s reconnects instead (a chunk of the 23s Linode
               // join). preview_ready === true means the probe is redundant.
               skipConnectProbe={previewReady === true}
+              playbackPolicy={playbackPolicy}
               jobStatus={jobStatus}
+              jobError={jobError}
+              waitingForEncodeSlot={waitingForEncodeSlot}
+              encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
             />
@@ -319,9 +331,11 @@ export function StreamPlayer({
               sourceVideoCodec={moqVideoCodec}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              encodeLatencyMs={encodeLatencyMs}
               netRttMs={netRttMs}
               draftVersion={resolvedDraft}
               mediaPackaging={moqMediaPackaging}
+              playbackPolicy={playbackPolicy}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

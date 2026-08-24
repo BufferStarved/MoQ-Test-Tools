@@ -13,7 +13,7 @@ import os
 import threading
 from typing import Optional
 
-DEFAULT_MAX_CONCURRENT_CLOUD_ENCODES = 1
+DEFAULT_MAX_CONCURRENT_CLOUD_ENCODES = 4
 
 
 def max_concurrent_cloud_encodes() -> int:

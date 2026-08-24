@@ -489,8 +489,8 @@ async function main() {
       const p = mpegts.createPlayer({ type: 'mse', isLive: true, url }, {
         enableWorker: true,
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 3.5,
-        liveBufferLatencyMinRemain: 0.8,
+        liveBufferLatencyMaxLatency: 1.5,
+        liveBufferLatencyMinRemain: 0.5,
         enableStashBuffer: true,
       });
       p.attachMediaElement(video); p.load(); p.play();

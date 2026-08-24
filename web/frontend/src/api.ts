@@ -64,6 +64,15 @@ export interface EncodeHostInfo {
   available: boolean;
   cloud_provider?: string;
   cloud_region?: string;
+  provider?: string;
+  region?: string;
+  subtitle?: string;
+  unavailable_reason?: string;
+  roles?: {
+    zixi?: boolean;
+    mediamtx?: boolean;
+    moq?: boolean;
+  };
 }
 
 export interface BundledMediaSource {
@@ -90,8 +99,15 @@ export interface FeatureFlags {
   media_sources?: BundledMediaSource[];
 }
 
-export function fetchFeatures(): Promise<FeatureFlags> {
-  return request("/features");
+export function fetchFeatures(session?: string): Promise<FeatureFlags> {
+  const query = session?.trim()
+    ? `?session=${encodeURIComponent(session.trim())}`
+    : "";
+  return request(`/features${query}`);
+}
+
+export function mintPublisherSession(): Promise<{ session_id: string; expires_at: number }> {
+  return request("/publisher-session", { method: "POST" });
 }
 
 export function fetchProtocols(): Promise<{ protocols: Protocol[] }> {
@@ -161,11 +177,14 @@ export function createUpload(payload: {
   compute_vmaf_encoder?: boolean;
   encode_ladder?: string;
   target_latency_ms?: number;
+  playback_policy?: "live-edge" | "complete";
+  test_scope?: "upload" | "e2e";
   comparison_id?: string;
   stream_index?: number;
   stream_label?: string;
   publisher_host?: "cloud" | "local" | "browser";
   encoder?: "ffmpeg" | "obs";
+  publisher_session?: string;
 }): Promise<UploadJob> {
   return request("/uploads", {
     method: "POST",
@@ -204,6 +223,10 @@ export interface PlaybackMetricsSnapshot {
   playback_rebuffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
+  /** Elapsed second of the first Go Live click (0 if never clicked). */
+  go_live_at_sec?: number;
+  /** Glass delay immediately before that click. */
+  go_live_e2e_ms?: number;
   /**
    * Startup decomposition, player half (src/startup_budget.py ↔
    * startupTiming.ts): attach → request sent → manifest received → first media

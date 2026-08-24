@@ -44,6 +44,13 @@ class CsvComparableMetricsTests(unittest.TestCase):
         for name in ("e2e_latency_ms", "playback_error_count", "playback_video_time_sec"):
             self.assertIn(name, PLAYBACK_FIELD_NAMES)
 
+    def test_playback_policy_is_on_the_csv(self):
+        self.assertIn("playback_policy", CSV_COLUMNS)
+        self.assertIn("playback_policy", PLAYBACK_FIELD_NAMES)
+
+    def test_test_scope_is_on_the_csv(self):
+        self.assertIn("test_scope", CSV_COLUMNS)
+
 
 if __name__ == "__main__":
     unittest.main()

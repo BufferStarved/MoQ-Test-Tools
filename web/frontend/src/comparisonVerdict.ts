@@ -1,6 +1,13 @@
-import { protocolLabel } from "./protocolTheme";
-import type { ResultSummary } from "./types";
-import { isPlausibleE2eMs, playbackFpsFromCounters } from "./glassLatency";
+import { protocolLabel } from "./protocolTheme.ts";
+import type { ResultSummary } from "./types.ts";
+import { isPlausibleE2eMs, playbackFpsFromCounters } from "./glassLatency.ts";
+import {
+  E2E_SCOPE_CAPTURE_TO_GLASS,
+  E2E_SCOPE_CAPTURE_TO_INGEST,
+  E2E_SCOPE_INGEST_TO_GLASS,
+  e2eScopeFor,
+  type E2eScope,
+} from "./latencyBudget.ts";
 
 export interface VerdictHighlight {
   /** Short metric name shown in the board, e.g. "Fastest join". */
@@ -92,6 +99,66 @@ function formatMs(value: number): string {
   return `${Math.round(value)} ms`;
 }
 
+export function e2eScopeShortLabel(scope: string | null | undefined): string {
+  if (scope === E2E_SCOPE_INGEST_TO_GLASS) {
+    return "ingest-to-glass";
+  }
+  if (scope === E2E_SCOPE_CAPTURE_TO_INGEST) {
+    return "capture-to-ingest";
+  }
+  return "capture-to-glass";
+}
+
+export function e2eScopeHudLabel(scope: string | null | undefined): string {
+  if (scope === E2E_SCOPE_INGEST_TO_GLASS) {
+    return "Latency · ingest path";
+  }
+  if (scope === E2E_SCOPE_CAPTURE_TO_INGEST) {
+    return "Latency · ingest path";
+  }
+  return "Latency · glass";
+}
+
+/** Ingest-to-glass + encode → a capture-class hint. Not a measured glass number. */
+export function captureClassHintMs(
+  e2eMs: number | null | undefined,
+  encodeMs: number | null | undefined,
+  scope?: string | null,
+): number | undefined {
+  if (scope != null && scope !== E2E_SCOPE_INGEST_TO_GLASS) {
+    return undefined;
+  }
+  if (!finitePositive(e2eMs) || !finitePositive(encodeMs)) {
+    return undefined;
+  }
+  return Math.round(e2eMs + encodeMs);
+}
+
+export function resolveSampleE2eScope(sample: {
+  latency_e2e_scope?: string;
+  protocol?: string | null;
+  playback_engine?: string | null;
+  test_scope?: string | null;
+} | null | undefined): E2eScope {
+  const raw = (sample?.latency_e2e_scope ?? "").trim();
+  if (
+    raw === E2E_SCOPE_INGEST_TO_GLASS ||
+    raw === E2E_SCOPE_CAPTURE_TO_GLASS ||
+    raw === E2E_SCOPE_CAPTURE_TO_INGEST
+  ) {
+    return raw;
+  }
+  return e2eScopeFor(sample?.protocol, sample?.playback_engine, sample?.test_scope);
+}
+
+function streamE2eScope(result: ResultSummary): E2eScope {
+  return e2eScopeFor(
+    result.protocol,
+    result.summary_extra?.playback_engine,
+    result.summary_extra?.test_scope || result.rows?.[0]?.test_scope,
+  );
+}
+
 function streamRtt(result: ResultSummary): number | undefined {
   const avg = result.averages ?? {};
   const rtt = avg.net_rtt_ms || avg.transport_rtt_ms || avg.quic_rtt_ms;
@@ -123,7 +190,8 @@ export function buildComparisonVerdict(
   }
 
   const highlights: VerdictHighlight[] = [];
-  const parts: string[] = [];
+  const joinParts: string[] = [];
+  const glassParts: string[] = [];
 
   const ttff = pickLowest(streams, (r) => r.averages?.playback_ttff_ms);
   if (ttff) {
@@ -134,7 +202,7 @@ export function buildComparisonVerdict(
       value: formatMs(ttff.value),
       protocol: streams[ttff.index].protocol,
     });
-    parts.push(`${name} joined fastest (${formatMs(ttff.value)})`);
+    joinParts.push(`${name} joined fastest (${formatMs(ttff.value)})`);
   }
 
   const stalls = pickLowestOrZero(streams, (r) => r.averages?.playback_stall_count);
@@ -149,27 +217,64 @@ export function buildComparisonVerdict(
       protocol: streams[stalls.index].protocol,
     });
     if (stalls.value === 0) {
-      parts.push(`${name} had no stalls`);
+      joinParts.push(`${name} had no stalls`);
     } else {
-      parts.push(`${name} had the fewest stalls (${value})`);
+      joinParts.push(`${name} had the fewest stalls (${value})`);
     }
   }
 
-  // Glass delay: MoQ LOC uses CaptureTimestamp; WebRTC uses encode + RTT/2 +
-  // jitter buffer; HLS/TS uses wall − encoder playhead. Same units, same
-  // question (how late is the glass vs capture). Rank any plausible sample.
-  const e2e = pickLowest(streams, (r) =>
-    isPlausibleE2eMs(r.averages?.e2e_latency_ms) ? r.averages?.e2e_latency_ms : null,
-  );
-  if (e2e) {
+  // Do not rank ingest-to-glass (WHEP) against capture-to-glass (MoQ/HLS)
+  // as one "lowest glass delay". TTFF is join time, not glass — it stays
+  // in "Fastest join" above.
+  const scopesPresent = new Set<E2eScope>();
+  streams.forEach((result) => {
+    if (isPlausibleE2eMs(result.averages?.e2e_latency_ms)) {
+      scopesPresent.add(streamE2eScope(result));
+    }
+  });
+  for (const scope of [
+    E2E_SCOPE_INGEST_TO_GLASS,
+    E2E_SCOPE_CAPTURE_TO_GLASS,
+    E2E_SCOPE_CAPTURE_TO_INGEST,
+  ]) {
+    if (!scopesPresent.has(scope)) {
+      continue;
+    }
+    const e2e = pickLowest(streams, (r) =>
+      streamE2eScope(r) === scope && isPlausibleE2eMs(r.averages?.e2e_latency_ms)
+        ? r.averages?.e2e_latency_ms
+        : null,
+    );
+    if (!e2e) {
+      continue;
+    }
     const name = streamName(streams[e2e.index], e2e.index, labels);
+    const scopeLabel = e2eScopeShortLabel(scope);
     highlights.push({
-      label: "Lowest glass delay",
+      label: `Lowest ${scopeLabel}`,
       winner: name,
       value: formatMs(e2e.value),
       protocol: streams[e2e.index].protocol,
     });
-    parts.push(`${name} lowest glass delay (${formatMs(e2e.value)})`);
+    glassParts.push(`${name} lowest ${scopeLabel} (${formatMs(e2e.value)})`);
+  }
+  if (scopesPresent.size > 1) {
+    const webrtc = streams.findIndex((r) => streamE2eScope(r) === E2E_SCOPE_INGEST_TO_GLASS);
+    if (webrtc >= 0) {
+      const hint = captureClassHintMs(
+        streams[webrtc].averages?.e2e_latency_ms,
+        streams[webrtc].averages?.latency_encode_ms,
+        E2E_SCOPE_INGEST_TO_GLASS,
+      );
+      if (hint != null) {
+        highlights.push({
+          label: "WebRTC as capture-class",
+          winner: streamName(streams[webrtc], webrtc, labels),
+          value: `≈ ${formatMs(hint)} (ingest + encode)`,
+          protocol: streams[webrtc].protocol,
+        });
+      }
+    }
   }
 
   const rtt = pickLowest(streams, streamRtt);
@@ -237,9 +342,12 @@ export function buildComparisonVerdict(
     return null;
   }
 
+  // Lead with scoped glass so a mixed 4-way cannot read as "WebRTC wins
+  // by 6s". TTFF is join time, not glass — it stays in the scorecard.
+  const headlineParts = glassParts.length > 0 ? glassParts : joinParts;
   const headline =
-    parts.length > 0
-      ? `${parts.slice(0, 2).join(" · ")}.`
+    headlineParts.length > 0
+      ? `${headlineParts.slice(0, 2).join(" · ")}.`
       : "Comparison finished — review the scorecard below.";
 
   return { headline, highlights };
@@ -252,6 +360,9 @@ export function liveGlanceMetrics(sample: {
   e2e_latency_ms?: number;
   net_rtt_ms?: number;
   transport_rtt_ms?: number;
+  latency_e2e_scope?: string;
+  protocol?: string | null;
+  playback_engine?: string | null;
 } | null): { label: string; value: string }[] {
   if (!sample) {
     return [];
@@ -262,7 +373,16 @@ export function liveGlanceMetrics(sample: {
     out.push({ label: "RTT", value: `${Math.round(rtt)} ms` });
   }
   if (finitePositive(sample.e2e_latency_ms)) {
-    out.push({ label: "E2E", value: `${Math.round(sample.e2e_latency_ms)} ms` });
+    const scope = resolveSampleE2eScope(sample);
+    out.push({
+      label:
+        scope === E2E_SCOPE_INGEST_TO_GLASS
+          ? "E2E ingest"
+          : scope === E2E_SCOPE_CAPTURE_TO_INGEST
+            ? "E2E ingest path"
+            : "E2E capture",
+      value: `${Math.round(sample.e2e_latency_ms)} ms`,
+    });
   }
   if (finitePositive(sample.playback_ttff_ms)) {
     out.push({ label: "TTFF", value: `${Math.round(sample.playback_ttff_ms)} ms` });
@@ -318,10 +438,26 @@ export function compareLiveMetrics(
     playback_ttff_ms?: number;
     net_rtt_ms?: number;
     transport_rtt_ms?: number;
+    latency_e2e_scope?: string;
+    protocol?: string | null;
+    playback_engine?: string | null;
   } | null>,
 ): { latency: LiveMetricRank; ttff: LiveMetricRank; rtt: LiveMetricRank } {
+  const scopes = samples.map((sample) => (sample ? resolveSampleE2eScope(sample) : null));
+  const rankedScopes = new Set(
+    scopes.filter((scope, index) => scope && finitePositive(samples[index]?.e2e_latency_ms)),
+  );
+  // Mixed ingest vs capture: do not crown a winner or print "+6s".
+  const latency =
+    rankedScopes.size > 1
+      ? {
+          values: samples.map((sample) => sample?.e2e_latency_ms ?? null),
+          bestIndex: null,
+          deltaVsBest: samples.map(() => null),
+        }
+      : rankLowerIsBetter(samples.map((sample) => sample?.e2e_latency_ms ?? null));
   return {
-    latency: rankLowerIsBetter(samples.map((sample) => sample?.e2e_latency_ms ?? null)),
+    latency,
     ttff: rankLowerIsBetter(samples.map((sample) => sample?.playback_ttff_ms ?? null)),
     rtt: rankLowerIsBetter(
       samples.map((sample) => sample?.net_rtt_ms ?? sample?.transport_rtt_ms ?? null),

@@ -54,6 +54,7 @@ import { detectStrategy } from './auto-detect.js';
 import type { DecoderStrategy } from './auto-detect.js';
 import { VolumeController } from './volume-controller.js';
 import { TimeController } from './time-controller.js';
+import type { CatalogState } from '@moqt/msf';
 import { mapLevels, mapAudioTracks } from './level-mapper.js';
 import type { PlayerOptions, Level, AudioTrack, PlayerStats, PlayerState } from './types.js';
 import type { PlayerEventMap } from './events.js';
@@ -587,27 +588,47 @@ export class Player {
 
   // ─── Private: Event Bridging ─────────────────────────────────────
 
+  private applyCatalogLevels(catalog: CatalogState): void {
+    this._levels = mapLevels(catalog);
+    this._audioTracks = mapAudioTracks(catalog);
+    const hasCmaf = catalog.tracks.some(track => track.packaging === 'cmaf');
+
+    // Record which element is the active render sink so callers can react.
+    this._activeMediaType = hasCmaf ? 'video' : 'canvas';
+    this.applyVolumeState();
+
+    // Only toggle visibility on elements the Player created itself.
+    // Caller-provided (borrowed) elements are never mutated.
+    if (this.ownsCanvas && this.canvas) this.canvas.hidden = hasCmaf;
+    if (this.ownsVideo && this.videoElement) this.videoElement.hidden = !hasCmaf;
+    this.emitter.emit('levelsloaded', { levels: this._levels });
+  }
+
   private wireEngineEvents(): void {
     this.engine.on('catalog_received', (e) => {
-      this._levels = mapLevels(e.catalog);
-      this._audioTracks = mapAudioTracks(e.catalog);
-      const hasCmaf = e.catalog.tracks.some(track => track.packaging === 'cmaf');
-
-      // Record which element is the active render sink so callers can react.
-      this._activeMediaType = hasCmaf ? 'video' : 'canvas';
-      this.applyVolumeState();
-
-      // Only toggle visibility on elements the Player created itself.
-      // Caller-provided (borrowed) elements are never mutated.
-      if (this.ownsCanvas && this.canvas) this.canvas.hidden = hasCmaf;
-      if (this.ownsVideo && this.videoElement) this.videoElement.hidden = !hasCmaf;
+      this.applyCatalogLevels(e.catalog);
       this.emitter.emit('ready', {
         levels: this._levels,
         audioTracks: this._audioTracks,
         duration: this._duration,
       });
-      this.emitter.emit('levelsloaded', { levels: this._levels });
       if (this.options.autoplay ?? DEFAULTS.autoplay) this.play();
+    });
+
+    // Webcam live-write: first FETCH catalog can be empty; the refresh
+    // arrives as catalog_updated. Re-map levels and emit ready so the
+    // headed player can subscribe/paint instead of locking on levels=0.
+    this.engine.on('catalog_updated', (e) => {
+      const hadLevels = this._levels.length > 0;
+      this.applyCatalogLevels(e.catalog);
+      if (!hadLevels && this._levels.length > 0) {
+        this.emitter.emit('ready', {
+          levels: this._levels,
+          audioTracks: this._audioTracks,
+          duration: this._duration,
+        });
+        if (this.options.autoplay ?? DEFAULTS.autoplay) this.play();
+      }
     });
 
     this.engine.on('first_frame', () => {

@@ -466,6 +466,65 @@ describe('parseMsfCatalog', () => {
         expect(() => parseMsfCatalog('{"version": 2, "tracks": []}')).toThrow(/version/i);
     });
 
+    it('accepts MSF-01 string version "1" from libmoq', () => {
+        const catalog = parseMsfCatalog('{"version":"1","tracks":[]}');
+        expect(catalog.version).toBe(1);
+    });
+
+    it('resolves libmoq CMAF initDataList + initRef onto track.initData', () => {
+        // Exact wire shape from tools/moq5/service/src/media_sender.c:
+        // CMAF init lives in initDataList[]; tracks carry initRef only.
+        const videoInit = btoa('ftyp-moov-video');
+        const audioInit = btoa('ftyp-moov-audio');
+        const catalog = parseMsfCatalog(JSON.stringify({
+            version: '1',
+            generatedAt: 1746104606044,
+            tracks: [
+                {
+                    name: 'vide_1',
+                    packaging: 'cmaf',
+                    isLive: true,
+                    role: 'video',
+                    codec: 'avc1.4d4028',
+                    width: 1280,
+                    height: 720,
+                    bitrate: 2500000,
+                    initRef: 'vide_1',
+                },
+                {
+                    name: 'soun_2',
+                    packaging: 'cmaf',
+                    isLive: true,
+                    role: 'audio',
+                    codec: 'mp4a.40.2',
+                    samplerate: 48000,
+                    channelConfig: '2',
+                    bitrate: 128000,
+                    initRef: 'soun_2',
+                },
+            ],
+            initDataList: [
+                { id: 'vide_1', type: 'inline', data: videoInit },
+                { id: 'soun_2', type: 'inline', data: audioInit },
+            ],
+        }));
+        expect(catalog.tracks[0]!.initRef).toBe('vide_1');
+        expect(catalog.tracks[0]!.initData).toBe(videoInit);
+        expect(catalog.tracks[1]!.initRef).toBe('soun_2');
+        expect(catalog.tracks[1]!.initData).toBe(audioInit);
+    });
+
+    it('rejects a dangling initRef so MSE cannot subscribe without init', () => {
+        expect(() => parseMsfCatalog(JSON.stringify({
+            version: 1,
+            tracks: [{
+                name: 'vide_1', packaging: 'cmaf', isLive: true,
+                role: 'video', codec: 'avc1.4d4028', initRef: 'missing',
+            }],
+            initDataList: [{ id: 'other', type: 'inline', data: 'AAAB' }],
+        }))).toThrow(/initRef "missing"/);
+    });
+
     it('rejects missing version', () => {
         expect(() => parseMsfCatalog('{"tracks": []}')).toThrow(/version/i);
     });

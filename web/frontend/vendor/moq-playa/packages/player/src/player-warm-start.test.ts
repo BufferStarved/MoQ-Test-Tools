@@ -113,6 +113,25 @@ async function bootPlayer(
   return { player, adapter, errors, subscribeCalls, reqIdFor };
 }
 
+/** Joining FETCHes attached to media tracks — excludes the catalog bootstrap. */
+async function mediaJoiningFetchCalls(adapter: ReturnType<typeof createMockAdapter>) {
+  const catalogReqId = BigInt(await adapter.subscribe.mock.results[0]?.value);
+  return adapter.joiningFetch.mock.calls.filter(
+    (c: any[]) => BigInt(c[0].joiningRequestId) !== catalogReqId,
+  );
+}
+
+async function joiningFetchReqIdFor(
+  adapter: ReturnType<typeof createMockAdapter>,
+  subscribeReqId: bigint,
+): Promise<bigint | undefined> {
+  const idx = adapter.joiningFetch.mock.calls.findIndex(
+    (c: any[]) => BigInt(c[0].joiningRequestId) === subscribeReqId,
+  );
+  if (idx < 0) return undefined;
+  return BigInt(await adapter.joiningFetch.mock.results[idx]?.value);
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
@@ -126,7 +145,7 @@ describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
       expect(call![1]?.subscriptionFilter?.type).toBe('LargestObject');
     }
 
-    expect(adapter.joiningFetch).toHaveBeenCalledTimes(2);
+    expect(await mediaJoiningFetchCalls(adapter)).toHaveLength(2);
     const videoReqId = await reqIdFor('video');
     const audioReqId = await reqIdFor('audio');
     const joinedIds = adapter.joiningFetch.mock.calls.map((c: any[]) => BigInt(c[0].joiningRequestId));
@@ -182,7 +201,7 @@ describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
     const { player, adapter, errors, reqIdFor } = await bootPlayer(
       locCatalog([VIDEO_LOC]), { warmStartCurrentGroup: true });
     const videoReqId = await reqIdFor('video');
-    const fetchReqId = BigInt(await adapter.joiningFetch.mock.results[0]?.value);
+    const fetchReqId = (await joiningFetchReqIdFor(adapter, videoReqId!))!;
 
     adapter._triggerMessage({
       type: 'REQUEST_ERROR', requestId: varint(fetchReqId),
@@ -204,13 +223,13 @@ describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
   it('GUARDRAIL: selectVideoTrack (ABR switch) does NOT issue a joining FETCH', async () => {
     const { player, adapter } = await bootPlayer(
       locCatalog([VIDEO_LOC, VIDEO_LOC_ALT, AUDIO_LOC]), { warmStartCurrentGroup: true });
-    const joinsAfterTuneIn = adapter.joiningFetch.mock.calls.length;
+    const joinsAfterTuneIn = (await mediaJoiningFetchCalls(adapter)).length;
     expect(joinsAfterTuneIn).toBe(2); // video + audio at tune-in
 
     await player.selectVideoTrack('video-2');
     await new Promise((r) => setTimeout(r, 10));
 
-    expect(adapter.joiningFetch.mock.calls.length).toBe(joinsAfterTuneIn); // unchanged
+    expect((await mediaJoiningFetchCalls(adapter)).length).toBe(joinsAfterTuneIn); // unchanged
     await player.destroy();
   });
 
@@ -222,7 +241,7 @@ describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
     const { player, adapter, subscribeCalls } = await bootPlayer(
       cmafCatalog, { warmStartCurrentGroup: true });
 
-    expect(adapter.joiningFetch).not.toHaveBeenCalled();
+    expect(await mediaJoiningFetchCalls(adapter)).toHaveLength(0);
     const call = subscribeCalls().find(([n]: [string, unknown]) => n === 'video');
     expect(call![1]?.subscriptionFilter?.type).toBe('NextGroupStart');
     await player.destroy();
@@ -233,7 +252,7 @@ describe('warm start ON (warmStartCurrentGroup: true, live LOC)', () => {
     const { player, adapter, subscribeCalls } = await bootPlayer(
       vodCatalog, { warmStartCurrentGroup: true });
 
-    expect(adapter.joiningFetch).not.toHaveBeenCalled();
+    expect(await mediaJoiningFetchCalls(adapter)).toHaveLength(0);
     const call = subscribeCalls().find(([n]: [string, unknown]) => n === 'video');
     expect(call![1]?.subscriptionFilter?.type).toBe('AbsoluteStart');
     await player.destroy();
@@ -255,7 +274,7 @@ describe('warm start — alias remap and stream races', () => {
         },
       });
     const videoReqId = (await reqIdFor('video'))!;
-    const fetchReqId = BigInt(await adapter.joiningFetch.mock.results[0]?.value);
+    const fetchReqId = (await joiningFetchReqIdFor(adapter, videoReqId))!;
     const newAlias = videoReqId + 100n;
 
     // Fetch data stream opens BEFORE SUBSCRIBE_OK (maps to the optimistic alias)…
@@ -342,7 +361,7 @@ describe('warm start — alias remap and stream races', () => {
         },
       });
     const videoReqId = (await reqIdFor('video'))!;
-    const fetchReqId = BigInt(await adapter.joiningFetch.mock.results[0]?.value);
+    const fetchReqId = (await joiningFetchReqIdFor(adapter, videoReqId))!;
 
     const streamId = 90n;
     adapter._triggerDataStream(streamId, { type: 'fetch', header: { requestId: varint(fetchReqId) } });
@@ -653,7 +672,7 @@ describe('warm start — LatestObject compatibility alias', () => {
       });
     const call = subscribeCalls().find(([n]: [string, unknown]) => n === 'video');
     expect(call![1]?.subscriptionFilter?.type).toBe('LargestObject');
-    expect(adapter.joiningFetch).toHaveBeenCalledTimes(1);
+    expect(await mediaJoiningFetchCalls(adapter)).toHaveLength(1);
     await player.destroy();
   });
 });
@@ -681,7 +700,7 @@ describe('warm start OFF (default)', () => {
   it('live LOC subscribes keep NextGroupStart and no joining FETCH is issued', async () => {
     const { player, adapter, subscribeCalls } = await bootPlayer(locCatalog([VIDEO_LOC, AUDIO_LOC]));
 
-    expect(adapter.joiningFetch).not.toHaveBeenCalled();
+    expect(await mediaJoiningFetchCalls(adapter)).toHaveLength(0);
     for (const name of ['video', 'audio']) {
       const call = subscribeCalls().find(([n]: [string, unknown]) => n === name);
       expect(call![1]?.subscriptionFilter?.type).toBe('NextGroupStart');

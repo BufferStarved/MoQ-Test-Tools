@@ -984,14 +984,13 @@ def build_ffmpeg_moq_cmd(
         video_args = ["-c:v", "copy"]
         audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
     elif is_device_webcam_source(media_path):
-        # Solo webcam MoQ: one encode, same GOP/preset as the broker master.
-        # Isolates the UDP remux hop we already proved is not the stall.
+        # Solo webcam (broker skipped): one encode at the MoQ GOP (~0.25s).
+        # Mixed siblings keep the 1s master and copy it — do not drop that
+        # GOP for SRT/RTMP (known 24 fps / 0.8×).
         video_args = build_video_encode_args(
             encode_ladder,
             target_latency_ms,
-            # 0.5s groups: if visible freezes shrink vs 1s GOP, it's
-            # NextGroupStart wait. Publisher logs obj vide wall_dt_ms.
-            gop_frames=max(1, int(round(PREFERRED_FPS / 2))),
+            gop_frames=moq_gop_frames_for_latency(target_latency_ms),
             preset="ultrafast",
             output_cfr=False,
             rebase_pts=True,

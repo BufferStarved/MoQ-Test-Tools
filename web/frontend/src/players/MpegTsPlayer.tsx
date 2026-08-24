@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlaybackMetricsSnapshot } from "../api";
 import type { PlaybackGate } from "../playbackGate";
-import { playbackGateLabel } from "../playbackGate";
-import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
+import { playbackGateLabel, waitingPlayerStatus } from "../playbackGate";
+import { bufferedAheadSec, RebufferTracker, seekNearLiveEdge } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
-import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import { elapsedSecFromStart, usePlaybackMetricsReporter } from "../playbackMetrics";
 import {
   attachHtmlPlaybackMonitors,
   loadJobRebuffer,
@@ -21,7 +21,11 @@ import {
   type StartupPlayerPhases,
 } from "../startupTiming";
 import { isGracefulMpegTsEos } from "../playbackEos";
+import { playerErrorForFailedJob } from "../moqCmafPlayback";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
+import { GoLiveButton } from "../GoLiveButton";
+import { formatGoLiveDiag, goLiveHoldSec, latchGoLive, seekGoLive } from "../goLive";
+import { encodeAnchoredE2eMs, holdE2eWhilePlayheadFrozen } from "../glassLatency";
 
 interface MpegTsPlayerProps {
   url: string;
@@ -29,14 +33,20 @@ interface MpegTsPlayerProps {
   playbackGate?: PlaybackGate;
   jobId?: string;
   encodeStartedAtEpoch?: number | null;
+  /** Zixi: encode-media seconds at HTTP-TS / HLS buffer time 0. */
+  deliveryMediaOriginSec?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   /** Capture->bridge-output lag (ms) for live webcam runs; 0 for VOD. */
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (ms). */
+  playbackPolicy?: "live-edge" | "complete";
   encoderLagMs?: number;
   /** Skip the pre-connect TS byte probe when preview_ready already validated HTTP-TS. */
   skipConnectProbe?: boolean;
   jobStatus?: string;
+  jobError?: string | null;
+  waitingForEncodeSlot?: boolean;
+  encodeQueueAhead?: number;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
 }
@@ -47,6 +57,10 @@ const RECONNECT_DELAY_MS = 1200;
 /** Same threshold as HlsPlayer: rebase only when Zixi -output_ts_offset has
  *  pushed the MPEG-TS timeline into the minutes/hours. */
 const OFFSET_REBASE_THRESHOLD_SEC = 120;
+/** Play from the live edge of the HTTP-TS stash, not from t=0 of a 8–10s buffer. */
+const MPEGTS_HOLD_BEHIND_SEC = 0.6;
+const MPEGTS_SEEK_AHEAD_SEC = 2.2;
+const MPEGTS_LIVE_EDGE_MS = 1000;
 
 export default function MpegTsPlayer({
   url,
@@ -54,13 +68,18 @@ export default function MpegTsPlayer({
   playbackGate = "live",
   jobId,
   encodeStartedAtEpoch,
+  deliveryMediaOriginSec = null,
   onPlaybackSample,
   bridgeLagMs = 0,
   encoderLagMs = 0,
   skipConnectProbe = false,
   jobStatus,
+  jobError = null,
+  waitingForEncodeSlot = false,
+  encodeQueueAhead = 0,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  playbackPolicy = "live-edge",
 }: MpegTsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,14 +95,22 @@ export default function MpegTsPlayer({
     firstPaintAtMs: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
+  const goLiveRef = useRef({ atSec: 0, e2eMs: 0 });
+  const lastE2eRef = useRef<{ videoTimeSec: number; e2eMs: number } | undefined>(undefined);
   const startupPhasesRef = useRef<StartupPlayerPhases>({ ...EMPTY_STARTUP_PHASES });
-  const lagRef = useRef({ bridgeMs: 0, encoderMs: 0, epoch: 0 });
+  const lagRef = useRef({
+    bridgeMs: 0,
+    encoderMs: 0,
+    epoch: 0,
+    deliveryOriginSec: null as number | null,
+  });
   lagRef.current = {
     bridgeMs: bridgeLagMs,
     // Kept for API parity with HlsPlayer; HTTP-TS e2e is encode-anchored so
     // encode lag is already in wall−playhead and must not be double-added.
     encoderMs: encoderLagMs,
     epoch: encodeStartedAtEpoch ?? 0,
+    deliveryOriginSec: deliveryMediaOriginSec,
   };
   const jobStatusRef = useRef(jobStatus);
   jobStatusRef.current = jobStatus;
@@ -107,20 +134,30 @@ export default function MpegTsPlayer({
   }
 
   /**
-   * Zixi HTTP-TS timelines are encode-anchored (same media clock as Fast HLS).
-   * wall − position covers encoder→glass; add bridge only. encoderLag is already
-   * reflected in how far out_time trails wall, so do not double-add it here.
+   * Capture→glass of the painted frame. Session-relative currentTime (0 at
+   * join) made wall−epoch−videoTime the attach offset — a flat ~9s with
+   * only ~0.5s HTML buffer (comparison 2026-08-23). Rebase from delivery
+   * origin / live edge after first paint; do not invent a confident glass
+   * number when nothing encode-anchors the playhead.
    */
   function captureAnchoredE2eMs(): number | undefined {
-    const { bridgeMs, epoch } = lagRef.current;
-    const session = sessionRef.current;
-    if (epoch > 0 && session.maxVideoTime > 0) {
-      // Anchor epoch is server-clock; skew-correct Date.now() to match.
-      const total =
-        Date.now() + clockSkewMs() - epoch * 1000 - session.maxVideoTime * 1000 + bridgeMs;
-      return total > 0 && total < 120_000 ? Math.round(total) : undefined;
-    }
-    return undefined;
+    const { bridgeMs, epoch, deliveryOriginSec } = lagRef.current;
+    const video = videoRef.current;
+    const raw = video?.currentTime ?? 0;
+    const range = video?.buffered;
+    const bufferedEnd =
+      range && range.length > 0 ? range.end(range.length - 1) : raw;
+    const computed = encodeAnchoredE2eMs({
+      epochSec: epoch,
+      rawVideoTimeSec: raw,
+      clockSkewMs: clockSkewMs(),
+      bridgeMs,
+      deliveryOriginSec,
+      bufferedEndSec: bufferedEnd,
+    });
+    const held = holdE2eWhilePlayheadFrozen(computed, raw, lastE2eRef.current);
+    lastE2eRef.current = held.last;
+    return held.e2eMs;
   }
 
   /**
@@ -173,6 +210,8 @@ export default function MpegTsPlayer({
         playback_buffer_sec: bufferedAheadSec(videoRef.current),
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         e2e_latency_ms: captureAnchoredE2eMs(),
+        go_live_at_sec: goLiveRef.current.atSec,
+        go_live_e2e_ms: goLiveRef.current.e2eMs,
         ...startupPhases(),
       };
     },
@@ -195,11 +234,24 @@ export default function MpegTsPlayer({
     }
 
     if (playbackGate !== "live") {
+      const jobFail = playerErrorForFailedJob({ jobStatus, jobError });
+      if (jobFail) {
+        setError(jobFail);
+        setStatus("Failed (see diagnostics)");
+        return;
+      }
       setError(null);
       setStatus(
         playbackGate === "waiting"
-          ? "Waiting for live HTTP-TS…"
-          : playbackGateLabel(playbackGate, "other"),
+          ? waitingPlayerStatus({
+              engine: "other",
+              jobStatus,
+              waitingForEncodeSlot,
+              encodeQueueAhead,
+            })
+          : playbackGate === "ended"
+            ? "Encode finished"
+            : playbackGateLabel(playbackGate, "other"),
       );
       return;
     }
@@ -211,6 +263,7 @@ export default function MpegTsPlayer({
     let reconnects = 0;
     let mpegtsMod: typeof import("mpegts.js") | null = null;
     let timeTimer: number | null = null;
+    let liveEdgeTimer: number | null = null;
 
     sessionRef.current = {
       maxVideoTime: 0,
@@ -220,6 +273,7 @@ export default function MpegTsPlayer({
       errorCount: 0,
       firstPaintAtMs: 0,
     };
+    lastE2eRef.current = undefined;
     startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
     rebufferRef.current = new RebufferTracker();
     loadJobRebuffer(jobId, rebufferRef.current);
@@ -439,11 +493,12 @@ export default function MpegTsPlayer({
           // was tripping on (relative URL resolution against the worker's
           // blob: location, CSP, or an internal abort race).
           enableWorker: false,
-          liveBufferLatencyChasing: true,
-          // WAN HTTP-TS (laptop → GCP East Zixi) underruns with stash off and
-          // a ~1.5s chase window — html_stall every few seconds after TTFF.
-          liveBufferLatencyMaxLatency: 3.5,
-          liveBufferLatencyMinRemain: 0.8,
+          liveBufferLatencyChasing: playbackPolicy !== "complete",
+          // 3.5s chase plus stash-from-the-start left RTMP HTTP-TS sitting
+          // ~10s behind encode (comparison 2026-08-23: vt=0.58 at t=8).
+          // 1.5s still covers WAN jitter; the interval seek below trims more.
+          liveBufferLatencyMaxLatency: 1.5,
+          liveBufferLatencyMinRemain: 0.5,
           enableStashBuffer: true,
           autoCleanupSourceBuffer: true,
         },
@@ -463,6 +518,21 @@ export default function MpegTsPlayer({
         });
       }
       setStatus("Playing (HTTP-TS)");
+      liveEdgeTimer = window.setInterval(() => {
+        if (destroyed) {
+          return;
+        }
+        const media = videoRef.current;
+        if (!media || media.readyState < 2) {
+          return;
+        }
+        if (
+          playbackPolicy !== "complete" &&
+          seekNearLiveEdge(media, MPEGTS_HOLD_BEHIND_SEC, MPEGTS_SEEK_AHEAD_SEC)
+        ) {
+          pushDiag(`mpegts_live_seek ahead=${bufferedAheadSec(media).toFixed(2)}s`);
+        }
+      }, MPEGTS_LIVE_EDGE_MS);
 
       instance.on(mpegts.Events.MEDIA_INFO, (info: { videoCodec?: string; audioCodec?: string }) => {
         if (!destroyed) {
@@ -512,12 +582,23 @@ export default function MpegTsPlayer({
       if (timeTimer != null) {
         window.clearInterval(timeTimer);
       }
+      if (liveEdgeTimer != null) {
+        window.clearInterval(liveEdgeTimer);
+      }
       video.removeEventListener("timeupdate", onTimeUpdate);
       destroyPlayer();
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate, jobId]);
+  }, [
+    url,
+    playbackGate,
+    jobId,
+    jobStatus,
+    jobError,
+    waitingForEncodeSlot,
+    encodeQueueAhead,
+  ]);
 
   return (
     <div className="player-surface">
@@ -525,6 +606,17 @@ export default function MpegTsPlayer({
       <div className="player-meta">
         <span>{label}</span>
         <span className="hint">{status}</span>
+        <GoLiveButton
+          visible
+          disabled={playbackGate !== "live"}
+          onGoLive={() => {
+            const e2e = captureAnchoredE2eMs();
+            const elapsed = elapsedSecFromStart(encodeStartedAtEpoch);
+            goLiveRef.current = latchGoLive(goLiveRef.current, elapsed, e2e);
+            const result = seekGoLive(videoRef.current, goLiveHoldSec("mpegts"));
+            setDiagLines((current) => [...current.slice(-12), formatGoLiveDiag(result, elapsed, e2e)]);
+          }}
+        />
       </div>
       {error && <p className="player-error">{error}</p>}
       <PlayerDiagnostics

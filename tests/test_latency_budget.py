@@ -22,9 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from latency_budget import (  # noqa: E402
+    BROKER_GOP_MS,
     E2E_SCOPE_CAPTURE_TO_GLASS,
+    E2E_SCOPE_CAPTURE_TO_INGEST,
     E2E_SCOPE_INGEST_TO_GLASS,
     LATENCY_COMPONENTS,
+    LL_HLS_PART_MS,
     _clean_ms,
     build_frame_row,
     build_latency_budget,
@@ -35,6 +38,7 @@ from latency_budget import (  # noqa: E402
     network_latency_ms,
     playback_frame_drop_pct,
     player_buffer_latency_ms,
+    resolve_segmentation_ms,
 )
 from metrics import CSV_COLUMNS, EncodeLagTracker  # noqa: E402
 
@@ -103,7 +107,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(budget.accounted_ms, 1500 + 30 + 4000)
         self.assertEqual(budget.residual_ms, 12_000 - budget.accounted_ms)
         self.assertEqual(budget.overcount_ms, 0.0)
-        self.assertEqual(budget.unmeasured_stages, ("publish", "packager"))
+        self.assertEqual(budget.unmeasured_stages, ("segmentation", "publish", "packager"))
 
     def test_residual_is_zero_without_an_e2e_measurement(self):
         """No measured glass delay means nothing to attribute; a stack of
@@ -186,6 +190,31 @@ class E2eScopeTests(unittest.TestCase):
         self.assertEqual(e2e_scope_for("webrtc", "hls"), E2E_SCOPE_CAPTURE_TO_GLASS)
         self.assertEqual(e2e_scope_for("moq", "moq"), E2E_SCOPE_CAPTURE_TO_GLASS)
         self.assertEqual(e2e_scope_for("srt", "hls"), E2E_SCOPE_CAPTURE_TO_GLASS)
+        self.assertEqual(e2e_scope_for("moq", "moq", "upload"), E2E_SCOPE_CAPTURE_TO_INGEST)
+        self.assertEqual(e2e_scope_for("srt", "monitor"), E2E_SCOPE_CAPTURE_TO_INGEST)
+
+    def test_upload_scope_includes_segmentation_excludes_player_buffer(self):
+        budget = build_latency_budget(
+            pipeline_baseline_ms=400,
+            encode_lag_ms=0,
+            publish_transit_ms=80,
+            net_rtt_ms=40,
+            packager_transit_ms=25,
+            playback_buffer_sec=2.0,
+            e2e_latency_ms=0,
+            e2e_scope=E2E_SCOPE_CAPTURE_TO_INGEST,
+        )
+        self.assertEqual(budget.e2e_scope, E2E_SCOPE_CAPTURE_TO_INGEST)
+        self.assertGreater(budget.player_buffer_ms, 0)
+        self.assertIn("latency_player_buffer_ms", budget.out_of_scope)
+        self.assertAlmostEqual(
+            budget.accounted_ms,
+            budget.encode_ms
+            + budget.segmentation_ms
+            + budget.publish_ms
+            + budget.network_ms
+            + budget.packager_ms,
+        )
 
     def test_row_has_every_component_column(self):
         row = build_latency_budget(pipeline_baseline_ms=100).as_row()
@@ -199,6 +228,61 @@ class E2eScopeTests(unittest.TestCase):
             "latency_e2e_scope",
         ):
             self.assertIn(name, row)
+        self.assertIn("latency_not_applicable", row)
+
+
+class SegmentationHopTests(unittest.TestCase):
+    def test_moq_group_is_named_segmentation_not_ingest(self):
+        budget = build_latency_budget(
+            protocol="moq",
+            segmentation_ms=500,
+            split_gop_from_encode=True,
+            pipeline_baseline_ms=1800,
+            e2e_latency_ms=4000,
+        )
+        self.assertEqual(budget.segmentation_ms, 500.0)
+        self.assertEqual(budget.encode_ms, 1300.0)
+        self.assertNotIn("segmentation", budget.unmeasured_stages)
+        self.assertNotIn("segmentation", budget.not_applicable_stages)
+        self.assertIn("latency_segmentation_ms", budget.as_row())
+
+    def test_unknown_gop_is_unmeasured_not_zero(self):
+        budget = build_latency_budget(protocol="moq", e2e_latency_ms=4000)
+        self.assertEqual(budget.segmentation_ms, 0.0)
+        self.assertIn("segmentation", budget.unmeasured_stages)
+
+    def test_webrtc_segmentation_is_not_applicable(self):
+        budget = build_latency_budget(
+            protocol="webrtc",
+            e2e_scope=E2E_SCOPE_INGEST_TO_GLASS,
+            e2e_latency_ms=35,
+            net_rtt_ms=37,
+            playback_buffer_sec=0.03,
+        )
+        self.assertIn("segmentation", budget.not_applicable_stages)
+        self.assertNotIn("segmentation", budget.unmeasured_stages)
+        self.assertEqual(budget.segmentation_ms, 0.0)
+        self.assertNotIn("latency_segmentation_ms", budget.as_row()["latency_unmeasured"])
+
+    def test_ll_hls_parts_are_200ms_not_a_1s_cmaf_group(self):
+        ms, na = resolve_segmentation_ms(protocol="hls", playback_engine="ll-hls")
+        self.assertFalse(na)
+        self.assertEqual(ms, LL_HLS_PART_MS)
+        self.assertNotEqual(ms, BROKER_GOP_MS)
+        budget = build_latency_budget(protocol="hls", playback_engine="ll-hls", e2e_latency_ms=800)
+        self.assertEqual(budget.segmentation_ms, 200.0)
+
+    def test_upload_scope_keeps_cmaf_segmentation(self):
+        budget = build_latency_budget(
+            protocol="moq",
+            segmentation_ms=250,
+            pipeline_baseline_ms=400,
+            e2e_scope=E2E_SCOPE_CAPTURE_TO_INGEST,
+            e2e_latency_ms=0,
+        )
+        self.assertEqual(budget.segmentation_ms, 250.0)
+        self.assertIn("latency_player_buffer_ms", budget.out_of_scope)
+        self.assertNotIn("latency_segmentation_ms", budget.out_of_scope)
 
 
 class FrameAccountingTests(unittest.TestCase):
@@ -295,6 +379,7 @@ class CsvSchemaTests(unittest.TestCase):
             "latency_residual_ms",
             "latency_overcount_ms",
             "latency_unmeasured",
+            "latency_not_applicable",
             "latency_e2e_scope",
             "encode_frames_total",
             "encode_frames_dropped",

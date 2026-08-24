@@ -128,8 +128,8 @@ export function AboutPage() {
             <span className="about-encoder-badge">Realistic upload numbers</span>
             <h4>Webcam → this machine + encoder choice</h4>
             <p>
-              Choose <strong>Webcam</strong>, start{" "}
-              <code>./scripts/run-local-publisher.sh</code>, then pick an encoder under Encode.
+              Choose <strong>Webcam</strong> on <code>./scripts/dev.sh</code> (localhost
+              only — never the public site), then pick an encoder under Encode.
               <strong> ffmpeg (default)</strong> uses the helper for SRT, RTMP, WebRTC (if WHIP),
               and MoQ. <strong>OBS</strong> lets OBS encode: the plugin does MoQ,
               extra outputs do SRT/RTMP (no WebRTC). <strong>Browser</strong> encodes in this

@@ -7,17 +7,18 @@ import {
   cloudHostFromIngest,
   collapseOutputsForBrowserMoq,
   defaultIngestForProtocol,
+  encodeHostRank,
   ingestCollisionKey,
   ingestEndpointsForProtocol,
   ingestRole,
   isCustomIngestEndpoint,
   type IngestEndpointId,
-} from "./ingestEndpoints";
+} from "./ingestEndpoints.ts";
 import {
   isPlaybackModeCompatible,
   playbackModesForSelection,
   resolvedPlaybackMode,
-} from "./playbackUrls";
+} from "./playbackUrls.ts";
 import type { PlaybackMode } from "./playbackTypes";
 import type { EndpointConfig, Preset } from "./types";
 
@@ -42,6 +43,11 @@ export type RecipeEncoderId = "ffmpeg" | "obs" | "browser";
 /** Webcam encodes on this laptop via the publisher agent (ffmpeg / OBS). */
 export function isLocalAgentSource(source: RecipeSourceId): boolean {
   return source === "webcam";
+}
+
+/** Dummy bars, BBB, or an uploaded file — encoded on the API host. */
+export function isCloudPlayoutSource(source: RecipeSourceId): boolean {
+  return source === "dummy" || source === "bbb" || source === "upload";
 }
 
 /**
@@ -177,7 +183,7 @@ export function resolvedSelectablePlaybackMode(
   return selectablePlaybackModes(protocol, ingestEndpointId, caps)[0]?.id ?? resolved;
 }
 
-export function ingestAllowedForRecipe(
+function ingestFitsRecipe(
   ingestEndpointId: string,
   protocol: string,
   ctx: RecipeContext,
@@ -199,8 +205,22 @@ export function ingestAllowedForRecipe(
   ) {
     return false;
   }
+  return ingestEndpointsForProtocol(protocol, ctx.presets).some((item) => item.id === ingestEndpointId);
+}
+
+export function ingestAllowedForRecipe(
+  ingestEndpointId: string,
+  protocol: string,
+  ctx: RecipeContext,
+): boolean {
+  if (!ingestFitsRecipe(ingestEndpointId, protocol, ctx)) {
+    return false;
+  }
+  if (isCustomIngestEndpoint(ingestEndpointId)) {
+    return true;
+  }
   return ingestEndpointsForProtocol(protocol, ctx.presets).some(
-    (item) => item.id === ingestEndpointId,
+    (item) => item.id === ingestEndpointId && item.available,
   );
 }
 
@@ -211,16 +231,10 @@ export function destinationsForProtocol(
 ) {
   const preferredRole =
     protocol === "rtmp" ? "zixi" : protocol === "moq" ? "moq_relay" : "mediamtx";
-  const hostRank = (id: string) => {
-    const host = cloudHostFromIngest(id);
-    if (host === "gcp") return 0;
-    if (host === "gcp_east") return 1;
-    if (host === "linode") return 2;
-    return 3;
-  };
+  const hostRank = (id: string) => encodeHostRank(cloudHostFromIngest(id));
   return ingestEndpointsForProtocol(protocol, ctx.presets)
     .filter((item) => {
-      if (!ingestAllowedForRecipe(item.id, protocol, ctx)) {
+      if (!ingestFitsRecipe(item.id, protocol, ctx)) {
         return false;
       }
       const key = ingestCollisionKey(item.id, protocol);
@@ -260,7 +274,9 @@ function pickIngest(
   ctx: RecipeContext,
   occupiedCollisionKeys: ReadonlySet<string>,
 ): IngestEndpointId {
-  const dests = destinationsForProtocol(protocol, ctx, occupiedCollisionKeys);
+  const dests = destinationsForProtocol(protocol, ctx, occupiedCollisionKeys).filter(
+    (item) => item.available,
+  );
   const preferredHost = cloudHostFromIngest(preferredIngest);
   const sameCloud = dests.find(
     (item) =>
@@ -390,7 +406,7 @@ function tryAddProtocol(
     current.map((endpoint) => `${endpoint.protocol}:${endpoint.ingestEndpointId}`),
   );
   const dests = destinationsForProtocol(protocol, ctx, used).filter((item) => {
-    if (isCustomIngestEndpoint(item.id)) {
+    if (!item.available || isCustomIngestEndpoint(item.id)) {
       return false;
     }
     if (
@@ -422,6 +438,16 @@ export function nextAddableEndpoint(
   protocolOrder?: readonly PublishProtocolId[],
 ): Omit<EndpointConfig, "id"> | null {
   const used = collisionKeysFor(current);
+  // Caller-supplied order wins (Cloud compare: same protocol, next region).
+  if (protocolOrder && protocolOrder.length > 0) {
+    for (const protocol of protocolOrder) {
+      const created = tryAddProtocol(protocol, current, ctx, used);
+      if (created) {
+        return created;
+      }
+    }
+    return null;
+  }
   if (isBrowserPublish(ctx.source, ctx.encoder ?? "ffmpeg")) {
     if (!current.some((endpoint) => endpoint.protocol === "webrtc")) {
       const webrtc = tryAddProtocol("webrtc", current, ctx, used);
@@ -431,7 +457,7 @@ export function nextAddableEndpoint(
     }
     return tryAddProtocol("moq", current, ctx, used) ?? tryAddProtocol("webrtc", current, ctx, used);
   }
-  const order = protocolOrder ?? ["srt", "rtmp", "webrtc", "moq"];
+  const order = ["srt", "rtmp", "webrtc", "moq"] as const;
   for (const protocol of order) {
     const created = tryAddProtocol(protocol, current, ctx, used);
     if (created) {
@@ -478,8 +504,9 @@ export function canAddRecipeOutput(
   current: EndpointConfig[],
   ctx: RecipeContext,
   maxEndpoints: number,
+  protocolOrder?: readonly PublishProtocolId[],
 ): boolean {
-  return current.length < maxEndpoints && nextAddableEndpoint(current, ctx) !== null;
+  return current.length < maxEndpoints && nextAddableEndpoint(current, ctx, protocolOrder) !== null;
 }
 
 export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): string | null {

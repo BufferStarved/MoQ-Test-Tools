@@ -74,12 +74,20 @@ Expect `16,14,18`. Do **not** put a known-16-only image on `:4433`.
 
 ## Publisher (moq5)
 
-The web API on `34.9.217.178` publishes from that VM. `install-web-app.sh` rsync-excludes `tools/moq5`, so the library must be **built on the web VM**:
+The web API on `34.9.217.178` publishes from that VM. `install-web-app.sh` rsync-excludes `tools/moq5`, so the library must be **built on the web VM**.
+
+**Canary pin (west `:14433` only):** `scripts/install-moq5.sh` clones
+[BufferStarved/moq5](https://github.com/BufferStarved/moq5)
+`feat/publish-tracks-live-catalog` (openmoq/moq5#9 live-write `publish_tracks`).
+Do **not** grow a private libmoq (no new dual-emit / catalog-refresh-off /
+qlog-as-product). Prod `:4433` stays `openmoq-publisher` / draft-16.
 
 ```bash
 # On 34.9.217.178, as the moq-web user, from /opt/moq-test-tools:
-./scripts/install-moq5.sh
+./scripts/install-moq5.sh --rebuild
 # Binary: /opt/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish
+# Pin: BufferStarved/moq5 @ feat/publish-tracks-live-catalog
+# Override: MOQ5_REPO=https://github.com/openmoq/moq5.git MOQ5_REF=main
 ```
 
 Do **not** set `MOQ_PUBLISHER_BACKEND=moq5` in `/etc/moq-web.env`. The canary preset forces moq5 in code (`moq_publisher_backend_for_preset`). Prod stays `auto` → openmoq.
@@ -141,7 +149,7 @@ ffmpeg -re -f lavfi -i testsrc=size=640x360:rate=30 -f lavfi -i sine=frequency=1
 
 ## Remaining blockers
 
-1. **Playa subscribe** — canary `/config` lists draft 18; moq5 announced 3 namespaces. Confirm headed Chrome `@playa/player` `draftVersion: 18` actually renders. Never swap `:4433`.
+1. **Playa subscribe** — canary `/config` lists draft 18; moq5 announced 3 namespaces. Confirm headed Chrome `@playa/player` `draftVersion: 18` actually renders. Never swap `:4433`. Vendored playa MSF-00 required numeric `version`; libmoq emits `"1"` (string). `catalog-msf00.ts` accepts both.
 2. **openmoq-publisher** — not used on the canary path (moq5 only). Prod stays pinned to **v0.3.2**.
 3. **moq5 catalog** — `moq5-fmp4-publish` advertised `vide_1`/`soun_2` in the smoke; still experimental vs openmoq catalog options.
 4. **Catalog / MSF** — still draft-ietf-moq-msf.
@@ -164,4 +172,28 @@ In-tree `moq:` protocol: `./scripts/build-ffmpeg-libmoq.sh`. See
 [`docs/FFMPEG-MOQ-NATIVE.md`](FFMPEG-MOQ-NATIVE.md). Do not change the live
 canary pipe until headed playa on `:14433` is green.
 
+**FFmpeg plan:** stay aligned with `openmoq/moq5` `main`. Canary
+`moq5-fmp4-publish` / local libmoq builds from BufferStarved
+`feat/publish-tracks-live-catalog` (PR #9) until that lands upstream.
+Keep local-only until playa vendor ≥ main: `initData` dual-emit,
+`MOQ_QLOG_DIR`. Do not write a second `-f moq` muxer — extend OpenMOQ’s
+existing LOC muxer after paint works. SportsRadar / hang / `moq-cli` is
+moq-lite; engage via the FFmpeg name report, do not build on it.
+
+**Encoder options (last-mile Webcam only):** ffmpeg helper stays the
+default (SRT / RTMP / WebRTC if WHIP / MoQ). OBS + OpenMOQ plugin is an
+option, not a replacement — plugin does MoQ, extra outputs do SRT/RTMP,
+no WebRTC. Cloud playout stays server ffmpeg. Browser stays in-tab.
+Canary encode remains `ffmoq` + `moq:` + `moq5-fmp4-publish` until the
+operator picks OBS or OpenMOQ’s muxer.
+
 Prod path on `:4433` is still ffmpeg → `openmoq-publisher` → draft-16 moqx.
+
+## Do not FETCH the open GOP
+
+CMAF live subscribe stays **NextGroupStart** (`cmafSubscribeOptions`). Do not
+join the in-flight group with a FETCH. moqx honored a warm-start / mid-stream
+FETCH for one GOP (~0.5–1s) and never attached later groups — the same stall
+as LOC. Catalog init comes from the publisher. Revisit FETCH of the open GOP
+only after a headed check of the estimator, HUD scope, playback policy,
+upload-only test scope, and webcam GOP path.

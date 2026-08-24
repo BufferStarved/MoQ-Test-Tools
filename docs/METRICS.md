@@ -109,21 +109,23 @@ A future upgrade is SEI / wall-clock timestamps in the bitstream for true glass-
 `e2e_latency_ms` alone tells you a leg is slow, never *where* the time went — and because each protocol estimates it differently (LOC CaptureTimestamp vs HLS PDT vs wall−playhead vs encode+RTT/2), comparing totals across legs can mislead. Every leg now also reports one ordered chain of components in the same units:
 
 ```
-capture ──encode──> muxed ──publish──> ingest ──packager──> delivery ──network──> player ──buffer──> glass
+capture ──encode──> muxed ──cmaf_group──> publish ──network──> ingest ──packager──> player_buffer──> glass
 ```
 
 | Column | Stage | Source |
 |--------|-------|--------|
-| `latency_encode_ms` | capture → muxed | Encoder pipeline offset (the baseline `encode_lag_ms` subtracts) + sustained lag |
-| `latency_publish_ms` | muxed → ingest | **No instrument on any protocol today.** Always listed in `latency_unmeasured` |
-| `latency_network_ms` | one-way path | `net_rtt_ms ÷ 2` (symmetric-path assumption). SRT / RTMP / WebRTC only |
-| `latency_packager_ms` | ingest → delivery | Measured for MediaMTX LL-HLS via PROGRAM-DATE-TIME; measured ~0 for Zixi HTTP-TS (continuous TS). Unmeasured on Zixi Fast HLS and MoQ |
-| `latency_player_buffer_ms` | delivery → glass | `playback_buffer_sec × 1000` — strictly seconds queued **ahead** (HTML media / WebRTC jitter buffer) |
-| `latency_accounted_ms` | — | Sum of the components **this leg's e2e actually spans** — see `latency_e2e_scope` |
-| `latency_residual_ms` | — | Measured glass delay the accounted components do not explain. Never negative |
-| `latency_overcount_ms` | — | Accounted components **in excess of** measured e2e. Never negative |
-| `latency_unmeasured` | — | Comma-separated stages that had no instrument on this sample |
-| `latency_e2e_scope` | — | `capture_to_glass` or `ingest_to_glass` — which span the e2e estimator covers |
+| `latency_encode_ms` | capture → AU | Encoder pipeline offset + sustained lag. GOP-close wait is **not** here |
+| `latency_segmentation_ms` | AU → closed group | Known object/group duration. **0.5s/1s on MoQ CMAF is group duration (NextGroupStart), not ingest RTT.** LL-HLS parts are 200ms. WebRTC is n/a |
+| `latency_publish_ms` | closed group → ingest | **No instrument on any protocol today.** Always listed in `latency_unmeasured` |
+| `latency_network_ms` | one-way path | `net_rtt_ms ÷ 2`. SRT / RTMP / WebRTC only. MoQ unmeasured unless qlog RTT exists |
+| `latency_packager_ms` | ingest → delivery | Measured for MediaMTX LL-HLS via PROGRAM-DATE-TIME. 0 + unmeasured ≠ free remux |
+| `latency_player_buffer_ms` | delivery → glass | `playback_buffer_sec × 1000` — seconds queued **ahead** |
+| `latency_accounted_ms` | — | Sum of the components **this leg's e2e actually spans** |
+| `latency_residual_ms` | — | Measured glass delay the accounted components do not explain |
+| `latency_overcount_ms` | — | Accounted components **in excess of** measured e2e |
+| `latency_unmeasured` | — | Stages with no instrument (`segmentation` when GOP/part is unknown) |
+| `latency_not_applicable` | — | Stages that do not exist (WebRTC has no CMAF group) |
+| `latency_e2e_scope` | — | `capture_to_glass`, `ingest_to_glass`, or `capture_to_ingest` |
 
 ### The three honesty properties
 
@@ -136,7 +138,7 @@ The model makes three separate statements and refuses to blur them together:
 **The residual is a feature, not an error term.** A large residual means the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Check `latency_unmeasured` first. Expect a non-trivial residual on:
 
 - **Zixi Fast HLS** — chunk packaging time has no instrument (no PDT in the playlist), so `packager` is listed as unmeasured and its cost lands here. Only HTTP-TS is a measured ~0.
-- **MoQ CMAF** — group accumulation plus join offset, neither of which is a measured stage today.
+- **MoQ CMAF** — `latency_segmentation_ms` now holds the known group duration (NextGroupStart). Residual should no longer be a silent GOP. Publish and network remain unmeasured without a real instrument / qlog RTT.
 - **Browser MoQ LOC** — reports 0 for the player-buffer component on purpose. Its "seconds behind live" figure points the *opposite direction* from a buffer and travels in its own `playback_behind_live_sec` column so it can never be summed into this chain.
 
 Formulas live in `src/latency_budget.py` and its browser mirror `web/frontend/src/latencyBudget.ts`; they are kept numerically identical and tested against each other.

@@ -196,14 +196,16 @@ def srt_latency_us(target_latency_ms: int) -> int:
     return clamp_target_latency_ms(target_latency_ms) * 1000
 
 
-# MoQ GOP bounds (seconds). Floor keeps x264 overhead sane; ceiling keeps the
-# group cadence short enough that join-offset + fragment accumulation stay
-# inside the latency budget. Ceiling lowered 2.0 -> 1.0 after the 2026-07-21
-# webcam run: 2s objects held a rock-steady 7.5s e2e but the 2s arrival
-# bursts read as "inconsistent playback speed" to the viewer; 1s objects
-# halve the burst granularity and shave ~1-2s off the latency floor.
-MOQ_GOP_SEC_MIN = 0.5
+# MoQ GOP bounds (seconds). Solo/file encode only — the shared webcam broker
+# stays at 1s (MASTER_GOP_FRAMES) and MoQ copies that bitstream. Floor 0.25s
+# is 8 frames @ 30fps; ultrafast+zerolatency handles that without a second
+# x264 on the UDP hop. Do not drop the broker master to 0.5s (24fps / 0.8×).
+MOQ_GOP_SEC_MIN = 0.25
 MOQ_GOP_SEC_MAX = 1.0
+# Shared broker master IDR cadence. Must match webcam_broker.MASTER_GOP_FRAMES.
+BROKER_GOP_MS = 1000.0
+# MediaMTX LL-HLS part duration — the HLS object, not a 1s CMAF group.
+LL_HLS_PART_MS = 200.0
 
 
 def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
@@ -216,14 +218,32 @@ def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS
     CaptureTimestamps). So for MoQ the GOP *is* the latency floor twice over:
     a fragment ships only after the whole GOP is encoded (+1 GOP), and a
     subscriber waits up to a GOP for the next join point (+0..1 GOP) — an
-    offset that then persists for the entire session. With a 4s target the old
-    shared mapping produced 4s GOPs -> ~1.9MB objects every 4-5s and a real
-    glass-to-glass of 9-11s (relay logs, 2026-07-20). GOP = target/2 keeps
-    worst-case join latency (2 x GOP) at or under the target.
+    offset that then persists for the entire session. That wait is
+    ``latency_segmentation_ms`` (CMAF group), not ingest RTT. GOP = target/2
+    keeps worst-case join (2 × GOP) at or under the target; the floor is
+    0.25s for solo/file (brokered copy stays 1s).
     """
     ms = clamp_target_latency_ms(target_latency_ms)
     seconds = min(MOQ_GOP_SEC_MAX, max(MOQ_GOP_SEC_MIN, ms / 2000.0))
     return max(1, int(round(seconds * fps)))
+
+
+def moq_group_duration_ms(
+    target_latency_ms: int,
+    *,
+    brokered: bool = False,
+    fps: int = ASSUMED_FPS,
+) -> float:
+    """Closed-group duration the NextGroupStart subscriber must wait.
+
+    Brokered webcam copies the 1s master — do not report the solo 0.25s GOP
+    for a bitstream that still closes every second. File/solo use
+    ``moq_gop_frames_for_latency``. This is object cadence, not ingest RTT.
+    """
+    if brokered:
+        return float(BROKER_GOP_MS)
+    frames = moq_gop_frames_for_latency(target_latency_ms, fps=fps)
+    return round((frames / float(fps)) * 1000.0, 1)
 
 
 def hls_live_sync_duration_sec(target_latency_ms: int) -> float:
@@ -430,6 +450,7 @@ def ensure_known_ladder(ladder_id: str) -> str:
 # Re-export for callers that already import audio args from moq_publish.
 __all__ = [
     "ASSUMED_FPS",
+    "BROKER_GOP_MS",
     "DEFAULT_ENCODE_LADDER_ID",
     "DEFAULT_MOQ_TARGET_LATENCY_MS",
     "DEFAULT_TARGET_LATENCY_MS",
@@ -450,10 +471,12 @@ __all__ = [
     "ensure_known_ladder",
     "gop_frames_for_latency",
     "moq_gop_frames_for_latency",
+    "moq_group_duration_ms",
     "hls_live_sync_count",
     "hls_live_sync_duration_sec",
     "hls_segment_sec",
     "HLS_SEGMENT_SEC_MIN",
+    "LL_HLS_PART_MS",
     "list_encode_ladders",
     "moq_player_target_latency_ms",
     "resolve_encode_ladder",

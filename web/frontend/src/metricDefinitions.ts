@@ -42,12 +42,12 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   net_rtt_ms: {
     label: "Network RTT",
     description:
-      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; RTMP → Zixi receiver RTT when available, otherwise TCP connect probe to the RTMP host:port; WebRTC → ICE candidate-pair currentRoundTripTime; MoQ → picoquic qlog smoothed RTT when available, otherwise TCP path probe to the relay admin port (same host as WebTransport).",
+      "Normalized round-trip time (ms). SRT → libsrt/Zixi RTT; RTMP → Zixi receiver RTT when available, otherwise TCP connect probe to the RTMP host:port; WebRTC → ICE candidate-pair currentRoundTripTime; MoQ (moq5 canary) → picoquic qlog smoothed_rtt. Blank until the first qlog sample. The TCP admin-port probe is never written here on moq5.",
   },
   net_jitter_ms: {
     label: "Network jitter",
     description:
-      "Normalized RTT jitter (ms) from successive RTT samples. SRT → libsrt; RTMP/MoQ → path-probe or Zixi RTT variance (same estimator).",
+      "Normalized RTT jitter (ms) from successive RTT samples. SRT → libsrt; RTMP → path-probe or Zixi; MoQ (moq5) → mean absolute delta of picoquic latest_rtt samples. Blank until the first qlog sample.",
   },
   net_send_mbps: {
     label: "Network send rate",
@@ -80,37 +80,42 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   latency_encode_ms: {
     label: "Latency · encode",
     description:
-      "Component 1 of the latency budget: capture → muxed output. The constant encoder pipeline offset (x264 lookahead, mux buffering, device/broker warmup — 1.2–2.4s typical) plus any sustained encode lag on top. encode_lag_ms deliberately charts only the growth past that offset; this metric adds the offset back so the budget accounts for it exactly once.",
+      "Capture → encoded AU: encoder pipeline offset plus sustained encode lag — GOP-close wait is not here; that is latency_segmentation_ms.",
+  },
+  latency_segmentation_ms: {
+    label: "Latency · CMAF group (segmentation)",
+    description:
+      "AU → closed group: IDR/group duration the subscriber must wait (NextGroupStart worst-case ≈ one group). 0.5s/1s on MoQ CMAF is group duration (NextGroupStart), not ingest RTT; LL-HLS parts are 200ms, not a 1s CMAF group; WebRTC is n/a, never 0.",
   },
   latency_publish_ms: {
     label: "Latency · publish",
     description:
-      "Component 2: muxed output → ingest, per sample. No protocol produces this measurement yet, so it reads 0 and 'publish' is listed in latency_unmeasured on every leg. It is deliberately NOT upload_latency_ms: that is a one-shot startup figure (encoder-ready → first confirmed publish), and adding a startup constant to every steady-state sample used to inflate the accounted total for a whole run. Read upload_latency_ms in its own column for the startup number.",
+      "Closed group → ingest, per sample — unmeasured on every protocol today (not upload_latency_ms, which is a one-shot startup figure).",
   },
   latency_network_ms: {
     label: "Latency · network",
     description:
-      "Component 3: one-way path estimate, net_rtt_ms ÷ 2. Assumes a symmetric path. Available on SRT (libsrt), RTMP (TCP connect probe) and WebRTC (ICE currentRoundTripTime) — the underlying measurement differs per protocol, so treat cross-protocol differences of a few ms as noise. MoQ has no RTT source wired: the openmoq publisher emits no qlog and the relay admin TCP port the probe targets is not reachable, so MoQ legs list 'network' in latency_unmeasured instead of reporting a 0 ms hop.",
+      "One-way path estimate (net_rtt_ms ÷ 2); MoQ is unmeasured unless picoquic qlog RTT exists — do not invent 0.",
   },
   latency_packager_ms: {
     label: "Latency · packager",
     description:
-      "Component 4: ingest → delivery-ready. Measured for MediaMTX LL-HLS from EXT-X-PROGRAM-DATE-TIME versus the encode anchor (folds in SRT tsbpd + network + remux). Zixi HTTP-TS is a measured ~0 by construction (continuous TS, no packaging buffer). Zixi Fast HLS carries no PDT and MoQ has no packager clock, so on those legs there is no instrument at all: they list 'packager' in latency_unmeasured and their packaging time is part of the residual. A 0 here with 'packager' unmeasured means unknown, not free.",
+      "Ingest → delivery-ready remux; 0 + packager unmeasured means unknown, not a free remux (MediaMTX LL-HLS PDT is measured; Zixi Fast HLS and MoQ are not).",
   },
   latency_player_buffer_ms: {
     label: "Latency · player buffer",
     description:
-      "Component 5: delivery → glass. Media queued AHEAD of the playhead (HTMLMediaElement.buffered, or the WebRTC jitter buffer). Browser MoQ LOC renders to canvas and has no HTML buffer, so it contributes 0 — its 'seconds behind live' figure is the opposite direction and travels in playback_behind_live_sec, which is never summed into this chain. Unmeasured (and listed as such) for any sample where the player was not reporting.",
+      "Delivery → glass: media queued ahead of the playhead (HTML buffer / WebRTC jitter); MoQ LOC canvas reports 0 here and keeps behind-live in playback_behind_live_sec.",
   },
   latency_accounted_ms: {
     label: "Latency · accounted",
     description:
-      "Sum of the latency components that this leg's e2e estimator actually spans — see latency_e2e_scope. Compare against e2e_latency_ms: close together means the decomposition explains the glass delay; the gap in either direction is split into latency_residual_ms and latency_overcount_ms.",
+      "Sum of in-scope hops this leg's e2e estimator actually spans (see latency_e2e_scope); n/a stages are excluded.",
   },
   latency_residual_ms: {
     label: "Latency · unattributed",
     description:
-      "Measured glass delay the accounted components do not explain. A deliberate part of the model, not an error term to ignore: a large residual says the e2e estimate and the individual stages disagree, which is the signal to distrust a single-number comparison. Check latency_unmeasured first — on Zixi legs the residual is largely the packager stage, which has no instrument rather than being zero. Never negative: components exceeding the measurement is a different fact and is reported in latency_overcount_ms.",
+      "Measured glass delay the accounted hops do not explain — check latency_unmeasured first (publish, MoQ network, Zixi/MoQ packager) before treating leftover as GOP.",
   },
   latency_overcount_ms: {
     label: "Latency · over-attributed",
@@ -120,12 +125,17 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   latency_unmeasured: {
     label: "Latency · unmeasured stages",
     description:
-      "Which pipeline stages have no instrument on this leg, comma separated. A component reading 0.0 means 'measured, and it was zero' only if it is absent from this list; if it is present, 0.0 means 'nothing measures this here' and the time is inside the residual. Today: 'publish' on every leg, 'packager' on Zixi and MoQ, 'network' on MoQ, 'player_buffer' on samples where the browser was not reporting.",
+      "Comma-separated hops with no instrument (publish everywhere; network on MoQ without qlog; packager on Zixi/MoQ; segmentation when GOP/part duration is unknown). 0.0 on a named hop is unknown, not free.",
+  },
+  latency_not_applicable: {
+    label: "Latency · not-applicable stages",
+    description:
+      "Hops that structurally do not exist on this protocol — WebRTC has no CMAF group (segmentation), so it is n/a here rather than 0 or unmeasured.",
   },
   latency_e2e_scope: {
     label: "Latency · e2e scope",
     description:
-      "Which span this leg's e2e_latency_ms actually measures, and therefore which components may be summed against it. 'capture_to_glass' (HLS PDT, HTTP-TS, MoQ) includes the sender's encode pipeline, so all five stages are in scope. 'ingest_to_glass' (WHEP) is a receiver-side estimate built from ICE RTT/2 plus jitterBufferDelay and structurally cannot see the sender: latency_encode_ms is still reported there so the operator knows the pipeline exists, but it is excluded from the accounted total. Two legs with different scopes are not measuring the same thing — a WHEP number is not comparable to an HLS number without adding the encode column back.",
+      "Span e2e_latency_ms covers: capture_to_glass (encode + CMAF group + later hops), ingest_to_glass (WHEP; sender hops reported but not summed), or capture_to_ingest (upload-only; segmentation in, player buffer out).",
   },
   startup_dns_ms: {
     label: "Startup · DNS",
@@ -256,10 +266,20 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
     description:
       "Painted frames as a share of encoded frames over the window the player was actually attached for — the only frame metric spanning the whole chain, and the only one that catches loss in the middle (relay drop, packager gap, decoder flush) that neither endpoint counter sees on its own. 100% means every frame encoded since the player attached reached the glass. Both counters are differenced against their value at attach, because they are cumulative from different zero points: dividing the raw totals measured how late the browser attached, not delivery. Blank means there is no shared window yet (or the player has stopped reporting), which is unknown rather than zero. Not capped at 100% — a player reading ahead of the encoder counter is clock skew, and hiding that behind a perfect score is what a cap would do.",
   },
+  go_live_at_sec: {
+    label: "Go Live at (s)",
+    description:
+      "Elapsed second of the first operator Go Live click. The glass delay at that instant is go_live_e2e_ms — logged before the seek so a hitch does not rewrite the comparison series.",
+  },
+  go_live_e2e_ms: {
+    label: "Go Live e2e (before click)",
+    description:
+      "Estimated glass delay immediately before the operator clicked Go Live. Auto-chase is the default; this records what the glass looked like when someone asked to drain to the live edge.",
+  },
   e2e_latency_ms: {
     label: "Glass delay (estimated)",
     description:
-      "Capture-to-glass delay in milliseconds, comparable across protocols. MoQ LOC: last painted frame's CaptureTimestamp (or path delay) plus stall time if the canvas is frozen — a stalled playhead must climb, never sit at a healthy ~30ms. WebRTC: encode time + RTT/2 + jitter buffer. HLS/HTTP-TS: clock-skew-corrected wall now minus the encoder-timeline playhead. Distinct from TTFF.",
+      "Painted-frame capture→glass (or the scope in latency_e2e_scope): MoQ CMAF is encode-timeline glass, never playa latencyMs; WebRTC WHEP is ingest-to-glass. Distinct from TTFF and from CMAF group duration.",
   },
   playback_fps: {
     label: "Playback FPS",
@@ -410,7 +430,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   server_cpu_percent: {
     label: "Server CPU",
     description:
-      "CPU on the destination edge VM. Zixi: ingest-agent psutil (GCP Monitoring fallback). MoQ: GCP Monitoring on the relay instance. 0% often means not collected.",
+      "CPU on the destination edge VM when an ingest-host poller exists. Blank means unmeasured (MediaMTX without a host agent) — not “the server is free.” A written 0% is a real reading.",
   },
   server_memory_percent: {
     label: "Server memory",
@@ -437,7 +457,7 @@ export const METRIC_DEFINITIONS: Record<string, MetricDefinition> = {
   quic_rtt_ms: {
     label: "QUIC RTT",
     description:
-      "Smoothed round-trip time from the moq5 publisher picoquic qlog (recovery/metrics_updated), in milliseconds. Reads 0 with the openmoq publisher (no qlog): the TCP-connect path probe used as a stand-in is reported under net_rtt_ms, not here — it is not a QUIC measurement.",
+      "Smoothed round-trip time from the moq5 publisher picoquic qlog (recovery/metrics_updated.smoothed_rtt, µs→ms). Blank until the first qlog sample. Never a TCP admin-port probe. Empty on openmoq (no qlog).",
   },
   quic_cwnd_bytes: {
     label: "QUIC congestion window",

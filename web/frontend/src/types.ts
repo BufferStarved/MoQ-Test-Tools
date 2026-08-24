@@ -42,9 +42,11 @@ export interface UploadSample {
   encode_lag_ms?: number;
   upload_latency_ms?: number | null;
   e2e_latency_ms?: number;
-  // Latency decomposition (src/latency_budget.py ↔ latencyBudget.ts). The five
-  // components sum to latency_accounted_ms; e2e minus that is the residual.
+  go_live_at_sec?: number;
+  go_live_e2e_ms?: number;
+  // Latency decomposition (src/latency_budget.py ↔ latencyBudget.ts).
   latency_encode_ms?: number;
+  latency_segmentation_ms?: number;
   latency_publish_ms?: number;
   latency_network_ms?: number;
   latency_packager_ms?: number;
@@ -55,8 +57,11 @@ export interface UploadSample {
   latency_overcount_ms?: number;
   /** Comma-separated stage names with no instrument on this leg. */
   latency_unmeasured?: string;
-  /** Which span e2e_latency_ms covers: capture_to_glass | ingest_to_glass. */
+  /** Comma-separated stages that do not exist on this protocol (WebRTC CMAF group). */
+  latency_not_applicable?: string;
+  /** Which span e2e_latency_ms covers: capture_to_glass | ingest_to_glass | capture_to_ingest. */
   latency_e2e_scope?: string;
+  test_scope?: string;
   encode_frames_total?: number;
   encode_frames_dropped?: number;
   encode_frames_duped?: number;
@@ -144,6 +149,8 @@ export interface UploadJob {
   preset_id?: string;
   encode_ladder?: string | null;
   target_latency_ms?: number | null;
+  playback_policy?: "live-edge" | "complete" | string | null;
+  test_scope?: "upload" | "e2e" | string | null;
   publisher_host?: "cloud" | "local" | "browser" | string | null;
   moq_namespace?: string | null;
   zixi_stream_id?: string | null;
@@ -238,6 +245,7 @@ export interface ResultAverages {
   upload_latency_ms?: number;
   // Latency decomposition (src/latency_budget.py).
   latency_encode_ms?: number;
+  latency_segmentation_ms?: number;
   latency_publish_ms?: number;
   latency_network_ms?: number;
   latency_packager_ms?: number;
@@ -364,5 +372,7 @@ export interface ResultSummary {
     playback_engine?: string;
     /** Set when playback_engine is not the protocol's own delivery path. */
     playback_engine_caveat?: string;
+    playback_policy?: string;
+    test_scope?: string;
   };
 }

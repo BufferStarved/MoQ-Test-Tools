@@ -77,6 +77,7 @@ function createMockAdapter(): MoqtConnection & {
     unsubscribe: vi.fn(async () => {}),
     fetch: vi.fn(async () => varint(nextRequestId++)),
     fetchCancel: vi.fn(async () => {}),
+    joiningFetch: vi.fn(async () => varint(nextRequestId++)),
     trackStatus: vi.fn(async () => varint(nextRequestId++)),
     subscribeNamespace: vi.fn(async () => varint(nextRequestId++)),
     cancelNamespace: vi.fn(async () => {}),
@@ -656,6 +657,49 @@ describe('MoqtPlayer', () => {
       expect(fn).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'catalog_received' }),
       );
+    });
+
+    it('does not subscribe on an empty first catalog; re-selects when it updates', async () => {
+      const adapter = createMockAdapter();
+      const player = await loadPlayer(adapter);
+      const received = vi.fn();
+      const updated = vi.fn();
+      player.on('catalog_received', received);
+      player.on('catalog_updated', updated);
+
+      const catalogReqId = await (adapter.subscribe as any).mock.results[0]?.value;
+      const subscribeCountAfterLoad = adapter.subscribe.mock.calls.length;
+
+      adapter._triggerObject(0n, {
+        kind: 'data',
+        trackAlias: catalogReqId,
+        groupId: varint(0),
+        subgroupId: varint(0),
+        objectId: varint(0),
+        payload: new TextEncoder().encode(JSON.stringify({ version: 1, tracks: [] })),
+      } as MoqtObject);
+
+      expect(received).not.toHaveBeenCalled();
+      expect(updated).not.toHaveBeenCalled();
+      expect(adapter.subscribe.mock.calls.length).toBe(subscribeCountAfterLoad);
+
+      adapter._triggerObject(0n, {
+        kind: 'data',
+        trackAlias: catalogReqId,
+        groupId: varint(1),
+        subgroupId: varint(0),
+        objectId: varint(0),
+        payload: new TextEncoder().encode(CATALOG_JSON),
+      } as MoqtObject);
+
+      expect(received).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'catalog_received' }),
+      );
+      expect(updated).not.toHaveBeenCalled();
+      // subscribeToMediaTracks is async — flush microtasks
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(adapter.subscribe.mock.calls.length).toBeGreaterThan(subscribeCountAfterLoad);
     });
 
     it('emits catalog_updated on subsequent catalog objects', async () => {

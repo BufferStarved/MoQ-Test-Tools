@@ -122,16 +122,23 @@ export type MoqMediaPackaging = "cmaf" | "loc";
  * clocks are missing — cloud ffmpeg CMAF has no CaptureTimestamp and
  * `joinMediaOffsetSec` is often null, which used to leave e2e as a column
  * of zeros while frames were on screen (comparison CSV 2026-08-18).
+ *
+ * CMAF must not consume playa `stats.latencyMs` — that gauge is LOC
+ * CaptureTimestamp. Using it here short-circuited the encode-timeline math.
  */
 export function computeMoqE2eMs(options: {
   playerLatencyMs?: number;
   bridgeMs?: number;
   encoderLagMs?: number;
+  /** Full capture→muxed component (baseline + lag). Live-edge rebase only. */
+  encodeComponentMs?: number;
   rttMs?: number;
   bufferMs?: number;
   mediaPackaging?: MoqMediaPackaging;
   joinOffsetSec?: number | null;
   videoCurrentTimeSec?: number;
+  bufferedEndSec?: number | null;
+  deliveryOriginSec?: number | null;
   moqTimelineMs?: number;
   epochSec?: number;
   nowMs?: number;
@@ -162,28 +169,34 @@ export function computeMoqE2eMs(options: {
     });
   }
 
-  if (isPlausibleE2eMs(options.playerLatencyMs)) {
-    const total = options.playerLatencyMs + bridge;
+  // Everything below is the CMAF path: LOC returned above. playa latencyMs
+  // is CaptureTimestamp — do not treat it as CMAF glass.
+
+  const join = options.joinOffsetSec;
+  if (join != null && join > 1e6 && videoT > 0.05) {
+    const mediaPosSec = join + videoT;
+    const total = now + skew - mediaPosSec * 1000 + bridge;
     if (isPlausibleE2eMs(total)) {
       return Math.round(total);
     }
   }
 
-  // Everything below is the CMAF path: LOC returned above.
-  const join = options.joinOffsetSec;
-  if (join != null && videoT > 0.05) {
-    const mediaPosSec = join + videoT;
-    if (mediaPosSec > 1e6) {
-      const total = now + skew - mediaPosSec * 1000 + bridge;
-      if (isPlausibleE2eMs(total)) {
-        return Math.round(total);
-      }
-    } else if (epoch > 0) {
-      const total = now + skew - epoch * 1000 - mediaPosSec * 1000 + bridge;
-      if (isPlausibleE2eMs(total)) {
-        return Math.round(total);
-      }
-    }
+  const bufferedEnd =
+    options.bufferedEndSec ??
+    (options.bufferMs != null && videoT >= 0 ? videoT + options.bufferMs / 1000 : null);
+  const anchored = encodeAnchoredE2eMs({
+    epochSec: epoch,
+    rawVideoTimeSec: videoT,
+    nowMs: now,
+    clockSkewMs: skew,
+    bridgeMs: bridge,
+    deliveryOriginSec: options.deliveryOriginSec,
+    joinOffsetSec: join,
+    bufferedEndSec: bufferedEnd,
+    encodeComponentMs: options.encodeComponentMs ?? options.encoderLagMs,
+  });
+  if (anchored) {
+    return anchored;
   }
 
   const timelineMs = options.moqTimelineMs ?? 0;
@@ -193,17 +206,11 @@ export function computeMoqE2eMs(options: {
       return Math.round(total);
     }
   }
-  if (epoch > 0 && videoT > 0.05) {
-    const total = now + skew - epoch * 1000 - videoT * 1000 + bridge;
-    if (isPlausibleE2eMs(total)) {
-      return Math.round(total);
-    }
-  }
 
   // LOC glass is capture→now. Do not use playheadAnchored here for LOC — that
   // is why it returns above: videoTime is often framesRendered/30, so dropped
   // frames make e2e climb 1:1 with wall even when the canvas delay is steady.
-  const anchored = playheadAnchoredE2eMs({
+  const playheadAnchored = playheadAnchoredE2eMs({
     ttffMs: options.ttffMs,
     firstFrameAtMs: options.firstFrameAtMs,
     firstFrameVideoSec: options.firstFrameVideoSec,
@@ -211,8 +218,8 @@ export function computeMoqE2eMs(options: {
     videoTimeSec: videoT,
     bridgeMs: bridge,
   });
-  if (anchored) {
-    return anchored;
+  if (playheadAnchored) {
+    return playheadAnchored;
   }
 
   return pathDelayMs({
@@ -220,4 +227,189 @@ export function computeMoqE2eMs(options: {
     rttMs: options.rttMs,
     playerBufferMs: (options.bufferMs ?? 0) + bridge,
   });
+}
+
+/** Join offset is media-timeline (tfdt), not wall-clock attach delay. */
+export function isMediaTimelineJoinOffset(
+  joinOffsetSec: number | null | undefined,
+  videoTimeSec: number,
+  wallSinceEpochSec: number,
+): joinOffsetSec is number {
+  if (joinOffsetSec == null || !Number.isFinite(joinOffsetSec) || joinOffsetSec < 0) {
+    return false;
+  }
+  // Wall-attach: join ≈ how late we attached and currentTime is still
+  // session-from-0. Match the live-edge rebase window (`vt < 1.5`) so a
+  // first-paint join at vt≈1.0 cannot leak as tfdt (comparison 26).
+  if (
+    videoTimeSec < 1.5 &&
+    wallSinceEpochSec > 2 &&
+    Math.abs(joinOffsetSec - wallSinceEpochSec) < 1.25
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Encode-timeline position of the painted frame.
+ *
+ * Prefer publisher tfdt / delivery origin. If currentTime is still near 0
+ * while wall−epoch is large, rebase off the live edge (same class as Fast
+ * HLS `deliveryMediaOriginSec`) so e2e is capture→glass of that frame —
+ * not "how late we attached". Returns undefined rather than a confident
+ * join-offset glass number when nothing encode-anchors the playhead.
+ */
+export type EncodeMediaAnchorKind = "join" | "delivery" | "live-edge" | "raw";
+
+export type EncodeMediaAnchor = {
+  mediaPosSec: number;
+  kind: EncodeMediaAnchorKind;
+};
+
+/**
+ * Encode-timeline position of the painted frame, plus how it was anchored.
+ *
+ * `live-edge` means CMAF `currentTime` is session-from-0 and join/tfdt was
+ * missing or rejected — rebase off `bufferedEnd` for the *whole* run.
+ * Using raw `currentTime` after `vt > 1.5` baked a flat ~4.5s above buffer
+ * (comparison 26).
+ */
+export function resolveEncodeMediaAnchor(options: {
+  rawVideoTimeSec: number;
+  epochSec: number;
+  nowMs?: number;
+  clockSkewMs?: number;
+  deliveryOriginSec?: number | null;
+  joinOffsetSec?: number | null;
+  bufferedEndSec?: number | null;
+}): EncodeMediaAnchor | undefined {
+  const videoT = options.rawVideoTimeSec;
+  const epoch = options.epochSec;
+  if (!Number.isFinite(videoT) || videoT < 0) {
+    return undefined;
+  }
+  const now = options.nowMs ?? Date.now();
+  const skew = options.clockSkewMs ?? 0;
+  const wallSec = epoch > 0 ? (now + skew) / 1000 - epoch : 0;
+  const join = options.joinOffsetSec;
+
+  if (isMediaTimelineJoinOffset(join, videoT, wallSec)) {
+    return { mediaPosSec: join + videoT, kind: "join" };
+  }
+  if (options.deliveryOriginSec != null && Number.isFinite(options.deliveryOriginSec)) {
+    return { mediaPosSec: options.deliveryOriginSec + videoT, kind: "delivery" };
+  }
+  const bufferedEnd = options.bufferedEndSec;
+  // Session-relative currentTime + large wall−epoch is join offset, not the
+  // painted frame — for the whole run, not only vt < 1.5. Live edge of the
+  // HTML buffer is the newest received media; treat that as "now".
+  if (
+    epoch > 0 &&
+    wallSec > 2.5 &&
+    bufferedEnd != null &&
+    Number.isFinite(bufferedEnd) &&
+    bufferedEnd >= videoT
+  ) {
+    return { mediaPosSec: wallSec - bufferedEnd + videoT, kind: "live-edge" };
+  }
+  // Last resort when nothing queued the live edge: encode-anchored
+  // currentTime (origin 0). Do not take this path when bufferedEnd exists.
+  if (epoch > 0 && videoT > 1.5 && wallSec - videoT > 0.05 && wallSec - videoT < 60) {
+    return { mediaPosSec: videoT, kind: "raw" };
+  }
+  return undefined;
+}
+
+export function resolveEncodeMediaPosSec(options: {
+  rawVideoTimeSec: number;
+  epochSec: number;
+  nowMs?: number;
+  clockSkewMs?: number;
+  deliveryOriginSec?: number | null;
+  joinOffsetSec?: number | null;
+  bufferedEndSec?: number | null;
+}): number | undefined {
+  return resolveEncodeMediaAnchor(options)?.mediaPosSec;
+}
+
+export function encodeAnchoredE2eMs(options: {
+  epochSec: number;
+  rawVideoTimeSec: number;
+  nowMs?: number;
+  clockSkewMs?: number;
+  bridgeMs?: number;
+  deliveryOriginSec?: number | null;
+  joinOffsetSec?: number | null;
+  bufferedEndSec?: number | null;
+  encodeComponentMs?: number;
+}): number | undefined {
+  const epoch = options.epochSec;
+  if (!(epoch > 0)) {
+    return undefined;
+  }
+  const anchor = resolveEncodeMediaAnchor(options);
+  if (anchor == null) {
+    return undefined;
+  }
+  const now = options.nowMs ?? Date.now();
+  const skew = options.clockSkewMs ?? 0;
+  const bridge = options.bridgeMs ?? 0;
+  let total = now + skew - epoch * 1000 - anchor.mediaPosSec * 1000 + bridge;
+  // Live-edge rebase is hold only (wall − live + playhead). Capture-class
+  // glass still includes encode; tfdt/delivery anchors already contain it.
+  if (anchor.kind === "live-edge") {
+    total += Math.max(0, options.encodeComponentMs ?? 0);
+  }
+  return isPlausibleE2eMs(total) ? Math.round(total) : undefined;
+}
+
+const PLAYHEAD_STALL_EPS_SEC = 0.05;
+
+/**
+ * A frozen playhead is not +1s/s of glass delay. Hold the last reading
+ * taken while the painted frame was still advancing (including a Go Live
+ * seek, which jumps currentTime forward).
+ */
+export function holdE2eWhilePlayheadFrozen(
+  computed: number | undefined,
+  videoTimeSec: number,
+  last: { videoTimeSec: number; e2eMs: number } | undefined,
+): { e2eMs: number | undefined; last: { videoTimeSec: number; e2eMs: number } | undefined } {
+  if (computed == null) {
+    return { e2eMs: last?.e2eMs, last };
+  }
+  if (
+    last &&
+    Number.isFinite(videoTimeSec) &&
+    Math.abs(videoTimeSec - last.videoTimeSec) <= PLAYHEAD_STALL_EPS_SEC
+  ) {
+    return { e2eMs: last.e2eMs, last };
+  }
+  return { e2eMs: computed, last: { videoTimeSec, e2eMs: computed } };
+}
+
+/**
+ * Drop a one-shot packager transit that is just (PDT−anchor − 1s).
+ * PDT is already packaging-time; adding that snapshot overstated every
+ * later LL-HLS sample (comparison 2026-08-23: 4.6s stuck for the run).
+ */
+export function usablePackagerTransitMs(options: {
+  transitMs?: number | null;
+  playheadPdtMs?: number;
+  epochSec?: number;
+}): number {
+  const transit = options.transitMs;
+  if (transit == null || !(transit > 0) || !Number.isFinite(transit)) {
+    return 0;
+  }
+  const pdt = options.playheadPdtMs ?? 0;
+  const epoch = options.epochSec ?? 0;
+  if (pdt > 0 && epoch > 0) {
+    const elapsedSec = pdt / 1000 - epoch;
+    if (elapsedSec > 2 && Math.abs(transit / 1000 - (elapsedSec - 1)) < 0.4) {
+      return 0;
+    }
+  }
+  return transit;
 }

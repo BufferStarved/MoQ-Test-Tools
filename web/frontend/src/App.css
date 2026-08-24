@@ -645,6 +645,11 @@ select:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+option.option-unavailable,
+option:disabled {
+  color: var(--text-faint);
+}
+
 select:disabled,
 input:disabled {
   opacity: 0.55;
@@ -905,6 +910,10 @@ input:disabled {
   max-width: 720px;
 }
 
+.cloud-protocol-section .source-mode-options {
+  max-width: 920px;
+}
+
 .source-mode-options-primary {
   max-width: 720px;
 }
@@ -954,6 +963,39 @@ input:disabled {
 .encode-encoder-locked {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+.playback-policy-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ingest-monitor {
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px;
+  border: 1px dashed var(--surface-border-strong);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.ingest-monitor-kicker {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ingest-monitor-body {
+  margin: 0;
+  color: var(--text-soft);
 }
 
 .encode-location-options .source-mode-card {
@@ -2512,6 +2554,11 @@ code {
   color: rgba(248, 250, 252, 0.7);
 }
 
+.player-hud-hint {
+  color: rgba(248, 250, 252, 0.62);
+  font-weight: 500;
+}
+
 .metric-figure {
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, monospace;
@@ -2519,6 +2566,44 @@ code {
 
 .metric-best {
   color: var(--success);
+}
+
+.recipe-options {
+  max-width: 960px;
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+}
+
+.recipe-options .source-mode-card.recipe-card-custom {
+  border-style: dashed;
+  border-color: var(--surface-border-strong);
+  background: var(--surface-soft);
+}
+
+.recipe-options .source-mode-card.recipe-card-custom.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.recipe-options .source-mode-card.recipe-card-custom .eyebrow {
+  margin: 0;
+}
+
+.recipe-locked-summary {
+  margin: 8px 0 0;
+}
+
+.outputs-locked-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--text-soft);
+}
+
+.stream-column-locked-label {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-soft);
 }
 
 .benchmark-preset-row {
@@ -2583,6 +2668,10 @@ code {
   gap: 12px;
   flex-wrap: wrap;
   font-size: 0.85rem;
+}
+
+.go-live-button {
+  margin-left: auto;
 }
 
 .player-diagnostics {

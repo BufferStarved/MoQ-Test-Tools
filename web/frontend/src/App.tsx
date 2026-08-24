@@ -4,6 +4,7 @@ import {
   checkHealth,
   createUpload,
   fetchFeatures,
+  mintPublisherSession,
   fetchPresets,
   fetchProtocols,
   fetchResultDetail,
@@ -19,7 +20,7 @@ import {
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
 import { ComparisonCharts } from "./ComparisonCharts";
-import { EndpointSection } from "./EndpointSection";
+import { EndpointSection, playerShortLabel } from "./EndpointSection";
 import { AboutPage, PAYPAL_DONATE_URL } from "./AboutPage";
 import { ResultsErrorBoundary } from "./ResultsErrorBoundary";
 import { SessionMetrics } from "./SessionMetrics";
@@ -32,7 +33,11 @@ import {
   wantsEncoderVmaf,
   wantsIngestVmaf,
 } from "./qualityVmaf";
-import { applyPlaybackHighWater, mergePlaybackSampleIntoUploadSample } from "./playbackMetricsShared";
+import {
+  mergeEncoderSampleWithLivePlayback,
+  mergePlaybackSampleIntoUploadSample,
+  overlayPlaybackOnLatestSample,
+} from "./playbackMetricsShared";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { humanizeJobError } from "./moqCmafPlayback";
 import { encodeElapsedSecForVerdict } from "./playbackEndVerdict";
@@ -59,9 +64,11 @@ import {
   isLocalAgentSource,
   nextAddableEndpoint,
   obsMoqSupported,
+  publishProtocolIdsForSource,
   recipeIssue,
   RECIPE_CHROME_CAPS,
   siblingOccupiedCollisionKeys,
+  type PublishProtocolId,
   type RecipeContext,
 } from "./recipeSupport";
 import type { EndpointConfig, Preset, Protocol, ResultSummary, UploadJob, UploadSample } from "./types";
@@ -97,9 +104,40 @@ import { IconBroadcast, IconCpu, IconMonitor, IconPlus } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
 import { operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
-import { applyBenchmarkPreset, BENCHMARK_PRESET_DEFS, type BenchmarkPresetId } from "./benchmarkPresets";
-import { compareLiveMetrics } from "./comparisonVerdict";
+import {
+  applyBenchmarkPreset,
+  BENCHMARK_PRESET_DEFS,
+  cloudCompareProtocolHint,
+  cloudCompareProtocolLabel,
+  recipeLockedSummary,
+  recipeLocksProtocolMix,
+  recipeShowsEndpointPickers,
+  recipeShowsSharedProtocolPicker,
+  wizardStepVisible,
+  type BenchmarkPresetId,
+} from "./benchmarkPresets";
+import { captureClassHintMs, compareLiveMetrics, resolveSampleE2eScope } from "./comparisonVerdict";
 import { PlayerHud } from "./PlayerHud";
+import {
+  DEFAULT_PLAYBACK_POLICY,
+  PLAYBACK_POLICY_COMPLETE,
+  PLAYBACK_POLICY_COMPLETE_COPY,
+  PLAYBACK_POLICY_LIVE_COPY,
+  PLAYBACK_POLICY_LIVE_EDGE,
+  parsePlaybackPolicy,
+  playbackPolicyToggleVisible,
+  type PlaybackPolicy,
+} from "./playbackPolicy";
+import {
+  DEFAULT_TEST_SCOPE,
+  TEST_SCOPE_E2E,
+  TEST_SCOPE_E2E_COPY,
+  TEST_SCOPE_UPLOAD,
+  TEST_SCOPE_UPLOAD_COPY,
+  isUploadOnlyScope,
+  testScopeBanner,
+  type TestScope,
+} from "./testScope";
 
 type Tab = "benchmark" | "metrics" | "about";
 
@@ -108,6 +146,14 @@ const MAX_ENDPOINTS = 6;
 
 function minEndpointsForSource(_source: MediaSourceId): number {
   return MIN_ENDPOINTS;
+}
+
+function sharedOutputProtocol(endpoints: EndpointConfig[]): PublishProtocolId | undefined {
+  const protocol = endpoints[0]?.protocol;
+  if (!protocol || !endpoints.every((endpoint) => endpoint.protocol === protocol)) {
+    return undefined;
+  }
+  return protocol as PublishProtocolId;
 }
 
 function browserSourceCanStart(endpoints: EndpointConfig[]): boolean {
@@ -159,6 +205,23 @@ function createEndpointId(): string {
 const operatorPlan = parseOperatorSearch(
   typeof window !== "undefined" ? window.location.search : "",
 );
+const PUBLISHER_SESSION_KEY = "moq-publisher-session";
+
+function readPublisherSession(): string {
+  try {
+    return sessionStorage.getItem(PUBLISHER_SESSION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writePublisherSession(sessionId: string): void {
+  try {
+    sessionStorage.setItem(PUBLISHER_SESSION_KEY, sessionId);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 function buildDefaultEndpoints(ctx: RecipeContext = {
   source: "dummy",
@@ -288,10 +351,16 @@ function App() {
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
   const [encodeLadder, setEncodeLadder] = useState(DEFAULT_ENCODE_LADDER_ID);
+  const [playbackPolicy, setPlaybackPolicy] = useState<PlaybackPolicy>(DEFAULT_PLAYBACK_POLICY);
+  const [testScope, setTestScope] = useState<TestScope>(DEFAULT_TEST_SCOPE);
   const [encoder, setEncoder] = useState<EncoderId>(
     operatorPlan.encoder ?? (operatorPlan.source === "browser_moq" ? "browser" : "ffmpeg"),
   );
-  const [activePresetId, setActivePresetId] = useState<BenchmarkPresetId | null>(null);
+  const [activePresetId, setActivePresetId] = useState<BenchmarkPresetId | null>(() =>
+    operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
+      ? "build-your-own"
+      : null,
+  );
   const targetLatencyMs = DEFAULT_TARGET_LATENCY_MS;
   // Source and encode location are coupled 1:1 (cloud playout → API host,
   // webcam → this machine) — no independent "Publisher" toggle.
@@ -302,6 +371,7 @@ function App() {
       : mediaSource === "browser_moq"
         ? "browser"
         : "cloud";
+  const [publisherSession, setPublisherSession] = useState(readPublisherSession);
   const recipeCaps = useMemo(() => {
     const detected = detectBrowserMoqCapabilities();
     return {
@@ -501,7 +571,7 @@ function App() {
       const [protocolData, presetData, featureData] = await Promise.all([
         fetchProtocols(),
         fetchPresets(),
-        fetchFeatures().catch(() => ({
+        fetchFeatures(readPublisherSession()).catch(() => ({
           local_publisher: false,
           local_publisher_connected: false,
           local_publisher_whip: false,
@@ -552,6 +622,27 @@ function App() {
     startClockSkewProbe();
   }, [loadBootstrapData]);
 
+  useEffect(() => {
+    if (publisherSession) {
+      return;
+    }
+    let cancelled = false;
+    void mintPublisherSession()
+      .then((minted) => {
+        if (cancelled || !minted.session_id) {
+          return;
+        }
+        writePublisherSession(minted.session_id);
+        setPublisherSession(minted.session_id);
+      })
+      .catch(() => {
+        /* API offline — helper command waits until mint succeeds */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publisherSession]);
+
   // Poll agent connection whenever the API is up (local publish may be enabled).
   useEffect(() => {
     if (!apiOnline) {
@@ -560,7 +651,7 @@ function App() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const next = await fetchFeatures();
+        const next = await fetchFeatures(publisherSession);
         if (!cancelled) {
           setFeatures(next);
           if (!next.local_publisher && (isLocalAgentSource(mediaSource) || encoder === "obs")) {
@@ -582,7 +673,7 @@ function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [apiOnline, mediaSource, encoder]);
+  }, [apiOnline, mediaSource, encoder, publisherSession]);
 
   // Cameras advertised by the connected agent, for the last-mile picker.
   const agentWebcamDevices =
@@ -606,7 +697,36 @@ function App() {
     if ((next === "obs" || next === "browser") && mediaSource !== "webcam" && mediaSource !== "browser_moq") {
       return;
     }
-    setActivePresetId(null);
+    if (activePresetId === "protocol-compare" || activePresetId === "cloud-compare") {
+      const nextSource = next === "browser" ? "browser_moq" : mediaSource === "browser_moq" ? "webcam" : mediaSource;
+      setEncoder(next);
+      if (next === "browser") {
+        setMediaSource("browser_moq");
+        setMediaLabel("Browser camera");
+        setMediaPath(DEVICE_BROWSER_MEDIA);
+        setComputeVmaf(false);
+      } else if (mediaSource === "browser_moq") {
+        setMediaSource("webcam");
+        setMediaLabel("Webcam");
+        setMediaPath(lastMileWebcamMediaPath());
+      }
+      const plan = applyBenchmarkPreset(
+        activePresetId,
+        { ...recipeContext, source: nextSource, encoder: next },
+        createEndpointId,
+        {
+          currentEndpoints: endpoints,
+          source: nextSource,
+          encoder: next,
+          protocol: activePresetId === "cloud-compare" ? sharedOutputProtocol(endpoints) : undefined,
+        },
+      );
+      setEndpoints(plan.endpoints);
+      return;
+    }
+    if (activePresetId && activePresetId !== "build-your-own") {
+      setActivePresetId("build-your-own");
+    }
     if (next === "browser") {
       setEncoder("browser");
       setMediaSource("browser_moq");
@@ -644,7 +764,129 @@ function App() {
   function handleMediaSourceChange(next: MediaSourceId) {
     setMediaSource(next);
     setWebcamStatus(null);
-    setActivePresetId(null);
+    let nextEncoder: EncoderId = encoder;
+    if (next === "browser_moq") {
+      nextEncoder = "browser";
+    } else if (next === "webcam") {
+      if (encoder === "browser") {
+        nextEncoder = "ffmpeg";
+      }
+    } else if (encoder === "obs" || encoder === "browser") {
+      nextEncoder = "ffmpeg";
+    }
+    if (activePresetId === "cloud-compare") {
+      const nextSource = next;
+      const nextEnc: EncoderId =
+        nextSource === "browser_moq"
+          ? "browser"
+          : nextSource === "webcam"
+            ? encoder === "browser"
+              ? "ffmpeg"
+              : encoder
+            : "ffmpeg";
+      if (nextSource === "dummy") {
+        setMediaPath("dummy.mp4");
+        setMediaLabel("Default Color Bars");
+      } else if (nextSource === "bbb") {
+        setMediaPath(BBB_MEDIA_PATH);
+        setMediaLabel("Big Buck Bunny");
+      } else if (nextSource === "upload") {
+        setMediaPath("");
+        setMediaLabel("Choose a local file");
+        setComputeVmaf(false);
+      } else if (nextSource === "webcam") {
+        setMediaLabel("Webcam");
+        setMediaPath(lastMileWebcamMediaPath());
+        setComputeVmaf(false);
+      } else if (nextSource === "browser_moq") {
+        setMediaLabel("Browser camera");
+        setMediaPath(DEVICE_BROWSER_MEDIA);
+        setComputeVmaf(false);
+      }
+      setEncoder(nextEnc);
+      const plan = applyBenchmarkPreset(
+        "cloud-compare",
+        { ...recipeContext, source: nextSource, encoder: nextEnc },
+        createEndpointId,
+        {
+          currentEndpoints: endpoints,
+          source: nextSource,
+          encoder: nextEnc,
+          protocol: sharedOutputProtocol(endpoints),
+        },
+      );
+      setEndpoints(plan.endpoints);
+      return;
+    }
+    if (activePresetId === "contribution-compare") {
+      const nextSource = next === "browser_moq" ? "webcam" : next;
+      if (nextSource !== next) {
+        setMediaSource(nextSource);
+      }
+      setEncoder("ffmpeg");
+      if (nextSource === "dummy") {
+        setMediaPath("dummy.mp4");
+        setMediaLabel("Default Color Bars");
+      } else if (nextSource === "bbb") {
+        setMediaPath(BBB_MEDIA_PATH);
+        setMediaLabel("Big Buck Bunny");
+      } else if (nextSource === "upload") {
+        setMediaPath("");
+        setMediaLabel("Choose a local file");
+        setComputeVmaf(false);
+      } else {
+        setMediaLabel("Webcam");
+        setMediaPath(lastMileWebcamMediaPath());
+        setComputeVmaf(false);
+      }
+      const plan = applyBenchmarkPreset(
+        "contribution-compare",
+        { ...recipeContext, source: nextSource, encoder: "ffmpeg" },
+        createEndpointId,
+        { currentEndpoints: endpoints, source: nextSource, encoder: "ffmpeg" },
+      );
+      setEndpoints(plan.endpoints);
+      return;
+    }
+    if (activePresetId === "protocol-compare") {
+      if (next !== "webcam" && next !== "browser_moq" && (encoder === "obs" || encoder === "browser")) {
+        setEncoder("ffmpeg");
+      }
+      if (next === "webcam" && encoder === "browser") {
+        setEncoder("ffmpeg");
+      }
+      if (next === "dummy") {
+        setMediaPath("dummy.mp4");
+        setMediaLabel("Default Color Bars");
+      } else if (next === "bbb") {
+        setMediaPath(BBB_MEDIA_PATH);
+        setMediaLabel("Big Buck Bunny");
+      } else if (next === "upload") {
+        setMediaPath("");
+        setMediaLabel("Choose a local file");
+        setComputeVmaf(false);
+      } else if (next === "webcam") {
+        setMediaLabel("Webcam");
+        setMediaPath(lastMileWebcamMediaPath());
+        setComputeVmaf(false);
+      } else if (next === "browser_moq") {
+        setMediaLabel("Browser camera");
+        setMediaPath(DEVICE_BROWSER_MEDIA);
+        setComputeVmaf(false);
+        setEncoder("browser");
+      }
+      const plan = applyBenchmarkPreset(
+        "protocol-compare",
+        { ...recipeContext, source: next, encoder: nextEncoder },
+        createEndpointId,
+        { currentEndpoints: endpoints, source: next, encoder: nextEncoder },
+      );
+      setEndpoints(plan.endpoints);
+      return;
+    }
+    if (activePresetId && activePresetId !== "build-your-own") {
+      setActivePresetId("build-your-own");
+    }
     if (next !== "webcam" && next !== "browser_moq" && (encoder === "obs" || encoder === "browser")) {
       setEncoder("ffmpeg");
     }
@@ -677,14 +919,30 @@ function App() {
   }
 
   function handleBenchmarkPreset(id: BenchmarkPresetId) {
-    const plan = applyBenchmarkPreset(id, recipeContext, createEndpointId);
+    if (id === "build-your-own") {
+      setActivePresetId(id);
+      return;
+    }
+    const plan = applyBenchmarkPreset(id, recipeContext, createEndpointId, {
+      currentEndpoints: endpoints,
+      source: recipeContext.source,
+      encoder: recipeContext.encoder,
+    });
     setActivePresetId(id);
+    setTestScope(plan.testScope);
     setWebcamStatus(null);
     setEncoder(plan.encoder);
     setMediaSource(plan.source);
     if (plan.source === "dummy") {
       setMediaPath("dummy.mp4");
       setMediaLabel("Default Color Bars");
+    } else if (plan.source === "bbb") {
+      setMediaPath(BBB_MEDIA_PATH);
+      setMediaLabel("Big Buck Bunny");
+    } else if (plan.source === "upload") {
+      setMediaPath("");
+      setMediaLabel("Choose a local file");
+      setComputeVmaf(false);
     } else if (plan.source === "webcam") {
       setMediaPath(lastMileWebcamMediaPath());
       setMediaLabel("Webcam");
@@ -944,13 +1202,49 @@ function App() {
     );
   }
 
+  function handleCloudProtocolChange(protocol: PublishProtocolId) {
+    if (activePresetId !== "cloud-compare") {
+      return;
+    }
+    let source = recipeContext.source;
+    let nextEncoder = recipeContext.encoder ?? "ffmpeg";
+    if (
+      (protocol === "srt" || protocol === "rtmp") &&
+      (nextEncoder === "browser" || source === "browser_moq")
+    ) {
+      nextEncoder = "ffmpeg";
+      if (source === "browser_moq") {
+        source = "webcam";
+        setMediaSource("webcam");
+        setMediaLabel("Webcam");
+        setMediaPath(lastMileWebcamMediaPath());
+      }
+      setEncoder("ffmpeg");
+    }
+    const plan = applyBenchmarkPreset(
+      "cloud-compare",
+      { ...recipeContext, source, encoder: nextEncoder },
+      createEndpointId,
+      {
+        currentEndpoints: endpoints,
+        source,
+        encoder: nextEncoder,
+        protocol,
+      },
+    );
+    setEndpoints(plan.endpoints);
+  }
+
   function addEndpoint() {
-    setActivePresetId(null);
+    if (activePresetId && activePresetId !== "build-your-own" && activePresetId !== "cloud-compare") {
+      setActivePresetId("build-your-own");
+    }
     setEndpoints((current) => {
       if (current.length >= MAX_ENDPOINTS) {
         return current;
       }
-      const next = nextAddableEndpoint(current, recipeContext);
+      const mix = recipeLocksProtocolMix(activePresetId) ? sharedOutputProtocol(current) : undefined;
+      const next = nextAddableEndpoint(current, recipeContext, mix ? [mix] : undefined);
       if (!next) {
         return current;
       }
@@ -959,7 +1253,9 @@ function App() {
   }
 
   function removeEndpoint(id: string) {
-    setActivePresetId(null);
+    if (activePresetId && activePresetId !== "build-your-own" && activePresetId !== "cloud-compare") {
+      setActivePresetId("build-your-own");
+    }
     setEndpoints((current) => {
       if (current.length <= minEndpointsForSource(mediaSource)) {
         return current;
@@ -981,6 +1277,8 @@ function App() {
     compute_vmaf_encoder: boolean;
     encode_ladder: string;
     target_latency_ms: number;
+    playback_policy?: PlaybackPolicy;
+    test_scope?: TestScope;
     comparison_id: string;
     stream_index: number;
     stream_label: string;
@@ -989,6 +1287,7 @@ function App() {
     endpoint_url?: string;
     publisher_host?: "cloud" | "local" | "browser";
     encoder?: "ffmpeg" | "obs";
+    publisher_session?: string;
   } {
     const presetId = resolvePresetId(endpoint);
     const isBrowserSource = resolvedMediaPath.toLowerCase().startsWith(DEVICE_BROWSER_MEDIA);
@@ -1013,6 +1312,8 @@ function App() {
       }),
       encode_ladder: encodeLadder,
       target_latency_ms: clampTargetLatencyMs(targetLatencyMsForProtocol(endpoint.protocol)),
+      playback_policy: playbackPolicy,
+      test_scope: testScope,
       comparison_id: comparisonId,
       stream_index: streamIndex,
       stream_label: endpointLabel(endpoint, streamIndex, presets),
@@ -1023,6 +1324,7 @@ function App() {
             ? publisherHost
             : "cloud",
       encoder: encoder === "obs" ? "obs" : "ffmpeg",
+      ...(publisherSession ? { publisher_session: publisherSession } : {}),
       ...(isCustomIngestEndpoint(endpoint.ingestEndpointId)
         ? {
             protocol: endpoint.protocol,
@@ -1064,9 +1366,15 @@ function App() {
                   ...leg,
                   samples: [
                     ...leg.samples,
-                    applyPlaybackHighWater(sample, leg.samples.at(-1)),
+                    mergeEncoderSampleWithLivePlayback(
+                      sample,
+                      leg.latestSample ?? leg.samples.at(-1),
+                    ),
                   ],
-                  latestSample: applyPlaybackHighWater(sample, leg.samples.at(-1)),
+                  latestSample: mergeEncoderSampleWithLivePlayback(
+                    sample,
+                    leg.latestSample ?? leg.samples.at(-1),
+                  ),
                 }
               : leg,
           ),
@@ -1556,9 +1864,50 @@ function App() {
   }
 
   const safariUnsupported = recipeCaps.safari;
-  const canAddOutput = canAddRecipeOutput(endpoints, recipeContext, MAX_ENDPOINTS);
+  const sharedProtocol = sharedOutputProtocol(endpoints);
+  const canAddOutput = canAddRecipeOutput(
+    endpoints,
+    recipeContext,
+    MAX_ENDPOINTS,
+    recipeLocksProtocolMix(activePresetId) && sharedProtocol ? [sharedProtocol] : undefined,
+  );
+  const recipePicked = activePresetId !== null;
+  const showTestScope = wizardStepVisible(activePresetId, "testScope");
+  const showSourceMode = wizardStepVisible(activePresetId, "source");
+  const showSourceOps =
+    recipePicked &&
+    (showSourceMode || isLocalAgentSource(mediaSource) || mediaSource === "browser_moq");
+  const showEncoderPicker = wizardStepVisible(activePresetId, "encoder");
+  const showSharedProtocol = recipeShowsSharedProtocolPicker(activePresetId);
+  const showOutputConfig = wizardStepVisible(activePresetId, "outputs");
+  const showEndpointPickers = recipeShowsEndpointPickers(activePresetId);
+  const showOutputTiles = showOutputConfig || showEndpointPickers;
+  const lockOutputProtocol = recipeLocksProtocolMix(activePresetId) || !showOutputConfig;
+  const lockedRecipeSummary = recipeLockedSummary(activePresetId);
+  const cloudProtocolChoices = showSharedProtocol
+    ? publishProtocolIdsForSource(
+        recipeContext.source,
+        recipeContext.caps,
+        recipeContext.publisher,
+        recipeContext.encoder ?? "ffmpeg",
+      )
+    : [];
+  const wizardStep = { n: 0 };
+  const allocWizardStep = (visible: boolean) => (visible ? (wizardStep.n += 1) : 0);
+  const recipeStep = allocWizardStep(true);
+  const testScopeStep = allocWizardStep(showTestScope);
+  const sourceStep = allocWizardStep(showSourceMode);
+  const protocolStep = allocWizardStep(showSharedProtocol);
+  const encodeStep = allocWizardStep(recipePicked);
+  const outputsStep = allocWizardStep(showOutputTiles);
   const liveMetricRanks = compareLiveMetrics(
-    endpoints.map((_, index) => comparisonLegs[index]?.latestSample ?? null),
+    endpoints.map((endpoint, index) => {
+      const sample = comparisonLegs[index]?.latestSample ?? null;
+      if (!sample) {
+        return { protocol: endpoint.protocol };
+      }
+      return { ...sample, protocol: endpoint.protocol };
+    }),
   );
   const needsLocalHelper =
     encoder === "obs" || isLocalAgentSource(mediaSource);
@@ -1683,21 +2032,78 @@ function App() {
           <>
             <section className="panel benchmark-shared">
               <div className="benchmark-shared-stack">
-                <div className="benchmark-preset-row" role="group" aria-label="Quick-start recipes">
-                  <span className="benchmark-preset-label">Recipes</span>
-                  {BENCHMARK_PRESET_DEFS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={`benchmark-preset-button${activePresetId === preset.id ? " selected" : ""}`}
-                      title={preset.hint}
-                      disabled={bootstrapping || !apiOnline || loading}
-                      onClick={() => handleBenchmarkPreset(preset.id)}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
+                <section className="recipe-section">
+                  <StepHeading
+                    step={recipeStep}
+                    title="Recipe"
+                    tip="Pick a precanned experiment or build your own. Precanned recipes default tiles and hide the steps they already decided."
+                  />
+                  <div className="source-mode-options recipe-options" role="radiogroup" aria-label="Harness recipes">
+                    {BENCHMARK_PRESET_DEFS.map((preset) => (
+                      <label
+                        key={preset.id}
+                        className={`source-mode-card${preset.id === "build-your-own" ? " recipe-card-custom" : ""}${activePresetId === preset.id ? " selected" : ""}`}
+                      >
+                        <input
+                          type="radio"
+                          name="harness-recipe"
+                          checked={activePresetId === preset.id}
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onChange={() => handleBenchmarkPreset(preset.id)}
+                        />
+                        <span className="source-mode-card-body">
+                          {preset.id === "build-your-own" ? <span className="eyebrow">Custom</span> : null}
+                          <strong>{preset.label}</strong>
+                          <span className="source-mode-card-hint">{preset.hint}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {lockedRecipeSummary ? (
+                    <p className="field-hint recipe-locked-summary">{lockedRecipeSummary}</p>
+                  ) : !recipePicked ? (
+                    <p className="field-hint">Choose a recipe to continue the wizard.</p>
+                  ) : null}
+                </section>
+                {showTestScope && (
+                <section className="test-scope-section">
+                  <StepHeading
+                    step={testScopeStep}
+                    title="Test"
+                    tip="Choose what this run measures. Upload-only stops at ingest — no glass tiles."
+                  />
+                  <div className="encode-location-options playback-policy-options" role="radiogroup" aria-label="Test scope">
+                    <label className={`source-mode-card${testScope === TEST_SCOPE_E2E ? " selected" : ""}`}>
+                      <input
+                        type="radio"
+                        name="test-scope"
+                        checked={testScope === TEST_SCOPE_E2E}
+                        disabled={bootstrapping || !apiOnline || loading}
+                        onChange={() => setTestScope(TEST_SCOPE_E2E)}
+                      />
+                      <span className="source-mode-card-body">
+                        <strong>End-to-end</strong>
+                        <span className="source-mode-card-hint">{TEST_SCOPE_E2E_COPY}</span>
+                      </span>
+                    </label>
+                    <label className={`source-mode-card${testScope === TEST_SCOPE_UPLOAD ? " selected" : ""}`}>
+                      <input
+                        type="radio"
+                        name="test-scope"
+                        checked={testScope === TEST_SCOPE_UPLOAD}
+                        disabled={bootstrapping || !apiOnline || loading}
+                        onChange={() => setTestScope(TEST_SCOPE_UPLOAD)}
+                      />
+                      <span className="source-mode-card-body">
+                        <strong>Upload only</strong>
+                        <span className="source-mode-card-hint">{TEST_SCOPE_UPLOAD_COPY}</span>
+                      </span>
+                    </label>
+                  </div>
+                  <p className="field-hint">{testScopeBanner(testScope)}</p>
+                </section>
+                )}
+                {showSourceOps && (
                 <SourceSection
                   mediaSource={mediaSource}
                   onMediaSourceChange={handleMediaSourceChange}
@@ -1723,16 +2129,51 @@ function App() {
                   preferD18Helper={endpoints.some((endpoint) =>
                     endpoint.ingestEndpointId.includes("moq_relay_d18"),
                   )}
+                  step={sourceStep}
+                  hideModePicker={!showSourceMode}
+                  publisherSession={publisherSession}
                 />
+                )}
 
+                {showSharedProtocol && (
+                <section className="cloud-protocol-section">
+                  <StepHeading
+                    step={protocolStep}
+                    title="Protocol"
+                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way lives in End-to-End Protocol Comparison."
+                  />
+                  <div className="source-mode-options" role="radiogroup" aria-label="Cloud compare protocol">
+                    {cloudProtocolChoices.map((protocol) => (
+                      <label
+                        key={protocol}
+                        className={`source-mode-card${sharedProtocol === protocol ? " selected" : ""}`}
+                      >
+                        <input
+                          type="radio"
+                          name="cloud-compare-protocol"
+                          checked={sharedProtocol === protocol}
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onChange={() => handleCloudProtocolChange(protocol)}
+                        />
+                        <span className="source-mode-card-body">
+                          <strong>{cloudCompareProtocolLabel(protocol)}</strong>
+                          <span className="source-mode-card-hint">{cloudCompareProtocolHint(protocol)}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </section>
+                )}
+
+                {recipePicked && (
                 <section className="encoder-profile-section">
                   <StepHeading
-                    step={2}
+                    step={encodeStep}
                     title="Encode"
-                    tip="Same ladder for every output. HLS/SRT stay on a 2s floor; MoQ uses a 400 ms budget. Last-mile Webcam picks ffmpeg (default), OBS, or Browser."
+                    tip="Same ladder for every output. HLS/SRT stay on a 2s floor; MoQ uses a 400 ms budget. Last-mile Webcam picks ffmpeg (default), OBS, or Browser. ffmpeg opens the camera on the computer running the helper."
                   />
                   <div className="encoder-profile-body">
-                    {mediaSource === "webcam" || mediaSource === "browser_moq" ? (
+                    {showEncoderPicker && (mediaSource === "webcam" || mediaSource === "browser_moq") ? (
                       <div className="encode-encoder-picker">
                         <div
                           className="source-mode-options encode-encoder-options"
@@ -1787,6 +2228,9 @@ function App() {
                               </span>
                             </span>
                           </label>
+                          {(activePresetId !== "cloud-compare" ||
+                            sharedProtocol === "moq" ||
+                            sharedProtocol === "webrtc") && (
                           <label className={`source-mode-card${encoder === "browser" ? " selected" : ""}`}>
                             <input
                               type="radio"
@@ -1804,6 +2248,7 @@ function App() {
                               </span>
                             </span>
                           </label>
+                          )}
                         </div>
                         <p className="source-mode-explainer">{encoderModeExplainer(encoder)}</p>
                         {encoder === "obs" && (
@@ -1828,12 +2273,12 @@ function App() {
                           </p>
                         )}
                       </div>
-                    ) : (
+                    ) : showEncoderPicker ? (
                       <p className="field-hint encode-encoder-locked">
                         Server ffmpeg encodes this file. ffmpeg (helper), OBS, and Browser are
                         last-mile options under Webcam — ffmpeg stays the default there.
                       </p>
-                    )}
+                    ) : null}
                     <div className="encode-profile-grid">
                       <label>
                         Bitrate / resolution
@@ -1850,6 +2295,37 @@ function App() {
                         </select>
                       </label>
                     </div>
+                    {!isUploadOnlyScope(testScope) &&
+                    playbackPolicyToggleVisible(endpoints.map((endpoint) => endpoint.protocol)) ? (
+                      <div className="encode-location-options playback-policy-options" role="radiogroup" aria-label="Playback policy">
+                        <label className={`source-mode-card${playbackPolicy === PLAYBACK_POLICY_LIVE_EDGE ? " selected" : ""}`}>
+                          <input
+                            type="radio"
+                            name="playback-policy"
+                            checked={playbackPolicy === PLAYBACK_POLICY_LIVE_EDGE}
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onChange={() => setPlaybackPolicy(PLAYBACK_POLICY_LIVE_EDGE)}
+                          />
+                          <span className="source-mode-card-body">
+                            <strong>Live edge</strong>
+                            <span className="source-mode-card-hint">{PLAYBACK_POLICY_LIVE_COPY}</span>
+                          </span>
+                        </label>
+                        <label className={`source-mode-card${playbackPolicy === PLAYBACK_POLICY_COMPLETE ? " selected" : ""}`}>
+                          <input
+                            type="radio"
+                            name="playback-policy"
+                            checked={playbackPolicy === PLAYBACK_POLICY_COMPLETE}
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onChange={() => setPlaybackPolicy(PLAYBACK_POLICY_COMPLETE)}
+                          />
+                          <span className="source-mode-card-body">
+                            <strong>Complete</strong>
+                            <span className="source-mode-card-hint">{PLAYBACK_POLICY_COMPLETE_COPY}</span>
+                          </span>
+                        </label>
+                      </div>
+                    ) : null}
                     <div className="vmaf-section">
                       <label className="checkbox-row">
                         <input
@@ -1877,22 +2353,36 @@ function App() {
                     </div>
                   </div>
                 </section>
+                )}
               </div>
 
+              {recipePicked && (
               <PipelineConfigDetails
                 sections={pipelineSections}
                 diagram={pipelineDiagram}
                 buttonLabel="Pipeline"
               />
+              )}
             </section>
 
+            {recipePicked && (
             <div className="outputs-heading-row">
+              {showOutputTiles ? (
+                <>
               <StepHeading
-                step={3}
+                step={outputsStep}
                 title="Outputs"
-                tip="One protocol, ingest, and player per column. Same source and encode."
+                tip={
+                  isUploadOnlyScope(testScope)
+                    ? showOutputConfig
+                      ? "Encode + publish + ingest only. One confidence monitor — no glass tiles or Go Live."
+                      : "Pick a cloud per output. Protocol mix is fixed (SRT + RTMP + MoQ :14433). Ingest only — no glass tiles or Go Live."
+                    : lockOutputProtocol && showOutputConfig
+                      ? "Same protocol on every tile. Pick a cloud endpoint per output. Add or remove region tiles."
+                      : "One protocol, ingest, and player per column. Same source and encode."
+                }
               />
-              {canAddOutput && (
+              {showOutputConfig && canAddOutput && (
                 <button
                   type="button"
                   className="add-output-button"
@@ -1907,7 +2397,13 @@ function App() {
                   </span>
                 </button>
               )}
+                </>
+              ) : (
+                <p className="outputs-locked-heading">Outputs</p>
+              )}
             </div>
+            )}
+            {recipePicked && (
             <section className="benchmark-streams">
               {endpoints.map((endpoint, index) => {
                 const leg = comparisonLegs[index];
@@ -1924,6 +2420,7 @@ function App() {
                       pulse={leg?.job.status === "running"}
                       className="output-card-status-dot"
                     />
+                    {showOutputTiles ? (
                     <EndpointSection
                       index={index}
                       endpoint={endpoint}
@@ -1932,12 +2429,34 @@ function App() {
                       occupiedCollisionKeys={siblingOccupiedCollisionKeys(endpoints, endpoint.id)}
                       bootstrapping={bootstrapping}
                       apiOnline={apiOnline}
-                      canRemove={endpoints.length > minEndpointsForSource(mediaSource)}
+                      canRemove={showOutputConfig && endpoints.length > minEndpointsForSource(mediaSource)}
+                      lockProtocol={lockOutputProtocol}
+                      lockPlayer={lockOutputProtocol}
+                      hideCustomDestinations={activePresetId === "cloud-compare"}
                       onChange={updateEndpoint}
                       onRemove={removeEndpoint}
                     />
+                    ) : (
+                      <p className="stream-column-locked-label">
+                        {protocolLabel(endpoint.protocol)} · {playerShortLabel(endpoint)}
+                      </p>
+                    )}
 
                     <div className="stream-column-preview">
+                      {isUploadOnlyScope(testScope) ? (
+                        <div className="ingest-monitor" data-testid="ingest-monitor">
+                          <p className="ingest-monitor-kicker">Ingest monitor — not glass</p>
+                          <p className="ingest-monitor-body">
+                            {leg?.job.preview_ready === false
+                              ? "Waiting for ingest…"
+                              : leg
+                                ? `${Math.round(leg.latestSample?.fps ?? 0)} fps · ${Math.round(leg.latestSample?.encoded_bitrate_kbps ?? 0)} kbps`
+                                : loading
+                                  ? "Publishing…"
+                                  : "Start a run to watch ingest."}
+                          </p>
+                        </div>
+                      ) : (
                       <div className="stream-player-with-hud">
                       <StreamPlayer
                         key={`${endpoint.id}:${endpoint.playbackMode ?? "default"}:${endpoint.protocol}:${endpoint.ingestEndpointId}`}
@@ -1972,6 +2491,10 @@ function App() {
                           leg?.job.delivery_media_origin_sec ?? null
                         }
                         encoderLagMs={leg?.latestSample?.encode_lag_ms ?? 0}
+                        encodeLatencyMs={leg?.latestSample?.latency_encode_ms ?? 0}
+                        playbackPolicy={parsePlaybackPolicy(
+                          leg?.job.playback_policy ?? playbackPolicy,
+                        )}
                         netRttMs={
                           leg?.latestSample?.net_rtt_ms ??
                           leg?.latestSample?.transport_rtt_ms ??
@@ -1989,6 +2512,10 @@ function App() {
                                     ...item,
                                     samples: mergePlaybackSampleIntoUploadSample(
                                       item.samples,
+                                      playback,
+                                    ),
+                                    latestSample: overlayPlaybackOnLatestSample(
+                                      item.latestSample,
                                       playback,
                                     ),
                                   }
@@ -2040,12 +2567,28 @@ function App() {
                         visible={Boolean(leg) || loading}
                         ttffMs={leg?.latestSample?.playback_ttff_ms}
                         latencyMs={leg?.latestSample?.e2e_latency_ms}
+                        latencyScope={resolveSampleE2eScope({
+                          latency_e2e_scope: leg?.latestSample?.latency_e2e_scope,
+                          protocol: endpoint.protocol,
+                          test_scope: leg?.job.test_scope ?? testScope,
+                        })}
+                        segmentationMs={leg?.latestSample?.latency_segmentation_ms}
+                        latencyCaptureHintMs={captureClassHintMs(
+                          leg?.latestSample?.e2e_latency_ms,
+                          leg?.latestSample?.latency_encode_ms,
+                          resolveSampleE2eScope({
+                            latency_e2e_scope: leg?.latestSample?.latency_e2e_scope,
+                            protocol: endpoint.protocol,
+                            test_scope: leg?.job.test_scope ?? testScope,
+                          }),
+                        )}
                         ttffBest={liveMetricRanks.ttff.bestIndex === index}
                         latencyBest={liveMetricRanks.latency.bestIndex === index}
                         ttffDeltaMs={liveMetricRanks.ttff.deltaVsBest[index]}
                         latencyDeltaMs={liveMetricRanks.latency.deltaVsBest[index]}
                       />
                       </div>
+                      )}
                     </div>
 
                     {(leg || loading) && (
@@ -2146,6 +2689,7 @@ function App() {
               })}
 
             </section>
+            )}
 
             {error && <p className="error benchmark-start-error">{error}</p>}
             {!error && startHint && !loading && (

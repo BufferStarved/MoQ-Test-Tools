@@ -42,8 +42,8 @@ class SoloDirectDeviceTests(unittest.TestCase):
 
 class MasterGopTests(unittest.TestCase):
     def test_master_gop_is_one_second_not_half_or_hls_6s(self) -> None:
-        # Shared capture GOP is 1s. MoQ children re-encode to 0.5s groups;
-        # 0.5s I-frames on the master plus two siblings starved encode (24fps).
+        # Shared capture GOP is 1s. Do not drop it for mixed siblings.
+        # Solo MoQ skips the broker and encodes 0.25s groups in moq_publish.
         self.assertEqual(MASTER_GOP_FRAMES, 30)
 
 

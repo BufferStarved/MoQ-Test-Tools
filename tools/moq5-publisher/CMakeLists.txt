@@ -68,8 +68,11 @@ target_include_directories(fmp4_moq PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(fmp4_moq PUBLIC moq::service)
 target_compile_definitions(fmp4_moq PRIVATE ${MOQ5_BRIDGE_DEFS})
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 add_executable(moq5-fmp4-publish main.c)
-target_link_libraries(moq5-fmp4-publish PRIVATE fmp4_moq)
+target_link_libraries(moq5-fmp4-publish PRIVATE fmp4_moq Threads::Threads)
 
 add_executable(moq_link_spike moq_link_spike.c)
 target_link_libraries(moq_link_spike PRIVATE fmp4_moq)

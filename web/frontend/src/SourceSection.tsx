@@ -22,9 +22,9 @@ export const CLOUD_PLAYOUT_DURATION_SEC = 60;
 
 export function sourceModeExplainer(mediaSource: MediaSourceId): string {
   if (mediaSource === "webcam" || mediaSource === "browser_moq") {
-    return "This laptop’s camera (last-mile). Then pick the engine under Encode: ffmpeg (helper, default) or Browser (this-tab WebCodecs). OBS is unavailable while public MoQ is draft-18.";
+    return "Laptop → cloud ingest: this computer’s camera (last-mile). ffmpeg (helper, default) opens the camera on the machine where you start the helper. Browser encodes in this tab. OBS is unavailable while public MoQ is draft-18.";
   }
-  return "Plays color bars or Big Buck Bunny on the server. Encodes in the cloud with server ffmpeg. Last-mile engines are under Webcam.";
+  return "Cloud → cloud ingest: dummy bars, Big Buck Bunny, or a file already on the VM. Encodes on the cloud host with server ffmpeg — not pulled through this laptop. Last-mile engines are under Webcam.";
 }
 
 export function encoderModeExplainer(encoder: EncoderId): string {
@@ -60,6 +60,11 @@ interface SourceSectionProps {
   bbbHint?: string | null;
   /** Highlight the draft-18 helper when an output is the :14433 canary. */
   preferD18Helper?: boolean;
+  step?: number;
+  /** Precanned recipes that already chose Webcam vs Cloud hide the mode cards. */
+  hideModePicker?: boolean;
+  /** Per-browser helper binding so ffmpeg opens this user's camera. */
+  publisherSession?: string;
 }
 
 export function SourceSection({
@@ -82,6 +87,9 @@ export function SourceSection({
   bbbAvailable = false,
   bbbHint = null,
   preferD18Helper = false,
+  step = 1,
+  hideModePicker = false,
+  publisherSession = "",
 }: SourceSectionProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isBrowserEngine = mediaSource === "browser_moq" || encoder === "browser";
@@ -105,10 +113,12 @@ export function SourceSection({
 
   return (
     <div className="source-media-section source-section">
+      {!hideModePicker && (
+        <>
       <StepHeading
-        step={1}
+        step={step}
         title="Source"
-        tip="Webcam is last-mile — then pick ffmpeg or Browser under Encode. OBS is draft-16 only and unavailable here. Cloud playout is dummy bars or BBB on the server."
+        tip="Webcam is laptop→cloud contribution from this computer’s camera. Cloud playout / VOD encodes dummy, BBB, or a cloud file on the VM. Then pick ffmpeg or Browser under Encode when using Webcam."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
@@ -123,7 +133,7 @@ export function SourceSection({
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
-            <span className="source-mode-card-hint">This laptop — then pick the engine</span>
+            <span className="source-mode-card-hint">This computer → cloud ingest</span>
           </span>
         </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
@@ -136,15 +146,17 @@ export function SourceSection({
           />
           <span className="source-mode-card-body">
             <strong>
-              <IconFilm size={15} /> Cloud playout
+              <IconFilm size={15} /> Cloud playout / VOD
             </strong>
-            <span className="source-mode-card-hint">Dummy / BBB on the server</span>
+            <span className="source-mode-card-hint">Cloud → cloud ingest</span>
           </span>
         </label>
       </div>
       <p className="source-mode-explainer">{sourceModeExplainer(mediaSource)}</p>
+        </>
+      )}
 
-      {isCloudPlayout && (
+      {!hideModePicker && isCloudPlayout && (
         <div className="source-mode-detail source-cloud-detail">
           <div className="source-asset-row">
             <label>
@@ -260,6 +272,7 @@ export function SourceSection({
                     compact
                     variant="webcam"
                     preferD18={preferD18Helper}
+                    publisherSession={publisherSession}
                   />
                 </>
               )}

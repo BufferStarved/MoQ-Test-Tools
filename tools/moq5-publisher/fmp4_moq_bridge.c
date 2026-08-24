@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -45,9 +46,11 @@ struct fmp4_moq_bridge {
     byte_buf_t pending_moof;
     byte_buf_t pending_mdat;
     bool have_moof;
+    char urlbuf[1024];
     char nsbuf[256];
     moq_bytes_t ns_parts[32];
     size_t ns_count;
+    int insecure_skip_verify;
     int duration_sec;
     time_t deadline;
     int session_live;
@@ -143,6 +146,86 @@ int mp4_box_at(const uint8_t *data, size_t len, size_t offset, mp4_box_t *out)
     out->header_size = header_size;
     out->type = read_be32(data + offset + 4);
     return 0;
+}
+
+/* ffmpeg +frag_keyframe puts the IDR in trun first-sample-flags (0x000004)
+ * and marks default_sample_flags non-sync. libmoq parse_trun used to skip
+ * that field, so vide_1 looked like a delta and media_sender returned
+ * WOULD_BLOCK ("group cannot lead with a delta") for every GOP. */
+static uint32_t cmaf_first_sample_flags(const uint8_t *data, size_t len,
+                                        uint32_t fallback)
+{
+    size_t stack[16];
+    size_t stack_end[16];
+    size_t depth = 0;
+    stack[0] = 0;
+    stack_end[0] = len;
+    depth = 1;
+    while (depth > 0) {
+        size_t *off = &stack[depth - 1];
+        size_t end = stack_end[depth - 1];
+        if (*off + 8 > end) {
+            depth--;
+            continue;
+        }
+        mp4_box_t box;
+        if (mp4_box_at(data, end, *off, &box) != 0) {
+            break;
+        }
+        *off += box.size;
+        if (box.type == MP4_TYPE('t', 'r', 'u', 'n')) {
+            const uint8_t *p = data + box.offset + box.header_size;
+            size_t r = box.size > box.header_size ? box.size - box.header_size : 0;
+            if (r < 8) {
+                return fallback;
+            }
+            uint32_t fl = ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+            p += 8;
+            r -= 8;
+            if ((fl & 0x01u) != 0) {
+                if (r < 4) {
+                    return fallback;
+                }
+                p += 4;
+                r -= 4;
+            }
+            if ((fl & 0x04u) != 0) {
+                if (r < 4) {
+                    return fallback;
+                }
+                return read_be32(p);
+            }
+            if ((fl & 0x400u) != 0) {
+                if ((fl & 0x100u) != 0) {
+                    if (r < 4) {
+                        return fallback;
+                    }
+                    p += 4;
+                    r -= 4;
+                }
+                if ((fl & 0x200u) != 0) {
+                    if (r < 4) {
+                        return fallback;
+                    }
+                    p += 4;
+                    r -= 4;
+                }
+                if (r < 4) {
+                    return fallback;
+                }
+                return read_be32(p);
+            }
+            return fallback;
+        }
+        if ((box.type == MP4_TYPE('m', 'o', 'o', 'f') ||
+             box.type == MP4_TYPE('t', 'r', 'a', 'f')) &&
+            depth < 16) {
+            stack[depth] = box.offset + box.header_size;
+            stack_end[depth] = box.offset + box.size;
+            depth++;
+        }
+    }
+    return fallback;
 }
 
 static int read_exact(int fd, void *dst, size_t len)
@@ -856,10 +939,13 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
         return -1;
     }
 
-    bool keyframe = false;
+    uint32_t parsed_flags = 0;
     if (finfo.sample_count > 0) {
-        keyframe = (finfo.samples[0].flags & 0x00010000u) == 0;
+        parsed_flags = finfo.samples[0].flags;
     }
+    uint32_t first_flags =
+        cmaf_first_sample_flags(fragment, fragment_len, parsed_flags);
+    bool keyframe = (first_flags & 0x00010000u) == 0;
     if (samples != stack_samples) free(samples);
 
     moq_cmaf_object_report_t report;
@@ -888,8 +974,11 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
     obj.struct_size = sizeof(obj);
     obj.payload = payload_rc;
     obj.is_sync = keyframe || report.starts_with_sync;
-    obj.starts_group = keyframe || report.starts_with_sync;
-    if (report.sap_type != MOQ_SAP_UNKNOWN) {
+    obj.starts_group = obj.is_sync;
+    if (obj.is_sync) {
+        obj.has_sap_type = true;
+        obj.sap_type = MOQ_SAP_TYPE_1;
+    } else if (report.sap_type != MOQ_SAP_UNKNOWN) {
         obj.has_sap_type = true;
         obj.sap_type = report.sap_type;
     }
@@ -899,8 +988,11 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
      * jobs advertised vide_1/soun_2 and then sent zero media. */
     enum { WRITE_WAIT_US = 200000 };
     const int write_tries = moq_media_sender_is_ready(tx) ? 25 : 3;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     moq_result_t wr = MOQ_ERR_WOULD_BLOCK;
-    for (int attempt = 0; attempt < write_tries; attempt++) {
+    int attempt = 0;
+    for (; attempt < write_tries; attempt++) {
         if (moq_media_sender_is_fatal(tx) || moq_media_sender_is_closed(tx)) {
             wr = MOQ_ERR_CLOSED;
             break;
@@ -908,6 +1000,13 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
         wr = moq_media_sender_write(tx, slot->handle, &obj);
         if (wr != MOQ_ERR_WOULD_BLOCK) {
             break;
+        }
+        if (attempt == 0) {
+            fprintf(stderr,
+                    "write(%s) block bytes=%zu is_sync=%d flags=0x%08x "
+                    "parsed=0x%08x starts_sync=%d\n",
+                    slot->name, fragment_len, (int)obj.is_sync, first_flags,
+                    parsed_flags, (int)report.starts_with_sync);
         }
         if (fmp4_moq_should_stop(NULL)) {
             break;
@@ -925,7 +1024,30 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
         fprintf(stderr, "write(%s) failed: %d\n", slot->name, (int)wr);
         return -1;
     }
-    fprintf(stderr, "live: sent track=%s bytes=%zu\n", slot->name, fragment_len);
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long pub_ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+    static unsigned sent_n;
+    sent_n++;
+    /* Always log a stall; otherwise sample so webcam vs file is comparable. */
+    if (pub_ms >= 20 || attempt > 1 || (sent_n % 25u) == 0) {
+        fprintf(stderr, "pub track=%s ms=%ld tries=%d bytes=%zu\n",
+                slot->name, pub_ms, attempt + 1, fragment_len);
+    }
+    /* Video group cadence vs wall clock — webcam 0.8↔1.3× shows up here. */
+    if (slot->media_type == MOQ_MEDIA_TYPE_VIDEO && obj.starts_group) {
+        static struct timespec last_vide;
+        static int have_vide;
+        long dt_ms = -1;
+        if (have_vide) {
+            dt_ms = (t1.tv_sec - last_vide.tv_sec) * 1000L +
+                    (t1.tv_nsec - last_vide.tv_nsec) / 1000000L;
+        }
+        last_vide = t1;
+        have_vide = 1;
+        fprintf(stderr, "obj vide wall_dt_ms=%ld bytes=%zu sync=%d\n",
+                dt_ms, fragment_len, (int)obj.is_sync);
+    }
     return 0;
 }
 
@@ -941,15 +1063,9 @@ static void drain_before_stop(moq_endpoint_t *ep, int likely_live)
 void init_sender_cfg(moq_media_sender_cfg_t *cfg, moq_bytes_t *namespace_parts,
                      size_t namespace_count)
 {
-    /* Newer libmoq versions freeze the pointer-only initializer at their v0
-     * ABI prefix. Prefer the sized form there; the fallback supports the
-     * current public release, whose pointer-only initializer still covers the
-     * complete struct. */
-#if MOQ5_HAVE_SIZED_SENDER_CFG_INIT
+    /* Pointer-only init_live() only stamps the frozen v0 prefix. Sized
+     * init is required for publish_tracks and a matching struct_size. */
     moq_media_sender_cfg_init_live_sized(cfg, sizeof(*cfg));
-#else
-    moq_media_sender_cfg_init_live(cfg);
-#endif
     /* Lossless: block the writer instead of dropping the first GOP. ffmpeg
      * already rate-limits; a 200ms stall beats a black playa canvas. */
     cfg->backpressure = MOQ_MEDIA_SEND_BP_BLOCK_TIMEOUT;
@@ -958,15 +1074,83 @@ void init_sender_cfg(moq_media_sender_cfg_t *cfg, moq_bytes_t *namespace_parts,
     cfg->queue_max_bytes = 16u * 1024u * 1024u;
     cfg->pre_ready_max_objects = 128;
     cfg->pre_ready_max_bytes = 8u * 1024u * 1024u;
-    /* Newer libmoq: push catalog + every media track instead of waiting
-     * for direct pull subscriptions. Installed prefixes without the field
-     * already announce on add_track. */
-#if MOQ5_HAVE_PUBLISH_TRACKS
     cfg->publish_tracks = true;
-#endif
     cfg->endpoint = NULL;
     cfg->namespace_.parts = namespace_parts;
     cfg->namespace_.count = namespace_count;
+}
+
+/* libmoq live-writes the catalog on the first sender_hook tick after
+ * attach. If we attach at CONNECT (before moov), that object is
+ * `{tracks:[]}` and a one-shot Joining FETCH never sees vide_1. Delay
+ * endpoint+sender until init is parsed, then add_track immediately so
+ * the first live catalog already has vide/soun + init. */
+static int ensure_sender_attached(fmp4_moq_bridge_t *b)
+{
+    if (b->tx) {
+        return 0;
+    }
+    if (b->urlbuf[0] == '\0') {
+        fprintf(stderr, "endpoint connect failed: %d\n", (int)MOQ_ERR_INVAL);
+        return -1;
+    }
+
+    /* Test hook: hold attach so lavfi/webcam bitrate can fill the OS pipe
+     * unless main.c is already draining stdin on another thread. */
+    const char *delay_raw = getenv("MOQ5_CONNECT_DELAY_MS");
+    if (delay_raw && delay_raw[0]) {
+        int delay_ms = atoi(delay_raw);
+        if (delay_ms > 0) {
+            fprintf(stderr, "MOQ5_CONNECT_DELAY_MS=%d (test hook)\n", delay_ms);
+            usleep((useconds_t)delay_ms * 1000u);
+        }
+    }
+
+    moq_endpoint_cfg_t ec;
+    moq_endpoint_cfg_init(&ec);
+    ec.url.data = (const uint8_t *)b->urlbuf;
+    ec.url.len = strlen(b->urlbuf);
+    ec.insecure_skip_verify = b->insecure_skip_verify != 0;
+
+    moq_result_t rc = moq_endpoint_connect(&ec, &b->ep);
+    if (rc != MOQ_OK) {
+        fprintf(stderr, "endpoint connect failed: %d\n", (int)rc);
+        return -1;
+    }
+
+    moq_media_sender_cfg_t scfg;
+    init_sender_cfg(&scfg, b->ns_parts, b->ns_count);
+    rc = moq_media_sender_attach(b->ep, &scfg, &b->tx);
+    if (rc != MOQ_OK) {
+        fprintf(stderr, "sender attach failed: %d\n", (int)rc);
+        moq_endpoint_stop(b->ep);
+        moq_endpoint_destroy(b->ep);
+        b->ep = NULL;
+        return -1;
+    }
+    /* Same token the orchestrator treats as a live WebTransport session. */
+    fprintf(stderr, "connection_id=moq5-wt ns=%s\n", b->nsbuf);
+    return 0;
+}
+
+static int activate_tracks(fmp4_moq_bridge_t *b)
+{
+    if (b->ctx.sender_ready) {
+        return 0;
+    }
+    if (!b->ctx.init_ready) {
+        if (discover_tracks(&b->ctx) != 0) {
+            return -1;
+        }
+    }
+    fprintf(stderr,
+            "attaching sender after CMAF init (%zu tracks; first live "
+            "catalog will include vide/soun)\n",
+            b->ctx.track_count);
+    if (ensure_sender_attached(b) != 0) {
+        return -1;
+    }
+    return ensure_tracks_added(b->tx, &b->ctx);
 }
 
 static int ensure_ready_for_fragment(fmp4_moq_bridge_t *b)
@@ -974,11 +1158,8 @@ static int ensure_ready_for_fragment(fmp4_moq_bridge_t *b)
     if (b->ctx.sender_ready) {
         return 0;
     }
-    if (b->ctx.init.len > 0 && !b->ctx.init_ready) {
-        if (discover_tracks(&b->ctx) != 0 ||
-            ensure_tracks_added(b->tx, &b->ctx) != 0) {
-            return -1;
-        }
+    if (b->ctx.init.len > 0) {
+        return activate_tracks(b);
     }
     return 0;
 }
@@ -986,11 +1167,10 @@ static int ensure_ready_for_fragment(fmp4_moq_bridge_t *b)
 static int finish_kept_box(fmp4_moq_bridge_t *b, const char *type)
 {
     if (strcmp(type, "moov") == 0 && !b->ctx.init_ready) {
-        if (discover_tracks(&b->ctx) != 0 ||
-            ensure_tracks_added(b->tx, &b->ctx) != 0) {
+        if (activate_tracks(b) != 0) {
             return -1;
         }
-        if (moq_media_sender_is_ready(b->tx)) {
+        if (b->tx && moq_media_sender_is_ready(b->tx)) {
             b->session_live = 1;
         }
     }
@@ -1126,6 +1306,7 @@ fmp4_moq_bridge_t *fmp4_moq_connect(const char *url, const char *namespace_,
     }
 
     if (opts->qlog_dir != NULL && opts->qlog_dir[0] != '\0') {
+        /* libmoq ep_configure_quic honors MOQ_QLOG_DIR via picoquic_set_qlog. */
         setenv("MOQ_QLOG_DIR", opts->qlog_dir, 1);
         fprintf(stderr, "picoquic qlog enabled: %s\n", opts->qlog_dir);
     }
@@ -1134,39 +1315,25 @@ fmp4_moq_bridge_t *fmp4_moq_connect(const char *url, const char *namespace_,
     if (!b) {
         return NULL;
     }
+    if (strlen(url) >= sizeof(b->urlbuf)) {
+        fprintf(stderr, "endpoint connect failed: %d\n", (int)MOQ_ERR_INVAL);
+        free(b);
+        return NULL;
+    }
+    memcpy(b->urlbuf, url, strlen(url) + 1);
     snprintf(b->nsbuf, sizeof(b->nsbuf), "%s", namespace_);
     b->ns_count = split_namespace(b->nsbuf, b->ns_parts, 32);
+    b->insecure_skip_verify = opts->insecure_skip_verify != 0;
     b->duration_sec = opts->duration_sec;
     if (b->duration_sec > 0) {
         b->deadline = time(NULL) + b->duration_sec;
     }
     parser_reset_header(&b->parser);
 
-    moq_endpoint_cfg_t ec;
-    moq_endpoint_cfg_init(&ec);
-    ec.url.data = (const uint8_t *)url;
-    ec.url.len = strlen(url);
-    ec.insecure_skip_verify = opts->insecure_skip_verify != 0;
-
-    moq_result_t rc = moq_endpoint_connect(&ec, &b->ep);
-    if (rc != MOQ_OK) {
-        fprintf(stderr, "endpoint connect failed: %d\n", (int)rc);
-        free(b);
-        return NULL;
-    }
-
-    moq_media_sender_cfg_t scfg;
-    init_sender_cfg(&scfg, b->ns_parts, b->ns_count);
-    rc = moq_media_sender_attach(b->ep, &scfg, &b->tx);
-    if (rc != MOQ_OK) {
-        fprintf(stderr, "sender attach failed: %d\n", (int)rc);
-        moq_endpoint_stop(b->ep);
-        moq_endpoint_destroy(b->ep);
-        free(b);
-        return NULL;
-    }
-    /* Same token the orchestrator treats as a live WebTransport session. */
-    fprintf(stderr, "connection_id=moq5-wt ns=%s\n", b->nsbuf);
+    /* Do not attach the sender here. libmoq live-writes `{tracks:[]}` on
+     * the first hook tick if no vide/soun tracks exist yet. CONNECT +
+     * add_track happen in activate_tracks() after moov. */
+    fprintf(stderr, "waiting for ftyp+moov before sender attach\n");
     return b;
 }
 

@@ -57,6 +57,7 @@ export function WebcamLivePreview({ active, running }: WebcamLivePreviewProps) {
 
     let cancelled = false;
     setError(null);
+
     navigator.mediaDevices
       ?.getUserMedia({ video: { width: 640, height: 360 }, audio: false })
       .then((stream) => {

@@ -30,8 +30,10 @@ typedef struct fmp4_moq_opts {
     const char *qlog_dir; /* nullable */
 } fmp4_moq_opts_t;
 
-/* Connect to a MoQ relay and attach a live CMAF media sender.
- * opts may be NULL (all zeros). Returns NULL on failure. */
+/* Prepare a live CMAF media sender. WebTransport CONNECT and sender
+ * attach wait until the first moov so the initial live catalog already
+ * has vide/soun + init (not `{tracks:[]}`). opts may be NULL.
+ * Returns NULL on failure. */
 fmp4_moq_bridge_t *fmp4_moq_connect(const char *url, const char *namespace_,
                                     const fmp4_moq_opts_t *opts);
 

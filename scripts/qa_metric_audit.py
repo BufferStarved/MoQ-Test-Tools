@@ -68,6 +68,7 @@ BASE_URL = os.environ.get("BASE_URL", "https://moq.sean-mccarthy.net").rstrip("/
 
 LATENCY_COMPONENTS = (
     "latency_encode_ms",
+    "latency_segmentation_ms",
     "latency_publish_ms",
     "latency_network_ms",
     "latency_packager_ms",
@@ -205,7 +206,8 @@ def summarize_column(rows: List[dict], key: str) -> dict:
 # the sender-side encode offset is reported but must not be summed into it.
 OUT_OF_SCOPE = {
     "capture_to_glass": (),
-    "ingest_to_glass": ("latency_encode_ms",),
+    "ingest_to_glass": ("latency_encode_ms", "latency_segmentation_ms"),
+    "capture_to_ingest": ("latency_player_buffer_ms",),
 }
 
 

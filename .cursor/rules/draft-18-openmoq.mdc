@@ -1,0 +1,32 @@
+---
+description: Draft-18 canary + OpenMOQ ffmpeg consolidation plan
+alwaysApply: true
+---
+
+# Draft-18 / OpenMOQ plan
+
+Working branch: `feat/moq-draft-18`. **Do not merge to `main`.** Public MoQ on https://moq.sean-mccarthy.net is **draft-18 `:14433`** (west / east / Linode). Do **not** replace the leftover `moqx:329b98b` container on UDP **4433** — leave it running, keep it out of the UI. Do not terraform-apply new VMs.
+
+## Order of work
+
+1. Headed playa paints on west canary `:14433` (`moq_gcp_relay_d18`, file source, `http://127.0.0.1:5173/`). **Green** (`bench-6d3a4094`, `first_frame=ok`, 1280x720).
+2. Stay aligned with `openmoq/moq5` `main`. Do not grow a private libmoq fork.
+   - Canary build pin: [BufferStarved/moq5](https://github.com/BufferStarved/moq5) `feat/publish-tracks-live-catalog` via `scripts/install-moq5.sh` (`MOQ5_REPO` / `MOQ5_REF`). That is openmoq/moq5#9 live-write `publish_tracks`. Rebuild with `./scripts/install-moq5.sh --rebuild`. Do not change prod `:4433`.
+   - Upstream (their vision): live-write the `publish_tracks` catalog without waiting for demand — retained group is the FETCH path (`docs/publisher-retained-groups.md`). PR: https://github.com/openmoq/moq5/pull/9
+   - Keep local only until playa vendor ≥ main: `initData` dual-emit, `MOQ_QLOG_DIR`. CMAF `first-sample-flags` is already on moq5 `main`.
+   - **Do not** disable catalog refresh. **Do not** treat dual-emit as the long-term catalog shape (MSF-01 is `initDataList` + `initRef`).
+3. Playa **main** already has CatalogBootstrap (SUBSCRIBE + Joining FETCH) and `initRef` → `initDataList`. Do **not** PR the 0.5.3 backports. Vendor-upgrade later without `FORCE=1` unless string `version` + initRef resolution stay.
+4. Contribute CMAF / draft-18 / AAC / playa init notes to [openmoq/FFmpeg `feat/add-moq-output-h264`](https://github.com/openmoq/FFmpeg/tree/feat/add-moq-output-h264) (`-f moq`, LOC today). Use `init_live_sized` so `publish_tracks` is not a silent no-op. Do not write a second muxer.
+5. Keep local `ffmoq` + `moq:` **protocol** (SRT-style, `-f mp4`) as the canary encode until folding into that muxer.
+6. OBS [openmoq-plugin](https://github.com/openmoq/openmoq-plugin) is a last-mile **encoder option** under Webcam, not a replacement for ffmpeg and not a source card. ffmpeg helper stays the default (all protocols). OBS encodes; plugin does MoQ; extra outputs do SRT/RTMP; no WebRTC. Same libmoq + playa. Send them CMAF catalog notes; do not rewrite the plugin. Canary encode stays ffmoq + `moq:` + `moq5-fmp4-publish` until the operator picks OBS.
+7. SportsRadar / moq-dev / hang / `moq-cli` is **moq-lite**, not IETF MSF. Engage via Gaston’s FFmpeg report (name `-f moqlite`/`hang`). Do not build on it.
+
+## Do not
+
+- Submit a second `-f moq` to ffmpeg.git. FFmpeg will not accept two muxers named `moq`. Protocol `moq:` does not take that name.
+- Pipe canary encode through hang / moq-lite / `moq-cli`.
+- Force-push, terraform-apply new VMs, or hard-refresh playa vendor with `FORCE=1` unless the catalog-version + `initDataList` flatten is preserved.
+
+## Headed test
+
+Hard-refresh `:5173`, file source, west `:14433`. Success = `rendered > 0`, not catalog-ready alone.

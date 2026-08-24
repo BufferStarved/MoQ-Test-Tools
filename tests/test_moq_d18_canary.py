@@ -250,7 +250,7 @@ class Draft18CanaryPresetTests(unittest.TestCase):
     def test_regional_canary_presets_use_14433_when_stack_configured(self) -> None:
         for preset_id in ("moq_gcp_east_relay_d18", "moq_linode_relay_d18"):
             preset = PRESET_BY_ID.get(preset_id)
-            if preset is None:
+            if preset is None or not preset.web_available:
                 continue
             self.assertIn(":14433/", preset.url)
             self.assertIn("draft=18", preset.url)
@@ -262,6 +262,11 @@ class Draft18CanaryPresetTests(unittest.TestCase):
         for preset in PRESET_BY_ID.values():
             hay = f"{preset.id} {preset.name} {preset.ingest_provider}".lower()
             if "d18" not in hay and "draft-18" not in hay and "draft 18" not in hay:
+                continue
+            if not preset.url:
+                self.assertFalse(preset.web_available, preset.id)
+                self.assertIn("14433", preset.notes, preset.id)
+                self.assertNotIn(":4433", preset.notes.replace("not leftover :4433", ""), preset.id)
                 continue
             self.assertIn(":14433/", preset.url, preset.id)
             self.assertIn("draft=18", preset.url, preset.id)

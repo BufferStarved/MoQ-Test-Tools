@@ -16,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from metrics import CSV_COLUMNS  # noqa: E402
-from playback_metrics import merge_playback_into_csv, robust_e2e_stats  # noqa: E402
+from playback_metrics import (  # noqa: E402
+    merge_playback_into_csv,
+    robust_e2e_stats,
+    should_merge_playback_samples,
+)
 
 
 def _write_csv(path: str, count: int, base_ts: float = 1000.0) -> None:
@@ -157,6 +161,34 @@ class PlaybackMergeTests(unittest.TestCase):
 
         averages = compute_playback_averages(rows)
         self.assertEqual(averages["playback_frames_rendered"], 1692)
+
+    def test_lower_post_seek_e2e_replaces_higher_pre_seek_e2e(self):
+        """Go Live drained the buffer; the CSV must not high-water e2e upward."""
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            _write_csv(csv_path, count=8)
+            playback = [
+                {
+                    "elapsed_sec": 3,
+                    "e2e_latency_ms": 8800,
+                    "playback_buffer_sec": 8,
+                    "go_live_at_sec": 0,
+                    "go_live_e2e_ms": 0,
+                },
+                {
+                    "elapsed_sec": 5,
+                    "e2e_latency_ms": 2200,
+                    "playback_buffer_sec": 2,
+                    "go_live_at_sec": 5,
+                    "go_live_e2e_ms": 8800,
+                },
+            ]
+            rows = merge_playback_into_csv(csv_path, playback, csv_columns=CSV_COLUMNS)
+
+        self.assertEqual(rows[3]["e2e_latency_ms"], "8800")
+        self.assertEqual(rows[5]["e2e_latency_ms"], "2200")
+        self.assertEqual(rows[5]["playback_buffer_sec"], "2")
+        self.assertEqual(rows[5]["go_live_e2e_ms"], "8800")
 
 
 class MergedLatencyBudgetTests(unittest.TestCase):
@@ -404,6 +436,37 @@ class MergedLatencyBudgetTests(unittest.TestCase):
         self.assertGreater(float(rows[1]["latency_residual_ms"]), 8000)
         averages = compute_playback_averages(rows)
         self.assertEqual(averages["latency_unmeasured_stages"], "packager,publish")
+
+    def test_monitor_engine_does_not_overlay_glass(self):
+        self.assertFalse(should_merge_playback_samples(engine="monitor"))
+        self.assertFalse(should_merge_playback_samples(test_scope="upload"))
+        self.assertTrue(should_merge_playback_samples(engine="moq", test_scope="e2e"))
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            _write_csv(csv_path, count=3)
+            playback = [{"elapsed_sec": 1, "e2e_latency_ms": 4500, "playback_buffer_sec": 0.3}]
+            rows = merge_playback_into_csv(
+                csv_path, playback, csv_columns=CSV_COLUMNS, playback_engine="monitor"
+            )
+        self.assertEqual(rows[1]["e2e_latency_ms"], "0")
+
+    def test_upload_scope_rows_do_not_take_monitor_glass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = str(Path(tmp) / "run.csv")
+            with open(csv_path, mode="w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
+                writer.writeheader()
+                for second in range(3):
+                    row = {name: "0" for name in CSV_COLUMNS}
+                    row["timestamp"] = str(1000.0 + second)
+                    row["test_scope"] = "upload"
+                    row["e2e_latency_ms"] = "900"
+                    writer.writerow(row)
+            playback = [{"elapsed_sec": 1, "e2e_latency_ms": 4500}]
+            rows = merge_playback_into_csv(
+                csv_path, playback, csv_columns=CSV_COLUMNS, playback_engine="hls"
+            )
+        self.assertEqual(rows[1]["e2e_latency_ms"], "900")
 
 
 class RobustE2eTests(unittest.TestCase):

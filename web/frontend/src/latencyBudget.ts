@@ -6,8 +6,8 @@
  * HLS PDT, wall−playhead, encode+RTT/2), so comparing totals alone can
  * mislead. These components are reported in the same units by every protocol:
  *
- *   capture ──encode──> muxed ──publish──> ingest ──packager──> delivery
- *           ──network──> player ──buffer──> glass
+ *   capture ──encode──> muxed ──cmaf_group──> publish ──network──> ingest
+ *           ──packager──> player_buffer──> glass
  *
  * Three properties keep the attribution honest:
  *
@@ -24,11 +24,17 @@
 
 export const LATENCY_COMPONENT_KEYS = [
   "latency_encode_ms",
+  "latency_segmentation_ms",
   "latency_publish_ms",
   "latency_network_ms",
   "latency_packager_ms",
   "latency_player_buffer_ms",
 ] as const;
+
+/** MediaMTX LL-HLS part — the HLS object, not a 1s CMAF group. */
+export const LL_HLS_PART_MS = 200;
+/** Shared webcam broker master IDR cadence. */
+export const BROKER_GOP_MS = 1000;
 
 export type LatencyComponentKey = (typeof LATENCY_COMPONENT_KEYS)[number];
 
@@ -38,8 +44,13 @@ export const LATENCY_COMPONENTS: Array<{
   label: string;
   stage: string;
 }> = [
-  { key: "latency_encode_ms", label: "Encode", stage: "capture → muxed" },
-  { key: "latency_publish_ms", label: "Publish", stage: "muxed → ingest" },
+  { key: "latency_encode_ms", label: "Encode", stage: "capture → AU" },
+  {
+    key: "latency_segmentation_ms",
+    label: "CMAF group (segmentation)",
+    stage: "AU → closed group",
+  },
+  { key: "latency_publish_ms", label: "Publish", stage: "closed group → ingest" },
   { key: "latency_network_ms", label: "Network", stage: "one-way path (RTT/2)" },
   { key: "latency_packager_ms", label: "Packager", stage: "ingest → delivery" },
   { key: "latency_player_buffer_ms", label: "Player buffer", stage: "delivery → glass" },
@@ -50,17 +61,25 @@ export const LATENCY_COMPONENTS: Array<{
  * decides which components may be summed against it.
  *
  * - `capture_to_glass`: wall now minus the encoder-timeline position of the
- *   frame on screen (HLS PDT, HTTP-TS, MoQ). All five stages are in scope.
+ *   frame on screen (HLS PDT, HTTP-TS, MoQ). Encode + CMAF group + publish +
+ *   network + packager + player_buffer are in scope.
  * - `ingest_to_glass`: a receiver-side estimate built only from what the
  *   viewer can see (WHEP: ICE RTT/2 + jitterBufferDelay). The sender pipeline
- *   is invisible to it, so `latency_encode_ms` is reported but not summed.
+ *   is invisible to it, so encode and CMAF group are reported but not summed.
+ * - `capture_to_ingest`: upload-only. Encode + CMAF group + publish + network
+ *   + packager. Player buffer is out of scope — do not copy monitor glass.
  */
 export const E2E_SCOPE_CAPTURE_TO_GLASS = "capture_to_glass";
 export const E2E_SCOPE_INGEST_TO_GLASS = "ingest_to_glass";
-export type E2eScope = typeof E2E_SCOPE_CAPTURE_TO_GLASS | typeof E2E_SCOPE_INGEST_TO_GLASS;
+export const E2E_SCOPE_CAPTURE_TO_INGEST = "capture_to_ingest";
+export type E2eScope =
+  | typeof E2E_SCOPE_CAPTURE_TO_GLASS
+  | typeof E2E_SCOPE_INGEST_TO_GLASS
+  | typeof E2E_SCOPE_CAPTURE_TO_INGEST;
 
 const OUT_OF_SCOPE: Record<string, readonly LatencyComponentKey[]> = {
-  [E2E_SCOPE_INGEST_TO_GLASS]: ["latency_encode_ms"],
+  [E2E_SCOPE_INGEST_TO_GLASS]: ["latency_encode_ms", "latency_segmentation_ms"],
+  [E2E_SCOPE_CAPTURE_TO_INGEST]: ["latency_player_buffer_ms"],
 };
 
 /** Above this a "component" is a clock/parse artifact, not a pipeline stage. */
@@ -88,6 +107,7 @@ function cleanMs(value: number | null | undefined, ceiling = COMPONENT_MAX_MS): 
 
 export interface LatencyBudget {
   encodeMs: number;
+  segmentationMs: number;
   publishMs: number;
   networkMs: number;
   packagerMs: number;
@@ -100,6 +120,8 @@ export interface LatencyBudget {
   overcountMs: number;
   /** Stages with no instrument on this leg; 0 here means unknown, not zero. */
   unmeasured: LatencyComponentKey[];
+  /** Stages that do not exist on this protocol (WebRTC has no CMAF group). */
+  notApplicable: LatencyComponentKey[];
 }
 
 export interface LatencyBudgetInput {
@@ -118,6 +140,20 @@ export interface LatencyBudgetInput {
   playbackBufferSec?: number | null;
   e2eLatencyMs?: number | null;
   e2eScope?: E2eScope;
+  protocol?: string | null;
+  playbackEngine?: string | null;
+  /**
+   * Known object/group duration (1s brokered MoQ, ~0.25s solo MoQ, 200ms
+   * LL-HLS parts). `null` = unmeasured. Do not invent 0.
+   */
+  segmentationMs?: number | null;
+  segmentationNotApplicable?: boolean;
+  /**
+   * Subtract group duration from encode when the ffmpeg baseline includes
+   * GOP-close wait (MoQ fMP4). Overlay must leave this false — encode is
+   * already the capture→AU component.
+   */
+  splitEncodeGop?: boolean;
 }
 
 /**
@@ -129,10 +165,64 @@ export interface LatencyBudgetInput {
  * delay, so the budget adds it back here — exactly once.
  *
  * This is a *sender-side* quantity; whether it may be added to a leg's e2e
- * depends on that leg's `e2eScope`.
+ * depends on that leg's `e2eScope`. On MoQ, `splitEncodeGop` pulls GOP-close
+ * wait out of this number so segmentation owns AU→closed group.
  */
 export function encodeLatencyMs(input: LatencyBudgetInput): number {
-  return round1(cleanMs(input.pipelineBaselineMs) + cleanMs(input.encodeLagMs));
+  let total = cleanMs(input.pipelineBaselineMs) + cleanMs(input.encodeLagMs);
+  if (input.splitEncodeGop) {
+    total = Math.max(0, total - cleanMs(input.segmentationMs));
+  }
+  return round1(total);
+}
+
+/**
+ * Object/group cadence for the CMAF-group hop. `[ms | null, notApplicable]`.
+ * `null` + not n/a is unmeasured — never a confident 0. WebRTC has no group.
+ * 0.5s/1s on MoQ CMAF is group duration (NextGroupStart), not ingest RTT.
+ * LL-HLS parts are 200ms.
+ */
+export function resolveSegmentationMs(input: {
+  protocol?: string | null;
+  playbackEngine?: string | null;
+  groupDurationMs?: number | null;
+}): { ms: number | null; notApplicable: boolean } {
+  const proto = (input.protocol ?? "").trim().toLowerCase();
+  const engine = (input.playbackEngine ?? "").trim().toLowerCase();
+  if (proto === "webrtc" && engine !== "hls" && engine !== "ll-hls" && engine !== "dash") {
+    return { ms: null, notApplicable: true };
+  }
+  if (
+    (proto === "srt" || proto === "rtmp" || proto === "http") &&
+    engine !== "hls" &&
+    engine !== "ll-hls" &&
+    engine !== "dash"
+  ) {
+    return { ms: null, notApplicable: true };
+  }
+  if (engine === "whep") {
+    return { ms: null, notApplicable: true };
+  }
+  if (engine === "ll-hls" || proto === "hls") {
+    const duration = input.groupDurationMs != null ? input.groupDurationMs : LL_HLS_PART_MS;
+    return { ms: round1(cleanMs(duration)), notApplicable: false };
+  }
+  if (proto === "moq" || engine === "moq") {
+    if (input.groupDurationMs == null) {
+      return { ms: null, notApplicable: false };
+    }
+    return { ms: round1(cleanMs(input.groupDurationMs)), notApplicable: false };
+  }
+  if (proto === "dash" || engine === "dash") {
+    if (input.groupDurationMs == null) {
+      return { ms: null, notApplicable: false };
+    }
+    return { ms: round1(cleanMs(input.groupDurationMs)), notApplicable: false };
+  }
+  if (input.groupDurationMs != null) {
+    return { ms: round1(cleanMs(input.groupDurationMs)), notApplicable: false };
+  }
+  return { ms: null, notApplicable: false };
 }
 
 /**
@@ -167,11 +257,153 @@ function round1(value: number): number {
  * because that is what computes e2e: a WHIP publish watched through an LL-HLS
  * remux is measured by the HLS player and really is capture-to-glass.
  */
+const STAGE_SHORT_NAMES: Record<LatencyComponentKey, string> = {
+  latency_encode_ms: "encode",
+  latency_segmentation_ms: "segmentation",
+  latency_publish_ms: "publish",
+  latency_network_ms: "network",
+  latency_packager_ms: "packager",
+  latency_player_buffer_ms: "player_buffer",
+};
+
+function namedUnmeasured(raw: unknown): Set<string> {
+  return new Set(
+    String(raw ?? "")
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean),
+  );
+}
+
+function stageIsUnmeasured(named: Set<string>, column: LatencyComponentKey): boolean {
+  return named.has(column) || named.has(STAGE_SHORT_NAMES[column]);
+}
+
+/**
+ * Rebuild player-side budget columns on a live upload sample after playback
+ * is overlaid. The encoder loop writes residual=0 / player_buffer=0 because
+ * it cannot see the glass; leaving those zeros in the comparison CSV made a
+ * 10s RTMP/SRT/MoQ run look fully attributed (comparison 2026-08-23).
+ */
+function overlayBudgetInput(
+  rec: Record<string, unknown>,
+  named: Set<string>,
+  namedNa: Set<string>,
+  extras: Partial<LatencyBudgetInput>,
+): LatencyBudgetInput {
+  const netRtt = Number(rec.net_rtt_ms);
+  const packager = Number(rec.latency_packager_ms);
+  const publish = Number(rec.latency_publish_ms);
+  const segmentation = Number(rec.latency_segmentation_ms);
+  const protocol = String(rec.protocol ?? "");
+  const engine = String(rec.engine ?? rec.playback_engine ?? "");
+  const segmentationNa =
+    namedNa.has("segmentation") || namedNa.has("latency_segmentation_ms");
+  return {
+    pipelineBaselineMs: Number(rec.latency_encode_ms) || 0,
+    protocol,
+    playbackEngine: engine,
+    segmentationNotApplicable: segmentationNa,
+    segmentationMs: segmentationNa
+      ? null
+      : stageIsUnmeasured(named, "latency_segmentation_ms")
+        ? null
+        : Number.isFinite(segmentation)
+          ? segmentation
+          : null,
+    splitEncodeGop: false,
+    publishTransitMs: stageIsUnmeasured(named, "latency_publish_ms")
+      ? null
+      : Number.isFinite(publish)
+        ? publish
+        : 0,
+    netRttMs: stageIsUnmeasured(named, "latency_network_ms")
+      ? null
+      : Number.isFinite(netRtt) && netRtt > 0
+        ? netRtt
+        : null,
+    packagerTransitMs: stageIsUnmeasured(named, "latency_packager_ms")
+      ? null
+      : Number.isFinite(packager)
+        ? packager
+        : 0,
+    ...extras,
+  };
+}
+
+/**
+ * Rebuild player-side budget columns on a live upload sample after playback
+ * is overlaid. The encoder loop writes residual=0 / player_buffer=0 because
+ * it cannot see the glass; leaving those zeros in the comparison CSV made a
+ * 10s RTMP/SRT/MoQ run look fully attributed (comparison 2026-08-23).
+ *
+ * Encode and segmentation are copied through — do not re-split GOP from an
+ * already-final encode component.
+ */
+export function applyLatencyBudgetToSample<T extends object>(sample: T): T {
+  const rec = sample as Record<string, unknown>;
+  const named = namedUnmeasured(rec.latency_unmeasured);
+  const namedNa = namedUnmeasured(rec.latency_not_applicable);
+  const buffer = Number(rec.playback_buffer_sec);
+  const e2e = Number(rec.e2e_latency_ms);
+  const uploadOnly = String(rec.test_scope ?? "").trim().toLowerCase() === "upload";
+  const hasPlayback =
+    !uploadOnly &&
+    ((Number.isFinite(e2e) && e2e > 0) || (Number.isFinite(buffer) && buffer > 0));
+  const scopeRaw = String(rec.latency_e2e_scope ?? "");
+  const e2eScope =
+    scopeRaw === E2E_SCOPE_INGEST_TO_GLASS ||
+    scopeRaw === E2E_SCOPE_CAPTURE_TO_GLASS ||
+    scopeRaw === E2E_SCOPE_CAPTURE_TO_INGEST
+      ? scopeRaw
+      : e2eScopeFor(String(rec.protocol ?? ""), String(rec.engine ?? ""), String(rec.test_scope ?? ""));
+
+  const draft = buildLatencyBudget(
+    overlayBudgetInput(rec, named, namedNa, {
+      playbackBufferSec: hasPlayback ? (Number.isFinite(buffer) ? buffer : 0) : null,
+      e2eLatencyMs: Number.isFinite(e2e) ? e2e : 0,
+      e2eScope,
+    }),
+  );
+  const e2eMs =
+    uploadOnly && !(Number.isFinite(e2e) && e2e > 0) ? draft.accountedMs : Number.isFinite(e2e) ? e2e : 0;
+  const budget =
+    uploadOnly && e2eMs !== (Number.isFinite(e2e) ? e2e : 0)
+      ? buildLatencyBudget(
+          overlayBudgetInput(rec, named, namedNa, {
+            playbackBufferSec: null,
+            e2eLatencyMs: e2eMs,
+            e2eScope,
+          }),
+        )
+      : draft;
+
+  return {
+    ...sample,
+    ...(uploadOnly ? { e2e_latency_ms: e2eMs } : {}),
+    latency_segmentation_ms: budget.segmentationMs,
+    latency_player_buffer_ms: budget.playerBufferMs,
+    latency_accounted_ms: budget.accountedMs,
+    latency_residual_ms: budget.residualMs,
+    latency_overcount_ms: budget.overcountMs,
+    latency_unmeasured: budget.unmeasured.map((key) => STAGE_SHORT_NAMES[key]).join(","),
+    latency_not_applicable: budget.notApplicable.map((key) => STAGE_SHORT_NAMES[key]).join(","),
+    latency_e2e_scope: budget.e2eScope,
+  };
+}
+
 export function e2eScopeFor(
   protocol: string | null | undefined,
   playbackEngine?: string | null,
+  testScope?: string | null,
 ): E2eScope {
+  if ((testScope ?? "").trim().toLowerCase() === "upload") {
+    return E2E_SCOPE_CAPTURE_TO_INGEST;
+  }
   const engine = (playbackEngine ?? "").trim().toLowerCase();
+  if (engine === "monitor") {
+    return E2E_SCOPE_CAPTURE_TO_INGEST;
+  }
   if (engine) {
     return engine === "whep" ? E2E_SCOPE_INGEST_TO_GLASS : E2E_SCOPE_CAPTURE_TO_GLASS;
   }
@@ -189,21 +421,42 @@ export function e2eScopeFor(
 export function buildLatencyBudget(input: LatencyBudgetInput): LatencyBudget {
   const e2eScope = input.e2eScope ?? E2E_SCOPE_CAPTURE_TO_GLASS;
   const unmeasured: LatencyComponentKey[] = [];
+  const notApplicable: LatencyComponentKey[] = [];
+  const resolved = resolveSegmentationMs({
+    protocol: input.protocol,
+    playbackEngine: input.playbackEngine,
+    groupDurationMs: input.segmentationMs,
+  });
+  const segmentationNa = Boolean(input.segmentationNotApplicable) || resolved.notApplicable;
+  const segmentationMs = segmentationNa ? 0 : resolved.ms == null ? 0 : resolved.ms;
+  if (segmentationNa) {
+    notApplicable.push("latency_segmentation_ms");
+  } else if (resolved.ms == null) {
+    unmeasured.push("latency_segmentation_ms");
+  }
   if (input.publishTransitMs == null) unmeasured.push("latency_publish_ms");
   if (input.netRttMs == null) unmeasured.push("latency_network_ms");
   if (input.packagerTransitMs == null) unmeasured.push("latency_packager_ms");
   if (input.playbackBufferSec == null) unmeasured.push("latency_player_buffer_ms");
 
-  const encodeMs = encodeLatencyMs(input);
+  const encodeMs = encodeLatencyMs({
+    ...input,
+    segmentationMs: segmentationNa ? 0 : resolved.ms,
+    splitEncodeGop: Boolean(input.splitEncodeGop) && !segmentationNa && resolved.ms != null,
+  });
   const publishMs = round1(cleanMs(input.publishTransitMs));
   const networkMs = networkLatencyMs(input.netRttMs);
   const packagerMs = round1(cleanMs(input.packagerTransitMs));
   const playerBufferMs = playerBufferLatencyMs(input.playbackBufferSec);
   const e2eMs = round1(cleanMs(input.e2eLatencyMs, E2E_MAX_MS));
 
-  const skip = new Set<string>(OUT_OF_SCOPE[e2eScope] ?? []);
+  const skip = new Set<string>([
+    ...(OUT_OF_SCOPE[e2eScope] ?? []),
+    ...notApplicable,
+  ]);
   const byKey: Record<LatencyComponentKey, number> = {
     latency_encode_ms: encodeMs,
+    latency_segmentation_ms: segmentationMs,
     latency_publish_ms: publishMs,
     latency_network_ms: networkMs,
     latency_packager_ms: packagerMs,
@@ -224,6 +477,7 @@ export function buildLatencyBudget(input: LatencyBudgetInput): LatencyBudget {
 
   return {
     encodeMs,
+    segmentationMs,
     publishMs,
     networkMs,
     packagerMs,
@@ -234,6 +488,7 @@ export function buildLatencyBudget(input: LatencyBudgetInput): LatencyBudget {
     residualMs,
     overcountMs,
     unmeasured,
+    notApplicable,
   };
 }
 
@@ -259,10 +514,14 @@ export function latencyBudgetShares(
   if (budget.e2eMs <= 0) {
     return null;
   }
-  const skip = new Set<string>(OUT_OF_SCOPE[budget.e2eScope] ?? []);
+  const skip = new Set<string>([
+    ...(OUT_OF_SCOPE[budget.e2eScope] ?? []),
+    ...budget.notApplicable,
+  ]);
   const unmeasured = new Set<string>(budget.unmeasured);
   const byKey: Record<LatencyComponentKey, number> = {
     latency_encode_ms: budget.encodeMs,
+    latency_segmentation_ms: budget.segmentationMs,
     latency_publish_ms: budget.publishMs,
     latency_network_ms: budget.networkMs,
     latency_packager_ms: budget.packagerMs,

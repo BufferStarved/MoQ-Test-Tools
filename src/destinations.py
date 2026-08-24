@@ -5,17 +5,14 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from cloud_placement import (
-    gcp_east_relay_domain,
-    gcp_east_region,
-    gcp_east_relay_ip,
-    gcp_east_stack_configured,
-    gcp_east_web_ip,
-    gcp_east_zixi_ip,
-    linode_relay_domain,
-    linode_region,
-    linode_stack_configured,
-    linode_web_ip,
-    linode_zixi_ip,
+    ENCODE_HOSTS,
+    EncodeHost,
+    host_relay_domain,
+    host_relay_ip,
+    host_region,
+    host_role_configured,
+    host_web_ip,
+    host_zixi_ip,
     merge_placement,
     placement_from_ingest_provider,
 )
@@ -305,70 +302,6 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         ingest_provider="gcp_mediamtx",
     ),
     ServicePreset(
-        id="zixi_aws_srt",
-        name="AWS Zixi",
-        protocol="srt",
-        notes="AWS Zixi SRT ingest (coming soon).",
-        ingest_provider="aws_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_aws_rtmp",
-        name="AWS Zixi",
-        protocol="rtmp",
-        notes="AWS Zixi RTMP ingest (coming soon).",
-        ingest_provider="aws_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_aws_hls",
-        name="AWS Zixi",
-        protocol="hls",
-        notes="AWS Zixi HLS ingest (coming soon).",
-        ingest_provider="aws_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_aws_dash",
-        name="AWS Zixi",
-        protocol="dash",
-        notes="AWS Zixi DASH ingest (coming soon).",
-        ingest_provider="aws_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_linode_srt",
-        name="Linode Zixi",
-        protocol="srt",
-        notes="Linode Zixi SRT ingest (coming soon).",
-        ingest_provider="linode_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_linode_rtmp",
-        name="Linode Zixi",
-        protocol="rtmp",
-        notes="Linode Zixi RTMP ingest (coming soon).",
-        ingest_provider="linode_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_linode_hls",
-        name="Linode Zixi",
-        protocol="hls",
-        notes="Linode Zixi HLS ingest (coming soon).",
-        ingest_provider="linode_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
-        id="zixi_linode_dash",
-        name="Linode Zixi",
-        protocol="dash",
-        notes="Linode Zixi DASH ingest (coming soon).",
-        ingest_provider="linode_zixi",
-        web_available=False,
-    ),
-    ServicePreset(
         id="local_srs_srt",
         name="Local SRS SRT listener",
         protocol="srt",
@@ -458,12 +391,9 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
     ),
 ]
 
-LINODE_STUB_IDS = {
-    "zixi_linode_srt",
-    "zixi_linode_rtmp",
-    "zixi_linode_hls",
-    "zixi_linode_dash",
-}
+# GCP Central presets stay hardcoded above (live IPs). Every other host is
+# generated so a 4th stack is env+IPs, not another copy-pasted builder.
+_HARDCODED_HOST_IDS = frozenset({"gcp_central"})
 
 
 def _tag_cloud_presets(presets: List[ServicePreset]) -> List[ServicePreset]:
@@ -486,285 +416,174 @@ def _tag_cloud_presets(presets: List[ServicePreset]) -> List[ServicePreset]:
     return tagged
 
 
-def _build_linode_presets() -> List[ServicePreset]:
-    zixi_ip = linode_zixi_ip()
-    web_ip = linode_web_ip()
-    relay_ip = os.environ.get("LINODE_RELAY_IP", "").strip()
-    region = linode_region()
-    region_label = f"linode-{region}"
-    relay_domain = linode_relay_domain(relay_ip)
-    relay_base = f"https://{relay_domain}:4433"
-    relay_publish = f"{relay_base}/moq-relay?namespace=benchmark"
-    zixi_agent = f"http://{zixi_ip}:8090"
-    web_agent = f"http://{web_ip}:8090"
-    common = dict(
-        cloud_provider="linode",
+def _build_stack_presets(host: EncodeHost) -> List[ServicePreset]:
+    """Zixi + MediaMTX + MoQ :14433 for one host. Undeployed stacks stay visible."""
+    slug = host.preset_slug
+    prefix = host.ingest_prefix
+    region = host_region(host)
+    zixi_ok = host_role_configured(host, "zixi")
+    mtx_ok = host_role_configured(host, "mediamtx")
+    moq_ok = host_role_configured(host, "moq_relay_d18")
+    zixi_ip = host_zixi_ip(host)
+    web_ip = host_web_ip(host)
+    relay_ip = host_relay_ip(host)
+    relay_domain = host_relay_domain(host, relay_ip)
+    zixi_agent = f"http://{zixi_ip}:8090" if zixi_ip else ""
+    web_agent = f"http://{web_ip}:8090" if web_ip else ""
+    placement = dict(
+        cloud_provider=host.provider,
         cloud_region=region,
+    )
+    live = dict(
+        **placement,
         web_visible=True,
         web_available=True,
     )
+    stub = dict(
+        **placement,
+        web_visible=True,
+        web_available=False,
+    )
+    zixi_vis = live if zixi_ok else stub
+    mtx_vis = live if mtx_ok else stub
+    moq_vis = live if moq_ok else stub
+
+    relay_d16 = f"https://{relay_domain}:4433/moq-relay?namespace=benchmark" if relay_domain else ""
+    # Public MoQ is :14433 (draft=18). Leftover :4433 stays off the picker.
+    relay_d18 = (
+        f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18"
+        if relay_domain
+        else ""
+    )
     return [
         ServicePreset(
-            id="moq_zixi_linode",
-            name=f"Zixi Broadcaster {region_label}",
+            id=f"moq_zixi_{slug}",
+            name=f"Zixi · {host.label}",
             protocol="srt",
-            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000",
+            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000" if zixi_ok else "",
             notes=(
-                "Managed Zixi SRT ingest on Linode. Stream ID 'SRT Test'; browser playback "
-                "uses error-concealed 'SRT Test EC' when configured. "
+                f"Managed Zixi SRT ingest on {host.label} ({region}). Stream ID 'SRT Test'; "
                 f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."
+                if zixi_ok
+                else "Not deployed"
             ),
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="linode_zixi",
-            **common,
+            ingest_provider=f"{prefix}_zixi",
+            **zixi_vis,
         ),
         ServicePreset(
-            id="moq_zixi_linode_rtmp",
-            name=f"Zixi Broadcaster {region_label}",
+            id=f"moq_zixi_{slug}_rtmp",
+            name=f"Zixi · {host.label}",
             protocol="rtmp",
-            url=f"rtmp://{zixi_ip}:1935/live/benchmark",
-            notes=(
-                "Managed Zixi RTMP ingest on Linode. HTTP-TS preview at "
-                f"http://{zixi_ip}:7777/benchmark.ts."
-            ),
+            url=f"rtmp://{zixi_ip}:1935/live/benchmark" if zixi_ok else "",
+            notes=f"Managed Zixi RTMP ingest on {host.label} ({region})." if zixi_ok else "Not deployed",
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="linode_zixi",
-            **common,
+            ingest_provider=f"{prefix}_zixi",
+            **zixi_vis,
         ),
         ServicePreset(
-            id="moq_zixi_linode_hls",
-            name=f"Zixi Broadcaster {region_label}",
+            id=f"moq_zixi_{slug}_hls",
+            name=f"Zixi · {host.label}",
             protocol="hls",
             url=f"http://{zixi_ip}:7777/benchmark",
             notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="linode_zixi",
-            cloud_provider="linode",
-            cloud_region=region,
-            web_visible=False,
-            web_available=False,
+            ingest_provider=f"{prefix}_zixi",
+            **{**placement, "web_visible": False, "web_available": False},
         ),
         ServicePreset(
-            id="moq_zixi_linode_dash",
-            name=f"Zixi Broadcaster {region_label}",
+            id=f"moq_zixi_{slug}_dash",
+            name=f"Zixi · {host.label}",
             protocol="dash",
             url=f"http://{zixi_ip}:7777/benchmark",
             notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="linode_zixi",
-            cloud_provider="linode",
-            cloud_region=region,
-            web_visible=False,
-            web_available=False,
+            ingest_provider=f"{prefix}_zixi",
+            **{**placement, "web_visible": False, "web_available": False},
         ),
         ServicePreset(
-            id="moq_linode_relay",
-            name=f"OpenMOQ MOQ-X draft-16 {region_label}",
+            id=f"moq_{slug}_relay",
+            name=f"OpenMOQ draft-16 · {host.label}",
             protocol="moq",
-            url=relay_publish,
-            notes=f"Legacy :4433 draft-16 on Linode ({relay_base}). Hidden. Public MoQ is :14433.",
-            supports_vmaf=True,
-            ingest_agent_url=moq_recorder_agent_url(web_agent),
-            ingest_recording_dir="/var/lib/moq-relay-recordings",
-            ingest_provider="linode_moq_relay",
-            **{**common, "web_visible": False},
-        ),
-        ServicePreset(
-            id="moq_linode_relay_d18",
-            name=f"OpenMOQ MOQ-X draft-18 {region_label}",
-            protocol="moq",
-            url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
+            url=relay_d16,
             notes=(
-                "Public MoQ path. moqx on UDP 14433. Speaks moqt-18. "
-                "ffmpeg → moq5-fmp4-publish. Linode cloud fw must allow UDP 14433."
+                f"Legacy :4433 draft-16 on {host.label}. Hidden. Public MoQ is :14433."
             ),
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
-            ingest_provider="linode_moq_relay_d18",
-            **common,
+            ingest_provider=f"{prefix}_moq_relay",
+            **{**live, "web_visible": False},
         ),
         ServicePreset(
-            id="moq_mediamtx_linode_srt",
-            name=f"MediaMTX {region_label} (LL delivery)",
-            protocol="srt",
-            url=f"srt://{web_ip}:8890?mode=caller&latency=200000&streamid=publish:benchmark",
-            notes=(
-                "MediaMTX SRT on Linode web host → LL-HLS / WHEP. "
-                f"HLS: http://{web_ip}:8888/benchmark/index.m3u8."
-            ),
-            supports_vmaf=False,
-            ingest_agent_url=web_agent,
-            ingest_provider="linode_mediamtx",
-            **common,
-        ),
-        ServicePreset(
-            id="moq_mediamtx_linode_rtmp",
-            name=f"MediaMTX {region_label} (LL delivery)",
-            protocol="rtmp",
-            url=f"rtmp://{web_ip}:1935/benchmark",
-            notes="MediaMTX RTMP on Linode web host.",
-            supports_vmaf=False,
-            ingest_agent_url=web_agent,
-            ingest_provider="linode_mediamtx",
-            **common,
-        ),
-        ServicePreset(
-            id="moq_mediamtx_linode_whip",
-            name=f"MediaMTX {region_label} (LL delivery)",
-            protocol="webrtc",
-            url=f"http://{web_ip}:8889/benchmark/whip",
-            notes="ffmpeg WHIP publish into Linode MediaMTX (Opus audio required).",
-            supports_vmaf=False,
-            ingest_agent_url=web_agent,
-            ingest_provider="linode_mediamtx",
-            **common,
-        ),
-    ]
-
-
-def _build_gcp_east_presets() -> List[ServicePreset]:
-    zixi_ip = gcp_east_zixi_ip()
-    web_ip = gcp_east_web_ip()
-    relay_ip = gcp_east_relay_ip()
-    region = gcp_east_region()
-    region_label = f"gcp-{region}"
-    relay_domain = gcp_east_relay_domain(relay_ip)
-    relay_base = f"https://{relay_domain}:4433"
-    relay_publish = f"{relay_base}/moq-relay?namespace=benchmark"
-    zixi_agent = f"http://{zixi_ip}:8090"
-    web_agent = f"http://{web_ip}:8090"
-    common = dict(
-        cloud_provider="gcp",
-        cloud_region=region,
-        web_visible=True,
-        web_available=True,
-    )
-    return [
-        ServicePreset(
-            id="moq_zixi_gcp_east",
-            name=f"Zixi Broadcaster {region_label}",
-            protocol="srt",
-            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000",
-            notes=(
-                f"Managed Zixi SRT ingest on GCP {region}. Stream ID 'SRT Test'; "
-                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."
-            ),
-            supports_vmaf=True,
-            ingest_agent_url=zixi_agent,
-            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="gcp_east_zixi",
-            **common,
-        ),
-        ServicePreset(
-            id="moq_zixi_gcp_east_rtmp",
-            name=f"Zixi Broadcaster {region_label}",
-            protocol="rtmp",
-            url=f"rtmp://{zixi_ip}:1935/live/benchmark",
-            notes=f"Managed Zixi RTMP ingest on GCP {region}.",
-            supports_vmaf=True,
-            ingest_agent_url=zixi_agent,
-            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="gcp_east_zixi",
-            **common,
-        ),
-        ServicePreset(
-            id="moq_zixi_gcp_east_hls",
-            name=f"Zixi Broadcaster {region_label}",
-            protocol="hls",
-            url=f"http://{zixi_ip}:7777/benchmark",
-            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
-            supports_vmaf=True,
-            ingest_agent_url=zixi_agent,
-            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="gcp_east_zixi",
-            cloud_provider="gcp",
-            cloud_region=region,
-            web_visible=False,
-            web_available=False,
-        ),
-        ServicePreset(
-            id="moq_zixi_gcp_east_dash",
-            name=f"Zixi Broadcaster {region_label}",
-            protocol="dash",
-            url=f"http://{zixi_ip}:7777/benchmark",
-            notes=HTTP_TS_PUT_UNAVAILABLE_REASON,
-            supports_vmaf=True,
-            ingest_agent_url=zixi_agent,
-            ingest_recording_dir="/opt/zixi_broadcaster-linux64",
-            ingest_provider="gcp_east_zixi",
-            cloud_provider="gcp",
-            cloud_region=region,
-            web_visible=False,
-            web_available=False,
-        ),
-        ServicePreset(
-            id="moq_gcp_east_relay",
-            name=f"OpenMOQ MOQ-X draft-16 {region_label}",
+            id=f"moq_{slug}_relay_d18",
+            name=f"OpenMOQ · {host.label}",
             protocol="moq",
-            url=relay_publish,
-            notes=f"Legacy :4433 draft-16 on GCP {region} ({relay_base}). Hidden. Public MoQ is :14433.",
-            supports_vmaf=True,
-            ingest_agent_url=moq_recorder_agent_url(web_agent),
-            ingest_recording_dir="/var/lib/moq-relay-recordings",
-            ingest_provider="gcp_east_moq_relay",
-            **{**common, "web_visible": False},
-        ),
-        ServicePreset(
-            id="moq_gcp_east_relay_d18",
-            name=f"OpenMOQ MOQ-X draft-18 {region_label}",
-            protocol="moq",
-            url=f"https://{relay_domain}:14433/moq-relay?namespace=benchmark&draft=18",
+            url=relay_d18 if moq_ok else "",
             notes=(
-                "Public MoQ path. moqx on UDP 14433. Speaks moqt-18. "
+                f"Public MoQ path on {host.label}. moqx on UDP 14433. Speaks moqt-18. "
                 "ffmpeg → moq5-fmp4-publish."
+                if moq_ok
+                else "Not deployed. Public MoQ is WebTransport :14433 (draft=18), not leftover :4433."
             ),
             supports_vmaf=True,
             ingest_agent_url=moq_recorder_agent_url(web_agent),
             ingest_recording_dir="/var/lib/moq-relay-recordings",
-            ingest_provider="gcp_east_moq_relay_d18",
-            **common,
+            ingest_provider=f"{prefix}_moq_relay_d18",
+            **moq_vis,
         ),
         ServicePreset(
-            id="moq_mediamtx_gcp_east_srt",
-            name=f"MediaMTX {region_label} (LL delivery)",
+            id=f"moq_mediamtx_{slug}_srt",
+            name=f"MediaMTX · {host.label}",
             protocol="srt",
-            url=f"srt://{web_ip}:8890?mode=caller&latency=200000&streamid=publish:benchmark",
-            notes=f"MediaMTX SRT on GCP {region} web host. HLS: http://{web_ip}:8888/benchmark/index.m3u8.",
+            url=(
+                f"srt://{web_ip}:8890?mode=caller&latency=200000&streamid=publish:benchmark"
+                if mtx_ok
+                else ""
+            ),
+            notes=(
+                f"MediaMTX SRT on {host.label}. HLS: http://{web_ip}:8888/benchmark/index.m3u8."
+                if mtx_ok
+                else "Not deployed"
+            ),
             supports_vmaf=False,
             ingest_agent_url=web_agent,
-            ingest_provider="gcp_east_mediamtx",
-            **common,
+            ingest_provider=f"{prefix}_mediamtx",
+            **mtx_vis,
         ),
         ServicePreset(
-            id="moq_mediamtx_gcp_east_rtmp",
-            name=f"MediaMTX {region_label} (LL delivery)",
+            id=f"moq_mediamtx_{slug}_rtmp",
+            name=f"MediaMTX · {host.label}",
             protocol="rtmp",
-            url=f"rtmp://{web_ip}:1935/benchmark",
-            notes=f"MediaMTX RTMP on GCP {region} web host.",
+            url=f"rtmp://{web_ip}:1935/benchmark" if mtx_ok else "",
+            notes=f"MediaMTX RTMP on {host.label}." if mtx_ok else "Not deployed",
             supports_vmaf=False,
             ingest_agent_url=web_agent,
-            ingest_provider="gcp_east_mediamtx",
-            **common,
+            ingest_provider=f"{prefix}_mediamtx",
+            **mtx_vis,
         ),
         ServicePreset(
-            id="moq_mediamtx_gcp_east_whip",
-            name=f"MediaMTX {region_label} (LL delivery)",
+            id=f"moq_mediamtx_{slug}_whip",
+            name=f"MediaMTX · {host.label}",
             protocol="webrtc",
-            url=f"http://{web_ip}:8889/benchmark/whip",
-            notes=f"ffmpeg WHIP publish into GCP {region} MediaMTX (Opus audio required).",
+            url=f"http://{web_ip}:8889/benchmark/whip" if mtx_ok else "",
+            notes=(
+                f"ffmpeg WHIP publish into {host.label} MediaMTX (Opus audio required)."
+                if mtx_ok
+                else "Not deployed"
+            ),
             supports_vmaf=False,
             ingest_agent_url=web_agent,
-            ingest_provider="gcp_east_mediamtx",
-            **common,
+            ingest_provider=f"{prefix}_mediamtx",
+            **mtx_vis,
         ),
     ]
 
@@ -772,11 +591,10 @@ def _build_gcp_east_presets() -> List[ServicePreset]:
 def _finalize_service_presets(raw: List[ServicePreset]) -> List[ServicePreset]:
     tagged = _tag_cloud_presets(raw)
     extras: List[ServicePreset] = []
-    if linode_stack_configured():
-        tagged = [preset for preset in tagged if preset.id not in LINODE_STUB_IDS]
-        extras.extend(_build_linode_presets())
-    if gcp_east_stack_configured():
-        extras.extend(_build_gcp_east_presets())
+    for host in ENCODE_HOSTS:
+        if host.id in _HARDCODED_HOST_IDS:
+            continue
+        extras.extend(_build_stack_presets(host))
     return tagged + extras
 
 

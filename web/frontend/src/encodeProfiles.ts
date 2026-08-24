@@ -14,8 +14,13 @@ export const HLS_SEGMENT_SEC_MIN = 2;
 export const HLS_SEGMENT_SEC_MAX = 6;
 export const HLS_LIVE_SYNC_SEGMENTS_DEFAULT = 2;
 export const HLS_LIVE_SYNC_DURATION_SEC_MIN = 1;
-export const MOQ_GOP_SEC_MIN = 0.5;
+/** Solo/file MoQ only. Shared broker master stays at 1s (do not drop it). */
+export const MOQ_GOP_SEC_MIN = 0.25;
 export const MOQ_GOP_SEC_MAX = 1.0;
+/** Matches webcam_broker.MASTER_GOP_FRAMES @ 30fps — brokered MoQ copies this. */
+export const BROKER_GOP_MS = 1000;
+/** MediaMTX LL-HLS part duration. Not a 1s CMAF group. */
+export const LL_HLS_PART_MS = 200;
 /** Uniform IDR cadence for TS/HLS delivery (mirrors DELIVERY_GOP_SEC). */
 export const DELIVERY_GOP_SEC = 1;
 
@@ -147,6 +152,49 @@ export function moqGopFramesForLatency(targetLatencyMs: number, fps = ASSUMED_FP
   return Math.max(1, Math.round(seconds * fps));
 }
 
+/** Closed-group duration the NextGroupStart subscriber waits — not ingest RTT. */
+export function moqGroupDurationMs(
+  targetLatencyMs: number,
+  options: { brokered?: boolean; fps?: number } = {},
+): number {
+  if (options.brokered) {
+    return BROKER_GOP_MS;
+  }
+  const fps = options.fps ?? ASSUMED_FPS;
+  return Math.round((moqGopFramesForLatency(targetLatencyMs, fps) / fps) * 1000 * 10) / 10;
+}
+
+/** Shared webcam broker loopback — file / BBB / dummy must not match this. */
+export function isBrokeredWebcamMedia(mediaPath: string | null | undefined): boolean {
+  return (mediaPath || "").trim().toLowerCase().startsWith("udp://");
+}
+
+/**
+ * `latency_segmentation_ms` for the publisher hop. File and cloud playout
+ * use the solo MoQ GOP. Only the brokered UDP master reports 1s.
+ */
+export function segmentationMsForPublish(
+  protocol: string,
+  targetLatencyMs: number,
+  options: { mediaPath?: string; brokered?: boolean } = {},
+): { ms: number | null; notApplicable: boolean } {
+  const proto = (protocol || "").trim().toLowerCase();
+  if (proto === "webrtc") {
+    return { ms: null, notApplicable: true };
+  }
+  if (proto === "moq") {
+    const brokered = options.brokered ?? isBrokeredWebcamMedia(options.mediaPath);
+    return { ms: moqGroupDurationMs(targetLatencyMs, { brokered }), notApplicable: false };
+  }
+  if (proto === "hls") {
+    return { ms: LL_HLS_PART_MS, notApplicable: false };
+  }
+  if (proto === "srt" || proto === "rtmp" || proto === "http") {
+    return { ms: null, notApplicable: true };
+  }
+  return { ms: null, notApplicable: false };
+}
+
 export function moqPlayerTargetLatencyMs(targetLatencyMs?: number): number {
   const ms = clampTargetLatencyMs(targetLatencyMs ?? DEFAULT_MOQ_TARGET_LATENCY_MS);
   if (ms >= SRT_MIN_TARGET_LATENCY_MS) {
@@ -169,6 +217,7 @@ export function moqPlayerTargetLatencyMs(targetLatencyMs?: number): number {
 export function moqCatchUpConfig(
   targetLatencyMs?: number,
   packaging: "cmaf" | "loc" = "cmaf",
+  playbackPolicy: "live-edge" | "complete" = "live-edge",
 ): {
   targetLatencyMs: number;
   maxCatchUpRate: number;
@@ -178,7 +227,7 @@ export function moqCatchUpConfig(
   const target = moqPlayerTargetLatencyMs(targetLatencyMs);
   return {
     targetLatencyMs: target,
-    maxCatchUpRate: packaging === "loc" ? 1.25 : 1.0,
+    maxCatchUpRate: packaging === "loc" && playbackPolicy !== "complete" ? 1.25 : 1.0,
     catchUpThresholdMs: Math.max(80, Math.round(target * 0.2)),
     catchUpRecoveryMs: Math.max(40, Math.round(target * 0.12)),
   };

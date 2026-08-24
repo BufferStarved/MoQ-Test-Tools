@@ -22,18 +22,21 @@ from encode_profile import (
     ASSUMED_FPS,
     DEFAULT_ENCODE_LADDER_ID,
     DEFAULT_TARGET_LATENCY_MS,
+    LL_HLS_PART_MS,
     build_video_encode_args,
     clamp_srt_target_latency_ms,
     clamp_target_latency_ms,
     delivery_gop_frames,
     effective_srt_caller_latency_ms,
     encode_profile_summary,
+    moq_group_duration_ms,
     with_srt_latency,
 )
 from endpoint_probe import probe_endpoint
-from ingest_host_metrics import IngestHostMetricsPoller
+from ingest_host_metrics import IngestHostMetricsPoller, measured_server_cpu
 from latency_budget import (
     E2E_SCOPE_CAPTURE_TO_GLASS,
+    E2E_SCOPE_CAPTURE_TO_INGEST,
     build_latency_budget,
     e2e_scope_for,
     encode_frame_drop_pct,
@@ -226,6 +229,8 @@ class UploadJob:
     compute_vmaf_encoder: bool = False
     encode_ladder: str = DEFAULT_ENCODE_LADDER_ID
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS
+    playback_policy: str = "live-edge"
+    test_scope: str = "e2e"
     zixi_stream_id: str = ""
     # Error-concealed derived stream for HLS playback (falls back to
     # zixi_stream_id when concealment isn't configured). See
@@ -247,6 +252,9 @@ class UploadJob:
     # "cloud" = encode on the API host (default). "local" = dispatch to a
     # connected publisher agent (laptop) for true internet-acquisition tests.
     publisher_host: str = "cloud"
+    # Browser session that owns the laptop helper. Empty on localhost
+    # shared-token helpers; required on prod so we never pick another user.
+    publisher_session: str = ""
     # "ffmpeg" (default) or "obs" (OpenMOQ plugin + OBS SRT/RTMP outputs).
     encoder: str = "ffmpeg"
     cancel_event: Optional[threading.Event] = None
@@ -509,7 +517,7 @@ class UploadSample:
     client_disk_percent: float = 0.0
     cloud_provider: str = ""
     cloud_region: str = ""
-    server_cpu_percent: float = 0.0
+    server_cpu_percent: Optional[float] = None
     server_memory_percent: float = 0.0
     server_disk_percent: float = 0.0
     moqx_subscribe_success: int = 0
@@ -525,6 +533,7 @@ class UploadSample:
     # live so the operator can attribute a slow leg while it is still running,
     # not only after the CSV lands.
     latency_encode_ms: float = 0.0
+    latency_segmentation_ms: float = 0.0
     latency_publish_ms: float = 0.0
     latency_network_ms: float = 0.0
     latency_packager_ms: float = 0.0
@@ -533,11 +542,37 @@ class UploadSample:
     latency_residual_ms: float = 0.0
     latency_overcount_ms: float = 0.0
     latency_unmeasured: str = ""
+    latency_not_applicable: str = ""
     latency_e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS
     encode_frames_total: int = 0
     encode_frames_dropped: int = 0
     encode_frames_duped: int = 0
     encode_frame_drop_pct: float = 0.0
+
+
+def _job_segmentation(job) -> tuple[Optional[float], bool, bool]:
+    """Known object cadence, n/a flag, and whether to split GOP out of encode.
+
+    MoQ: 1s when the brokered UDP master is copied, else the solo/file GOP
+    (~0.25s). HLS publish: 200ms LL parts — not a 1s CMAF group. WebRTC and
+    continuous TS/FLV (SRT/RTMP/HTTP) are n/a at this hop.
+    """
+    proto = str(getattr(getattr(job, "destination", None), "protocol", "") or "").strip().lower()
+    media = str(getattr(job, "media_path", "") or "")
+    target = int(getattr(job, "target_latency_ms", DEFAULT_TARGET_LATENCY_MS) or DEFAULT_TARGET_LATENCY_MS)
+    if proto == "webrtc":
+        return None, True, False
+    if proto == "moq":
+        return (
+            moq_group_duration_ms(target, brokered=is_brokered_webcam_udp(media)),
+            False,
+            True,
+        )
+    if proto == "hls":
+        return float(LL_HLS_PART_MS), False, False
+    if proto in {"srt", "rtmp", "http"}:
+        return None, True, False
+    return None, False, False
 
 
 def _apply_latency_budget(
@@ -547,6 +582,7 @@ def _apply_latency_budget(
     pipeline_baseline_ms: float,
     packager_transit_ms: Optional[float],
     e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
+    job=None,
 ) -> None:
     """Fill the live sample's latency components and frame ratios in place.
 
@@ -560,7 +596,9 @@ def _apply_latency_budget(
     startup figure, and feeding it in as a per-sample stage added a fixed
     ~2s "publish" to every steady-state row.
     """
-    budget = build_latency_budget(
+    protocol = str(getattr(getattr(job, "destination", None), "protocol", "") or "")
+    group_ms, seg_na, split_gop = _job_segmentation(job) if job is not None else (None, False, False)
+    budget_kwargs = dict(
         pipeline_baseline_ms=pipeline_baseline_ms,
         encode_lag_ms=sample.encode_lag_ms,
         publish_transit_ms=None,
@@ -569,8 +607,20 @@ def _apply_latency_budget(
         playback_buffer_sec=None,
         e2e_latency_ms=sample.e2e_latency_ms,
         e2e_scope=e2e_scope,
+        protocol=protocol,
+        segmentation_ms=group_ms,
+        segmentation_not_applicable=seg_na,
+        split_gop_from_encode=split_gop,
     )
+    budget = build_latency_budget(**budget_kwargs)
+    # Upload-only ranking e2e is capture-to-ingest accounted — never a
+    # confidence-monitor glass number, and never a fake 0 that "wins".
+    if e2e_scope == E2E_SCOPE_CAPTURE_TO_INGEST and (sample.e2e_latency_ms or 0) <= 0:
+        sample.e2e_latency_ms = budget.accounted_ms
+        budget_kwargs["e2e_latency_ms"] = sample.e2e_latency_ms
+        budget = build_latency_budget(**budget_kwargs)
     sample.latency_encode_ms = budget.encode_ms
+    sample.latency_segmentation_ms = budget.segmentation_ms
     sample.latency_publish_ms = budget.publish_ms
     sample.latency_network_ms = budget.network_ms
     sample.latency_packager_ms = budget.packager_ms
@@ -579,6 +629,7 @@ def _apply_latency_budget(
     sample.latency_residual_ms = budget.residual_ms
     sample.latency_overcount_ms = budget.overcount_ms
     sample.latency_unmeasured = ",".join(budget.unmeasured_stages)
+    sample.latency_not_applicable = ",".join(budget.not_applicable_stages)
     sample.latency_e2e_scope = budget.e2e_scope
     sample.encode_frames_total = max(0, int(getattr(status, "frame", 0) or 0))
     sample.encode_frames_dropped = max(0, int(getattr(status, "drop_frames", 0) or 0))
@@ -680,6 +731,29 @@ def sleep_until_next_tick(
         return tick + 1
     # Overran the slot: jump to the next whole-second tick still ahead.
     return max(tick + 1, int(now() - start_time) + 1)
+
+
+def llhls_packager_transit_ms(
+    pdt_epoch: float,
+    anchor: float,
+    media_pos: float,
+) -> Optional[float]:
+    """PDT − (anchor + media_pos) in ms. Never (elapsed − 1s).
+
+    A near-empty playlist at T+5s makes media_pos≈1 and transit≈4.6s —
+    that is the startup wait, not encoder→packager. Reject those so a
+    later probe with a real media position can replace the snapshot.
+    """
+    elapsed = pdt_epoch - anchor
+    transit_s = pdt_epoch - (anchor + media_pos)
+    if media_pos < 2.0 and transit_s > 2.5:
+        return None
+    if media_pos < 2.0 and abs(transit_s - (elapsed - 1.0)) < 0.35:
+        return None
+    transit_ms = transit_s * 1000.0
+    if not 0.0 < transit_ms < 15_000.0:
+        return None
+    return transit_ms
 
 
 class UploadService:
@@ -1033,7 +1107,7 @@ class UploadService:
                     transport_recv_rate_mbps=merged["net_recv_mbps"],
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
-                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_cpu_percent=measured_server_cpu(server_host),
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
                     **_sample_cloud_fields(job.destination),
@@ -1043,8 +1117,13 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
-                    e2e_scope=e2e_scope_for(job.destination.protocol),
+                    e2e_scope=e2e_scope_for(
+                        job.destination.protocol,
+                        test_scope=getattr(job, "test_scope", None) or "e2e",
+                    ),
+                    job=job,
                 )
+                seg_ms, seg_na, split_gop = _job_segmentation(job)
                 sample.fps_stability = collector.record_sample(
                     pid=process.pid,
                     encoded_bitrate_kbps=encoded_bitrate_kbps,
@@ -1067,9 +1146,14 @@ class UploadService:
                     encode_frames_dropped=status.drop_frames,
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
+                    segmentation_ms=seg_ms,
+                    segmentation_not_applicable=seg_na,
+                    split_gop_from_encode=split_gop,
                     upload_latency_ms=sample.upload_latency_ms,
                     startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
+                    e2e_latency_ms=sample.e2e_latency_ms,
+                    test_scope=getattr(job, "test_scope", None) or "e2e",
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -1598,17 +1682,22 @@ class UploadService:
         from a prior publish otherwise invent multi-second media times in the
         first second of a new encode and produce nonsense negative transit
         (2026-08-10 truth run: −3697ms from a 7s playlist at T+3.3s).
+
+        Keep re-probing for the run: a one-shot at T+5s with media_pos≈1s
+        locked 4.6s into every later sample (comparison 2026-08-23).
         """
         index_url = self._managed_hls_manifest_url(job)
         if not index_url:
             return
-        deadline = time.time() + 25.0
-        while job._media_zero_epoch is None and time.time() < deadline:
+        wait_deadline = time.time() + 25.0
+        while job._media_zero_epoch is None and time.time() < wait_deadline:
             if stop_event.wait(0.2):
                 return
         variant_url: Optional[str] = None
         pdt_re = re.compile(r"#EXT-X-PROGRAM-DATE-TIME:(\S+)")
-        while not stop_event.is_set() and time.time() < deadline:
+        first_deadline = time.time() + 25.0
+        published = False
+        while not stop_event.is_set() and (published or time.time() < first_deadline):
             try:
                 if variant_url is None:
                     body = urllib.request.urlopen(index_url, timeout=2.0).read().decode(
@@ -1666,52 +1755,33 @@ class UploadService:
                 continue
             elapsed = pdt_epoch - anchor
             now = time.time()
-            # Prefer a fresh muxer (sequence 0) with a media position that
-            # cannot exceed wall elapsed.
-            if media_sequence == 0 and pdt_media_pos <= elapsed + 0.75:
-                transit_ms = (pdt_epoch - (anchor + pdt_media_pos)) * 1000.0
-                if 0.0 < transit_ms < 15000.0:
-                    logger.info(
-                        "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
-                        job.job_id,
-                        transit_ms,
-                        pdt_value,
-                        media_sequence,
-                        pdt_media_pos,
-                    )
-                    self._notify_packager_transit(job, transit_ms)
-                    return
-            # Fallback: MediaMTX often continues MEDIA-SEQUENCE across
-            # republishes, so sequence==0 never appears. The first live-edge
-            # PDT after our encode starts (PDT wall-clock ≈ now, elapsed < 8s)
-            # packages the head of THIS publish — treat its media time as ~0.
-            # Truth run 2026-08-10: sequence==0 path timed out; this recovers
-            # the ~2.3s encoder→packager leg SRT was missing.
-            if (
-                0.5 < elapsed < 8.0
-                and abs(pdt_epoch - now) < 2.0
-                and time.time() - anchor > 3.0
-            ):
-                # First live-edge PDT packages media ≈0.5–1s into the publish,
-                # not media 0 — subtract that or transit overstates by ~1s
-                # (truth run 2026-08-10: 3.3s published vs ~2.3s implied by glass).
-                transit_ms = (elapsed - 1.0) * 1000.0
-                if 500.0 < transit_ms < 15000.0:
-                    logger.info(
-                        "LL-HLS packager transit for %s: %.0fms "
-                        "(live-edge fallback pdt=%s seq=%s)",
-                        job.job_id,
-                        transit_ms,
-                        pdt_value,
-                        media_sequence,
-                    )
-                    self._notify_packager_transit(job, transit_ms)
-                    return
-            stop_event.wait(0.5)
-        logger.warning(
-            "LL-HLS transit probe timed out for %s without a usable PDT window",
-            job.job_id,
-        )
+            transit_ms = llhls_packager_transit_ms(pdt_epoch, anchor, pdt_media_pos)
+            if transit_ms is None or pdt_media_pos > elapsed + 0.75:
+                stop_event.wait(0.5)
+                continue
+            # Prefer a fresh muxer (sequence 0). MediaMTX often continues
+            # MEDIA-SEQUENCE across republishes, so also accept a live PDT
+            # whose stamp is still near wall clock.
+            if media_sequence == 0 or abs(pdt_epoch - now) < 2.0:
+                logger.info(
+                    "LL-HLS packager transit for %s: %.0fms (pdt=%s seq=%s pos=%.1fs)",
+                    job.job_id,
+                    transit_ms,
+                    pdt_value,
+                    media_sequence,
+                    pdt_media_pos,
+                )
+                self._notify_packager_transit(job, transit_ms)
+                published = True
+            # Re-probe — do not lock the first snapshot for the rest of the run.
+            if stop_event.wait(2.0):
+                return
+            continue
+        if not published:
+            logger.warning(
+                "LL-HLS transit probe timed out for %s without a usable PDT window",
+                job.job_id,
+            )
 
     def _zixi_uses_error_concealment_playback(self, job: UploadJob) -> bool:
         """True when the browser pulls the EC derivative, not the raw SRT input."""
@@ -2224,7 +2294,7 @@ class UploadService:
                     transport_recv_rate_mbps=merged["net_recv_mbps"],
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
-                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_cpu_percent=measured_server_cpu(server_host),
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
                     **_sample_cloud_fields(job.destination),
@@ -2234,8 +2304,13 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
-                    e2e_scope=e2e_scope_for(job.destination.protocol),
+                    e2e_scope=e2e_scope_for(
+                        job.destination.protocol,
+                        test_scope=getattr(job, "test_scope", None) or "e2e",
+                    ),
+                    job=job,
                 )
+                seg_ms, seg_na, split_gop = _job_segmentation(job)
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
                     encoded_bitrate_kbps=encoded_bitrate_kbps,
@@ -2260,9 +2335,14 @@ class UploadService:
                     encode_frames_dropped=status.drop_frames,
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
+                    segmentation_ms=seg_ms,
+                    segmentation_not_applicable=seg_na,
+                    split_gop_from_encode=split_gop,
                     upload_latency_ms=sample.upload_latency_ms,
                     startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
+                    e2e_latency_ms=sample.e2e_latency_ms,
+                    test_scope=getattr(job, "test_scope", None) or "e2e",
                     net_rtt_ms=sample.net_rtt_ms,
                     net_jitter_ms=sample.net_jitter_ms,
                     net_send_mbps=sample.net_send_mbps,
@@ -2425,11 +2505,15 @@ class UploadService:
             # ffmpeg first (bench-733f1d7c) let encode finish 240 CMAF
             # fragments while the relay never saw PUBLISH_NAMESPACE.
             try:
+                publisher_env = os.environ.copy()
+                if qlog_dir:
+                    publisher_env["MOQ_QLOG_DIR"] = qlog_dir
                 publisher_proc = subprocess.Popen(
                     publisher_cmd,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=publisher_env,
                 )
             except OSError as exc:
                 return UploadResult(
@@ -2533,8 +2617,10 @@ class UploadService:
         )
         moqx_poller = MoqxStatsPoller(job.destination.url)
         qlog_tailer = PicoquicQlogTailer(qlog_dir) if qlog_dir else None
-        # openmoq has no qlog; probe relay admin TCP for path RTT/jitter equivalent.
-        path_rtt_probe = PathRttProbe(job.destination.url)
+        # openmoq has no qlog; probe relay admin TCP for path RTT/jitter.
+        # moq5 qlog is the QUIC instrument — never mix the TCP admin probe
+        # into quic_rtt_ms or into net_* once qlog is enabled.
+        path_rtt_probe = PathRttProbe(job.destination.url) if not qlog_dir else None
         start_time = time.time()
         encode_lag_tracker = EncodeLagTracker()
         upload_latency_tracker = UploadLatencyTracker()
@@ -2677,7 +2763,11 @@ class UploadService:
                         preview_ready_notified = True
                         self._notify_preview_ready(job, True)
                 quic_stats = qlog_tailer.poll() if qlog_tailer and qlog_tailer.enabled else None
-                path_rtt = path_rtt_probe.poll() if path_rtt_probe.enabled else None
+                path_rtt = (
+                    path_rtt_probe.poll()
+                    if path_rtt_probe is not None and path_rtt_probe.enabled
+                    else None
+                )
                 elapsed = int(time.time() - start_time)
                 pids = [pid for pid in (ffmpeg_proc.pid, publisher_proc.pid if publisher_proc else None) if pid]
                 cpu, mem = self._process_usage(pids)
@@ -2685,12 +2775,21 @@ class UploadService:
                 encoded_bitrate_kbps = status.bitrate_kbps or (send_mbps * 1000.0)
                 encode_lag_ms = encode_lag_tracker.sample(float(elapsed), status.out_time)
 
-                # Prefer native QUIC smoothed RTT (moq5 qlog); else path TCP probe.
+                # Real QUIC smoothed RTT + jitter from picoquic qlog only.
+                # First seconds stay 0 until the *.client.qlog exists; charts
+                # map that 0 to null. Never copy the TCP admin probe here.
                 quic_rtt = quic_stats.rtt_ms if quic_stats and quic_stats.rtt_ms > 0 else 0.0
-                path_rtt_ms = path_rtt.rtt_ms if path_rtt else 0.0
-                path_jitter_ms = path_rtt.jitter_ms if path_rtt else 0.0
-                net_rtt = quic_rtt or path_rtt_ms
-                net_jitter = path_jitter_ms if quic_rtt <= 0 else 0.0
+                quic_jitter = (
+                    quic_stats.jitter_ms if quic_stats and quic_stats.jitter_ms > 0 else 0.0
+                )
+                if qlog_tailer and qlog_tailer.enabled:
+                    net_rtt = quic_rtt
+                    net_jitter = quic_jitter
+                else:
+                    path_rtt_ms = path_rtt.rtt_ms if path_rtt else 0.0
+                    path_jitter_ms = path_rtt.jitter_ms if path_rtt else 0.0
+                    net_rtt = quic_rtt or path_rtt_ms
+                    net_jitter = quic_jitter or path_jitter_ms
 
                 quic_packets_lost = quic_stats.packets_lost if quic_stats else 0
                 quic_cwnd = quic_stats.cwnd_bytes if quic_stats else 0
@@ -2762,7 +2861,7 @@ class UploadService:
                     upload_latency_ms=upload_latency_ms,
                     client_memory_percent=client_host.memory_percent,
                     client_disk_percent=client_host.disk_percent,
-                    server_cpu_percent=server_host.cpu_percent if server_host else 0.0,
+                    server_cpu_percent=measured_server_cpu(server_host),
                     server_memory_percent=server_host.memory_percent if server_host else 0.0,
                     server_disk_percent=server_host.disk_percent if server_host else 0.0,
                     moqx_subscribe_success=moqx_deltas.subscribe_success if moqx_deltas else 0,
@@ -2772,9 +2871,7 @@ class UploadService:
                     ),
                     moqx_publish_received=moqx_stats.publish_received if moqx_stats else 0,
                     moqx_publish_done=moqx_stats.publish_done if moqx_stats else 0,
-                    # Real QUIC smoothed RTT only (moq5 qlog). The TCP-probe
-                    # fallback is NOT QUIC — it stays in net_rtt_ms where it is
-                    # labeled as a path probe, instead of masquerading here.
+                    # picoquic qlog smoothed_rtt only. Never a TCP admin probe.
                     quic_rtt_ms=quic_rtt,
                     quic_cwnd_bytes=quic_cwnd,
                     quic_packets_lost=quic_packets_lost,
@@ -2785,8 +2882,13 @@ class UploadService:
                     status=status,
                     pipeline_baseline_ms=encode_lag_tracker.pipeline_baseline_ms,
                     packager_transit_ms=job._packager_transit_ms,
-                    e2e_scope=e2e_scope_for(job.destination.protocol),
+                    e2e_scope=e2e_scope_for(
+                        job.destination.protocol,
+                        test_scope=getattr(job, "test_scope", None) or "e2e",
+                    ),
+                    job=job,
                 )
+                seg_ms, seg_na, split_gop = _job_segmentation(job)
                 sample.fps_stability = collector.record_sample(
                     pid=ffmpeg_proc.pid,
                     encoded_bitrate_kbps=encoded_bitrate_kbps,
@@ -2804,9 +2906,14 @@ class UploadService:
                     encode_frames_dropped=status.drop_frames,
                     encode_frames_duped=status.dup_frames,
                     packager_transit_ms=job._packager_transit_ms,
+                    segmentation_ms=seg_ms,
+                    segmentation_not_applicable=seg_na,
+                    split_gop_from_encode=split_gop,
                     upload_latency_ms=sample.upload_latency_ms,
                     startup=startup_half,
                     e2e_scope=sample.latency_e2e_scope,
+                    e2e_latency_ms=sample.e2e_latency_ms,
+                    test_scope=getattr(job, "test_scope", None) or "e2e",
                     net_rtt_ms=net_rtt,
                     net_jitter_ms=net_jitter,
                     net_send_mbps=send_mbps,
@@ -3081,6 +3188,8 @@ class UploadService:
                 "vmaf_computed_on": "local" if vmaf_score is not None else "",
                 "vmaf_pending_on_ingest": job.compute_vmaf_on_ingest,
                 "vmaf_via": "ingest_agent" if job.compute_vmaf_on_ingest else "",
+                "playback_policy": getattr(job, "playback_policy", None) or "live-edge",
+                "test_scope": getattr(job, "test_scope", None) or "e2e",
                 "encoder_vmaf_requested": job.compute_vmaf_encoder,
                 "encoder_capture_path": job.encoder_capture_path,
                 "zixi_poller_enabled": zixi_enabled,

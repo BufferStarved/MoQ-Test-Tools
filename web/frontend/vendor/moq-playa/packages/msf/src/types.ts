@@ -78,6 +78,8 @@ export interface CatalogTrack {
     readonly label?: string;
     /** @see draft-ietf-moq-msf-00 §5.1.20 — Base64-encoded initialization data */
     readonly initData?: string;
+    /** @see draft-ietf-moq-msf-01 §5.2.13 / CMSF §3.1 — initDataList[].id */
+    readonly initRef?: string;
     /** @see draft-ietf-moq-catalogformat-01 §3.2.16 — name of separate initialization track */
     readonly initTrack?: string;
     /** @see draft-ietf-moq-msf-00 §5.1.21 — array of track names this track depends on */

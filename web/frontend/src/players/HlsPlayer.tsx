@@ -22,6 +22,10 @@ import {
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
+import { GoLiveButton } from "../GoLiveButton";
+import { formatGoLiveDiag, goLiveHoldSec, latchGoLive, seekGoLive } from "../goLive";
+import { usablePackagerTransitMs } from "../glassLatency";
+import { elapsedSecFromStart } from "../playbackMetrics";
 import {
   hlsSyncDurationForPlaylist,
   isStaleHlsFragmentLoop,
@@ -61,6 +65,7 @@ interface HlsPlayerProps {
   deliveryMediaOriginSec?: number | null;
   /** Zixi SRT/RTMP: switch the card to MPEG-TS when Fast HLS cannot recover. */
   onUnrecoverableHls?: () => void;
+  playbackPolicy?: "live-edge" | "complete";
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -77,6 +82,8 @@ const MANIFEST_STUCK_POLLS_FALLBACK = 8;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
+/** LL-HLS parts are 200ms; 4s was a whole regular-HLS window behind live. */
+const LIVE_JUMP_BEHIND_LL_SEC = 2;
 /**
  * Playhead frozen this long while data keeps buffering => escape the hole.
  * 2500ms (was 4000): the rescue ladder (nudge -> decoder recover -> full
@@ -328,6 +335,7 @@ export default function HlsPlayer({
   packagerTransitMs = null,
   deliveryMediaOriginSec = null,
   onUnrecoverableHls,
+  playbackPolicy = "live-edge",
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -337,6 +345,9 @@ export default function HlsPlayer({
   const [isMuted, setIsMuted] = useState(true);
   const [elapsedSec, setElapsedSec] = useState(0);
   const lastErrorRef = useRef<string | null>(null);
+  const goLiveRef = useRef({ atSec: 0, e2eMs: 0 });
+  const hlsLiveRef = useRef<{ liveSyncPosition: number | null } | null>(null);
+  const hlsTargetDurationRef = useRef(2);
   const onUnrecoverableHlsRef = useRef(onUnrecoverableHls);
   onUnrecoverableHlsRef.current = onUnrecoverableHls;
   const sessionRef = useRef({
@@ -494,10 +505,15 @@ export default function HlsPlayer({
         // (now − PDT) covers packager→glass only. packagerTransitMs is the
         // server-measured encoder→packager leg (SRT tsbpd + network + remux);
         // without it LL-HLS understated e2e by ~2.7s vs a burnt-in timer
-        // (2026-08-09). Computing the difference HERE (not at timeupdate)
-        // keeps the estimate honest while the playhead is stalled.
+        // (2026-08-09). Adding it is correct once — a stale (elapsed−1s)
+        // snapshot must not stick on every later sample.
+        const transit = usablePackagerTransitMs({
+          transitMs,
+          playheadPdtMs: session.playheadPdtMs,
+          epochSec: epoch,
+        });
         const total =
-          Date.now() + clockSkewMs() - session.playheadPdtMs + (transitMs ?? 0) + bridgeMs;
+          Date.now() + clockSkewMs() - session.playheadPdtMs + transit + bridgeMs;
         return total > 0 && total < 120_000 ? Math.round(total) : undefined;
       }
       return undefined;
@@ -552,6 +568,8 @@ export default function HlsPlayer({
         playback_buffer_sec: sessionRef.current.bufferSec,
         playback_rebuffer_sec: rebufferRef.current.totalSec,
         e2e_latency_ms: captureAnchoredE2eMs(),
+        go_live_at_sec: goLiveRef.current.atSec,
+        go_live_e2e_ms: goLiveRef.current.e2eMs,
         ...startupPhases(),
       };
     },
@@ -827,6 +845,7 @@ export default function HlsPlayer({
         hlsSyncDurationForPlaylist(manifestBody, requestedSec),
       );
       const syncCount = Math.max(1, Math.round(syncSec / Math.max(1, targetDuration)));
+      hlsTargetDurationRef.current = targetDuration;
       // LL-HLS (MediaMTX, PDT + parts): let hls.js's own low-latency engine
       // manage the live edge. Overriding liveSyncDurationCount there pinned
       // playback a fixed segment count behind and *disabled* part-level sync:
@@ -837,23 +856,22 @@ export default function HlsPlayer({
       const llHlsTuning = {
         // MediaMTX advertises 200ms parts, so the LL-HLS default latency
         // target (PART-HOLD-BACK ≈ 3 parts) is only ~0.6s. Through the
-        // /api/playback/fetch proxy that cushion drains on routine jitter and
-        // playback micro-stalls (SRT leg stutter, webcam run 2026-08-06).
-        // 1.2s still stalled repeatedly on real webcam runs (2026-08-08:
-        // 16.6s total rebuffer + a wedge) — 3s trades ~2s of latency (still
-        // inside the 4s default target) for a cushion that absorbs proxy +
-        // SRT-path jitter. Duration (seconds) — NOT liveSyncDurationCount,
+        // /api/playback/fetch proxy that cushion drains on routine jitter.
+        // 3.0s (2026-08-08 webcam cushion) plus a frozen 4.6s packager
+        // snapshot stacked a ~10s SRT glass delay (comparison 2026-08-23).
+        // 1.5s keeps a proxy cushion without pinning three full seconds
+        // behind live. Duration (seconds) — NOT liveSyncDurationCount,
         // which is what disabled part sync in the 2026-07-21 regression.
-        liveSyncDuration: 3.0,
+        liveSyncDuration: playbackPolicy === "complete" ? 3 : 1.5,
         // 1.5× chasing visibly warbled: rate ramps toward the cap whenever
         // latency drifts >50ms past the tight target, then snaps back to 1.0.
-        // 1.1× is imperceptible and still recovers ~0.5s of drift per ~5s.
-        maxLiveSyncPlaybackRate: 1.1,
+        // 1.15× is still imperceptible and recovers ~0.75s of drift per ~5s.
+        maxLiveSyncPlaybackRate: playbackPolicy === "complete" ? 1.0 : 1.15,
         // MediaMTX fMP4 part boundaries can leave sub-500ms A/V gaps; skip
         // them via the gap controller instead of stalling (default is 0.1s).
         maxBufferHole: 0.5,
-        maxBufferLength: 20,
-        maxMaxBufferLength: 40,
+        maxBufferLength: 8,
+        maxMaxBufferLength: 16,
       };
       // Zixi Fast HLS (no parts, 2s chunks, often 1-deep): keep explicit
       // segment-count sync — LL defaults assume part signaling that Zixi
@@ -866,7 +884,7 @@ export default function HlsPlayer({
         // Speed-up catch-up on a shallow window just empties the only segment.
         // 1.5× read as visible warble on deep windows too — 1.1× recovers
         // drift without perceptible speed changes (smoothness > latency).
-        maxLiveSyncPlaybackRate: shallow ? 1.0 : 1.1,
+        maxLiveSyncPlaybackRate: playbackPolicy === "complete" || shallow ? 1.0 : 1.1,
         // Hold enough media for 2-segment operation; more when shallow.
         maxBufferLength: shallow ? 30 : Math.max(20, syncSec * 3),
         maxMaxBufferLength: shallow ? 60 : 40,
@@ -895,7 +913,7 @@ export default function HlsPlayer({
       };
       pushDiag(
         lowLatencyMode
-          ? `hls_live_sync=ll target=3.0s max_rate=1.1 targetduration=${targetDuration}s depth=${depth}`
+          ? `hls_live_sync=ll target=1.5s max_rate=1.15 targetduration=${targetDuration}s depth=${depth}`
           : `hls_live_sync=${syncCount}seg (~${syncSec.toFixed(1)}s) targetduration=${targetDuration}s depth=${depth} shallow=${shallow ? 1 : 0} ll_mode=off`,
       );
 
@@ -1024,6 +1042,7 @@ export default function HlsPlayer({
       function createHls(): InstanceType<typeof Hls> {
         const instance = new Hls(hlsConfig);
         hlsInstance = instance;
+        hlsLiveRef.current = instance;
         instance.loadSource(manifestUrl);
         instance.attachMedia(video);
 
@@ -1056,8 +1075,12 @@ export default function HlsPlayer({
             return;
           }
           const behind = liveSync - video.currentTime;
-          const jumpThreshold = shallow ? LIVE_JUMP_BEHIND_SHALLOW_SEC : LIVE_JUMP_BEHIND_SEC;
-          if (behind >= jumpThreshold) {
+          const jumpThreshold = lowLatencyMode
+            ? LIVE_JUMP_BEHIND_LL_SEC
+            : shallow
+              ? LIVE_JUMP_BEHIND_SHALLOW_SEC
+              : LIVE_JUMP_BEHIND_SEC;
+          if (playbackPolicy !== "complete" && behind >= jumpThreshold) {
             // Clamp the jump into buffered media: a seek to an unbuffered
             // liveSyncPosition never completes (video.seeking sticks) and
             // freezes the playhead harder than the backlog it was escaping.
@@ -1486,6 +1509,19 @@ export default function HlsPlayer({
     setIsMuted(video.muted);
   }
 
+  function handleGoLive() {
+    const e2e = captureAnchoredE2eMs();
+    const elapsed = elapsedSecFromStart(encodeStartedAtEpoch);
+    goLiveRef.current = latchGoLive(goLiveRef.current, elapsed, e2e);
+    const engine = lowLatencyMode ? "ll-hls" : "hls";
+    const result = seekGoLive(
+      videoRef.current,
+      goLiveHoldSec(engine, hlsTargetDurationRef.current),
+      hlsLiveRef.current?.liveSyncPosition,
+    );
+    setDiagLines((current) => [...current.slice(-12), formatGoLiveDiag(result, elapsed, e2e)]);
+  }
+
   function formatElapsed(totalSec: number): string {
     const safe = Math.max(0, Math.floor(totalSec));
     const mm = Math.floor(safe / 60);
@@ -1517,6 +1553,7 @@ export default function HlsPlayer({
         <button type="button" className="ghost-button" onClick={toggleMute}>
           {isMuted ? "Unmute" : "Mute"}
         </button>
+        <GoLiveButton visible disabled={playbackGate !== "live"} onGoLive={handleGoLive} />
         {playbackGate === "live" && (
           <span className="hint player-elapsed">Elapsed {formatElapsed(elapsedSec)}</span>
         )}

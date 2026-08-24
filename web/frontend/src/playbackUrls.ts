@@ -1,4 +1,4 @@
-import { ingestRole } from "./ingestEndpoints";
+import { ingestRole } from "./ingestEndpoints.ts";
 import type { PlaybackEngine, PlaybackMode, PlaybackTarget } from "./playbackTypes";
 
 const ZIXI_HTTP_PORT = 7777;

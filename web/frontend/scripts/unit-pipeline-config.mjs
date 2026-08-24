@@ -24,5 +24,7 @@ assert.doesNotMatch(
   src,
   /subtitle: "Shared ffmpeg \/ libx264 settings for every stream in the recipe"/,
 );
+assert.match(src, /encoderSectionMoqGopNote/);
+assert.match(src, /solo file GOP does not apply/);
 
 console.log("unit-pipeline-config: PASS");

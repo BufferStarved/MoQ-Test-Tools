@@ -56,9 +56,13 @@ from avfoundation_modes import (  # noqa: E402
     parse_avfoundation_supported_modes,
     pick_avfoundation_mode,
 )
+from encode_profile import ASSUMED_FPS  # noqa: E402
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
+    CAMERA_EIO_HINT,
     build_device_webcam_input_args,
+    classify_job_exception,
+    classify_spawn_oserror,
     device_webcam_index,
     find_ffmpeg,
 )
@@ -89,7 +93,12 @@ MASTER_HARD_CAP_SEC = 15 * 60
 # 1080p tops out at 5250/6000) re-encodes *down* from this, never up.
 MASTER_BITRATE_KBPS = 5250
 MASTER_MAXRATE_KBPS = 6000
-MASTER_GOP_FRAMES = 60
+# 1s GOP on the shared capture. Brokered MoQ *copies* this bitstream —
+# there is no 0.5s child re-encode (that comment was stale; a second x264
+# on the UDP hop still ran 24↔37 fps). A 0.5s master plus two siblings
+# dropped encode to ~24fps / 0.8× (CSV 2026-08-20). Solo webcam MoQ skips
+# the broker and uses moq_gop_frames_for_latency (~0.25s) in moq_publish.
+MASTER_GOP_FRAMES = ASSUMED_FPS
 # Some MacBook cameras default to a *portrait* native AVFoundation capture
 # mode (e.g. 1080x1920) when no size is requested — confirmed 2026-08-06 on
 # a MacBook Pro built-in camera, with no rotation metadata to correct it.
@@ -117,6 +126,11 @@ class _Session:
     error: Optional[str] = None
     refcount: int = 0
     started: bool = False
+    # One job: keep device:webcam so MoQ encodes camera → CMAF (no UDP hop).
+    # Two+ jobs: fan out over UDP so siblings do not race the camera.
+    share_policy: str = "auto"
+    source_media: str = ""
+    direct_device: bool = False
 
 
 class WebcamBroker:
@@ -132,13 +146,14 @@ class WebcamBroker:
         *,
         duration_sec: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
+        share_policy: str = "auto",
     ) -> Tuple[str, _Session]:
         """Register as a subscriber of the shared capture for ``media_path``.
 
-        Blocks briefly while sibling requests are collected and the shared
-        ffmpeg capture starts, then returns ``(media_path, session)`` where
-        ``media_path`` is a ``udp://127.0.0.1:<port>`` URL this job's own
-        pipeline should read from instead of opening the device directly.
+        Blocks briefly while sibling requests are collected. One subscriber
+        keeps ``device:webcam`` (camera → that job's ffmpeg). Two or more
+        get ``udp://127.0.0.1:<port>`` from a shared tee. ``share_policy=
+        "always"`` forces the tee (tests / multi-protocol).
         Call :meth:`release` with the returned session exactly once, even on
         failure, to avoid leaking the shared capture process.
         """
@@ -146,7 +161,7 @@ class WebcamBroker:
         with self._sessions_lock:
             session = self._sessions.get(key)
             if session is None or session.started:
-                session = _Session(key=key)
+                session = _Session(key=key, share_policy=share_policy, source_media=media_path)
                 self._sessions[key] = session
                 threading.Thread(
                     target=self._start_after_join_window,
@@ -172,6 +187,11 @@ class WebcamBroker:
             self.release(session)
             raise
 
+        if session.direct_device:
+            logger.info(
+                "Single webcam job: skip UDP broker; camera → this job's ffmpeg"
+            )
+            return session.source_media or media_path, session
         return f"udp://127.0.0.1:{port}?timeout=15000000&fifo_size=1000000", session
 
     def release(self, session: _Session) -> None:
@@ -194,10 +214,18 @@ class WebcamBroker:
                 return
             session.started = True
             ports = list(session.ports)
-            try:
-                self._start_capture_with_mode_fallback(session, media_path, ports)
-            except Exception as exc:  # noqa: BLE001 — surfaced to acquire() callers
-                session.error = f"Failed to start shared webcam capture: {exc}"
+            if session.share_policy != "always" and len(ports) == 1:
+                session.direct_device = True
+                logger.info(
+                    "Single webcam subscriber after join window — no shared tee"
+                )
+            else:
+                try:
+                    self._start_capture_with_mode_fallback(session, media_path, ports)
+                except Exception as exc:  # noqa: BLE001 — surfaced to acquire() callers
+                    session.error = classify_job_exception(
+                        exc, media_path=media_path, role="camera"
+                    )
         session.ready.set()
 
     def _start_capture_with_mode_fallback(
@@ -314,7 +342,7 @@ class WebcamBroker:
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "ultrafast",
             "-tune",
             "zerolatency",
             "-pix_fmt",
@@ -347,9 +375,19 @@ class WebcamBroker:
             len(ports),
             " ".join(cmd),
         )
-        return subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
-        )
+        try:
+            return subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                classify_spawn_oserror(
+                    exc,
+                    role="camera",
+                    binary=cmd[0] if cmd else "",
+                    media_path=media_path,
+                )
+            ) from exc
 
     def _check_early_exit(self, session: _Session) -> None:
         # Give ffmpeg a moment to fail fast (bad device index, permission
@@ -370,10 +408,17 @@ class WebcamBroker:
                     stderr = (process.stderr.read() or "")[-2000:]
             except Exception:  # noqa: BLE001
                 pass
-            session.error = (
-                f"Shared webcam capture exited immediately (code {process.returncode}): "
-                f"{stderr.strip()}"
-            )
+            detail = stderr.strip() or "unknown error"
+            if "Input/output error" in detail:
+                session.error = (
+                    f"camera I/O error: Shared webcam capture exited immediately "
+                    f"(code {process.returncode}): {detail}. {CAMERA_EIO_HINT}"
+                )
+            else:
+                session.error = (
+                    f"Shared webcam capture exited immediately (code {process.returncode}): "
+                    f"{detail}"
+                )
 
     def _terminate(self, session: _Session) -> None:
         process = session.process

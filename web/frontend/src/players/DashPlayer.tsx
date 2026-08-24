@@ -5,7 +5,9 @@ import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import type { PlaybackGate } from "../playbackGate";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
-import { usePlaybackMetricsReporter } from "../playbackMetrics";
+import { elapsedSecFromStart, usePlaybackMetricsReporter } from "../playbackMetrics";
+import { GoLiveButton } from "../GoLiveButton";
+import { goLiveHoldSec, latchGoLive, seekGoLive } from "../goLive";
 import {
   EMPTY_STARTUP_PHASES,
   findStartupResourceTiming,
@@ -31,6 +33,7 @@ interface DashPlayerProps {
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   bridgeLagMs?: number;
   encoderLagMs?: number;
+  playbackPolicy?: "live-edge" | "complete";
 }
 
 /**
@@ -67,11 +70,13 @@ export default function DashPlayer({
   onPlaybackSample,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  playbackPolicy = "live-edge",
 }: DashPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading DASH player...");
   const rebufferRef = useRef(new RebufferTracker());
+  const goLiveRef = useRef({ atSec: 0, e2eMs: 0 });
   const sessionRef = useRef({
     ttffMs: 0,
     liveStartedAtMs: 0,
@@ -164,6 +169,8 @@ export default function DashPlayer({
       playback_buffer_sec: bufferedAheadSec(videoRef.current),
       playback_rebuffer_sec: rebufferRef.current.totalSec,
       e2e_latency_ms: captureAnchoredE2eMs(),
+      go_live_at_sec: goLiveRef.current.atSec,
+      go_live_e2e_ms: goLiveRef.current.e2eMs,
       ...startupPhases(),
     };
   }, [jobId]);
@@ -281,13 +288,14 @@ export default function DashPlayer({
         streaming: {
           delay: lowLatencyMode ? { liveDelay: 2 } : undefined,
           lowLatencyEnabled: lowLatencyMode,
-          liveCatchup: lowLatencyMode
+          liveCatchup:
+            lowLatencyMode && playbackPolicy !== "complete"
             ? {
                 enabled: true,
                 maxDrift: 0.5,
                 playbackRate: { min: -0.5, max: 0.5 },
               }
-            : undefined,
+            : { enabled: false, playbackRate: { min: 0, max: 0 } },
           requestModifier: {
             modifyRequestURL: (requestUrl: string) => resolveDashRequestUrl(requestUrl, url),
           },
@@ -355,6 +363,17 @@ export default function DashPlayer({
       <div className="player-meta">
         <span>{label}</span>
         <span className="hint">{status}</span>
+        <GoLiveButton
+          visible
+          disabled={playbackGate !== "live"}
+          onGoLive={() => {
+            const e2e = captureAnchoredE2eMs();
+            const elapsed = elapsedSecFromStart(encodeStartedAtEpoch);
+            goLiveRef.current = latchGoLive(goLiveRef.current, elapsed, e2e);
+            const result = seekGoLive(videoRef.current, goLiveHoldSec("dash"));
+            setStatus(result.ok ? "Playing (live)" : status);
+          }}
+        />
       </div>
       {error && <p className="player-error">{error}</p>}
     </div>

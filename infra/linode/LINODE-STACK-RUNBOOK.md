@@ -59,6 +59,33 @@ bash infra/moqx/scripts/install-ingest-agent.sh
 
 Use sslip.io: `<relay-ip-with-dashes>.sslip.io`.
 
+## Extra regions (Dallas / Fremont)
+
+Sibling terraform dirs (`infra/*/terraform/linode-us-central`,
+`linode-us-west`) symlink the live `linode/` modules. Do **not** apply into the
+us-east state.
+
+```bash
+export LINODE_TOKEN=…
+./infra/scripts/provision-linode-central.sh   # plan; TF_AUTO_APPROVE=1 to apply
+./infra/scripts/provision-linode-west.sh
+```
+
+Needs a token with firewall + instance scopes. After IPs exist:
+
+```bash
+./infra/linode/scripts/update-linode-central-endpoints.sh
+./infra/linode/scripts/update-linode-west-endpoints.sh
+```
+
+Merge `linode-central-stack.env.example` / `linode-west-stack.env.example` into
+`/etc/moq-web.env`. Restart `moq-web` only after the merge. Do not leave an
+unlicensed Zixi Broadcaster running. Do not replace the us-east instances.
+
+Live us-east canary UDP **14433** is the `moqx-d18` inbound rule on
+`moq-relay-fw`. If Cloud Manager still DROPs it, apply that rule only
+(`-refresh=false` if SSH-key refresh 401s). Prod `:4433` stays `329b98b`.
+
 ## 4. Wire the app
 
 After all three public IPs are known:

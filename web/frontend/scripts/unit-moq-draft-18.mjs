@@ -27,13 +27,14 @@ assert.match(recorder, /new MoqtConnection\(18\)/);
 
 const ingest = fs.readFileSync(path.join(root, "ingestEndpoints.ts"), "utf8");
 assert.match(ingest, /protocol === "moq"\s*\n\s*\? \(`\$\{prefix\}_moq_relay_d18`/);
-assert.match(ingest, /label: "OpenMOQ · GCP us-central1"/);
-assert.match(ingest, /label: "OpenMOQ · GCP us-east1"/);
-assert.match(ingest, /label: "OpenMOQ · Linode"/);
-assert.match(ingest, /OpenMOQ draft-16 · GCP us-central1/);
-assert.match(ingest, /"gcp_moq_relay"/);
-assert.match(ingest, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*gcp_moq_relay/);
-assert.match(ingest, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*linode_moq_relay/);
+assert.match(ingest, /label: "GCP Central"/);
+assert.match(ingest, /label: "GCP East"/);
+assert.match(ingest, /label: "Linode East"/);
+assert.match(ingest, /labelPrefix: "OpenMOQ"/);
+assert.match(ingest, /labelPrefix: "OpenMOQ draft-16"/);
+assert.match(ingest, /\$\{role\.labelPrefix\} · \$\{host\.label\}/);
+assert.match(ingest, /ingestPrefix: "gcp"/);
+assert.match(ingest, /RECIPE_HIDDEN_INGEST_IDS[\s\S]*moq_relay/);
 for (const label of ingest.match(/label: "OpenMOQ · [^"]+"/g) || []) {
   assert.doesNotMatch(label, /:4433/);
   assert.doesNotMatch(label, /draft-16/);
@@ -54,29 +55,22 @@ assert.doesNotMatch(streamPlayer, /moqPinTlsCert = true/);
 
 const helper = fs.readFileSync(path.join(root, "localPublisherHelp.ts"), "utf8");
 assert.match(helper, /localPublisherAgentD18Command/);
-assert.match(helper, /feat\/moq-draft-18/);
-assert.match(helper, /MoQ-Test-Tools-d18/);
-assert.match(helper, /install-moq5\.sh/);
-assert.match(helper, /return localPublisherAgentCommand/);
-assert.doesNotMatch(helper, /git clone \$\{GH_REPO\}\.git 2>\/dev\/null \|\| git -C MoQ-Test-Tools pull/);
-assert.equal(
-  (helper.match(/git clone --branch feat\/moq-draft-18/g) || []).length,
-  1,
-  "exactly one hosted helper clone",
-);
+assert.match(helper, /isPublicOrchestrator/);
+assert.match(helper, /moq\.sean-mccarthy\.net/);
+assert.doesNotMatch(helper, /git clone --branch feat\/moq-draft-18/);
+assert.doesNotMatch(helper, /LOCAL_PUBLISHER_API=\$\{api\}.*sean-mccarthy/);
 const setup = fs.readFileSync(path.join(root, "LocalPublisherSetup.tsx"), "utf8");
-assert.match(setup, /Laptop helper/);
-assert.match(setup, /One helper covers MoQ draft-18/);
-assert.match(setup, /SRT \/ RTMP \/ WebRTC/);
-assert.doesNotMatch(setup, /title="SRT \/ RTMP \/ WebRTC"/);
+assert.match(setup, /Laptop webcam encode is not available on the public site/);
+assert.doesNotMatch(setup, /Laptop helper/);
+assert.doesNotMatch(setup, /LOCAL_PUBLISHER_API=https:\/\/moq/);
 
 const dest = fs.readFileSync(path.join(root, "../../../src/destinations.py"), "utf8");
-const d18Blocks = dest.split("ServicePreset(").filter((block) => /id="[^"]*_d18"/.test(block));
-assert.ok(d18Blocks.length >= 3, "expected west/east/linode d18 presets");
-for (const block of d18Blocks) {
-  assert.match(block, /:14433/);
-  assert.match(block, /draft=18/);
-  assert.doesNotMatch(block, /url=.*:4433/);
-}
+assert.match(dest, /moq_gcp_relay_d18/);
+assert.match(dest, /relay_d18/);
+assert.match(dest, /:14433/);
+assert.match(dest, /draft=18/);
+assert.match(dest, /id=f"moq_\{slug\}_relay_d18"/);
+assert.match(dest, /https:\/\/\{relay_domain\}:14433\/moq-relay\?namespace=benchmark&draft=18/);
+assert.doesNotMatch(dest, /url=f"https:\/\/\{relay_domain\}:4433\/moq-relay\?namespace=benchmark&draft=18"/);
 
 console.log("unit-moq-draft-18: PASS");

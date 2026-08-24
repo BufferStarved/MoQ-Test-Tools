@@ -27,6 +27,12 @@ PLAYBACK_FIELD_NAMES = [
     "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
+    # Operator Go Live: first click only. Elapsed second and e2e *before* the
+    # seek so a hitch does not rewrite the comparison series as if it were
+    # always live.
+    "go_live_at_sec",
+    "go_live_e2e_ms",
+    "playback_policy",
     # Startup decomposition, player half (see src/startup_budget.py). Kept in
     # PLAYBACK_NULLABLE_KEYS below, which is what stops them being coerced.
     "startup_player_request_ms",
@@ -69,6 +75,7 @@ PLAYBACK_DERIVED_FIELD_NAMES = [
     "latency_residual_ms",
     "latency_overcount_ms",
     "latency_unmeasured",
+    "latency_not_applicable",
     "latency_e2e_scope",
     "playback_frame_drop_pct",
     "frame_delivery_pct",
@@ -77,11 +84,18 @@ PLAYBACK_DERIVED_FIELD_NAMES = [
 
 PLAYBACK_GAUGE_KEYS = (
     "playback_bitrate_bps",
-    "playback_ttff_ms",
     "playback_video_time_sec",
     "playback_buffer_sec",
     "playback_behind_live_sec",
     "e2e_latency_ms",
+)
+
+# First-click / first-join facts. max() so a later lower live e2e cannot
+# rewrite go_live_e2e_ms — that column is the pre-seek latch, not the HUD.
+PLAYBACK_LATCH_KEYS = (
+    "playback_ttff_ms",
+    "go_live_at_sec",
+    "go_live_e2e_ms",
 )
 
 # Instantaneous gauges that describe "what the player is doing right now".
@@ -130,6 +144,15 @@ def _row_elapsed_sec(rows: List[dict], index: int) -> int:
     except (TypeError, ValueError):
         pass
     return index
+
+
+def should_merge_playback_samples(*, engine: str = "", test_scope: str = "") -> bool:
+    """Monitor ticks and upload-only jobs must not overlay glass onto a leg."""
+    if (engine or "").strip().lower() == "monitor":
+        return False
+    if (test_scope or "").strip().lower() == "upload":
+        return False
+    return True
 
 
 def _playback_by_elapsed(playback_samples: List[dict]) -> Dict[int, dict]:
@@ -192,9 +215,16 @@ def _csv_nullable(value: Optional[float]) -> str:
 
 
 def _playback_high_water(dest: dict, incoming: dict) -> dict:
-    """Do not let a reconnect snapshot of zeros erase painted-glass counters."""
+    """Merge playback ticks. dest is the older row, incoming is the newer.
+
+    Counters and the Go Live latch take max(). Instantaneous gauges
+    (e2e, buffer, bitrate) take the newer non-zero so a post-seek drop
+    replaces a higher pre-seek reading — a reconnect 0 does not erase.
+    """
     merged = dict(dest)
     for name in PLAYBACK_COUNTER_KEYS:
+        merged[name] = max(_as_float(dest.get(name)), _as_float(incoming.get(name)))
+    for name in PLAYBACK_LATCH_KEYS:
         merged[name] = max(_as_float(dest.get(name)), _as_float(incoming.get(name)))
     for name in PLAYBACK_GAUGE_KEYS:
         value = _as_float(incoming.get(name))
@@ -209,16 +239,24 @@ def _playback_high_water(dest: dict, incoming: dict) -> dict:
         # across reconnects rather than the phases of the join that happened.
         existing = _nullable_float(dest.get(name))
         merged[name] = existing if existing is not None else _nullable_float(incoming.get(name))
+    dest_policy = str(dest.get("playback_policy") or "").strip()
+    incoming_policy = str(incoming.get("playback_policy") or "").strip()
+    merged["playback_policy"] = dest_policy or incoming_policy or "live-edge"
     return merged
+
+
+def _stages_from_row(row: dict, column: str) -> set:
+    """Re-read stage names the encoder loop already marked (unmeasured / n/a)."""
+    from latency_budget import LATENCY_COMPONENTS, STAGE_NAMES
+
+    by_stage = dict(zip(STAGE_NAMES, LATENCY_COMPONENTS))
+    names = str(row.get(column, "") or "").split(",")
+    return {by_stage[name] for name in (n.strip() for n in names) if name in by_stage}
 
 
 def _unmeasured_from_row(row: dict) -> set:
     """Re-read the stage names the encoder loop already marked unmeasured."""
-    from latency_budget import LATENCY_COMPONENTS, STAGE_NAMES
-
-    by_stage = dict(zip(STAGE_NAMES, LATENCY_COMPONENTS))
-    names = str(row.get("latency_unmeasured", "") or "").split(",")
-    return {by_stage[name] for name in (n.strip() for n in names) if name in by_stage}
+    return _stages_from_row(row, "latency_unmeasured")
 
 
 def _recompute_startup_player(row: dict, *, engine: str = "") -> None:
@@ -301,6 +339,7 @@ def _recompute_derived(
     )
 
     unmeasured = _unmeasured_from_row(row)
+    not_applicable = _stages_from_row(row, "latency_not_applicable")
     # Strictly seconds queued AHEAD of the playhead. MoQ LOC's "behind live"
     # seconds arrive in playback_behind_live_sec and are deliberately not
     # consulted here — they are the opposite direction and summing them
@@ -313,19 +352,22 @@ def _recompute_derived(
 
     budget = LatencyBudget(
         encode_ms=_as_float(row.get("latency_encode_ms")),
+        segmentation_ms=_as_float(row.get("latency_segmentation_ms")),
         publish_ms=_as_float(row.get("latency_publish_ms")),
         network_ms=_as_float(row.get("latency_network_ms")),
         packager_ms=_as_float(row.get("latency_packager_ms")),
         player_buffer_ms=player_buffer_ms,
         e2e_ms=_as_float(row.get("e2e_latency_ms")),
-        e2e_scope=e2e_scope_for(row.get("protocol"), engine),
+        e2e_scope=e2e_scope_for(row.get("protocol"), engine, row.get("test_scope")),
         unmeasured=frozenset(unmeasured),
+        not_applicable=frozenset(not_applicable),
     )
     row["latency_player_buffer_ms"] = f"{budget.player_buffer_ms:.1f}"
     row["latency_accounted_ms"] = f"{budget.accounted_ms:.1f}"
     row["latency_residual_ms"] = f"{budget.residual_ms:.1f}"
     row["latency_overcount_ms"] = f"{budget.overcount_ms:.1f}"
     row["latency_unmeasured"] = ",".join(budget.unmeasured_stages)
+    row["latency_not_applicable"] = ",".join(budget.not_applicable_stages)
     row["latency_e2e_scope"] = budget.e2e_scope
     row["playback_frame_drop_pct"] = (
         f"{playback_frame_drop_pct(frames_rendered=_as_float(row.get('playback_frames_rendered')), frames_dropped=_as_float(row.get('playback_frames_dropped'))):.3f}"
@@ -375,6 +417,11 @@ def merge_playback_into_csv(
 
     if not rows:
         return []
+    if not should_merge_playback_samples(
+        engine=playback_engine,
+        test_scope=str(rows[0].get("test_scope") or ""),
+    ):
+        return rows
 
     by_sec = _playback_by_elapsed(playback_samples)
     if not by_sec:
@@ -486,7 +533,7 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, object]:
         if any(value > 0 for value in values):
             averages[key] = round(sum(values) / max(1, len(values)), 3)
 
-    for key in PLAYBACK_COUNTER_KEYS:
+    for key in (*PLAYBACK_COUNTER_KEYS, *PLAYBACK_LATCH_KEYS):
         if key not in rows[0] and key not in rows[-1]:
             continue
         value = max(int(float(row.get(key, 0) or 0)) for row in rows)
@@ -521,6 +568,7 @@ def compute_playback_averages(rows: List[dict]) -> Dict[str, object]:
         "latency_accounted_ms",
         "latency_residual_ms",
         "latency_overcount_ms",
+        "latency_segmentation_ms",
         "playback_frame_drop_pct",
         "frame_delivery_pct",
     ):
@@ -640,6 +688,8 @@ def patch_summary_with_playback(
     playback_engine: str = "",
 ) -> None:
     if not playback_samples or not summary_path:
+        return
+    if not should_merge_playback_samples(engine=playback_engine):
         return
 
     try:

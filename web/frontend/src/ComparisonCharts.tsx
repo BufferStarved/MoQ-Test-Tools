@@ -307,6 +307,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
                 "SRT RTT: libsrt / Zixi receiver.",
                 "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
+                "MoQ RTT/jitter: picoquic qlog smoothed_rtt / latest_rtt from moq5-fmp4-publish (MOQ_QLOG_DIR). Blank only before the first qlog sample — not a TCP admin probe.",
                 "ICE RTT from WHIP when publishing from the browser.",
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}

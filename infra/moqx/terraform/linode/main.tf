@@ -17,9 +17,14 @@ data "linode_image" "ubuntu" {
   id = "linode/ubuntu22.04"
 }
 
+locals {
+  ssh_public_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+}
+
 resource "linode_sshkey" "relay" {
+  count   = var.register_ssh_key ? 1 : 0
   label   = "${var.project_name}-ssh"
-  ssh_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+  ssh_key = local.ssh_public_key
 }
 
 resource "linode_instance" "relay" {
@@ -27,11 +32,11 @@ resource "linode_instance" "relay" {
   region          = var.region
   type            = var.instance_type
   image           = data.linode_image.ubuntu.id
-  authorized_keys = [linode_sshkey.relay.ssh_key]
+  authorized_keys = [local.ssh_public_key]
 
   metadata {
     user_data = base64encode(templatefile("${path.module}/../../cloud-init/linode.yaml", {
-      ssh_public_key  = linode_sshkey.relay.ssh_key
+      ssh_public_key  = local.ssh_public_key
       moqx_port       = var.moqx_port
       moqx_pico_port  = var.moqx_pico_port
       moqx_admin_port = var.moqx_admin_port
@@ -55,7 +60,7 @@ resource "linode_firewall" "relay" {
     protocol = "TCP"
     ports    = "22"
     ipv4     = concat([var.allowed_ssh_cidr], var.extra_ssh_ipv4_cidrs)
-    ipv6     = var.allowed_ssh_ipv6_cidrs
+    ipv6     = length(var.allowed_ssh_ipv6_cidrs) > 0 ? var.allowed_ssh_ipv6_cidrs : null
   }
 
   inbound {

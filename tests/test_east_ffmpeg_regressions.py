@@ -166,7 +166,8 @@ class FrontendRegressionSourceTests(unittest.TestCase):
     def test_mpegts_enables_stash_for_wan(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "players" / "MpegTsPlayer.tsx").read_text()
         self.assertIn("enableStashBuffer: true", text)
-        self.assertIn("liveBufferLatencyMaxLatency: 3.5", text)
+        self.assertIn("liveBufferLatencyMaxLatency: 1.5", text)
+        self.assertIn("seekNearLiveEdge", text)
         self.assertNotIn("enableStashBuffer: false", text)
 
     def test_ui_does_not_request_encoder_vmaf_for_webrtc(self) -> None:

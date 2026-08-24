@@ -2,8 +2,9 @@
 
 Used when the publish path lacks a peer RTT gauge:
 
-- MoQ: openmoq has no qlog; moqx Prometheus lacks smoothed RTT. Probe the
-  relay admin HTTP port (same host as WebTransport).
+- MoQ: moq5 fills RTT from picoquic qlog (this probe is not used). openmoq
+  has no qlog; moqx Prometheus lacks smoothed RTT. Probe the relay admin
+  HTTP port (same host as WebTransport) only on that backend.
 - RTMP: ffmpeg→RTMP has no libsrt-style RTT. Probe TCP connect to the RTMP
   host:port (typically 1935) as a path RTT stand-in.
 

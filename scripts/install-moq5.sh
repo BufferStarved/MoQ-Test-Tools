@@ -10,7 +10,9 @@ PUBLISHER_BIN="$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish"
 # Canary pin: BufferStarved live-write publish_tracks (openmoq/moq5#9).
 # Branch feat/publish-tracks-live-catalog @ 1ce1cfc. Override to stay on
 # upstream: MOQ5_REPO=https://github.com/openmoq/moq5.git MOQ5_REF=main
-# Do not grow a private libmoq (no new dual-emit / catalog-refresh-off / qlog-as-product).
+# Do not grow a private libmoq (no new dual-emit / catalog-refresh-off).
+# The canary applies tools/moq5-publisher/patches/honor-moq-qlog-dir.patch so
+# MOQ_QLOG_DIR reaches picoquic_set_qlog — measurement only, not a product API.
 MOQ5_REPO="${MOQ5_REPO:-https://github.com/BufferStarved/moq5.git}"
 MOQ5_REF="${MOQ5_REF:-feat/publish-tracks-live-catalog}"
 PICOQUIC_REPO="${PICOQUIC_REPO:-https://github.com/private-octopus/picoquic.git}"
@@ -110,6 +112,21 @@ ensure_moq5() {
   git -C "$MOQ5_DIR" checkout -B "$MOQ5_REF" FETCH_HEAD
 }
 
+apply_qlog_patch() {
+  local patch="$ROOT_DIR/tools/moq5-publisher/patches/honor-moq-qlog-dir.patch"
+  if [[ ! -f "$patch" ]]; then
+    return 0
+  fi
+  if git -C "$MOQ5_DIR" apply --check "$patch" >/dev/null 2>&1; then
+    git -C "$MOQ5_DIR" apply "$patch"
+    echo "Applied local MOQ_QLOG_DIR hook (canary measurement)"
+  elif git -C "$MOQ5_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+    echo "MOQ_QLOG_DIR hook already applied"
+  else
+    echo "WARNING: could not apply $patch — MoQ RTT qlog may stay empty" >&2
+  fi
+}
+
 build_picotls() {
   local ptls_build="$DEPS_DIR/picotls/build"
   if [[ -f "$ptls_build/libpicotls.a" || -f "$ptls_build/libpicotls.dylib" ]]; then
@@ -185,6 +202,7 @@ main() {
 
   ensure_prerequisites
   ensure_moq5
+  apply_qlog_patch
   build_moq5
   build_publisher
   echo "Installed moq5-fmp4-publish to $PUBLISHER_BIN"

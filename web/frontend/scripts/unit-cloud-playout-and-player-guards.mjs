@@ -40,5 +40,11 @@ assert.match(moq, /moqRenderSink/);
 assert.doesNotMatch(moq, /playhead_frozen_\$\{video\.currentTime\.toFixed\(2\)\}s_buffered/);
 assert.match(streamPlayer, /player-idle-placeholder/);
 assert.doesNotMatch(streamPlayer, /Preview starts with the encode/);
+assert.match(app, /test-scope/);
+assert.match(app, /playback-policy/);
+assert.match(app, /ingest-monitor/);
+assert.match(app, /isUploadOnlyScope\(testScope\)/);
+assert.doesNotMatch(whep, /GoLiveButton/);
+assert.match(moq, /goLiveButtonVisible/);
 
 console.log("unit-cloud-playout-and-player-guards: PASS");

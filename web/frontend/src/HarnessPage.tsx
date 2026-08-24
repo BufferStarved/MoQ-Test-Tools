@@ -129,6 +129,7 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         encodeDurationSec={job.duration_sec}
         targetLatencyMs={job.target_latency_ms ?? 800}
         encodeLadder={job.encode_ladder ?? undefined}
+        playbackPolicy={job.playback_policy === "complete" ? "complete" : "live-edge"}
         moqDraftVersion={moqDraftForIngest(ingestEndpointId)}
         moqPinTlsCert={moqPinTlsCertForIngest(ingestEndpointId)}
       />

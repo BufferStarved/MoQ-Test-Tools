@@ -77,6 +77,8 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   // itself in latency_unmeasured*, so its time lands in latency_residual_ms
   // without the 0 reading as "this stage was free".
   latency_encode_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // MoQ group duration and HLS part/segment object cadence. WebRTC is n/a.
+  latency_segmentation_ms: ["moq", "hls", "dash"],
   // No protocol measures steady-state publish transit yet; the column exists
   // so the stage is named rather than silently missing from the chain.
   latency_publish_ms: ["srt", "rtmp", "webrtc", "moq"],
@@ -93,6 +95,7 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   latency_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_overcount_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_not_applicable: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   latency_e2e_scope: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Startup phase decomposition (src/startup_budget.py). Two chains that stay
@@ -216,6 +219,8 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   playback_error_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_video_time_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   e2e_latency_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  go_live_at_sec: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  go_live_e2e_ms: ["srt", "rtmp", "http", "hls", "dash", "moq"],
 };
 
 /**
