@@ -1,6 +1,9 @@
 import {
+  cloudHostFromIngest,
+  encodeHostProvider,
   isCustomIngestEndpoint,
   presetIdForIngest,
+  type IngestEndpointOption,
 } from "./ingestEndpoints";
 import type { EndpointConfig, Protocol } from "./types";
 import type { PlaybackMode } from "./playbackTypes";
@@ -45,6 +48,31 @@ interface EndpointSectionProps {
   hideCustomDestinations?: boolean;
   onChange: (id: string, patch: Partial<EndpointConfig>) => void;
   onRemove: (id: string) => void;
+}
+
+const DESTINATION_GROUP_LABEL: Record<string, string> = {
+  gcp: "GCP",
+  linode: "Linode",
+  aws: "AWS",
+  custom: "Custom",
+};
+
+function destinationGroups(hostOptions: IngestEndpointOption[]) {
+  const groups: { id: string; label: string; items: IngestEndpointOption[] }[] = [];
+  const index = new Map<string, number>();
+  for (const item of hostOptions) {
+    const id = isCustomIngestEndpoint(item.id)
+      ? "custom"
+      : encodeHostProvider(cloudHostFromIngest(item.id));
+    let slot = index.get(id);
+    if (slot === undefined) {
+      slot = groups.length;
+      index.set(id, slot);
+      groups.push({ id, label: DESTINATION_GROUP_LABEL[id] ?? id, items: [] });
+    }
+    groups[slot].items.push(item);
+  }
+  return groups;
 }
 
 function parseHostSafe(endpointUrl: string): string | null {
@@ -250,17 +278,21 @@ export function EndpointSection({
           }}
           disabled={controlsLocked}
         >
-          {hostOptions.map((item) => (
-            <option
-              key={item.id}
-              value={item.id}
-              disabled={!item.available && item.id !== "custom"}
-              className={!item.available && item.id !== "custom" ? "option-unavailable" : undefined}
-            >
-              {item.available || item.id === "custom"
-                ? item.label
-                : `${item.label} — Not deployed`}
-            </option>
+          {destinationGroups(hostOptions).map((group) => (
+            <optgroup key={group.id} label={group.label}>
+              {group.items.map((item) => (
+                <option
+                  key={item.id}
+                  value={item.id}
+                  disabled={!item.available && item.id !== "custom"}
+                  className={!item.available && item.id !== "custom" ? "option-unavailable" : undefined}
+                >
+                  {item.available || item.id === "custom"
+                    ? item.label
+                    : `${item.label} — Not deployed`}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
       </label>

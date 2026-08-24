@@ -41,7 +41,7 @@ def _resolve_relay_url(explicit: str = "") -> str:
         return explicit.strip()
     return os.environ.get(
         "MOQ_RELAY_URL",
-        "https://127.0.0.1:4433/moq-relay",
+        "https://127.0.0.1:14433/moq-relay",
     ).strip()
 
 

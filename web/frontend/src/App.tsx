@@ -1948,9 +1948,11 @@ function App() {
     Boolean(startTitle);
   const startLabel = uploadingMedia ? "Preparing…" : loading ? "Running…" : "Start";
 
-  function renderStartStop(extraClass = "") {
+  function renderStartStop(extraClass = "", options: { start?: boolean } = {}) {
+    const showStart = options.start !== false;
     return (
       <>
+        {showStart && (
         <button
           className={`primary${extraClass ? ` ${extraClass}` : ""}`}
           onClick={() => void handleStart()}
@@ -1959,6 +1961,7 @@ function App() {
         >
           {startLabel}
         </button>
+        )}
         {loading && (
           <button
             className="secondary-button stop-webcam-button"
@@ -1993,9 +1996,9 @@ function App() {
             label={bootstrapping ? "Connecting…" : apiOnline ? "API online" : "API offline"}
             className="hero-api-status"
           />
-          {tab === "benchmark" && (
+          {tab === "benchmark" && (recipePicked || loading) && (
             <div className="hero-start-row" aria-label="Run controls">
-              {renderStartStop("hero-start-button")}
+              {renderStartStop("hero-start-button", { start: recipePicked })}
             </div>
           )}
           <a className="hero-support" href={PAYPAL_DONATE_URL} target="_blank" rel="noreferrer">
@@ -2029,7 +2032,8 @@ function App() {
 
       <main>
         {tab === "benchmark" && (
-          <>
+          <div className={recipePicked ? "benchmark-split" : undefined}>
+            <div className={recipePicked ? "benchmark-split-setup" : undefined}>
             <section className="panel benchmark-shared">
               <div className="benchmark-shared-stack">
                 <section className="recipe-section">
@@ -2364,7 +2368,9 @@ function App() {
               />
               )}
             </section>
+            </div>
 
+            <div className="benchmark-split-run">
             {recipePicked && (
             <div className="outputs-heading-row">
               {showOutputTiles ? (
@@ -2695,9 +2701,11 @@ function App() {
             {!error && startHint && !loading && (
               <p className="field-hint benchmark-start-error">{startHint}</p>
             )}
+            {loading && (
             <div className="button-row benchmark-start-row">
-              {renderStartStop()}
+              {renderStartStop("", { start: false })}
             </div>
+            )}
 
             {!loading &&
               comparisonLegs.length > 0 &&
@@ -2804,7 +2812,8 @@ function App() {
                 </ResultsErrorBoundary>
               </section>
             )}
-          </>
+            </div>
+          </div>
         )}
 
         {tab === "metrics" && (

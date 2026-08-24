@@ -71,7 +71,7 @@ SYNTAX_BY_PROTOCOL = {
     "hls": "http(s)://<host>:<port>/<stream-id> (TS over HTTP push ingest; Zixi serves HLS output)",
     "dash": "http(s)://<host>:<port>/<stream-id> (TS over HTTP push ingest; Zixi serves DASH output)",
     "webrtc": "https://<host>/<whip-path> or whip://<host>/<path>",
-    "moq": "https://<relay-host>:4433/moq-relay?namespace=benchmark (OpenMOQ moqx via openmoq-publisher)",
+    "moq": "https://<relay-host>:14433/moq-relay?namespace=benchmark&draft=18 (moqx draft-18 via moq5-fmp4-publish)",
 }
 
 PROTOCOL_LABELS = {

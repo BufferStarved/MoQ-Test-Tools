@@ -238,6 +238,35 @@ h1 {
   margin-bottom: 20px;
 }
 
+.benchmark-split {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+@media (min-width: 1100px) {
+  .benchmark-split {
+    display: grid;
+    grid-template-columns: minmax(300px, 38%) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .benchmark-split-setup {
+    position: sticky;
+    top: 76px;
+  }
+
+  .benchmark-split-setup .benchmark-shared {
+    margin-bottom: 0;
+  }
+
+  .live-charts-panel {
+    position: sticky;
+    bottom: 0;
+    z-index: 15;
+  }
+}
+
 .benchmark-shared-header {
   margin-bottom: 4px;
 }
@@ -878,6 +907,13 @@ input:disabled {
 
 .local-publisher-setup-command {
   display: grid;
+  gap: 8px;
+}
+
+.local-publisher-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
@@ -1782,6 +1818,13 @@ code {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  position: sticky;
+  top: 72px;
+  z-index: 12;
+  margin: 0 -8px 4px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(10px);
 }
 
 .chart-group-tabs button {

@@ -28,6 +28,7 @@ export function LocalPublisherSetup({
   publisherSession = "",
 }: LocalPublisherSetupProps) {
   const [copied, setCopied] = useState(false);
+  const [showCommand, setShowCommand] = useState(false);
   const publicSite = isPublicOrchestrator(apiOrigin) || !isLocalDevApi(apiOrigin);
   const shortCommand = localPublisherAgentOneLiner(apiOrigin, undefined, publisherSession);
 
@@ -62,14 +63,24 @@ export function LocalPublisherSetup({
       </p>
       {shortCommand ? (
         <div className="local-publisher-setup-command">
-          <pre>{shortCommand}</pre>
-          <button
-            type="button"
-            className="secondary-button local-publisher-setup-copy"
-            onClick={() => void copyCommand(shortCommand)}
-          >
-            {copied ? "Copied" : "Copy command"}
-          </button>
+          <div className="local-publisher-setup-actions">
+            <button
+              type="button"
+              className="secondary-button local-publisher-setup-copy"
+              onClick={() => void copyCommand(shortCommand)}
+            >
+              {copied ? "Copied" : "Copy command"}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              aria-expanded={showCommand}
+              onClick={() => setShowCommand((open) => !open)}
+            >
+              {showCommand ? "Hide command" : "Show command"}
+            </button>
+          </div>
+          {showCommand ? <pre>{shortCommand}</pre> : null}
         </div>
       ) : (
         <p className="field-hint">Preparing a helper command for this browser…</p>

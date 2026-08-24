@@ -34,7 +34,7 @@ if [[ -f "$AGENT_ENV" ]]; then
     grep -q "^${key}=" "$AGENT_ENV" && continue
     case "$key" in
       MOQ_RECORDER_BIN) echo "MOQ_RECORDER_BIN=${RECORDER_ROOT}/bin/moq5-fmp4-record" >> "$AGENT_ENV" ;;
-      MOQ_RELAY_URL) echo "MOQ_RELAY_URL=https://34-28-164-90.sslip.io:4433/moq-relay" >> "$AGENT_ENV" ;;
+      MOQ_RELAY_URL) echo "MOQ_RELAY_URL=https://34-28-164-90.sslip.io:14433/moq-relay" >> "$AGENT_ENV" ;;
     esac
   done
   if grep -q "^MOQ_RECORDER_BIN=" "$AGENT_ENV"; then

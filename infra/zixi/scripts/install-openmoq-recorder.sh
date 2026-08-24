@@ -10,7 +10,7 @@ fi
 MOQ_RECORDING_DIR="${2:-/var/lib/moq-relay-recordings}"
 REPO_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 AGENT_ENV="/etc/moq-ingest-agent.env"
-MOQ_RELAY_URL="${MOQ_RELAY_URL:-https://34-28-164-90.sslip.io:4433/moq-relay}"
+MOQ_RELAY_URL="${MOQ_RELAY_URL:-https://34-28-164-90.sslip.io:14433/moq-relay}"
 RECORDER_DIR="$REPO_DIR/tools/openmoq-recorder"
 IMAGE="openmoq-recorder:latest"
 RECORDER_BIN="$RECORDER_DIR/bin/openmoq-fmp4-record"
