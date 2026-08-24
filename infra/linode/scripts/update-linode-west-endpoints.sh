@@ -24,9 +24,10 @@ WEB_IP="${LINODE_WEST_WEB_IP:-${2:-$(tf_ip "$WEB_TF")}}"
 RELAY_IP="${LINODE_WEST_RELAY_IP:-${3:-$(tf_ip "$RELAY_TF")}}"
 REGION="${LINODE_WEST_REGION:-us-west}"
 
-if [[ -z "$ZIXI_IP" || -z "$WEB_IP" || -z "$RELAY_IP" ]]; then
+if [[ -z "$WEB_IP" || -z "$RELAY_IP" ]]; then
   echo "Usage: $0 [zixi-ip web-ip relay-ip]" >&2
   echo "Or export LINODE_WEST_ZIXI_IP, LINODE_WEST_WEB_IP, LINODE_WEST_RELAY_IP." >&2
+  echo "Zixi IP may be empty until Broadcaster is installed." >&2
   exit 1
 fi
 
@@ -37,6 +38,7 @@ cat > "$ENV_FILE" <<EOF
 # Linode us-west (Fremont) mirror stack — merge into the orchestrator /etc/moq-web.env
 LINODE_WEST_STACK_ENABLED=1
 LINODE_WEST_REGION=${REGION}
+# Empty until Zixi Broadcaster is installed — IP-only greys that destination.
 LINODE_WEST_ZIXI_IP=${ZIXI_IP}
 LINODE_WEST_WEB_IP=${WEB_IP}
 LINODE_WEST_RELAY_IP=${RELAY_IP}

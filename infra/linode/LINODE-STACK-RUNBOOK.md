@@ -110,6 +110,10 @@ LINODE_RELAY_IP=…
 
 Restart `moq-web`. The UI will show **Zixi · Linode**, **MediaMTX · Linode**, and **OpenMOQ · Linode** when presets are active.
 
+Dallas (`linode-central-stack.env.example`) and Fremont (`linode-west-stack.env.example`)
+enable MediaMTX + draft-18 `:14433` the same way. Leave `*_ZIXI_IP` empty until
+Broadcaster is installed so Zixi stays grey in the picker.
+
 ## Metrics
 
 - Sample rows and CSV include **`cloud_provider`** and **`cloud_region`** (e.g. `gcp` / `us-central1`, `linode` / `us-east`).

@@ -163,6 +163,31 @@ class LinodePresetTests(unittest.TestCase):
             self.assertFalse(hosts["linode_east"]["roles"]["moq"])
             self.assertIn("mediamtx", hosts["linode_east"]["unavailable_reason"])
 
+    def test_linode_central_greys_zixi_until_ip_is_set(self) -> None:
+        env = {
+            "LINODE_CENTRAL_STACK_ENABLED": "1",
+            "LINODE_CENTRAL_ZIXI_IP": "",
+            "LINODE_CENTRAL_WEB_IP": "50.116.17.198",
+            "LINODE_CENTRAL_RELAY_IP": "66.228.49.113",
+            "LINODE_CENTRAL_REGION": "us-central",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            import importlib
+            import destinations as dest_mod
+            import cloud_placement as place_mod
+
+            importlib.reload(place_mod)
+            importlib.reload(dest_mod)
+            self.assertFalse(dest_mod.PRESET_BY_ID["moq_zixi_linode_central"].web_available)
+            self.assertTrue(dest_mod.PRESET_BY_ID["moq_mediamtx_linode_central_srt"].web_available)
+            self.assertTrue(dest_mod.PRESET_BY_ID["moq_linode_central_relay_d18"].web_available)
+            hosts = {row["id"]: row for row in place_mod.encode_hosts_for_api()}
+            self.assertTrue(hosts["linode_central"]["available"])
+            self.assertFalse(hosts["linode_central"]["roles"]["zixi"])
+            self.assertTrue(hosts["linode_central"]["roles"]["mediamtx"])
+            self.assertTrue(hosts["linode_central"]["roles"]["moq"])
+            self.assertEqual(hosts["linode_central"]["unavailable_reason"], "Not deployed: zixi")
+
 
 class MoqRecorderAgentTests(unittest.TestCase):
     def test_east_and_linode_moq_record_on_regional_web_agent(self) -> None:
