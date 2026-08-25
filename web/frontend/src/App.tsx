@@ -2056,7 +2056,6 @@ function App() {
                           onChange={() => handleBenchmarkPreset(preset.id)}
                         />
                         <span className="source-mode-card-body">
-                          {preset.id === "build-your-own" ? <span className="eyebrow">Custom</span> : null}
                           <strong>{preset.label}</strong>
                           <span className="source-mode-card-hint">{preset.hint}</span>
                         </span>
@@ -2144,7 +2143,7 @@ function App() {
                   <StepHeading
                     step={protocolStep}
                     title="Protocol"
-                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way lives in End-to-End Protocol Comparison."
+                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way lives in Capture to glass."
                   />
                   <div className="source-mode-options" role="radiogroup" aria-label="Cloud compare protocol">
                     {cloudProtocolChoices.map((protocol) => (
@@ -2409,6 +2408,13 @@ function App() {
               )}
             </div>
             )}
+            <div
+              className={
+                loading || comparisonLegs.some((leg) => leg.samples.length > 0)
+                  ? "benchmark-live has-charts"
+                  : "benchmark-live"
+              }
+            >
             {recipePicked && (
             <section className="benchmark-streams">
               {endpoints.map((endpoint, index) => {
@@ -2697,51 +2703,6 @@ function App() {
             </section>
             )}
 
-            {error && <p className="error benchmark-start-error">{error}</p>}
-            {!error && startHint && !loading && (
-              <p className="field-hint benchmark-start-error">{startHint}</p>
-            )}
-            {loading && (
-            <div className="button-row benchmark-start-row">
-              {renderStartStop("", { start: false })}
-            </div>
-            )}
-
-            {!loading &&
-              comparisonLegs.length > 0 &&
-              comparisonLegs.every((leg) =>
-                isLegFinished(leg.job, leg.ingestVmafRequested, leg.encoderVmafRequested),
-              ) && (
-                <section className="session-download-strip benchmark-download">
-                  <div className="download-actions">
-                    <button
-                      type="button"
-                      className="csv-download"
-                      onClick={() =>
-                        void downloadCombinedCsv(
-                          sessionDownloadStreams(comparisonLegs),
-                          "comparison.csv",
-                        )
-                      }
-                    >
-                      Download CSV
-                    </button>
-                    <button
-                      type="button"
-                      className="csv-download"
-                      onClick={() =>
-                        void downloadCombinedJson(
-                          sessionDownloadStreams(comparisonLegs),
-                          "comparison.json",
-                        )
-                      }
-                    >
-                      Download JSON
-                    </button>
-                  </div>
-                </section>
-              )}
-
             {(loading || comparisonLegs.some((leg) => leg.samples.length > 0)) && (
               <section className="panel live-charts-panel">
                 <h2 className="live-charts-heading">Charts</h2>
@@ -2812,6 +2773,52 @@ function App() {
                 </ResultsErrorBoundary>
               </section>
             )}
+            </div>
+
+            {error && <p className="error benchmark-start-error">{error}</p>}
+            {!error && startHint && !loading && (
+              <p className="field-hint benchmark-start-error">{startHint}</p>
+            )}
+            {loading && (
+            <div className="button-row benchmark-start-row">
+              {renderStartStop("", { start: false })}
+            </div>
+            )}
+
+            {!loading &&
+              comparisonLegs.length > 0 &&
+              comparisonLegs.every((leg) =>
+                isLegFinished(leg.job, leg.ingestVmafRequested, leg.encoderVmafRequested),
+              ) && (
+                <section className="session-download-strip benchmark-download">
+                  <div className="download-actions">
+                    <button
+                      type="button"
+                      className="csv-download"
+                      onClick={() =>
+                        void downloadCombinedCsv(
+                          sessionDownloadStreams(comparisonLegs),
+                          "comparison.csv",
+                        )
+                      }
+                    >
+                      Download CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="csv-download"
+                      onClick={() =>
+                        void downloadCombinedJson(
+                          sessionDownloadStreams(comparisonLegs),
+                          "comparison.json",
+                        )
+                      }
+                    >
+                      Download JSON
+                    </button>
+                  </div>
+                </section>
+              )}
             </div>
           </div>
         )}

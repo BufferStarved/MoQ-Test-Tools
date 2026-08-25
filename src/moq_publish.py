@@ -1107,11 +1107,16 @@ def should_pace_moq_publisher(media_path: str = "") -> bool:
 def publisher_first_object_sent(log_text: str) -> bool:
     """True when the publisher logged a successful first media object.
 
-    ``live: sent track=`` is moq5 / openmoq first-group write (MOQ_OK).
-    CONNECT / ``connection_id=`` alone is not publish success.
+    ``live: sent track=`` is older moq5 / openmoq first-group write (MOQ_OK).
+    Current moq5 logs ``obj vide wall_dt_ms=``. CONNECT / ``connection_id=``
+    alone is not publish success.
     """
     text = log_text or ""
-    return "live: sent track=" in text or "MOQ_OK" in text
+    return (
+        "live: sent track=" in text
+        or "MOQ_OK" in text
+        or "obj vide wall_dt_ms=" in text
+    )
 
 
 def publisher_catalog_published(log_text: str) -> bool:

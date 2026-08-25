@@ -190,6 +190,24 @@ class LinodePresetTests(unittest.TestCase):
 
 
 class MoqRecorderAgentTests(unittest.TestCase):
+    def test_dallas_and_fremont_agents_use_regional_tokens(self) -> None:
+        env = {
+            "INGEST_AGENT_TOKEN": "central-token",
+            "LINODE_CENTRAL_INGEST_AGENT_TOKEN": "dallas-token",
+            "LINODE_WEST_INGEST_AGENT_TOKEN": "fremont-token",
+            "LINODE_CENTRAL_WEB_IP": "50.116.17.198",
+            "LINODE_WEST_WEB_IP": "173.230.155.121",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            from ingest_agent_client import resolve_ingest_agent
+
+            dallas = resolve_ingest_agent(agent_url="http://50.116.17.198:8090")
+            fremont = resolve_ingest_agent(agent_url="http://173.230.155.121:8090")
+            self.assertIsNotNone(dallas)
+            self.assertIsNotNone(fremont)
+            self.assertEqual(dallas.token, "dallas-token")
+            self.assertEqual(fremont.token, "fremont-token")
+
     def test_east_and_linode_moq_record_on_regional_web_agent(self) -> None:
         env = {
             "MOQ_RECORDER_AGENT_URL": "http://35.222.33.58:8090",

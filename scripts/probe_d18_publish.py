@@ -396,9 +396,9 @@ def main() -> int:
     else:
         log("PASS: namespace + catalog publish logged")
 
-    if not publisher_first_object_sent(combined_pub) or "live: sent track=vide" not in combined_pub:
+    if not publisher_first_object_sent(combined_pub):
         failures.append("no video object left the publisher")
-        log("FAIL: no live: sent track=vide")
+        log("FAIL: no video object left the publisher")
     else:
         log("PASS: at least one video object/group left the publisher")
 

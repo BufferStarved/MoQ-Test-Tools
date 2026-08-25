@@ -19,16 +19,13 @@ assert.match(presetSrc, /build-your-own/);
 assert.match(presetSrc, /cloud-compare/);
 assert.match(presetSrc, /contribution-compare/);
 assert.match(presetSrc, /webrtc-vs-moq/);
-assert.match(presetSrc, /Ingest\/Contribution Protocol Comparison/);
-assert.match(presetSrc, /Cloud\/Infrastructure Comparison/);
-assert.match(presetSrc, /MoQ vs WebRTC Realtime Comparison/);
-assert.match(presetSrc, /End-to-End Protocol Comparison/);
-assert.match(presetSrc, /Custom - Build Your Own Comparison/);
-assert.match(presetSrc, /choose your source, output configurations, endpoints and players\./);
-assert.match(
-  presetSrc,
-  /Compare performance to various endpoints to determine the optimal infrastructure provider for your network path\./,
-);
+assert.match(presetSrc, /label: "Ingest only"/);
+assert.match(presetSrc, /label: "Where to host"/);
+assert.match(presetSrc, /label: "MoQ vs WebRTC"/);
+assert.match(presetSrc, /label: "Capture to glass"/);
+assert.match(presetSrc, /label: "Custom"/);
+assert.match(presetSrc, /Pick source, outputs, destinations, and players\./);
+assert.match(presetSrc, /Same protocol across GCP \/ Linode \/ AWS/);
 assert.doesNotMatch(presetSrc, /Contribution Protocol Comparison for Streaming Workflows/);
 assert.doesNotMatch(presetSrc, /WebRTC vs MOQ for realtime video\./);
 assert.doesNotMatch(presetSrc, /label: "Protocol comparison"/);
@@ -38,10 +35,10 @@ assert.doesNotMatch(presetSrc, /label: "Contribution ingest"/);
 assert.doesNotMatch(presetSrc, /label: "WebRTC vs MoQ"/);
 assert.match(
   presetSrc,
-  /id: "contribution-compare"[\s\S]*id: "cloud-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "protocol-compare"[\s\S]*id: "build-your-own"/,
+  /id: "protocol-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "cloud-compare"[\s\S]*id: "contribution-compare"[\s\S]*id: "build-your-own"/,
 );
 assert.match(appSrc, /recipe-card-custom/);
-assert.match(appSrc, /eyebrow">Custom/);
+assert.match(appSrc, /recipe-card-custom/);
 assert.match(presetSrc, /TEST_SCOPE_UPLOAD/);
 assert.match(presetSrc, /defaultRecipeEndpoints/);
 assert.match(presetSrc, /BROWSER4_OUTPUT_KEYS/);

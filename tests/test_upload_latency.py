@@ -42,6 +42,7 @@ class UploadLatencyTests(unittest.TestCase):
             publisher_first_object_sent("live: sent track=vide_1 bytes=191598\n")
         )
         self.assertTrue(publisher_first_object_sent("object write MOQ_OK group=0\n"))
+        self.assertTrue(publisher_first_object_sent("obj vide wall_dt_ms=999 bytes=322195 sync=1\n"))
 
     def test_catalog_published_ignores_connect_and_old_empty_catalog(self) -> None:
         self.assertFalse(publisher_catalog_published("connection_id=moq5-wt ns=bench-x\n"))

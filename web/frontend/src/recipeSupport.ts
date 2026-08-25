@@ -475,8 +475,9 @@ export function defaultRecipeEndpoints(ctx: RecipeContext): Omit<EndpointConfig,
         ["moq", "srt"],
       ]
     : [
-        ["rtmp", "srt"],
+        ["moq", "srt"],
         ["srt", "moq"],
+        ["rtmp", "srt"],
         ["webrtc", "moq"],
         ["moq", "webrtc"],
       ];

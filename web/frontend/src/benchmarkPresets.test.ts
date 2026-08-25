@@ -318,6 +318,13 @@ describe("applyBenchmarkPreset", () => {
     assert.equal(wizardStepVisible("build-your-own", "source"), true);
     assert.equal(recipeLockedSummary("build-your-own"), null);
   });
+
+  it("build-your-own defaults include a public MoQ :14433 tile", () => {
+    const plan = applyBenchmarkPreset("build-your-own", chromeCtx("dummy"), nextId());
+    assert.ok(plan.endpoints.some((endpoint) => endpoint.protocol === "moq"));
+    assert.ok(plan.endpoints.some((endpoint) => endpoint.protocol === "srt"));
+    assertPublicMoq(plan.endpoints);
+  });
 });
 
 describe("recipe wizard locks", () => {
@@ -325,33 +332,24 @@ describe("recipe wizard locks", () => {
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => item.id),
       [
-        "contribution-compare",
-        "cloud-compare",
-        "webrtc-vs-moq",
         "protocol-compare",
+        "webrtc-vs-moq",
+        "cloud-compare",
+        "contribution-compare",
         "build-your-own",
       ],
     );
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => [item.label, item.hint]),
       [
+        ["Capture to glass", "SRT + RTMP + WebRTC + MoQ :14433 · players side by side"],
+        ["MoQ vs WebRTC", "Webcam + Browser · realtime join on Linode/East"],
         [
-          "Ingest/Contribution Protocol Comparison",
-          "Laptop→cloud webcam or cloud→cloud VOD · SRT + RTMP + MoQ · ingest only (not glass)",
+          "Where to host",
+          "Same protocol across GCP / Linode / AWS · grey cells are not deployed",
         ],
-        [
-          "Cloud/Infrastructure Comparison",
-          "Compare performance to various endpoints to determine the optimal infrastructure provider for your network path.",
-        ],
-        [
-          "MoQ vs WebRTC Realtime Comparison",
-          "Webcam · Browser encode · Linode/East MoQ + WebRTC",
-        ],
-        ["End-to-End Protocol Comparison", "4-way SRT + RTMP + WebRTC + MoQ :14433 · capture to glass"],
-        [
-          "Custom - Build Your Own Comparison",
-          "choose your source, output configurations, endpoints and players.",
-        ],
+        ["Ingest only", "SRT + RTMP + MoQ :14433 · confidence monitor, no players"],
+        ["Custom", "Pick source, outputs, destinations, and players."],
       ],
     );
   });

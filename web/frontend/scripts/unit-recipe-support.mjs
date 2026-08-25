@@ -13,6 +13,7 @@ const recipeSrc = fs.readFileSync(path.join(root, "src/recipeSupport.ts"), "utf8
 const ingestSrc = fs.readFileSync(path.join(root, "src/ingestEndpoints.ts"), "utf8");
 const playbackSrc = fs.readFileSync(path.join(root, "src/playbackUrls.ts"), "utf8");
 const endpointSrc = fs.readFileSync(path.join(root, "src/EndpointSection.tsx"), "utf8");
+const destGridSrc = fs.readFileSync(path.join(root, "src/DestinationGrid.tsx"), "utf8");
 const appSrc = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
 
 assert.match(appSrc, /coerceRecipe/);
@@ -22,7 +23,7 @@ assert.match(appSrc, /Boolean\(startTitle\)/);
 assert.match(appSrc, /recipeBlockReason/);
 assert.match(endpointSrc, /destinationsForProtocol/);
 assert.match(endpointSrc, /lockProtocol/);
-assert.match(endpointSrc, /data-testid="output-destination"/);
+assert.match(destGridSrc, /data-testid="output-destination"/);
 assert.match(endpointSrc, /selectablePlaybackModes/);
 assert.doesNotMatch(endpointSrc, /playbackModeBlockedReason/);
 assert.match(endpointSrc, /UPLOAD_PROTOCOLS_COMING_SOON = new Set\(\["hls", "dash"\]\)/);
