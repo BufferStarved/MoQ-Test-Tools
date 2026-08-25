@@ -247,8 +247,14 @@ h1 {
 @media (min-width: 1100px) {
   .benchmark-split {
     display: grid;
-    grid-template-columns: minmax(300px, 38%) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
     align-items: start;
+  }
+
+  .benchmark-split-setup,
+  .benchmark-split-run {
+    min-width: 0;
+    max-width: 100%;
   }
 
   .benchmark-split-setup {
@@ -258,6 +264,17 @@ h1 {
 
   .benchmark-split-setup .benchmark-shared {
     margin-bottom: 0;
+    max-width: 100%;
+  }
+
+  .benchmark-split-setup .source-mode-options,
+  .benchmark-split-setup .recipe-options,
+  .benchmark-split-setup .cloud-protocol-section .source-mode-options {
+    max-width: 100%;
+  }
+
+  .benchmark-split-setup .encoder-profile-body {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .live-charts-panel {
@@ -413,13 +430,15 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .benchmark-streams {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 20px;
   align-items: stretch;
+  min-width: 0;
 }
 
 .destination-grid-wrap {
@@ -427,6 +446,8 @@ h1 {
   flex-direction: column;
   gap: 8px;
   margin-bottom: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .destination-grid-label {
@@ -440,6 +461,8 @@ h1 {
   grid-template-columns: 4.5rem repeat(3, minmax(0, 1fr));
   gap: 6px;
   align-items: stretch;
+  min-width: 0;
+  width: 100%;
 }
 
 .destination-grid-corner,
@@ -466,6 +489,7 @@ h1 {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  min-width: 0;
   min-height: 3.4rem;
   padding: 7px 8px;
   border: 1px solid var(--surface-border);
@@ -479,12 +503,14 @@ h1 {
 .destination-cell strong {
   font-size: 0.78rem;
   line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .destination-cell span {
   font-size: 0.68rem;
   color: var(--text-muted);
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .destination-cell.selected {
@@ -560,6 +586,12 @@ h1 {
   padding: 20px;
   border-top: 3px solid var(--protocol-accent, var(--accent));
   background: var(--surface);
+}
+
+.stream-column select,
+.stream-column input {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .stream-path-chips {
@@ -1084,7 +1116,7 @@ input:disabled {
 
 .source-mode-options {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
   gap: 10px;
   max-width: 720px;
 }
@@ -2756,7 +2788,7 @@ code {
 
 .recipe-options {
   max-width: 960px;
-  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 176px), 1fr));
 }
 
 .recipe-options .source-mode-card.recipe-card-custom {
