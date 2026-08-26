@@ -683,6 +683,7 @@ page.on('pageerror', (err) => {{
 await page.goto(pageUrl, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
 const started = Date.now();
 let state = {{}};
+let painted = false;
 while (Date.now() - started < waitMs) {{
   state = await page.evaluate(() => {{
     const v = document.querySelector('video');
@@ -696,8 +697,7 @@ while (Date.now() - started < waitMs) {{
     }};
   }});
   if (state.videoWidth >= 16 && state.readyState >= 2) {{
-    await page.waitForTimeout(2500);
-    break;
+    painted = true;
   }}
   await page.waitForTimeout(400);
 }}

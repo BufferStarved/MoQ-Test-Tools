@@ -103,7 +103,7 @@ import { isSafariBrowser } from "./browserDetect";
 import { IconBroadcast, IconCpu, IconMonitor, IconPlus } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
-import { operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
+import { operatorBenchmarkPreset, operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
 import {
   applyBenchmarkPreset,
   BENCHMARK_PRESET_DEFS,
@@ -112,6 +112,7 @@ import {
   recipeDef,
   recipeLockedSummary,
   recipeLocksProtocolMix,
+  recipeRevealsLockedOutputs,
   recipeShowsEndpointPickers,
   recipeShowsSharedProtocolPicker,
   wizardStepVisible,
@@ -368,15 +369,17 @@ function App() {
     operatorPlan.encoder ?? (operatorPlan.source === "browser_moq" ? "browser" : "ffmpeg"),
   );
   const [activePresetId, setActivePresetId] = useState<BenchmarkPresetId | null>(() =>
-    operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
+    operatorBenchmarkPreset(operatorPlan.operator) ??
+    (operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
       ? "build-your-own"
-      : null,
+      : null),
   );
   const [setupCursor, setSetupCursor] = useState<SetupStepId>(() => {
     const initialPreset =
-      operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
+      operatorBenchmarkPreset(operatorPlan.operator) ??
+      (operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
         ? "build-your-own"
-        : null;
+        : null);
     if (!initialPreset) {
       return "recipe";
     }
@@ -1915,7 +1918,10 @@ function App() {
   const protocolState = setupStepState(setupSteps, setupCursor, "protocol", runLayout);
   const encodeState = setupStepState(setupSteps, setupCursor, "encode", runLayout);
   const outputsState = setupStepState(setupSteps, setupCursor, "outputs", runLayout);
-  const showOutputsPane = outputsState === "current" || runLayout;
+  const showOutputsPane =
+    outputsState === "current" ||
+    runLayout ||
+    (recipeRevealsLockedOutputs(activePresetId) && isLastSetupStep(setupSteps, setupCursor));
   const setupHasContinue = !isLastSetupStep(setupSteps, setupCursor);
   const sourceSummary =
     mediaSource === "webcam" || mediaSource === "browser_moq"
@@ -2564,6 +2570,7 @@ function App() {
                     />
                     ) : (
                       <p className="stream-column-locked-label">
+                        {ingestEndpointLabel(endpoint.ingestEndpointId)} ·{" "}
                         {protocolLabel(endpoint.protocol)} · {playerShortLabel(endpoint)}
                       </p>
                     )}

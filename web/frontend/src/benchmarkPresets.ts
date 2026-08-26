@@ -203,6 +203,15 @@ export function recipeNeedsLaptopHelper(id: BenchmarkPresetId): boolean {
   return id === "contribution-compare";
 }
 
+/**
+ * Recipes that already decided the output mix hide the Outputs wizard step.
+ * Still show those tiles on the last decision so a visitor sees destinations
+ * before Start (browser4 / protocol-compare). Custom keeps walking the wizard.
+ */
+export function recipeRevealsLockedOutputs(id: BenchmarkPresetId | null): boolean {
+  return Boolean(id) && recipeLocksStep(id, "outputs") && !recipeShowsEndpointPickers(id);
+}
+
 export function recipeLockedSummary(id: BenchmarkPresetId | null): string | null {
   const summary = recipeDef(id)?.lockedSummary?.trim();
   return summary ? summary : null;

@@ -209,13 +209,19 @@ const browser = await chromium.launch({{
 }});
 const page = await (await browser.newContext({{ ignoreHTTPSErrors: true }})).newPage();
 await page.goto(pageUrl, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+await page.waitForSelector('.hero-start-button', {{ timeout: 25000 }});
 await page.waitForSelector('.stream-column', {{ timeout: 25000 }});
 const state = await page.evaluate(() => {{
   const columns = document.querySelectorAll('.stream-column');
-  const radios = [...document.querySelectorAll('input[name="source-mode"]')];
-  const browserOn = radios[1] ? radios[1].checked : false;
+  const selectedRecipe = document.querySelector('.recipe-options .source-mode-card.selected strong');
+  const body = String(document.body.innerText || '');
   const labels = [...columns].map((col) => String(col.textContent || '').slice(0, 240));
-  return {{ columns: columns.length, browserOn, labels }};
+  return {{
+    columns: columns.length,
+    browserOn: /webcam\\s*[·•]\\s*browser/i.test(body),
+    recipeOn: /moq vs webrtc/i.test(String(selectedRecipe?.textContent || '')),
+    labels,
+  }};
 }});
 await browser.close();
 console.log(JSON.stringify(state));
@@ -243,9 +249,13 @@ console.log(JSON.stringify(state));
     blob = " ".join(state.get("labels") or []).lower()
     has_linode = "linode" in blob
     has_east = "east" in blob or "us-east" in blob
+    recipe_on = bool(state.get("recipeOn"))
     if columns >= 4 and browser_on and has_linode and has_east:
-        return True, f"deeplink_ok columns={columns} browser=1 linode+east"
-    return False, f"deeplink_incomplete columns={columns} browser={int(browser_on)}"
+        return True, f"deeplink_ok columns={columns} browser=1 linode+east recipe={int(recipe_on)}"
+    return False, (
+        f"deeplink_incomplete columns={columns} browser={int(browser_on)} "
+        f"recipe={int(recipe_on)}"
+    )
 
 
 def run_headed_chrome(url: str, seconds: float, *, camera: bool = False) -> tuple[bool, str]:

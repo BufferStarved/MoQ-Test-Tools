@@ -24,7 +24,7 @@ import {
 } from "./encodeProfiles.ts";
 import { goLiveButtonVisible } from "./goLive.ts";
 import { RECIPE_HIDDEN_INGEST_IDS, defaultIngestForProtocol } from "./ingestEndpoints.ts";
-import { parseOperatorSearch } from "./operatorRecipe.ts";
+import { operatorBenchmarkPreset, parseOperatorSearch } from "./operatorRecipe.ts";
 import { encoderSectionMoqGopNote } from "./pipelineConfig.ts";
 import {
   isCloudPlayoutSource,
@@ -166,6 +166,15 @@ describe("test_scope and playback policy per source", () => {
     const plan = parseOperatorSearch("?operator=playa-file");
     assert.equal(plan.source, "bbb");
     assert.equal(plan.outputs[0]?.ingestEndpointId, "gcp_moq_relay_d18");
+  });
+
+  it("maps browser4 onto the MoQ vs WebRTC recipe", () => {
+    const plan = parseOperatorSearch("?operator=browser4");
+    assert.equal(plan.operator, "browser4");
+    assert.equal(plan.source, "browser_moq");
+    assert.equal(plan.encoder, "browser");
+    assert.equal(operatorBenchmarkPreset(plan.operator), "webrtc-vs-moq");
+    assert.equal(plan.outputs.length, 4);
   });
 });
 

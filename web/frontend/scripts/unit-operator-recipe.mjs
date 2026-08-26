@@ -24,6 +24,8 @@ const app = fs.readFileSync(
 );
 assert.match(app, /parseOperatorSearch/);
 assert.match(app, /operatorEndpoints/);
+assert.match(app, /operatorBenchmarkPreset/);
+assert.match(src, /webrtc-vs-moq/);
 
 const OUTPUTS = {
   linode_moq: { protocol: "moq", ingestEndpointId: "linode_moq_relay_d18", playbackMode: "moq" },

@@ -156,6 +156,7 @@ export function parseOperatorSearch(search: string): {
   source: MediaSourceId | null;
   encoder: EncoderId | null;
   outputs: OperatorOutputSpec[];
+  operator: string;
 } {
   const trimmed = search.startsWith("?") ? search.slice(1) : search;
   const params = new URLSearchParams(trimmed);
@@ -190,5 +191,11 @@ export function parseOperatorSearch(search: string): {
     source,
     encoder,
     outputs: parseOperatorOutputs(params.get("outputs"), operator),
+    operator: op,
   };
+}
+
+/** Named recipe for /?operator=… — browser4 is MoQ vs WebRTC, not Custom. */
+export function operatorBenchmarkPreset(operator: string | null): "webrtc-vs-moq" | null {
+  return (operator || "").trim().toLowerCase() === "browser4" ? "webrtc-vs-moq" : null;
 }

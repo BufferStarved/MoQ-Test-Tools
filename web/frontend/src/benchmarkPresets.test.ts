@@ -9,6 +9,7 @@ import {
   recipeLocksEndpoints,
   recipeLocksProtocolMix,
   recipeLocksStep,
+  recipeRevealsLockedOutputs,
   recipeShowsEndpointPickers,
   recipeShowsSharedProtocolPicker,
   wizardStepVisible,
@@ -402,6 +403,14 @@ describe("recipe wizard locks", () => {
     assert.equal(recipeLocksEndpoints("cloud-compare"), false);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
     assert.match(recipeLockedSummary("cloud-compare") ?? "", /one protocol × N cloud endpoints/);
+  });
+
+  it("locked-output recipes reveal tiles before Start; Custom does not", () => {
+    assert.equal(recipeRevealsLockedOutputs("webrtc-vs-moq"), true);
+    assert.equal(recipeRevealsLockedOutputs("protocol-compare"), true);
+    assert.equal(recipeRevealsLockedOutputs("contribution-compare"), false);
+    assert.equal(recipeRevealsLockedOutputs("build-your-own"), false);
+    assert.equal(recipeRevealsLockedOutputs(null), false);
   });
 
   it("precanned recipes mask shape steps and keep a locked summary", () => {

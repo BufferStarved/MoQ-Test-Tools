@@ -71,6 +71,45 @@ class FindDistortedRecordingTests(unittest.TestCase):
         self.assertIn("during-job capture", state.error)
         self.assertNotIn("HTTP-TS pull", state.error)
 
+    def test_libvmaf_uses_one_nice_thread_and_short_timeout(self) -> None:
+        from vmaf_service import (
+            VMAF_FFMPEG_TIMEOUT_SEC,
+            VMAF_N_THREADS,
+            compute_vmaf,
+            job_dir,
+        )
+
+        self.assertEqual(VMAF_N_THREADS, 1)
+        self.assertLessEqual(VMAF_FFMPEG_TIMEOUT_SEC, 180)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("vmaf_service.WORK_DIR", tmp), patch(
+                "vmaf_service.RECORDING_DIR", str(Path(tmp) / "recordings")
+            ), patch("vmaf_service._resolve_ffmpeg", return_value="/usr/bin/ffmpeg"), patch(
+                "vmaf_service.subprocess.run",
+                side_effect=TimeoutError("should not reach"),
+            ) as run:
+                ref = job_dir("job-cap") / "reference.mp4"
+                cap = job_dir("job-cap") / "http-ts-capture.ts"
+                ref.parent.mkdir(parents=True)
+                ref.write_bytes(b"ref")
+                cap.write_bytes(b"\x47" + b"\x00" * 200)
+                # Fail before ffmpeg if recording wait is skipped and parse fails —
+                # we only need to see the command that would have been run.
+                run.side_effect = None
+                run.return_value = type(
+                    "Completed",
+                    (),
+                    {"returncode": 1, "stderr": "nope", "stdout": ""},
+                )()
+                state = compute_vmaf("job-cap", 1.0, 10.0, recording_dir=str(Path(tmp) / "rec"))
+        self.assertEqual(state.status, "failed")
+        self.assertTrue(run.called)
+        cmd = run.call_args.args[0]
+        lavfi = next(part for part in cmd if "libvmaf" in part)
+        self.assertIn("n_threads=1", lavfi)
+        self.assertEqual(run.call_args.kwargs["timeout"], 180)
+        self.assertTrue(callable(run.call_args.kwargs.get("preexec_fn")))
+
 
 class PrepareRemoteVmafTests(unittest.TestCase):
     def test_zixi_starts_http_ts_capture_after_reference(self) -> None:

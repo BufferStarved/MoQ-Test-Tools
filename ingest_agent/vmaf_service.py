@@ -11,6 +11,14 @@ from config import FFMPEG_BIN, RECORDING_DIR, WORK_DIR
 
 logger = logging.getLogger("ingest-agent")
 
+# e2-medium ingest boxes wedge when libvmaf takes both cores (SSH/health die,
+# the next RTMP publish gets bitrate 0). Resolve ffmpeg once; score with one
+# nice'd thread and a hard cap so the agent stays reachable.
+_FFMPEG_CACHE: Optional[str] = None
+_FFMPEG_RESOLVED = False
+VMAF_FFMPEG_TIMEOUT_SEC = 180
+VMAF_N_THREADS = 1
+
 
 @dataclass
 class VmafJobState:
@@ -34,12 +42,16 @@ def reference_path_for(job_id: str, suffix: str = ".mp4") -> Path:
 
 
 def _resolve_ffmpeg() -> Optional[str]:
+    global _FFMPEG_CACHE, _FFMPEG_RESOLVED
+    if _FFMPEG_RESOLVED:
+        return _FFMPEG_CACHE
     candidates = [
         FFMPEG_BIN,
         "/usr/local/bin/ffmpeg",
         "/usr/bin/ffmpeg",
         "ffmpeg",
     ]
+    found = None
     for candidate in candidates:
         if not candidate:
             continue
@@ -54,8 +66,11 @@ def _resolve_ffmpeg() -> Optional[str]:
         except (OSError, subprocess.SubprocessError):
             continue
         if "libvmaf" in (completed.stdout or "") + (completed.stderr or ""):
-            return candidate
-    return None
+            found = candidate
+            break
+    _FFMPEG_CACHE = found
+    _FFMPEG_RESOLVED = True
+    return _FFMPEG_CACHE
 
 
 def _parse_quality_metrics(payload: dict) -> tuple[Optional[float], Optional[float], Optional[float]]:
@@ -268,7 +283,7 @@ def compute_vmaf(
             "[0:v]setpts=PTS-STARTPTS[dis];"
             "[1:v]setpts=PTS-STARTPTS[ref];"
             "[dis][ref]scale2ref[dis2][ref2];"
-            f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads=2:"
+            f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads={VMAF_N_THREADS}:"
             "feature=name=psnr|name=float_ssim"
         ),
         "-f",
@@ -276,14 +291,28 @@ def compute_vmaf(
         "-",
     ]
 
+    def _nice_child() -> None:
+        try:
+            os.nice(15)
+        except OSError:
+            pass
+
     try:
         completed = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=VMAF_FFMPEG_TIMEOUT_SEC,
             check=False,
+            preexec_fn=_nice_child,
         )
+    except subprocess.TimeoutExpired:
+        state.status = "failed"
+        state.error = (
+            f"libvmaf exceeded {VMAF_FFMPEG_TIMEOUT_SEC}s on this ingest host; "
+            "encode and playback still stand"
+        )
+        return state
     except (OSError, subprocess.SubprocessError) as exc:
         state.status = "failed"
         state.error = f"ffmpeg libvmaf failed: {exc}"
