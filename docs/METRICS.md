@@ -131,7 +131,7 @@ capture ──encode──> muxed ──cmaf_group──> publish ──network�
 
 The model makes three separate statements and refuses to blur them together:
 
-1. **A stage with no instrument reads 0 *and* names itself in `latency_unmeasured`.** A bare 0 would mean "this stage is free"; the annotation makes it mean "we did not measure this". `latency_publish_ms` is unmeasured everywhere; `latency_packager_ms` is unmeasured on Zixi Fast HLS and MoQ; `latency_network_ms` is unmeasured on MoQ (no RTT source is wired for the openmoq publisher — `quic_rtt_ms` is 0 too).
+1. **A stage with no instrument reads 0 *and* names itself in `latency_unmeasured`.** A bare 0 would mean "this stage is free"; the annotation makes it mean "we did not measure this". `latency_publish_ms` is unmeasured everywhere; `latency_packager_ms` is unmeasured on Zixi Fast HLS and MoQ; `latency_network_ms` is unmeasured on MoQ (no RTT source is wired for the openmoq publisher — `quic_rtt_ms` is 0 too). File-source MoQ must **not** subtract a 1000 ms GOP from a ~40 ms encode baseline — that wiped `latency_encode_ms` to 0 while leaving `encode` out of `latency_unmeasured` (audit FAIL). HLS playback collects Fast HLS segmentation (2000 ms) or MediaMTX LL-HLS parts (200 ms) instead of a silent 0.
 2. **Under- and over-attribution are different facts and get different columns.** `latency_residual_ms` was previously clamped at zero, so a leg whose components summed to *more* than its measured e2e looked identical to one that reconciled exactly — Linode WebRTC over-counted by up to 1721 ms against a 35 ms e2e while reporting a residual of 0.0. Exactly one of `latency_residual_ms` and `latency_overcount_ms` can be non-zero.
 3. **Only components inside the measured span are summed.** WHEP's `e2e_latency_ms` is a *receiver-side* jitter-buffer estimate that begins at ingest, while `latency_encode_ms` is a *sender-side* offset. Summing them was the modelling error behind that 1721 ms. WebRTC legs therefore carry `latency_e2e_scope=ingest_to_glass`: the encode component is still reported in its own column, but it is excluded from `latency_accounted_ms`.
 
@@ -316,7 +316,7 @@ There is no 100% cap. A cap would hide the cases worth seeing: a player legitima
 |--------|----------------|
 | `net_rtt_ms` | **SRT:** libsrt, then Zixi or MediaMTX `srt_conns_ms_rtt`. **RTMP:** Zixi/MediaMTX when available, else TCP connect probe. **MoQ:** picoquic qlog / TCP path probe |
 | `net_jitter_ms` | libsrt jitter, Zixi jitter, or EMA of successive MediaMTX RTT deltas |
-| `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` (MediaMTX: falls back to path ingest rate) |
+| `net_send_mbps` | libsrt send rate or `encoded_bitrate_kbps / 1000` (MediaMTX: falls back to path ingest rate). **FLV/RTMP:** ffmpeg `-progress` often reports `total_size=N/A`; keep `bitrate=` and/or fall back to the encoder capture file instead of writing 0 for a healthy encode |
 | `net_recv_mbps` | libsrt receive rate, or MediaMTX `srt_conns_mbps_receive_rate` / path byte deltas |
 | `net_loss_pct` / `net_retrans_pct` | **SRT:** libsrt or MediaMTX SRT loss/retrans. **MoQ:** moqx QUIC counters |
 
@@ -460,6 +460,8 @@ not available for MoQ; they are complementary, protocol-native views rather than
 | `playback_error_count` | Normalized player errors |
 | `playback_sample_age_sec` | Seconds since the browser last reported. Non-zero means the live gauges on this row are carried over, not fresh |
 
+Zixi Fast HLS playlists are **1-deep**. `HlsPlayer` sets `liveSyncDurationCount` to 1 on those playlists so hls.js does not wait for a second segment that never arrives (rendered stuck at ~35). MediaMTX LL-HLS is unchanged.
+
 ### Stale is not stable
 
 The pipeline samples once a second for the whole encode, but the browser only reports while a player is attached. Rows written after the player detaches used to repeat its last reading verbatim — Linode WebRTC held an identical 35 ms for 22 of 30 samples and Zixi RTMP held 5522 ms for 24 of 30 — which pulled the run average toward the frozen value and made a leg that had stopped being measured look rock-steady.
@@ -473,6 +475,12 @@ Live gauges (`e2e_latency_ms`, `playback_buffer_sec`, `playback_bitrate_bps`, an
 Optional post-run libvmaf on encoder capture and/or ingest recording. Charted separately per stage
 (see “Encode quality vs. ingest quality” above) rather than in one combined tab. See the ingest-agent
 sections in this repo’s Zixi / web runbooks.
+
+MoQ ingest VMAF needs a **local** `openmoq-recorder:latest` image and a relay URL on
+**`:14433`** (no leftover `:4433` cert pin). Zixi ingest VMAF captures HTTP-TS
+**during** the job; a pull after encode ends is empty. MediaMTX presets that do
+not support ingest VMAF must skip, not advertise available and write null. Health
+`moq_recorder_available` is false when the Docker image is missing.
 
 ---
 

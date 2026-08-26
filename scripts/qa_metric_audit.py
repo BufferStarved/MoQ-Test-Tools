@@ -267,9 +267,11 @@ def unmeasured_stages(rows: List[dict]) -> dict:
 
     A stage that is listed as unmeasured must not also be reporting a number:
     that combination is what made a Zixi packager read 0 while the docs blamed
-    packaging for the residual.
+    packaging for the residual. ``not_applicable`` is the other honest zero
+    (WebRTC has no CMAF group) — the silent-zero gate must accept it too.
     """
     counts: Dict[str, int] = {}
+    na_counts: Dict[str, int] = {}
     contradictions = 0
     for row in rows:
         listed = {
@@ -277,12 +279,20 @@ def unmeasured_stages(rows: List[dict]) -> dict:
             for stage in (row.get("latency_unmeasured") or "").split(",")
             if stage.strip()
         }
+        not_applicable = {
+            stage.strip()
+            for stage in (row.get("latency_not_applicable") or "").split(",")
+            if stage.strip()
+        }
         for stage in listed:
             counts[stage] = counts.get(stage, 0) + 1
             if (num(row.get(f"latency_{stage}_ms")) or 0.0) > 0.0:
                 contradictions += 1
+        for stage in not_applicable:
+            na_counts[stage] = na_counts.get(stage, 0) + 1
     return {
         "stages": {k: f"{v}/{len(rows)}" for k, v in sorted(counts.items())},
+        "not_applicable": {k: f"{v}/{len(rows)}" for k, v in sorted(na_counts.items())},
         "reported_while_unmeasured": contradictions,
     }
 
@@ -462,6 +472,10 @@ def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[s
     # Absence gate. A required column that never arrived is a broken collector,
     # and until now it produced the same "invariants OK" as a healthy leg.
     for column in REQUIRED_NONZERO.get(protocol, _CORE_REQUIRED):
+        if column.startswith("latency_"):
+            stage = column[len("latency_") : -len("_ms")]
+            if unm["stages"].get(stage) or unm.get("not_applicable", {}).get(stage):
+                continue
         s = summarize_column(rows, column)
         if s["nonzero"] == 0:
             state = "never emitted" if s["empty"] == s["n"] else "zero on every sample"
@@ -534,10 +548,12 @@ def check_invariants(rows: List[dict], protocol: str) -> tuple[List[str], List[s
         values = series(rows, component)
         if values and not any(v > 0 for v in values):
             listed = unm["stages"].get(stage)
-            if not listed:
+            na_listed = unm.get("not_applicable", {}).get(stage)
+            if not listed and not na_listed:
                 failures.append(
                     f"{component} is 0 on every sample but '{stage}' is absent "
-                    f"from latency_unmeasured — a silent zero"
+                    f"from latency_unmeasured and latency_not_applicable — "
+                    f"a silent zero"
                 )
 
     # Defect 2: the ratio must not decay to a fraction of its peak while the

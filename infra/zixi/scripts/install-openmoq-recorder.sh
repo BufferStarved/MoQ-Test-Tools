@@ -25,6 +25,9 @@ if ! command -v docker >/dev/null 2>&1; then
   systemctl enable --now docker 2>/dev/null || true
 fi
 
+# git checkout has playa source only; dist/ is gitignored and Docker COPY needs it.
+bash "$REPO_DIR/scripts/ensure-openmoq-recorder-playa-dist.sh"
+
 cp "$RECORDER_DIR/.dockerignore" "$REPO_DIR/.dockerignore"
 docker build -f "$RECORDER_DIR/Dockerfile" -t "$IMAGE" "$REPO_DIR"
 rm -f "$REPO_DIR/.dockerignore"

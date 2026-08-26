@@ -20,6 +20,27 @@ JOB=<id> HEADED=1 python3 scripts/e2e_operator_matrix.py --case cloud_moq
 https://moq.sean-mccarthy.net. Do not set `START_JOB=1` while another ingest
 matrix is running.
 
+## File-source metric honesty (no camera)
+
+After a web deploy, the four idle-prod legs are GCP Central MoQ d18, Dallas MoQ
+d18, GCP MediaMTX SRT, and GCP Zixi RTMP (file `dummy.mp4`). Pass means:
+
+- Headed Chrome: MoQ `rendered` keeps climbing (not stuck ~36). Zixi Fast HLS
+  uses `liveSyncDurationCount: 1` on a 1-deep playlist so the playhead is not
+  frozen at ~35 frames waiting for a second segment.
+- Encoder VMAF is a number. MoQ/Zixi ingest VMAF is a number when the checkbox
+  advertised available (not null / stuck `computing`). MediaMTX ingest VMAF
+  skip is honest.
+- `latency_encode_ms` / `latency_segmentation_ms` are collected or named in
+  `latency_unmeasured`. MoQ `quic_rtt_ms` / `net_rtt_ms` may stay 0 (no RTT
+  instrument).
+- Zixi RTMP `encoded_bitrate_kbps` / `net_send_mbps` track the encode (~3 Mbps
+  on the dummy clip), not 0/28.
+
+```bash
+BASE_URL=https://moq.sean-mccarthy.net python3 scripts/qa_metric_audit.py --assert <job-ids>
+```
+
 ## Automated vs human
 
 | Case | Verdict | What it covers |

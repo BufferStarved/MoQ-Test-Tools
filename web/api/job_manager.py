@@ -15,7 +15,9 @@ from remote_vmaf import (
     patch_summary_with_vmaf,
     prepare_reference_bytes_via_agent,
     prepare_reference_via_agent,
+    start_http_ts_capture_via_agent,
     start_moq_recording_via_agent,
+    stop_http_ts_capture_via_agent,
 )
 from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
@@ -37,7 +39,13 @@ from cloud_encode_slots import (
     encode_slot_fields,
     job_needs_cloud_encode_slot,
 )
-from upload_service import UploadJob, UploadResult, UploadSample, UploadService
+from upload_service import (
+    UploadJob,
+    UploadResult,
+    UploadSample,
+    UploadService,
+    _is_zixi_provider,
+)
 
 
 def live_sample_payload(sample: UploadSample) -> dict:
@@ -548,6 +556,8 @@ class JobManager:
                 return
 
         if job.destination.protocol != "moq" or job.destination.moq_target is None:
+            if _is_zixi_provider(job.destination.ingest_provider or ""):
+                self._start_zixi_http_ts_capture(job_id, job)
             return
 
         # Same namespace-live gate as the player (should_mark_moq_preview_ready).
@@ -595,6 +605,61 @@ class JobManager:
         if record_error:
             self._update(job_id, vmaf_status=VmafStatus.FAILED.value, vmaf_error=record_error)
 
+    def _start_zixi_http_ts_capture(self, job_id: str, job: UploadJob) -> None:
+        """Pull HTTP-TS while the Zixi push is live so ingest VMAF has media."""
+        deadline = time.time() + min(20.0, max(6.0, float(job.duration_sec or 8)))
+        preview_ready = False
+        while time.time() < deadline:
+            with self._lock:
+                live = self._jobs.get(job_id)
+                if live is None:
+                    return
+                preview_ready = bool(live.preview_ready)
+                cancelled = live.cancel_event.is_set()
+                status = live.status
+            if preview_ready or cancelled or status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                break
+            time.sleep(0.4)
+        if not preview_ready:
+            self._update(
+                job_id,
+                vmaf_status=VmafStatus.FAILED.value,
+                vmaf_error=(
+                    "Zixi ingest VMAF waited for HTTP-TS to become readable "
+                    "before capturing; preview never became ready. Encode and "
+                    "playback still run."
+                ),
+            )
+            return
+        stream_id = (
+            (job.zixi_playback_stream_id or "").strip()
+            or (job.managed_zixi_stream_id() or "")
+        ).strip()
+        if not stream_id:
+            self._update(
+                job_id,
+                vmaf_status=VmafStatus.FAILED.value,
+                vmaf_error="Zixi ingest VMAF has no HTTP-TS stream id to capture",
+            )
+            return
+        from zixi_hls_health import zixi_ingest_http_ts_url
+
+        url = zixi_ingest_http_ts_url(
+            stream_id,
+            endpoint_url=job.destination.url,
+            agent_url=job.ingest_agent_url,
+        )
+        record_error = start_http_ts_capture_via_agent(
+            job.destination.url,
+            job_id,
+            http_ts_url=url,
+            duration_sec=job.duration_sec,
+            agent_url=job.ingest_agent_url,
+            recording_dir=job.ingest_recording_dir,
+        )
+        if record_error:
+            self._update(job_id, vmaf_status=VmafStatus.FAILED.value, vmaf_error=record_error)
+
     def _compute_remote_vmaf(
         self,
         job_id: str,
@@ -607,6 +672,14 @@ class JobManager:
             record = self._jobs.get(job_id)
             if record and record.vmaf_status == VmafStatus.FAILED.value and record.vmaf_error:
                 return
+
+        if _is_zixi_provider(job.destination.ingest_provider or ""):
+            stop_http_ts_capture_via_agent(
+                job.destination.url,
+                job_id,
+                agent_url=job.ingest_agent_url,
+                recording_dir=job.ingest_recording_dir,
+            )
 
         self._update(job_id, vmaf_status=VmafStatus.COMPUTING.value, vmaf_error=None)
         remote_result = None

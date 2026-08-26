@@ -91,6 +91,29 @@ class ProgressDeltaTests(unittest.TestCase):
         feed_block(tracker, frame=60, out_time="00:00:02.000000", total_size=222)
         self.assertEqual(tracker.get_status().total_bytes, 222)
 
+    def test_flv_without_total_size_keeps_ffmpeg_bitrate(self):
+        """RTMP/FLV reports total_size=N/A; dropping bitrate= left 0/28."""
+        clock = FakeClock()
+        tracker = ProgressDeltaTracker(clock=clock)
+        feed_block(
+            tracker,
+            frame=30,
+            out_time="00:00:01.000000",
+            total_size="N/A",
+            bitrate="3000.0kbits/s",
+        )
+        clock.now += 1.0
+        feed_block(
+            tracker,
+            frame=60,
+            out_time="00:00:02.000000",
+            total_size="N/A",
+            bitrate="2981.1kbits/s",
+        )
+        status = tracker.get_status()
+        self.assertAlmostEqual(status.bitrate_kbps, 2981.1, places=1)
+        self.assertEqual(status.total_bytes, 0)
+
     def test_out_time_us_only_still_advances_media_clock(self):
         """ffmpeg 6+ can omit HH:MM:SS out_time and only print out_time_us."""
         clock = FakeClock()

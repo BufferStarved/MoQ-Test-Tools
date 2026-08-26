@@ -11,6 +11,7 @@ from unittest.mock import patch
 from zixi_hls_health import (
     _read_capped,
     probe_http_ts_ready,
+    zixi_ingest_http_ts_url,
 )
 
 TS_SYNC = 0x47
@@ -77,6 +78,24 @@ class ProbeHttpTsReadyTests(unittest.TestCase):
             health = probe_http_ts_ready("benchmark", endpoint_url="rtmp://1.2.3.4:1935/live/benchmark")
         self.assertFalse(health.ok)
         self.assertIn("bytes=0", health.detail)
+
+
+class IngestHttpTsUrlTests(unittest.TestCase):
+    def test_colocated_agent_uses_loopback(self):
+        url = zixi_ingest_http_ts_url(
+            "benchmark",
+            endpoint_url="rtmp://35.222.33.58:1935/live/benchmark",
+            agent_url="http://35.222.33.58:8090",
+        )
+        self.assertEqual(url, "http://127.0.0.1:7777/benchmark.ts")
+
+    def test_remote_agent_uses_public_origin(self):
+        url = zixi_ingest_http_ts_url(
+            "SRT Test",
+            endpoint_url="srt://35.222.33.58:10080?mode=caller",
+            agent_url="http://34.9.217.178:8090",
+        )
+        self.assertEqual(url, "http://35.222.33.58:7777/SRT%20Test.ts")
 
 
 if __name__ == "__main__":

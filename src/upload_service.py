@@ -29,6 +29,7 @@ from encode_profile import (
     delivery_gop_frames,
     effective_srt_caller_latency_ms,
     encode_profile_summary,
+    hls_segment_sec,
     moq_group_duration_ms,
     with_srt_latency,
 )
@@ -554,12 +555,15 @@ def _job_segmentation(job) -> tuple[Optional[float], bool, bool]:
     """Known object cadence, n/a flag, and whether to split GOP out of encode.
 
     MoQ: 1s when the brokered UDP master is copied, else the solo/file GOP
-    (~0.25s). HLS publish: 200ms LL parts — not a 1s CMAF group. WebRTC and
-    continuous TS/FLV (SRT/RTMP/HTTP) are n/a at this hop.
+    (~0.25s). HLS publish: 200ms LL parts — not a 1s CMAF group. WebRTC is
+    n/a. SRT/RTMP remuxed to HLS collect the known object (MediaMTX 200ms
+    parts, Zixi Fast HLS segment); plain TS/FLV without a remux stays n/a.
     """
-    proto = str(getattr(getattr(job, "destination", None), "protocol", "") or "").strip().lower()
+    dest = getattr(job, "destination", None)
+    proto = str(getattr(dest, "protocol", "") or "").strip().lower()
     media = str(getattr(job, "media_path", "") or "")
     target = int(getattr(job, "target_latency_ms", DEFAULT_TARGET_LATENCY_MS) or DEFAULT_TARGET_LATENCY_MS)
+    provider = str(getattr(dest, "ingest_provider", "") or "").strip().lower()
     if proto == "webrtc":
         return None, True, False
     if proto == "moq":
@@ -571,6 +575,10 @@ def _job_segmentation(job) -> tuple[Optional[float], bool, bool]:
     if proto == "hls":
         return float(LL_HLS_PART_MS), False, False
     if proto in {"srt", "rtmp", "http"}:
+        if "mediamtx" in provider:
+            return float(LL_HLS_PART_MS), False, False
+        if "zixi" in provider:
+            return float(hls_segment_sec(target) * 1000), False, False
         return None, True, False
     return None, False, False
 
@@ -1049,10 +1057,17 @@ class UploadService:
                     net_loss_pct=zixi_stats.packet_loss_pct,
                     ts_continuity_counter_errors=zixi_stats.cc_errors,
                 )
+                capture_kbps = self._capture_file_bitrate_kbps(
+                    job.encoder_capture_path, status.out_time
+                )
                 encoded_bitrate_kbps = self._encoded_bitrate_kbps(
                     ffmpeg_kbps=status.bitrate_kbps,
                     merged_send_mbps=merged["net_send_mbps"],
+                    capture_kbps=capture_kbps,
                 )
+                if send_mbps <= 0 and encoded_bitrate_kbps > 0:
+                    send_mbps = encoded_bitrate_kbps / 1000.0
+                    merged["net_send_mbps"] = send_mbps
                 publish_success = _ingest_receive_observed(mtx_stats) or (
                     job.destination.protocol == "rtmp" and (zixi_stats.rtt_ms or 0) > 0
                 )
@@ -1418,18 +1433,41 @@ class UploadService:
         }
 
     @staticmethod
-    def _encoded_bitrate_kbps(*, ffmpeg_kbps: float, merged_send_mbps: float) -> float:
+    def _encoded_bitrate_kbps(
+        *,
+        ffmpeg_kbps: float,
+        merged_send_mbps: float,
+        capture_kbps: float = 0.0,
+    ) -> float:
         """Encoder bitrate for charts.
 
         ffmpeg -progress ``bitrate`` / ``total_size`` are N/A for the WHIP muxer
-        (no file-like output), so fall back to merged send rate — typically
-        MediaMTX ``paths_bytes_received`` / ``webrtc_sessions_bytes_received``.
+        (no file-like output) and often for FLV/RTMP too, so fall back to
+        merged send rate, then the encoder-capture file when VMAF tee is on.
         """
         if ffmpeg_kbps > 0:
             return ffmpeg_kbps
         if merged_send_mbps > 0:
             return merged_send_mbps * 1000.0
+        if capture_kbps > 0:
+            return capture_kbps
         return 0.0
+
+    @staticmethod
+    def _capture_file_bitrate_kbps(path: str, out_time: str) -> float:
+        """Cumulative encoded rate from the VMAF tee file / media clock."""
+        if not path or not os.path.isfile(path):
+            return 0.0
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return 0.0
+        from metrics import parse_out_time_seconds
+
+        media_sec = parse_out_time_seconds(out_time)
+        if size <= 0 or media_sec <= 0:
+            return 0.0
+        return (size * 8.0 / media_sec) / 1000.0
 
     def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
         if self._is_mediamtx_destination(job):

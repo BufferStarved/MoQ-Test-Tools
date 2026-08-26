@@ -272,6 +272,43 @@ class SegmentationHopTests(unittest.TestCase):
         budget = build_latency_budget(protocol="hls", playback_engine="ll-hls", e2e_latency_ms=800)
         self.assertEqual(budget.segmentation_ms, 200.0)
 
+    def test_file_source_moq_does_not_zero_encode_by_over_subtracting_gop(self):
+        """File-source -re baseline is ~40ms; GOP is 1s. Subtracting GOP
+        wiped latency_encode_ms on GCP MoQ f2ce8fe2 (0/28)."""
+        self.assertEqual(
+            encode_latency_ms(
+                pipeline_baseline_ms=40,
+                encode_lag_ms=0,
+                segmentation_ms=1000,
+                split_gop_from_encode=True,
+            ),
+            40.0,
+        )
+        # Fragment-close baselines that actually contain the GOP still split.
+        self.assertEqual(
+            encode_latency_ms(
+                pipeline_baseline_ms=1800,
+                encode_lag_ms=0,
+                segmentation_ms=500,
+                split_gop_from_encode=True,
+            ),
+            1300.0,
+        )
+
+    def test_srt_ll_hls_and_zixi_fast_hls_collect_segmentation(self):
+        ms, na = resolve_segmentation_ms(protocol="srt", playback_engine="ll-hls")
+        self.assertFalse(na)
+        self.assertEqual(ms, LL_HLS_PART_MS)
+        ms, na = resolve_segmentation_ms(protocol="rtmp", playback_engine="hls")
+        self.assertFalse(na)
+        self.assertEqual(ms, 2000.0)
+        budget = build_latency_budget(
+            protocol="rtmp", playback_engine="hls", e2e_latency_ms=4000
+        )
+        self.assertEqual(budget.segmentation_ms, 2000.0)
+        self.assertNotIn("segmentation", budget.unmeasured_stages)
+        self.assertNotIn("segmentation", budget.not_applicable_stages)
+
     def test_upload_scope_keeps_cmaf_segmentation(self):
         budget = build_latency_budget(
             protocol="moq",

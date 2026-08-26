@@ -76,6 +76,8 @@ LATENCY_COLUMNS = (
 
 # MediaMTX LL-HLS part duration. This is the HLS *object*, not a 1s CMAF group.
 LL_HLS_PART_MS = 200.0
+# Zixi Fast HLS segment floor (encode_profile.HLS_SEGMENT_SEC_MIN). Not LL parts.
+FAST_HLS_SEGMENT_MS = 2000.0
 # Shared webcam broker master IDR cadence (webcam_broker.MASTER_GOP_FRAMES @ 30fps).
 BROKER_GOP_MS = 1000.0
 
@@ -274,7 +276,14 @@ def encode_latency_ms(
     """
     total = _clean_ms(pipeline_baseline_ms) + _clean_ms(encode_lag_ms)
     if split_gop_from_encode:
-        total = max(0.0, total - _clean_ms(segmentation_ms))
+        gop = _clean_ms(segmentation_ms)
+        # Only peel GOP-close wait out of encode when the baseline is large
+        # enough to actually contain it. File-source -re advances out_time
+        # every frame (~40ms offset); subtracting a 1s GOP zeros a real
+        # instrument (GCP MoQ f2ce8fe2: encode 0/28). Brokered/fMP4
+        # fragment-close baselines are 1s+ and still split.
+        if gop > 0 and _clean_ms(pipeline_baseline_ms) >= gop:
+            total = max(0.0, total - gop)
     return round(total, 1)
 
 
@@ -304,6 +313,11 @@ def resolve_segmentation_ms(
         return None, True
     if engine == "ll-hls" or proto == "hls":
         duration = group_duration_ms if group_duration_ms is not None else LL_HLS_PART_MS
+        return _clean_ms(duration), False
+    if engine == "hls":
+        duration = (
+            group_duration_ms if group_duration_ms is not None else FAST_HLS_SEGMENT_MS
+        )
         return _clean_ms(duration), False
     if proto == "moq" or engine == "moq":
         if group_duration_ms is None:
@@ -589,6 +603,7 @@ __all__ = [
     "E2E_SCOPE_INGEST_TO_GLASS",
     "E2E_SCOPE_CAPTURE_TO_INGEST",
     "BROKER_GOP_MS",
+    "FAST_HLS_SEGMENT_MS",
     "FRAME_COLUMNS",
     "LATENCY_COLUMNS",
     "LATENCY_COMPONENTS",

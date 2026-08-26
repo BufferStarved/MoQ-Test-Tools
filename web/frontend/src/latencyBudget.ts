@@ -33,6 +33,8 @@ export const LATENCY_COMPONENT_KEYS = [
 
 /** MediaMTX LL-HLS part — the HLS object, not a 1s CMAF group. */
 export const LL_HLS_PART_MS = 200;
+/** Zixi Fast HLS segment floor (encode_profile.HLS_SEGMENT_SEC_MIN). */
+export const FAST_HLS_SEGMENT_MS = 2000;
 /** Shared webcam broker master IDR cadence. */
 export const BROKER_GOP_MS = 1000;
 
@@ -171,7 +173,13 @@ export interface LatencyBudgetInput {
 export function encodeLatencyMs(input: LatencyBudgetInput): number {
   let total = cleanMs(input.pipelineBaselineMs) + cleanMs(input.encodeLagMs);
   if (input.splitEncodeGop) {
-    total = Math.max(0, total - cleanMs(input.segmentationMs));
+    const gop = cleanMs(input.segmentationMs);
+    // Only peel GOP-close wait out of encode when the baseline actually
+    // contains it. File-source -re advances out_time every frame (~40ms);
+    // subtracting a 1s GOP zeros a real instrument.
+    if (gop > 0 && cleanMs(input.pipelineBaselineMs) >= gop) {
+      total = Math.max(0, total - gop);
+    }
   }
   return round1(total);
 }
@@ -205,6 +213,10 @@ export function resolveSegmentationMs(input: {
   }
   if (engine === "ll-hls" || proto === "hls") {
     const duration = input.groupDurationMs != null ? input.groupDurationMs : LL_HLS_PART_MS;
+    return { ms: round1(cleanMs(duration)), notApplicable: false };
+  }
+  if (engine === "hls") {
+    const duration = input.groupDurationMs != null ? input.groupDurationMs : FAST_HLS_SEGMENT_MS;
     return { ms: round1(cleanMs(duration)), notApplicable: false };
   }
   if (proto === "moq" || engine === "moq") {

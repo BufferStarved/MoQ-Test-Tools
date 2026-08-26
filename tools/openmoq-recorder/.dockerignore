@@ -1,8 +1,20 @@
 *
+# BuildKit ignores a directory unless every parent and the dir itself
+# are un-ignored before dist/**. Otherwise COPY …/webtransport/dist fails
+# with "not found" even after the tarball extract.
+!web/frontend/vendor/moq-playa/
+!web/frontend/vendor/moq-playa/packages/
+!web/frontend/vendor/moq-playa/packages/msf/
 !web/frontend/vendor/moq-playa/packages/msf/package.json
+!web/frontend/vendor/moq-playa/packages/msf/dist/
 !web/frontend/vendor/moq-playa/packages/msf/dist/**
+!web/frontend/vendor/moq-playa/packages/transport/
 !web/frontend/vendor/moq-playa/packages/transport/package.json
+!web/frontend/vendor/moq-playa/packages/transport/dist/
 !web/frontend/vendor/moq-playa/packages/transport/dist/**
+!web/frontend/vendor/moq-playa/packages/webtransport/
 !web/frontend/vendor/moq-playa/packages/webtransport/package.json
+!web/frontend/vendor/moq-playa/packages/webtransport/dist/
 !web/frontend/vendor/moq-playa/packages/webtransport/dist/**
+!tools/openmoq-recorder/
 !tools/openmoq-recorder/**

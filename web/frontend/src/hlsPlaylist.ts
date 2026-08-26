@@ -16,6 +16,11 @@ export function playlistDepth(body: string): number {
   }).length;
 }
 
+/** hls.js segment-count sync. A 1-deep Fast HLS pack must not ask for two. */
+export function hlsLiveSyncDurationCount(depth: number, requestedCount = 2): number {
+  return depth <= 1 ? 1 : Math.max(1, requestedCount);
+}
+
 export function playlistExtinfMaxSec(body: string): number | null {
   let max = 0;
   for (const match of body.matchAll(/#EXTINF:(\d+(?:\.\d+)?)/g)) {

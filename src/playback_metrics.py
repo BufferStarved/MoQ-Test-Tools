@@ -336,6 +336,7 @@ def _recompute_derived(
         frame_delivery_pct,
         playback_frame_drop_pct,
         player_buffer_latency_ms,
+        resolve_segmentation_ms,
     )
 
     unmeasured = _unmeasured_from_row(row)
@@ -350,9 +351,28 @@ def _recompute_derived(
         unmeasured.add("latency_player_buffer_ms")
         player_buffer_ms = 0.0
 
+    existing_seg = _as_float(row.get("latency_segmentation_ms"))
+    resolved_ms, inferred_na = resolve_segmentation_ms(
+        protocol=row.get("protocol"),
+        playback_engine=engine,
+        group_duration_ms=existing_seg if existing_seg > 0 else None,
+    )
+    if inferred_na:
+        not_applicable.add("latency_segmentation_ms")
+        unmeasured.discard("latency_segmentation_ms")
+        segmentation_ms = 0.0
+    elif resolved_ms is not None:
+        not_applicable.discard("latency_segmentation_ms")
+        unmeasured.discard("latency_segmentation_ms")
+        segmentation_ms = resolved_ms
+    else:
+        unmeasured.add("latency_segmentation_ms")
+        not_applicable.discard("latency_segmentation_ms")
+        segmentation_ms = 0.0
+
     budget = LatencyBudget(
         encode_ms=_as_float(row.get("latency_encode_ms")),
-        segmentation_ms=_as_float(row.get("latency_segmentation_ms")),
+        segmentation_ms=segmentation_ms,
         publish_ms=_as_float(row.get("latency_publish_ms")),
         network_ms=_as_float(row.get("latency_network_ms")),
         packager_ms=_as_float(row.get("latency_packager_ms")),
@@ -362,6 +382,7 @@ def _recompute_derived(
         unmeasured=frozenset(unmeasured),
         not_applicable=frozenset(not_applicable),
     )
+    row["latency_segmentation_ms"] = f"{budget.segmentation_ms:.1f}"
     row["latency_player_buffer_ms"] = f"{budget.player_buffer_ms:.1f}"
     row["latency_accounted_ms"] = f"{budget.accounted_ms:.1f}"
     row["latency_residual_ms"] = f"{budget.residual_ms:.1f}"

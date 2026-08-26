@@ -108,6 +108,8 @@ class ProgressDeltaTracker:
         self._prev_frame: Optional[int] = None
         self._prev_total_size: Optional[int] = None
         self._prev_out_time_sec: Optional[float] = None
+        # ffmpeg's own bitrate= when total_size is N/A (FLV/RTMP muxer).
+        self._reported_bitrate_kbps: Optional[float] = None
 
     def apply_line(self, line: str) -> None:
         if "=" not in line:
@@ -124,10 +126,13 @@ class ProgressDeltaTracker:
                     if self._prev_wall is None:
                         self._status.fps = float(value)
                 elif key == "bitrate" and "N/A" not in value:
-                    if self._prev_wall is None:
-                        self._status.bitrate_kbps = float(
-                            value.replace("kbits/s", "").strip()
-                        )
+                    parsed = float(value.replace("kbits/s", "").strip())
+                    self._reported_bitrate_kbps = parsed
+                    # Keep ffmpeg's reported rate until total_size deltas exist.
+                    # FLV/RTMP often emits bitrate= but total_size=N/A forever
+                    # (Zixi RTMP 769d4f4e: 790 frames, bitrate 0/28).
+                    if self._prev_wall is None or self._raw_total_size is None:
+                        self._status.bitrate_kbps = parsed
                 elif key == "total_size" and "N/A" not in value:
                     self._raw_total_size = int(float(value))
                     self._status.total_bytes = self._raw_total_size
@@ -186,6 +191,8 @@ class ProgressDeltaTracker:
                     # timeline advanced, else per wall second.
                     denom = d_out if d_out > 0 else d_wall
                     self._status.bitrate_kbps = (d_bytes * 8.0 / denom) / 1000.0
+                elif self._reported_bitrate_kbps is not None:
+                    self._status.bitrate_kbps = self._reported_bitrate_kbps
         self._prev_wall = now
         self._prev_frame = self._raw_frame
         self._prev_total_size = self._raw_total_size

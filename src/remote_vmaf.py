@@ -292,3 +292,53 @@ def start_moq_recording_via_agent(
     except RuntimeError as exc:
         return str(exc)
     return None
+
+
+def start_http_ts_capture_via_agent(
+    endpoint_url: str,
+    job_id: str,
+    *,
+    http_ts_url: str,
+    duration_sec: int,
+    agent_url: str = "",
+    recording_dir: str = "",
+    agent_token: str = "",
+) -> Optional[str]:
+    config = resolve_ingest_agent(
+        endpoint_url,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
+    if config is None:
+        return "Ingest agent is not configured (set ingest agent token for this endpoint)"
+
+    client = IngestAgentClient(config)
+    try:
+        client.start_http_ts_capture(job_id, url=http_ts_url, duration_sec=duration_sec)
+    except RuntimeError as exc:
+        return str(exc)
+    return None
+
+
+def stop_http_ts_capture_via_agent(
+    endpoint_url: str,
+    job_id: str,
+    *,
+    agent_url: str = "",
+    recording_dir: str = "",
+    agent_token: str = "",
+) -> None:
+    config = resolve_ingest_agent(
+        endpoint_url,
+        agent_url=agent_url,
+        recording_dir=recording_dir,
+        agent_token=agent_token,
+    )
+    if config is None:
+        return
+    client = IngestAgentClient(config)
+    try:
+        client.stop_http_ts_capture(job_id)
+    except RuntimeError as exc:
+        logger.info("Stop HTTP-TS capture job=%s: %s", job_id, exc)

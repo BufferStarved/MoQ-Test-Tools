@@ -29,6 +29,27 @@ test("encode component adds the hidden pipeline offset back exactly once", () =>
   assert.equal(encodeLatencyMs({}), 0);
 });
 
+test("file-source MoQ does not zero encode by over-subtracting GOP", () => {
+  assert.equal(
+    encodeLatencyMs({
+      pipelineBaselineMs: 40,
+      encodeLagMs: 0,
+      segmentationMs: 1000,
+      splitEncodeGop: true,
+    }),
+    40,
+  );
+  assert.equal(
+    encodeLatencyMs({
+      pipelineBaselineMs: 1800,
+      encodeLagMs: 0,
+      segmentationMs: 500,
+      splitEncodeGop: true,
+    }),
+    1300,
+  );
+});
+
 test("network component is one-way, not RTT", () => {
   assert.equal(networkLatencyMs(80), 40);
   assert.equal(networkLatencyMs(0), 0);
@@ -285,6 +306,18 @@ test("LL-HLS parts are 200ms, not a 1s CMAF group", () => {
     e2eLatencyMs: 800,
   });
   assert.equal(budget.segmentationMs, 200);
+});
+
+test("Zixi Fast HLS collects 2s segmentation on RTMP", () => {
+  const resolved = resolveSegmentationMs({ protocol: "rtmp", playbackEngine: "hls" });
+  assert.equal(resolved.ms, 2000);
+  assert.equal(resolved.notApplicable, false);
+  const budget = buildLatencyBudget({
+    protocol: "rtmp",
+    playbackEngine: "hls",
+    e2eLatencyMs: 4000,
+  });
+  assert.equal(budget.segmentationMs, 2000);
 });
 
 test("solo MoQ group is 0.25s; brokered copy stays 1s", () => {

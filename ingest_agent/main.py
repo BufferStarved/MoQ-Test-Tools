@@ -13,6 +13,12 @@ from pydantic import BaseModel, Field
 from config import API_TOKEN, PORT, RECORDING_DIR, WORK_DIR
 from host_metrics import read_host_metrics
 from recording_service import RecordingState, get_recording_state, start_moq_recording, stop_moq_recording
+from ts_capture import (
+    TsCaptureState,
+    get_http_ts_capture_state,
+    start_http_ts_capture,
+    stop_http_ts_capture,
+)
 from vmaf_service import (
     VmafJobState,
     compute_vmaf,
@@ -40,6 +46,21 @@ class VmafComputeRequest(BaseModel):
     start_epoch: float
     end_epoch: float
     recording_dir: str = ""
+    http_ts_url: str = ""
+
+
+class HttpTsCaptureStartRequest(BaseModel):
+    url: str
+    duration_sec: int = Field(default=30, ge=5, le=3600)
+
+
+class HttpTsCaptureResponse(BaseModel):
+    job_id: str
+    status: str
+    output_path: str = ""
+    url: str = ""
+    error: str = ""
+    pid: Optional[int] = None
 
 
 class RecordingStartRequest(BaseModel):
@@ -116,9 +137,31 @@ def health() -> dict:
 
     ffmpeg = _resolve_ffmpeg()
     recorder_bin_ok = os.path.isfile(MOQ_RECORDER_BIN) and os.access(MOQ_RECORDER_BIN, os.X_OK)
-    # Health is polled on every job start. Do not subprocess --probe here —
-    # a hung recorder used to stall encode for 10–20s and surface
-    # "Ingest agent health check failed: timed out".
+    # Wrapper existing is not enough — Dallas advertised available while
+    # `openmoq-recorder:latest` was missing. `docker image inspect` is
+    # milliseconds; do not `--probe` (that hung job start).
+    image = os.environ.get("MOQ_RECORDER_IMAGE", "openmoq-recorder:latest")
+    image_ok = False
+    image_err = ""
+    if recorder_bin_ok and shutil.which("docker"):
+        import subprocess
+
+        try:
+            inspected = subprocess.run(
+                ["docker", "image", "inspect", image],
+                capture_output=True,
+                timeout=3,
+                check=False,
+            )
+            image_ok = inspected.returncode == 0
+            if not image_ok:
+                image_err = f"docker image {image} missing"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            image_err = str(exc)
+    elif recorder_bin_ok:
+        image_err = "docker not on PATH"
+    else:
+        image_err = "recorder binary missing"
     return {
         "status": "ok",
         "service": "moq-ingest-agent",
@@ -126,9 +169,9 @@ def health() -> dict:
         "ffmpeg": ffmpeg or "",
         "libvmaf_available": bool(ffmpeg),
         "moq_recorder_bin": MOQ_RECORDER_BIN,
-        "moq_recorder_available": recorder_bin_ok,
-        "moq_recorder_runtime_ok": recorder_bin_ok,
-        "moq_recorder_runtime_error": "" if recorder_bin_ok else "recorder binary missing",
+        "moq_recorder_available": recorder_bin_ok and image_ok,
+        "moq_recorder_runtime_ok": recorder_bin_ok and image_ok,
+        "moq_recorder_runtime_error": image_err,
         "moq_relay_url": MOQ_RELAY_URL,
         "moq_relay_cert_configured": bool(MOQ_RELAY_CERT_SHA256),
     }
@@ -301,6 +344,47 @@ def run_media_health(job_id: str, request: MediaHealthRequest) -> dict:
     return payload
 
 
+def _ts_capture_to_response(state: TsCaptureState) -> HttpTsCaptureResponse:
+    return HttpTsCaptureResponse(
+        job_id=state.job_id,
+        status=state.status,
+        output_path=state.output_path,
+        url=state.url,
+        error=state.error,
+        pid=state.pid,
+    )
+
+
+@app.post("/api/v1/jobs/{job_id}/http-ts-capture/start", dependencies=[Depends(verify_token)])
+def start_ts_capture(job_id: str, request: HttpTsCaptureStartRequest) -> HttpTsCaptureResponse:
+    try:
+        state = start_http_ts_capture(
+            job_id,
+            url=request.url,
+            duration_sec=request.duration_sec,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _ts_capture_to_response(state)
+
+
+@app.post("/api/v1/jobs/{job_id}/http-ts-capture/stop", dependencies=[Depends(verify_token)])
+def stop_ts_capture(job_id: str) -> HttpTsCaptureResponse:
+    try:
+        state = stop_http_ts_capture(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _ts_capture_to_response(state)
+
+
+@app.get("/api/v1/jobs/{job_id}/http-ts-capture", dependencies=[Depends(verify_token)])
+def ts_capture_status(job_id: str) -> HttpTsCaptureResponse:
+    state = get_http_ts_capture_state(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="HTTP-TS capture not found")
+    return _ts_capture_to_response(state)
+
+
 @app.post("/api/v1/jobs/{job_id}/vmaf", dependencies=[Depends(verify_token)])
 def run_vmaf(job_id: str, request: VmafComputeRequest) -> JobResponse:
     if request.end_epoch < request.start_epoch:
@@ -311,6 +395,7 @@ def run_vmaf(job_id: str, request: VmafComputeRequest) -> JobResponse:
         start_epoch=request.start_epoch,
         end_epoch=request.end_epoch,
         recording_dir=request.recording_dir,
+        http_ts_url=request.http_ts_url,
     )
     _jobs[job_id] = state
     logger.info("VMAF job %s status=%s score=%s", job_id, state.status, state.vmaf_score)

@@ -30,6 +30,13 @@ function hexToUint8Array(hex) {
  * set it for a single-relay worker, never as a stale catch-all.
  */
 export function resolveCertSha256(hostname, port) {
+  const portNum = Number(port);
+  // Public draft-18 :14433 uses Let's Encrypt. The hostname map is the
+  // leftover :4433 ≤14-day pin — applying it here fails the handshake.
+  if (portNum === 14433) {
+    return null;
+  }
+
   const envHex = process.env.MOQ_RELAY_CERT_SHA256?.trim();
   if (envHex) {
     return hexToUint8Array(envHex);

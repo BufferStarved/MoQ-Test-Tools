@@ -433,7 +433,10 @@ class MergedLatencyBudgetTests(unittest.TestCase):
         from playback_metrics import compute_playback_averages
 
         self.assertEqual(rows[1]["latency_unmeasured"], "publish,packager")
-        self.assertGreater(float(rows[1]["latency_residual_ms"]), 8000)
+        self.assertEqual(float(rows[1]["latency_segmentation_ms"]), 2000.0)
+        # Fast HLS 2s object is now accounted; publish+packager stay unmeasured
+        # so the residual is still most of the 8.1s glass number.
+        self.assertGreater(float(rows[1]["latency_residual_ms"]), 5000)
         averages = compute_playback_averages(rows)
         self.assertEqual(averages["latency_unmeasured_stages"], "packager,publish")
 

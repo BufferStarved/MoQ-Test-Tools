@@ -33,6 +33,14 @@ class MoqRelayCertsTests(unittest.TestCase):
             "13e87aa62f8996119ade0612fbae33426598d50c5125847d301a9d13ac269c9a",
         )
 
+    def test_public_d18_port_is_not_pinned(self):
+        """:14433 is Let's Encrypt. The :4433 hostname pin must not apply."""
+        self.assertIsNone(
+            fingerprint_for_relay_url(
+                "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18"
+            )
+        )
+
     def test_recorder_cert_map_stays_in_sync(self):
         cert_mjs = (ROOT / "tools/openmoq-recorder/cert.mjs").read_text()
         for host, digest in MOQ_RELAY_CERT_SHA256.items():

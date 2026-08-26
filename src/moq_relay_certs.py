@@ -29,5 +29,12 @@ def fingerprint_for_host(host: str) -> Optional[str]:
 
 
 def fingerprint_for_relay_url(relay_url: str) -> Optional[str]:
-    host = urlparse((relay_url or "").strip()).hostname
-    return fingerprint_for_host(host or "")
+    """Pin only leftover :4433 (≤14-day self-signed). Public :14433 is LE.
+
+    Applying the :4433 hostname map to :14433 is the ingest-VMAF handshake
+    failure (openmoq-record vs Let's Encrypt).
+    """
+    parsed = urlparse((relay_url or "").strip())
+    if parsed.port == 14433 or ":14433" in (relay_url or ""):
+        return None
+    return fingerprint_for_host(parsed.hostname or "")

@@ -27,6 +27,7 @@ import { formatGoLiveDiag, goLiveHoldSec, latchGoLive, seekGoLive } from "../goL
 import { usablePackagerTransitMs } from "../glassLatency";
 import { elapsedSecFromStart } from "../playbackMetrics";
 import {
+  hlsLiveSyncDurationCount,
   hlsSyncDurationForPlaylist,
   isStaleHlsFragmentLoop,
   playlistDepth,
@@ -877,7 +878,10 @@ export default function HlsPlayer({
       // segment-count sync — LL defaults assume part signaling that Zixi
       // never provides.
       const zixiTuning = {
-        liveSyncDurationCount: syncCount,
+        // A 1-deep Fast HLS playlist only has one segment. Asking hls.js for
+        // two (the default liveSyncDurationCount) waits for media that never
+        // arrives and freezes after the first GOP (rendered stuck ~35).
+        liveSyncDurationCount: hlsLiveSyncDurationCount(depth, syncCount),
         liveMaxLatencyDurationCount: shallow
           ? Math.max(syncCount + 2, 3)
           : Math.max(syncCount + 3, syncCount * 2),

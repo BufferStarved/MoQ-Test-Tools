@@ -13,6 +13,9 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
+# git archive / clone omits vendor dist/; Dockerfile COPY fails without it.
+bash "$ROOT/scripts/ensure-openmoq-recorder-playa-dist.sh"
+
 cp "$RECORDER_DIR/.dockerignore" "$ROOT/.dockerignore"
 docker build -f "$RECORDER_DIR/Dockerfile" -t "$IMAGE" "$ROOT"
 rm -f "$ROOT/.dockerignore"

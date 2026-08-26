@@ -85,8 +85,9 @@ Playback works via moq-js once a compatible publisher feeds namespace `benchmark
 The relay runs **moqx only**. Post-relay VMAF is handled by the shared GCP ingest worker
 (`35.222.33.58`). See [GCP-ZIXI-RUNBOOK.md](../zixi/GCP-ZIXI-RUNBOOK.md) for worker setup.
 
-The `moq_gcp_relay` preset publishes to this relay but routes ingest VMAF API calls to the
-worker, which subscribes to the relay remotely per job namespace.
+The `moq_gcp_relay_d18` preset publishes to **`:14433`** and routes ingest VMAF
+API calls to the worker, which subscribes to that public URL per job namespace.
+The leftover `:4433` listener is unused by the UI and by the recorder.
 
 ## 6. Domains
 
@@ -94,7 +95,7 @@ The **benchmark web app** is hosted at **https://moq.sean-mccarthy.net** (dedica
 See [GCP-WEB-RUNBOOK.md](../web/GCP-WEB-RUNBOOK.md).
 
 When ready, point e.g. `relay.sean-mccarthy.net` at this relay IP, re-issue certs, and update
-the `moq_gcp_relay` preset URL. Keep the web app on `moq.sean-mccarthy.net`.
+the `moq_gcp_relay_d18` preset URL (`:14433`). Keep the web app on `moq.sean-mccarthy.net`.
 
 ## Networking note
 
@@ -112,7 +113,7 @@ gcloud compute ssh ubuntu@moq-relay-gcp --zone=us-central1-a --tunnel-through-ia
 | Symptom | Check |
 |---------|--------|
 | Certbot fails | Port 80 reachable from internet; domain resolves to VM IP |
-| Player cannot connect | UDP 4433 open; browser supports WebTransport (Chrome/Edge). Relay must use an ECDSA cert ≤14 days with fingerprint pinning — run `configure-webtransport-cert.sh` on the VM. |
+| Player cannot connect | Public path is UDP **14433** (LE cert, no hash pin). Chrome/Edge WebTransport only. Leftover UDP 4433 is hidden — do not debug playa against it. |
 | `curl :8000/info` fails | `docker ps` on VM; `journalctl -u moqx` |
 | No video | Relay needs an active MOQ publisher on namespace `benchmark` |
 | IAP SSH `4003 failed to connect to backend` | Firewall `moq-relay-allow-iap-ssh` must be on **`moq-relay-vpc`** (not `default`) with source `35.235.240.0/20` |

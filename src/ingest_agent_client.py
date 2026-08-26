@@ -317,6 +317,7 @@ class IngestAgentClient:
         job_id: str,
         start_epoch: float,
         end_epoch: float,
+        http_ts_url: str = "",
     ) -> RemoteVmafResult:
         payload = self._request(
             "POST",
@@ -325,6 +326,7 @@ class IngestAgentClient:
                 "start_epoch": start_epoch,
                 "end_epoch": end_epoch,
                 "recording_dir": self._config.recording_dir,
+                "http_ts_url": http_ts_url,
             },
             timeout=900,
         )
@@ -396,4 +398,25 @@ class IngestAgentClient:
             "POST",
             f"/api/v1/jobs/{job_id}/recording/stop",
             timeout=60,
+        )
+
+    def start_http_ts_capture(
+        self,
+        job_id: str,
+        *,
+        url: str,
+        duration_sec: int,
+    ) -> dict:
+        return self._request(
+            "POST",
+            f"/api/v1/jobs/{job_id}/http-ts-capture/start",
+            body={"url": url, "duration_sec": duration_sec},
+            timeout=30,
+        )
+
+    def stop_http_ts_capture(self, job_id: str) -> dict:
+        return self._request(
+            "POST",
+            f"/api/v1/jobs/{job_id}/http-ts-capture/stop",
+            timeout=30,
         )

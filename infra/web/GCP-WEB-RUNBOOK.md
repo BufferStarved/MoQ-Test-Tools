@@ -9,7 +9,7 @@ ingest/Zixi worker on their existing VMs.
 | Role | Host |
 |------|------|
 | Web UI + API (this) | `moq.sean-mccarthy.net` (new GCE VM) |
-| MoQ relay | `34.28.164.90` / `34-28-164-90.sslip.io:4433` |
+| MoQ relay | `34.28.164.90` / `34-28-164-90.sslip.io:14433` (leftover `:4433` hidden) |
 | Ingest agent + Zixi | `35.222.33.58:8090` |
 
 ## Prerequisites
@@ -159,7 +159,7 @@ ssh ubuntu@<web-public-ip> "sudo sed -i \"s|^INGEST_AGENT_TOKEN=.*|INGEST_AGENT_
 | Caddy cert fails | `dig +short moq.sean-mccarthy.net` equals VM IP; TCP 80/443 open; `journalctl -u caddy` |
 | `/api/health` OK locally but HTTPS fails | DNS/cert only — API can still be up on `:8000` via localhost |
 | Ingest VMAF unavailable | `/etc/moq-web.env` has `INGEST_AGENT_TOKEN`; VM can reach `http://35.222.33.58:8090` |
-| MoQ publish fails / playback “no such namespace” | Publisher never reached relay. Check `journalctl -u moq-web` for `Exec format error` or `GLIBC_* not found`. On Ubuntu 22.04 the install script wraps the Linux binary with Docker (`ubuntu:24.04`). Confirm `openmoq-publisher --help` works as `ubuntu`, and UDP egress to relay `:4433`. |
+| MoQ publish fails / playback “no such namespace” | Publisher never reached relay. Check `journalctl -u moq-web` for `Exec format error` or `GLIBC_* not found`. On Ubuntu 22.04 the install script wraps the Linux binary with Docker (`ubuntu:24.04`). Confirm `moq5-fmp4-publish --help` works as `ubuntu`, and UDP egress to relay **`:14433`**. |
 | Encoder VMAF missing | `/usr/local/bin/ffmpeg -filters \| grep libvmaf`; re-run `infra/zixi/scripts/install-ingest-vmaf.sh` on the web VM |
 | SPA shows API JSON at `/` | Frontend not built — `test -f /opt/moq-test-tools/web/frontend/dist/index.html` |
 

@@ -63,6 +63,28 @@ def zixi_http_ts_playback_url(
     return f"http://{host}:{port}/{urllib.parse.quote(clean, safe='')}.ts"
 
 
+def zixi_ingest_http_ts_url(
+    stream_id: str,
+    *,
+    endpoint_url: str = "",
+    agent_url: str = "",
+    port: int = _DEFAULT_HLS_PORT,
+) -> str:
+    """HTTP-TS URL the ingest agent should pull for VMAF.
+
+    When the agent is on the same host as Zixi (typical GCP/Linode Broadcaster
+    install), use loopback so hairpin NAT to the public :7777 does not miss
+    the live stream. Otherwise use the public origin URL.
+    """
+    public = zixi_http_ts_playback_url(stream_id, endpoint_url=endpoint_url, port=port)
+    agent_host = (urlparse(agent_url).hostname or "").strip() if agent_url else ""
+    zixi_host = zixi_hls_host_from_endpoint(endpoint_url)
+    if agent_host and zixi_host and agent_host == zixi_host:
+        clean = (stream_id or "benchmark").strip() or "benchmark"
+        return f"http://127.0.0.1:{port}/{urllib.parse.quote(clean, safe='')}.ts"
+    return public
+
+
 def probe_http_ts_ready(
     stream_id: str,
     *,

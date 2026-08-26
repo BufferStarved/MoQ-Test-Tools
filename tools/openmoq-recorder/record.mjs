@@ -256,10 +256,13 @@ async function connectRelay(relayUrl, { insecure }) {
   };
 
   if (!insecure) {
-    wtOptions.serverCertificateHashes = [{
-      algorithm: 'sha-256',
-      value: resolveCertSha256(parsed.hostname, port),
-    }];
+    const hash = resolveCertSha256(parsed.hostname, port);
+    if (hash) {
+      wtOptions.serverCertificateHashes = [{
+        algorithm: 'sha-256',
+        value: hash,
+      }];
+    }
   }
 
   const transport = new WebTransport(wtUrl, wtOptions);

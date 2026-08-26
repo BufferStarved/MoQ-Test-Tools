@@ -183,6 +183,30 @@ class AbsenceGateTests(unittest.TestCase):
             f"a documented unmeasured stage must not be a failure: {failures}",
         )
 
+    def test_segmentation_n_a_is_not_a_silent_zero(self) -> None:
+        """SRT/RTMP without HLS remux mark segmentation n/a, not unmeasured."""
+        rows = self._leg(protocol="srt")
+        for row in rows:
+            row["latency_segmentation_ms"] = "0.0"
+            row["latency_unmeasured"] = "publish,packager"
+            row["latency_not_applicable"] = "segmentation"
+        failures, _ = self.audit.check_invariants(rows, "srt")
+        self.assertFalse(
+            [f for f in failures if "latency_segmentation_ms" in f and "silent zero" in f],
+            f"n/a must be an honest zero: {failures}",
+        )
+
+    def test_encode_unmeasured_skips_the_absence_gate(self) -> None:
+        rows = self._leg(protocol="moq")
+        for row in rows:
+            row["latency_encode_ms"] = "0.0"
+            row["latency_unmeasured"] = "encode,publish,network,packager"
+        failures, _ = self.audit.check_invariants(rows, "moq")
+        self.assertFalse(
+            [f for f in failures if "latency_encode_ms" in f and "collection failure" in f],
+            f"an honestly unmeasured encode must not trip REQUIRED_NONZERO: {failures}",
+        )
+
 
 class PlausibilityGateTests(unittest.TestCase):
     """PLAUSIBLE was computed and printed for months without ever gating."""

@@ -173,6 +173,14 @@ class MediaMtxMergeTests(unittest.TestCase):
         )
         self.assertAlmostEqual(encoded, 2800.0)
 
+    def test_encoded_bitrate_falls_back_to_capture_file(self):
+        encoded = UploadService._encoded_bitrate_kbps(
+            ffmpeg_kbps=0.0,
+            merged_send_mbps=0.0,
+            capture_kbps=3012.4,
+        )
+        self.assertAlmostEqual(encoded, 3012.4)
+
 
 class MediaMtxAgentScrapeTests(unittest.TestCase):
     def test_poll_uses_agent_prometheus_body(self):

@@ -97,7 +97,8 @@ See [METRICS.md](./METRICS.md) for field-level detail. High-level stages:
 | Per-role grey-out | [`src/cloud_placement.py`](../src/cloud_placement.py) `host_role_configured` |
 | Frontend | [`web/frontend/src/App.tsx`](../web/frontend/src/App.tsx) |
 | Players | [`web/frontend/src/players/`](../web/frontend/src/players/) |
-| Ingest agent | [`ingest_agent/`](../ingest_agent/) |
+| Ingest agent | [`ingest_agent/`](../ingest_agent/) (`ts_capture.py` for Zixi HTTP-TS during the job) |
+| MoQ ingest recorder | [`tools/openmoq-recorder/`](../tools/openmoq-recorder/) — build locally, never `docker pull`; skip `:4433` cert pin on `:14433` |
 | Infra runbooks | [`infra/web/`](../infra/web/), [`infra/moqx/`](../infra/moqx/), [`infra/zixi/`](../infra/zixi/) |
 
 ## Feedback

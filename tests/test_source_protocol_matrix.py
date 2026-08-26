@@ -64,6 +64,26 @@ class SourceProtocolMatrixTests(unittest.TestCase):
             self.assertTrue(na, proto)
             self.assertFalse(split, proto)
 
+    def test_hls_remux_collects_known_object_cadence(self):
+        mtx = SimpleNamespace(
+            destination=SimpleNamespace(protocol="srt", ingest_provider="gcp_mediamtx"),
+            media_path="dummy.mp4",
+            target_latency_ms=2000,
+        )
+        ms, na, split = _job_segmentation(mtx)
+        self.assertEqual(ms, 200.0)
+        self.assertFalse(na)
+        self.assertFalse(split)
+        zixi = SimpleNamespace(
+            destination=SimpleNamespace(protocol="rtmp", ingest_provider="gcp_zixi"),
+            media_path="dummy.mp4",
+            target_latency_ms=2000,
+        )
+        ms, na, split = _job_segmentation(zixi)
+        self.assertEqual(ms, 2000.0)
+        self.assertFalse(na)
+        self.assertFalse(split)
+
     def test_public_moq_presets_stay_on_14433(self):
         for preset_id in (
             "moq_gcp_relay_d18",

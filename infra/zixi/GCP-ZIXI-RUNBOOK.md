@@ -204,12 +204,22 @@ For **GCP MoQ Relay** uploads, the same worker runs Docker-backed `openmoq-fmp4-
 subscribes to the public moqx URL and records post-relay fMP4:
 
 ```bash
-cd ~/moq-test-tools   # or /opt/moq-test-tools
-sudo bash infra/zixi/scripts/install-openmoq-recorder.sh
-sudo systemctl restart moq-ingest-agent.service
+cd /opt/moq-test-tools
+sudo MOQ_RELAY_URL=https://34-28-164-90.sslip.io:14433/moq-relay \
+  bash infra/zixi/scripts/install-openmoq-recorder.sh
 curl -s http://127.0.0.1:8090/api/v1/health | python3 -m json.tool
-# expect moq_recorder_available: true, moq_recorder_runtime_ok: true
+docker images | grep openmoq-recorder
+# expect moq_recorder_available: true, moq_relay_url on :14433, and a local image
 ```
+
+Do **not** `docker pull openmoq-recorder` (not a registry image). Do **not**
+point the recorder at leftover `:4433`. Git checkouts lack playa `dist/`; the
+install script fetches `@moqt/{msf,transport,webtransport}` from npm. See
+[tools/openmoq-recorder/README.md](../../tools/openmoq-recorder/README.md).
+
+Zixi RTMP ingest VMAF captures HTTP-TS **during** the job
+(`ingest_agent/ts_capture.py` via `http://127.0.0.1:7777/<stream>.ts`). A pull
+after the job ends is empty 200.
 
 MoQ relay recordings land in `/var/lib/moq-relay-recordings/<job_id>.mp4` on this worker.
 

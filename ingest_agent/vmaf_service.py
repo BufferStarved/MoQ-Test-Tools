@@ -139,6 +139,11 @@ def find_distorted_recording(
     recording_dir: str = "",
     job_id: str = "",
 ) -> Optional[str]:
+    if job_id:
+        captured = job_dir(job_id) / "http-ts-capture.ts"
+        if captured.is_file() and captured.stat().st_size >= 188:
+            return str(captured)
+
     root = recording_dir or RECORDING_DIR
     if not os.path.isdir(root):
         return None
@@ -147,6 +152,10 @@ def find_distorted_recording(
         explicit = Path(root) / f"{job_id}.mp4"
         if explicit.is_file() and explicit.stat().st_size > 0:
             return str(explicit)
+        # Zixi's ingest_recording_dir is the Broadcaster install tree, not a
+        # recordings folder. Walking it picks up unrelated .ts/.mp4 files.
+        if Path(root).name in {"zixi_broadcaster-linux64", "zixi_broadcaster"}:
+            return None
 
     extensions = ("*.ts", "*.mp4", "*.mkv", "*.m2ts")
     candidates: list[tuple[float, str]] = []
@@ -173,6 +182,7 @@ def compute_vmaf(
     start_epoch: float,
     end_epoch: float,
     recording_dir: str = "",
+    http_ts_url: str = "",
 ) -> VmafJobState:
     state = VmafJobState(job_id=job_id, status="computing")
 
@@ -210,20 +220,26 @@ def compute_vmaf(
         state.error = "ffmpeg with libvmaf is not available on this ingest host"
         return state
 
-    distorted = None
-    for attempt in range(12):
-        distorted = find_distorted_recording(
-            start_epoch,
-            end_epoch,
-            recording_dir=recording_dir,
-            job_id=job_id,
-        )
-        if distorted:
-            break
-        time.sleep(5)
+    distorted = find_distorted_recording(
+        start_epoch,
+        end_epoch,
+        recording_dir=recording_dir,
+        job_id=job_id,
+    )
+    if not distorted:
+        for attempt in range(4):
+            distorted = find_distorted_recording(
+                start_epoch,
+                end_epoch,
+                recording_dir=recording_dir,
+                job_id=job_id,
+            )
+            if distorted:
+                break
+            time.sleep(2)
     if not distorted:
         # Prefer disk recordings; fall back to Zixi raw HTTP-TS (http_ts_auto_out).
-        http_ts = (os.environ.get("ZIXI_HTTP_TS_URL") or "").strip()
+        http_ts = (http_ts_url or os.environ.get("ZIXI_HTTP_TS_URL") or "").strip()
         if not http_ts:
             stream = (os.environ.get("ZIXI_HTTP_TS_STREAM") or "SRT Test").strip()
             host = (os.environ.get("ZIXI_HTTP_TS_HOST") or "127.0.0.1").strip()
@@ -238,6 +254,8 @@ def compute_vmaf(
             "-hide_banner",
             "-loglevel",
             "error",
+            "-rw_timeout",
+            "15000000",
             "-y",
             "-i",
             http_ts,

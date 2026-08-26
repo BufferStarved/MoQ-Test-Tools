@@ -1,23 +1,31 @@
-# MoQ draft-18 branch
+# MoQ draft-18 (default product)
 
-Working branch: `feat/moq-draft-18`. **Do not merge to `main`.** **Do not deploy this branch as the only MoQ path on https://moq.sean-mccarthy.net.** Prod `ghcr.io/openmoq/moqx:329b98b` on UDP **4433** only forwards **draft-16**. Offering `moqt-18` against that relay has already produced WebTransport-ready sessions whose SUBSCRIBE never reached the publisher (jobs `d32a5e99`, `0840ceff`, `2765cdee`).
+Draft-18 **is** the public path on https://moq.sean-mccarthy.net (`main`).
+WebTransport is UDP **`:14433`**. Leftover `moqx:329b98b` on UDP **`:4433`**
+stays running and **out of the UI**. Do not point publishers, playa, or
+`openmoq-recorder` at `:4433`. Do not terraform-apply new VMs.
 
-IETF newest is [draft-ietf-moq-transport-19](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) (July 2026). OpenMOQ + vendored `@playa/player` top out at **18**. This branch targets 18, not 19.
+Historical note: offering `moqt-18` against `:4433` produced WebTransport-ready
+sessions whose SUBSCRIBE never reached the publisher (jobs `d32a5e99`,
+`0840ceff`, `2765cdee`). That is why the leftover listener is hidden, not
+deleted.
+
+IETF newest is [draft-ietf-moq-transport-19](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) (July 2026). OpenMOQ + vendored `@playa/player` top out at **18**. This product targets 18, not 19.
 
 ## Operator map (prod vs canary)
 
-| | Prod (leave running) | Draft-18 canary |
+| | Leftover (leave running, hidden) | Public product |
 |---|---|---|
 | VM | `moq-relay-gcp` | same VM, second container |
 | Container | `moqx` | `moqx-canary` |
-| Image | `ghcr.io/openmoq/moqx:329b98b` | `ghcr.io/openmoq/moqx:88f9d27` (or `MOQX_CANARY_IMAGE`) |
+| Image | `ghcr.io/openmoq/moqx:329b98b` | `ghcr.io/openmoq/moqx:75af044` (or `MOQX_CANARY_IMAGE`) |
 | WebTransport | `https://34-28-164-90.sslip.io:4433/moq-relay` | `https://34-28-164-90.sslip.io:14433/moq-relay` |
 | Admin `/info` | TCP 8000 (may be public) | TCP **18000**, localhost / SSH hop only |
-| UI preset | `moq_gcp_relay` | `moq_gcp_relay_d18` |
-| Ingest dropdown | OpenMOQ · GCP us-central1 | **OpenMOQ draft-18 canary · GCP us-central1** |
-| Publisher | `openmoq-publisher` (auto) | **`moq5-fmp4-publish` only** |
+| UI preset | none (hidden) | `moq_gcp_relay_d18` |
+| Publisher | unused | **`moq5-fmp4-publish` / ffmoq** |
 | Playa `draftVersion` | 16 | **18** |
 | Firewall | existing `moq-relay-allow-relay` UDP 4433/4434 | `moq-relay-allow-canary-d18` UDP 14433/14434 |
+| Recorder cert pin | leftover self-signed hash | **skip** on port 14433 (public LE) |
 
 East / Linode use the same canary pattern on **their** relay VMs (`moq-relay-east-gcp`, Linode relay). Prod `:4433` on those hosts stays draft-16. Dest presets: `moq_gcp_east_relay_d18`, `moq_linode_relay_d18`.
 
@@ -107,7 +115,9 @@ ffmpeg -re -i media/bbb.mp4 -map 0:v:0 -map 0:a:0? -c:v libx264 -c:a aac \
 ./scripts/dev.sh
 ```
 
-Benchmark tab → protocol **MoQ** → ingest **OpenMOQ draft-18 canary · GCP us-central1**. Headed Chrome playa uses `draftVersion: 18` for that preset only. Public https://moq.sean-mccarthy.net stays on `main` / draft-16 / `:4433`.
+Benchmark tab → protocol **MoQ** → GCP Central / Dallas / etc. Headed Chrome
+playa uses `draftVersion: 18` on public `:14433`. Public
+https://moq.sean-mccarthy.net is `main` / draft-18 / `:14433`.
 
 Laptop publisher binary (already present): `tools/moq5-publisher/bin/moq5-fmp4-publish` (Mach-O). Web VM Linux ELF: `/opt/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish`.
 
