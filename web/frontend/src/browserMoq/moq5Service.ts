@@ -6,8 +6,15 @@ import type { BrowserAudioChunk } from "./audioEncoder";
 import type { BrowserVideoChunk } from "./encoder";
 import {
   BROWSER_LOC_AUDIO_TRACK,
+  BROWSER_LOC_CATALOG_GROUP,
+  BROWSER_LOC_CATALOG_TRACK,
   BROWSER_LOC_VIDEO_TRACK,
   browserLocCatalogTracks,
+  browserLocHeaderOptions,
+  browserLocPublishTrackNames,
+  isPublishAccepted,
+  locCatalogTrackShouldEnd,
+  locKeyframeVideoConfig,
 } from "./locCatalog";
 import type { MoqtDraftVersion } from "./moqtVersions";
 import { openStrictMoqtWebTransport } from "./webTransport";
@@ -149,12 +156,45 @@ async function bindPublisherSession(args: {
     alias: bigint;
     streamId: bigint | null;
     objectId: bigint;
+    permanent?: boolean;
   };
   const videoSubscribers: VideoSubscriber[] = [];
+  const publishOkWaiters = new Map<bigint, (ok: boolean) => void>();
+  const acceptedPublishIds = new Set<bigint>();
+  const priorOnMessage = connection.onMessage;
+  connection.onMessage = (message) => {
+    priorOnMessage?.(message);
+    const typed = message as { type?: string; requestId?: bigint };
+    if (typed.requestId != null && isPublishAccepted(typed, typed.requestId)) {
+      const waiter = publishOkWaiters.get(typed.requestId);
+      if (waiter) {
+        publishOkWaiters.delete(typed.requestId);
+        waiter(true);
+      } else {
+        acceptedPublishIds.add(typed.requestId);
+      }
+    }
+  };
 
-  async function publishCatalog(requestId: bigint, alias: bigint): Promise<void> {
-    await connection.acceptSubscribe(requestId, alias);
-    const catalogGroupId = BigInt(Date.now());
+  function waitPublishOk(requestId: bigint, timeoutMs = 4000): Promise<boolean> {
+    if (acceptedPublishIds.has(requestId)) {
+      acceptedPublishIds.delete(requestId);
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        publishOkWaiters.delete(requestId);
+        resolve(false);
+      }, timeoutMs);
+      publishOkWaiters.set(requestId, (ok) => {
+        window.clearTimeout(timer);
+        resolve(ok);
+      });
+    });
+  }
+
+  async function writeCatalogObject(alias: bigint): Promise<void> {
+    const catalogGroupId = BROWSER_LOC_CATALOG_GROUP;
     const streamId = await connection.openSubgroup(alias, catalogGroupId, 0n, {
       hasExtensions: false,
       endOfGroup: true,
@@ -164,7 +204,15 @@ async function bindPublisherSession(args: {
     });
     await connection.sendObject(streamId, 0n, catalogPayload);
     await connection.closeSubgroup(streamId);
-    await connection.publishDone(requestId, PublishDoneCode.TRACK_ENDED, "");
+  }
+
+  async function publishCatalog(requestId: bigint, alias: bigint): Promise<void> {
+    await connection.acceptSubscribe(requestId, alias);
+    await writeCatalogObject(alias);
+    // Demand-subscribe fallback only. Live catalog stays up for FETCH.
+    if (locCatalogTrackShouldEnd()) {
+      await connection.publishDone(requestId, PublishDoneCode.TRACK_ENDED, "");
+    }
   }
 
   async function sendVideoChunk(chunk: BrowserVideoChunk): Promise<void> {
@@ -193,9 +241,14 @@ async function bindPublisherSession(args: {
           endOfFrame: true,
           temporalId: 0,
         },
-        ...(chunk.isKeyframe && lastDescription ? { videoConfig: lastDescription } : {}),
+        ...(chunk.isKeyframe
+          ? (() => {
+              const videoConfig = locKeyframeVideoConfig(chunk.description, lastDescription);
+              return videoConfig ? { videoConfig } : {};
+            })()
+          : {}),
       },
-      { deltaEncoded: true },
+      browserLocHeaderOptions(draft),
     );
     for (const sub of videoSubscribers) {
       if (chunk.isKeyframe) {
@@ -234,7 +287,7 @@ async function bindPublisherSession(args: {
   }
 
   function dropVideoSubscriber(requestId: bigint): void {
-    const idx = videoSubscribers.findIndex((sub) => sub.requestId === requestId);
+    const idx = videoSubscribers.findIndex((sub) => sub.requestId === requestId && !sub.permanent);
     if (idx < 0) {
       return;
     }
@@ -384,7 +437,36 @@ async function bindPublisherSession(args: {
     throw new Error(`MOQT SETUP negotiated draft-${connection.draftVersion}, expected draft-${draft}`);
   }
   const tuples = namespaceTuples(options.namespace);
-  await connection.publishNamespace(tuples.length ? tuples : [new TextEncoder().encode(options.namespace)]);
+  const ns = tuples.length ? tuples : [new TextEncoder().encode(options.namespace)];
+  await connection.publishNamespace(ns);
+
+  // draft-18 live-write (openmoq publish_tracks). Relays serve FETCH /
+  // SUBSCRIBE from these aliases. Waiting for forwarded onSubscribe left
+  // east with no catalog and linode catalog-ready / 0 video frames.
+  if (draft === 18) {
+    const encoder = new TextEncoder();
+    for (const trackName of browserLocPublishTrackNames({ includeAudio: options.includeAudio })) {
+      const alias = nextAlias;
+      nextAlias += 1n;
+      const requestId = await connection.publish(ns, encoder.encode(trackName), alias);
+      await waitPublishOk(requestId);
+      if (trackName === BROWSER_LOC_CATALOG_TRACK) {
+        try {
+          await writeCatalogObject(alias);
+        } catch (err) {
+          console.warn("browser MoQ live catalog", err);
+        }
+      } else if (trackName === BROWSER_LOC_VIDEO_TRACK) {
+        videoSubscribers.push({
+          requestId,
+          alias,
+          streamId: null,
+          objectId: 0n,
+          permanent: true,
+        });
+      }
+    }
+  }
 
   return {
     namespace: options.namespace,
@@ -407,7 +489,7 @@ async function bindPublisherSession(args: {
           audioGroupId += 1n;
           const extensions = encodeLocHeaders(
             { captureTimestamp: BigInt(Math.round(chunk.timestampUs)) },
-            { deltaEncoded: true },
+            browserLocHeaderOptions(draft),
           );
           const streamId = await connection.openSubgroup(audioAlias, audioGroupId, 0n, {
             hasExtensions: true,

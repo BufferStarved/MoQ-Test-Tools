@@ -1,9 +1,64 @@
 /** LOC catalog the in-browser publisher advertises. The player FETCHes it. */
 
+export const BROWSER_LOC_CATALOG_TRACK = "catalog";
 export const BROWSER_LOC_VIDEO_TRACK = "video";
 export const BROWSER_LOC_AUDIO_TRACK = "audio";
 export const BROWSER_LOC_VIDEO_CODEC = "avc1.4D4028";
 export const BROWSER_LOC_AUDIO_CODEC = "opus";
+/** Live-write group so CatalogBootstrap Joining FETCH(offset 0) hits object 0. */
+export const BROWSER_LOC_CATALOG_GROUP = 0n;
+
+/**
+ * Draft-18 LOC uses vi64. `{ deltaEncoded: true }` stays on draft-16 QUIC
+ * varint and mis-encodes every value ≥ 64 — playa then drops the objects.
+ */
+export function browserLocHeaderOptions(draft: number): {
+  wireProfile: "d16-delta-varint" | "d18-delta-vi64";
+} {
+  return { wireProfile: draft === 18 ? "d18-delta-vi64" : "d16-delta-varint" };
+}
+
+/** Retained catalog must stay fetchable. Ending it breaks MSF-01 Joining FETCH. */
+export function locCatalogTrackShouldEnd(): boolean {
+  return false;
+}
+
+export function isPublishAccepted(
+  message: { type?: string; requestId?: bigint } | null | undefined,
+  requestId: bigint,
+): boolean {
+  return Boolean(
+    message &&
+      (message.type === "REQUEST_OK" || message.type === "PUBLISH_OK") &&
+      message.requestId === requestId,
+  );
+}
+
+/**
+ * avcC on every IDR. Playa configures WebCodecs from LOC VideoConfig, not
+ * from an injected catalog initData (9958d69). Missing description = 0 frames.
+ */
+export function locKeyframeVideoConfig(
+  description: Uint8Array | undefined,
+  lastDescription: Uint8Array | undefined,
+): Uint8Array | undefined {
+  if (description && description.byteLength > 0) {
+    return description;
+  }
+  if (lastDescription && lastDescription.byteLength > 0) {
+    return lastDescription;
+  }
+  return undefined;
+}
+
+/** Tracks live-PUBLISHed after announce (same idea as libmoq publish_tracks). */
+export function browserLocPublishTrackNames(options: { includeAudio: boolean }): string[] {
+  return [
+    BROWSER_LOC_CATALOG_TRACK,
+    BROWSER_LOC_VIDEO_TRACK,
+    ...(options.includeAudio ? [BROWSER_LOC_AUDIO_TRACK] : []),
+  ];
+}
 
 export interface BrowserLocCatalogOptions {
   includeAudio: boolean;
