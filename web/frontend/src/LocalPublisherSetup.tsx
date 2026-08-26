@@ -3,7 +3,7 @@ import {
   GH_BYO_ENCODER_DOC,
   GH_LOCAL_PUBLISHER_DOC,
   isLocalDevApi,
-  localPublisherAgentCommand,
+  isPublicOrchestrator,
   localPublisherAgentOneLiner,
 } from "./localPublisherHelp";
 
@@ -13,6 +13,10 @@ interface LocalPublisherSetupProps {
   compact?: boolean;
   /** Webcam last-mile setup uses shorter copy focused on the agent command. */
   variant?: "default" | "webcam";
+  /** Highlight the draft-18 canary helper when the recipe hits `:14433`. */
+  preferD18?: boolean;
+  /** Per-browser helper binding so ffmpeg opens this user's camera. */
+  publisherSession?: string;
 }
 
 export function LocalPublisherSetup({
@@ -20,11 +24,13 @@ export function LocalPublisherSetup({
   connected,
   compact = false,
   variant = "default",
+  preferD18: _preferD18 = false,
+  publisherSession = "",
 }: LocalPublisherSetupProps) {
   const [copied, setCopied] = useState(false);
-  const hosted = !isLocalDevApi(apiOrigin);
-  const fullCommand = localPublisherAgentCommand(apiOrigin);
-  const shortCommand = localPublisherAgentOneLiner(apiOrigin);
+  const [showCommand, setShowCommand] = useState(false);
+  const publicSite = isPublicOrchestrator(apiOrigin) || !isLocalDevApi(apiOrigin);
+  const shortCommand = localPublisherAgentOneLiner(apiOrigin, undefined, publisherSession);
 
   async function copyCommand(text: string) {
     try {
@@ -44,16 +50,9 @@ export function LocalPublisherSetup({
     <div className={`local-publisher-setup${compact ? " compact" : ""}`}>
       <p className="local-publisher-setup-lede">
         {variant === "webcam" ? (
-          hosted ? (
-            <>Optional: only if you want Webcam on this laptop. Cloud playout and Browser already work.</>
-          ) : (
-            <>Optional: start the local helper in another terminal for Webcam.</>
-          )
-        ) : hosted ? (
           <>
-            <strong>Step 1:</strong> clone the repo on this computer. <strong>Step 2:</strong> run
-            the command below in a terminal and leave it open. <strong>Step 3:</strong> return here
-            and wait for &quot;Agent connected&quot; before Start.
+            Start the helper on <strong>this computer</strong> so ffmpeg opens{" "}
+            <strong>your</strong> camera — not a shared operator webcam.
           </>
         ) : (
           <>
@@ -62,36 +61,44 @@ export function LocalPublisherSetup({
           </>
         )}
       </p>
-      <div className="local-publisher-setup-command">
-        <pre>{hosted ? fullCommand : shortCommand}</pre>
-        <button
-          type="button"
-          className="secondary-button local-publisher-setup-copy"
-          onClick={() => void copyCommand(hosted ? fullCommand : shortCommand)}
-        >
-          {copied ? "Copied" : "Copy command"}
-        </button>
-      </div>
+      {shortCommand ? (
+        <div className="local-publisher-setup-command">
+          <div className="local-publisher-setup-actions">
+            <button
+              type="button"
+              className="secondary-button local-publisher-setup-copy"
+              onClick={() => void copyCommand(shortCommand)}
+            >
+              {copied ? "Copied" : "Copy command"}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              aria-expanded={showCommand}
+              onClick={() => setShowCommand((open) => !open)}
+            >
+              {showCommand ? "Hide command" : "Show command"}
+            </button>
+          </div>
+          {showCommand ? <pre>{shortCommand}</pre> : null}
+        </div>
+      ) : (
+        <p className="field-hint">Preparing a helper command for this browser…</p>
+      )}
       <p className="field-hint local-publisher-setup-links">
-        {hosted ? (
+        Paste it in a terminal on this computer — any directory is fine.{" "}
+        {publicSite ? (
           <>
-            Requires ffmpeg with libx264 on your laptop. See{" "}
-            <a href={GH_LOCAL_PUBLISHER_DOC} target="_blank" rel="noreferrer">
-              Local publisher guide
-            </a>{" "}
-            · Prefer OBS or your own encoder?{" "}
+            Cloud publish URLs:{" "}
             <a href={GH_BYO_ENCODER_DOC} target="_blank" rel="noreferrer">
               BYO encoder settings
             </a>
+            .{" "}
           </>
-        ) : (
-          <>
-            Run <code>./scripts/run-local-publisher.sh</code> from the repo root.{" "}
-            <a href={GH_LOCAL_PUBLISHER_DOC} target="_blank" rel="noreferrer">
-              Docs
-            </a>
-          </>
-        )}
+        ) : null}
+        <a href={GH_LOCAL_PUBLISHER_DOC} target="_blank" rel="noreferrer">
+          Docs
+        </a>
       </p>
     </div>
   );

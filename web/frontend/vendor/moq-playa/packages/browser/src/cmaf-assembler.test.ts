@@ -773,62 +773,6 @@ describe('CmafAssembler — HEVC CRA-with-RASL strip', () => {
   });
 });
 
-describe('CmafAssembler join offset (getJoinOffsetSec)', () => {
-  /** Minimal init: moov→trak→mdia→mdhd with the given timescale. */
-  function buildInitWithTimescale(timescale: number, mdhdVersion: 0 | 1 = 0): Uint8Array {
-    let mdhdBody: Uint8Array;
-    if (mdhdVersion === 0) {
-      // version(1)+flags(3)+creation(4)+modification(4)+timescale(4)+duration(4)
-      mdhdBody = new Uint8Array(24);
-      writeU32(mdhdBody, 12, timescale);
-    } else {
-      // version(1)+flags(3)+creation(8)+modification(8)+timescale(4)+duration(8)
-      mdhdBody = new Uint8Array(32);
-      mdhdBody[0] = 1;
-      writeU32(mdhdBody, 20, timescale);
-    }
-    const mdhd = buildBox('mdhd', mdhdBody);
-    const mdia = buildBox('mdia', mdhd);
-    const trak = buildBox('trak', mdia);
-    return buildBox('moov', trak);
-  }
-
-  it('returns raw first bmd / mdhd timescale after init + first segment', () => {
-    const assembler = new CmafAssembler({ onSegment: vi.fn() });
-    assembler.setInitSegment('video', buildInitWithTimescale(90000));
-    expect(assembler.getJoinOffsetSec('video')).toBeNull(); // no media yet
-
-    // Joined 2s into the encode: bmd = 180000 @ 90kHz.
-    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
-    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
-
-    // Later segments must not move the join offset.
-    assembler.push('video', 'v0', 1n, concat(buildMoof(270000), buildMdat(new Uint8Array(4))));
-    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
-  });
-
-  it('reads a version-1 mdhd timescale', () => {
-    const assembler = new CmafAssembler({ onSegment: vi.fn() });
-    assembler.setInitSegment('video', buildInitWithTimescale(48000, 1));
-    assembler.push('video', 'v0', 0n, concat(buildMoof(96000), buildMdat(new Uint8Array(4))));
-    expect(assembler.getJoinOffsetSec('video')).toBeCloseTo(2, 6);
-  });
-
-  it('returns null without an init segment (no timescale)', () => {
-    const assembler = new CmafAssembler({ onSegment: vi.fn() });
-    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
-    expect(assembler.getJoinOffsetSec('video')).toBeNull();
-  });
-
-  it('reset() clears both epoch and timescale', () => {
-    const assembler = new CmafAssembler({ onSegment: vi.fn() });
-    assembler.setInitSegment('video', buildInitWithTimescale(90000));
-    assembler.push('video', 'v0', 0n, concat(buildMoof(180000), buildMdat(new Uint8Array(4))));
-    assembler.reset();
-    expect(assembler.getJoinOffsetSec('video')).toBeNull();
-  });
-});
-
 describe('CmafAssembler non-media payload diagnostics', () => {
   it('warns ONCE per track when dropping a payload with no moof/mdat (e.g. in-band init)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -848,5 +792,313 @@ describe('CmafAssembler non-media payload diagnostics', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// ─── Shared cross-track epoch (A/V sync — RED5DEV-2315) ──────────
+
+/**
+ * When per-track timescales are known (from init segments), the two
+ * tracks must be rebased against ONE shared epoch instead of each
+ * independently zero-basing at its own first fragment. Per-track
+ * zero-basing erases the publisher's timeline alignment: on a
+ * mid-stream join, audio delivery starts at the live edge while
+ * video waits for the next group (GoP) boundary, so video's first
+ * bmd is up to a full GoP ahead of audio's — zeroing both bakes
+ * that gap in as a constant A/V desync.
+ */
+describe('CmafAssembler — shared cross-track epoch (RED5DEV-2315)', () => {
+  const VIDEO_TS = 90000;
+  const AUDIO_TS = 48000;
+
+  /** mdhd v0 with the given timescale. */
+  function mdhdBox(timescale: number): Uint8Array {
+    const body = new Uint8Array(20); // creation+modification+timescale+duration+lang
+    new DataView(body.buffer).setUint32(8, timescale);
+    return makeFullBoxTop('mdhd', 0, 0, body);
+  }
+
+  /** Minimal single-track init: moov(trak(mdia(mdhd))). */
+  function initWithTimescale(timescale: number): Uint8Array {
+    return makeBoxTop('moov', makeBoxTop('trak', makeBoxTop('mdia', mdhdBox(timescale))));
+  }
+
+  function makeBoxTop(type: string, body: Uint8Array): Uint8Array {
+    return buildBox(type, body);
+  }
+
+  function makeFullBoxTop(type: string, version: number, flags: number, body: Uint8Array): Uint8Array {
+    const vf = new Uint8Array(4);
+    vf[0] = version & 0xff;
+    vf[1] = (flags >> 16) & 0xff;
+    vf[2] = (flags >> 8) & 0xff;
+    vf[3] = flags & 0xff;
+    return buildBox(type, concat(vf, body));
+  }
+
+  function assemblerWithInits(onDiscontinuity?: ReturnType<typeof vi.fn>) {
+    const onSegment = vi.fn();
+    const assembler = new CmafAssembler({ onSegment, onDiscontinuity });
+    assembler.setInitSegment('video', initWithTimescale(VIDEO_TS));
+    assembler.setInitSegment('audio', initWithTimescale(AUDIO_TS));
+    return { assembler, onSegment };
+  }
+
+  function outBmd(onSegment: ReturnType<typeof vi.fn>, call: number): bigint {
+    return readBaseMediaDecodeTime(onSegment.mock.calls[call]![1] as Uint8Array)!;
+  }
+
+  it('preserves the A/V offset when tracks start at different decode times', () => {
+    const { assembler, onSegment } = assemblerWithInits();
+
+    // Mid-stream join at t=105s: audio starts at the live edge,
+    // video 0.75s later at the next GoP boundary.
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([0xAA]))));
+    assembler.push('video', 'video0', 0n, concat(buildMoof(105.75 * VIDEO_TS), buildMdat(new Uint8Array([0xBB]))));
+
+    expect(outBmd(onSegment, 0)).toBe(0n);                          // audio anchors the epoch
+    expect(outBmd(onSegment, 1)).toBe(BigInt(0.75 * VIDEO_TS));     // video keeps its real 0.75s lead
+  });
+
+  it('continues each track relative to the shared epoch on later fragments', () => {
+    const { assembler, onSegment } = assemblerWithInits();
+
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.push('video', 'video0', 0n, concat(buildMoof(105.75 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    // +2s on both tracks
+    assembler.push('audio', 'audio0', 1n, concat(buildMoof(107 * AUDIO_TS, 2), buildMdat(new Uint8Array([3]))));
+    assembler.push('video', 'video0', 1n, concat(buildMoof(107.75 * VIDEO_TS, 2), buildMdat(new Uint8Array([4]))));
+
+    expect(outBmd(onSegment, 2)).toBe(BigInt(2 * AUDIO_TS));
+    expect(outBmd(onSegment, 3)).toBe(BigInt(2.75 * VIDEO_TS));
+  });
+
+  it('clamps to its own bmd when the second track starts before the epoch track (no negative tfdt)', () => {
+    const { assembler, onSegment } = assemblerWithInits();
+
+    // Video fragment arrives first at t=10s, audio then arrives with
+    // EARLIER content (t=9.5s). Rebasing audio against the shared
+    // epoch would go negative — it must clamp to its own start.
+    assembler.push('video', 'video0', 0n, concat(buildMoof(10 * VIDEO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(9.5 * AUDIO_TS), buildMdat(new Uint8Array([2]))));
+
+    expect(outBmd(onSegment, 0)).toBe(0n);
+    expect(outBmd(onSegment, 1)).toBe(0n); // clamped, not -0.5s
+  });
+
+  it('re-anchors BOTH tracks to one new shared epoch after a publisher restart', () => {
+    const onDiscontinuity = vi.fn();
+    const { assembler, onSegment } = assemblerWithInits(onDiscontinuity);
+
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.push('video', 'video0', 0n, concat(buildMoof(105.75 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+
+    // Publisher restart: both tracks jump backward. Audio (t=1s)
+    // detects first and establishes the NEW shared epoch; video
+    // (t=1.75s) must adopt it — not zero-base independently.
+    assembler.push('audio', 'audio0', 1n, concat(buildMoof(1 * AUDIO_TS, 2), buildMdat(new Uint8Array([3]))));
+    assembler.push('video', 'video0', 1n, concat(buildMoof(1.75 * VIDEO_TS, 2), buildMdat(new Uint8Array([4]))));
+
+    expect(onDiscontinuity).toHaveBeenCalledWith('audio', 'audio0');
+    expect(onDiscontinuity).toHaveBeenCalledWith('video', 'video0');
+    expect(outBmd(onSegment, 2)).toBe(0n);                        // audio re-anchors new epoch at t=1s
+    expect(outBmd(onSegment, 3)).toBe(BigInt(0.75 * VIDEO_TS));   // video keeps its 0.75s lead on the new epoch
+  });
+
+  it('advances normally after a restart instead of repeatedly re-anchoring', () => {
+    const onDiscontinuity = vi.fn();
+    const { assembler, onSegment } = assemblerWithInits(onDiscontinuity);
+
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.push('video', 'video0', 0n, concat(buildMoof(105.75 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    assembler.push('audio', 'audio0', 1n, concat(buildMoof(1 * AUDIO_TS, 2), buildMdat(new Uint8Array([3]))));
+    assembler.push('video', 'video0', 1n, concat(buildMoof(1.75 * VIDEO_TS, 2), buildMdat(new Uint8Array([4]))));
+
+    assembler.push('audio', 'audio0', 2n, concat(buildMoof(2 * AUDIO_TS, 3), buildMdat(new Uint8Array([5]))));
+    assembler.push('video', 'video0', 2n, concat(buildMoof(2.75 * VIDEO_TS, 3), buildMdat(new Uint8Array([6]))));
+
+    expect(onDiscontinuity).toHaveBeenCalledTimes(2);
+    expect(outBmd(onSegment, 4)).toBe(BigInt(AUDIO_TS));
+    expect(outBmd(onSegment, 5)).toBe(BigInt(1.75 * VIDEO_TS));
+  });
+
+  it('treats an mdhd timescale of zero as unknown instead of dividing by zero', () => {
+    const onSegment = vi.fn();
+    const assembler = new CmafAssembler({ onSegment });
+    assembler.setInitSegment('audio', initWithTimescale(0));
+    assembler.setInitSegment('video', initWithTimescale(VIDEO_TS));
+
+    expect(() => {
+      assembler.push('audio', 'audio0', 0n, concat(buildMoof(1000), buildMdat(new Uint8Array([1]))));
+      assembler.push('video', 'video0', 0n, concat(buildMoof(VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    }).not.toThrow();
+    expect(outBmd(onSegment, 0)).toBe(0n);
+    expect(outBmd(onSegment, 1)).toBe(0n);
+  });
+
+  it('uses the audio mdhd timescale for the one-second reorder window', () => {
+    const highRateDiscontinuity = vi.fn();
+    const highRate = new CmafAssembler({
+      onSegment: vi.fn(),
+      onDiscontinuity: highRateDiscontinuity,
+    });
+    highRate.setInitSegment('audio', initWithTimescale(96000));
+    highRate.push('audio', 'audio0', 0n, concat(buildMoof(200000), buildMdat(new Uint8Array([1]))));
+    highRate.push('audio', 'audio0', 1n, concat(buildMoof(300000), buildMdat(new Uint8Array([2]))));
+    highRate.push('audio', 'audio0', 2n, concat(buildMoof(250000), buildMdat(new Uint8Array([3]))));
+    expect(highRateDiscontinuity).not.toHaveBeenCalled();
+
+    const lowRateDiscontinuity = vi.fn();
+    const lowRate = new CmafAssembler({
+      onSegment: vi.fn(),
+      onDiscontinuity: lowRateDiscontinuity,
+    });
+    lowRate.setInitSegment('audio', initWithTimescale(44100));
+    lowRate.push('audio', 'audio0', 0n, concat(buildMoof(100000), buildMdat(new Uint8Array([1]))));
+    lowRate.push('audio', 'audio0', 1n, concat(buildMoof(150000), buildMdat(new Uint8Array([2]))));
+    lowRate.push('audio', 'audio0', 2n, concat(buildMoof(104000), buildMdat(new Uint8Array([3]))));
+    expect(lowRateDiscontinuity).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to per-track zero-basing when timescales are unknown (no init segments)', () => {
+    const onSegment = vi.fn();
+    const assembler = new CmafAssembler({ onSegment });
+
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.push('video', 'video0', 0n, concat(buildMoof(105.75 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+
+    // Without timescales the gap cannot be scaled across tracks —
+    // legacy behavior (each track zero-based) is preserved.
+    expect(outBmd(onSegment, 0)).toBe(0n);
+    expect(outBmd(onSegment, 1)).toBe(0n);
+  });
+
+  it('reset() clears the shared epoch and per-track timescales', () => {
+    const { assembler, onSegment } = assemblerWithInits();
+
+    assembler.push('audio', 'audio0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    assembler.reset();
+
+    // After reset (and without re-sent inits) behavior reverts to
+    // per-track zero-basing — no stale shared epoch leaks through.
+    assembler.push('video', 'video0', 0n, concat(buildMoof(200 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    expect(outBmd(onSegment, 1)).toBe(0n);
+  });
+});
+
+// ─── Diagnostic epoch-mode control ───────────────────────────────
+//
+// The shared cross-track epoch (production) preserves the publisher's real A/V
+// offset, so a mid-stream join yields audio at 0 and video at +gap. The legacy
+// per-track mode zero-bases each track independently, mapping BOTH to 0 and
+// ERASING that offset — the pre-RED5DEV-2315 behavior. These pin that the two
+// modes produce different startup geometry from IDENTICAL input, so the
+// geometry can be isolated in one build.
+
+describe('CmafAssembler — epoch mode is a diagnostic control, not a policy', () => {
+  const VIDEO_TS = 90000;
+  const AUDIO_TS = 48000;
+  function mdhdBox(timescale: number): Uint8Array {
+    const body = new Uint8Array(20);
+    new DataView(body.buffer).setUint32(8, timescale);
+    return buildBox('mdhd', concat(new Uint8Array([0, 0, 0, 0]), body));
+  }
+  const initWith = (ts: number) => buildBox('moov', buildBox('trak', buildBox('mdia', mdhdBox(ts))));
+
+  /** Mid-stream join: audio at the live edge (105.00s), video at the next GoP (107.73s). */
+  function joinWith(mode: 'shared' | 'legacy') {
+    const onSegment = vi.fn();
+    const asm = new CmafAssembler({ onSegment, epochMode: mode });
+    asm.setInitSegment('video', initWith(VIDEO_TS));
+    asm.setInitSegment('audio', initWith(AUDIO_TS));
+    const geometries: unknown[] = [];
+    asm.onStartupGeometry = (g) => geometries.push(g);
+    asm.push('audio', 'a0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    asm.push('video', 'v0', 0n, concat(buildMoof(107.73 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    const out = (call: number) => readBaseMediaDecodeTime(onSegment.mock.calls[call]![1] as Uint8Array)!;
+    return { audioBmd: out(0), videoBmd: out(1), geometries, onSegment, asm };
+  }
+
+  it('shared (default) preserves the offset: audio 0, video +2.73s', () => {
+    const { audioBmd, videoBmd } = joinWith('shared');
+    expect(audioBmd).toBe(0n);
+    expect(videoBmd).toBe(BigInt(Math.round(2.73 * VIDEO_TS)));
+  });
+
+  it('legacy zero-bases each track: BOTH 0, offset erased', () => {
+    const { audioBmd, videoBmd } = joinWith('legacy');
+    expect(audioBmd).toBe(0n);
+    expect(videoBmd).toBe(0n); // the pre-fix desync, reproduced deliberately
+  });
+
+  it('reports the startup geometry once both first fragments are known', () => {
+    const { geometries } = joinWith('shared');
+    expect(geometries).toHaveLength(1); // exactly once
+    const g = geometries[0] as Record<string, unknown>;
+    expect(g['epochMode']).toBe('shared');
+    expect(g['audioStartSec']).toBeCloseTo(0, 5);
+    expect(g['videoStartSec']).toBeCloseTo(2.73, 5);
+    expect(g['gapSec']).toBeCloseTo(2.73, 5);       // the number skew must correlate with
+    expect(g['videoTimescale']).toBe(VIDEO_TS);
+    expect(g['audioTimescale']).toBe(AUDIO_TS);
+    expect(g['audioRawBmd']).toBe(String(105 * AUDIO_TS));
+  });
+
+  it('legacy geometry reports a ZERO gap from the same input', () => {
+    const g = joinWith('legacy').geometries[0] as Record<string, unknown>;
+    expect(g['epochMode']).toBe('legacy');
+    expect(g['gapSec']).toBeCloseTo(0, 5);
+  });
+
+  it('the production default is shared — legacy must be opted into', () => {
+    expect(new CmafAssembler({ onSegment: vi.fn() }).epochMode).toBe('shared');
+  });
+
+  it('epochMode is construction-time only — reassignment does not typecheck', () => {
+    const asm = new CmafAssembler({ onSegment: vi.fn(), epochMode: 'legacy' });
+    expect(asm.epochMode).toBe('legacy');
+    // The guarantee is a COMPILE-TIME one: TypeScript rejects the assignment,
+    // which @ts-expect-error asserts (the test fails to compile if it ever
+    // becomes writable). Performing the assignment at runtime is deliberately
+    // NOT done here — it would mutate the very field under test.
+    type Writable = { -readonly [K in keyof CmafAssembler]: CmafAssembler[K] };
+    const reassign = (a: CmafAssembler): void => {
+      // @ts-expect-error — readonly: assignment must not typecheck.
+      a.epochMode = 'shared';
+    };
+    expect(typeof reassign).toBe('function');
+    // A widened alias is the only way to write it, i.e. it takes an explicit
+    // cast through a mapped type — never an accidental assignment.
+    const widened = asm as Writable;
+    expect(widened.epochMode).toBe('legacy');
+  });
+
+  it('geometry is reported only AFTER the completing segment reaches the sink', () => {
+    const seen: string[] = [];
+    const onSegment = vi.fn(() => { seen.push('segment'); });
+    const asm = new CmafAssembler({ onSegment });
+    asm.setInitSegment('video', initWith(VIDEO_TS));
+    asm.setInitSegment('audio', initWith(AUDIO_TS));
+    asm.onStartupGeometry = () => { seen.push('geometry'); };
+    asm.push('audio', 'a0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    asm.push('video', 'v0', 0n, concat(buildMoof(107.73 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    // The second segment must be delivered before geometry announces it.
+    expect(seen).toEqual(['segment', 'segment', 'geometry']);
+  });
+
+  it('a throwing geometry consumer still delivers the media segment', () => {
+    const onSegment = vi.fn();
+    const asm = new CmafAssembler({ onSegment });
+    asm.setInitSegment('video', initWith(VIDEO_TS));
+    asm.setInitSegment('audio', initWith(AUDIO_TS));
+    asm.onStartupGeometry = () => { throw new Error('diagnostic consumer exploded'); };
+    asm.push('audio', 'a0', 0n, concat(buildMoof(105 * AUDIO_TS), buildMdat(new Uint8Array([1]))));
+    expect(() => {
+      asm.push('video', 'v0', 0n, concat(buildMoof(107.73 * VIDEO_TS), buildMdat(new Uint8Array([2]))));
+    }).not.toThrow();
+    expect(onSegment).toHaveBeenCalledTimes(2);
+    // ...and the stream keeps flowing afterwards.
+    asm.push('audio', 'a0', 1n, concat(buildMoof(107 * AUDIO_TS), buildMdat(new Uint8Array([3]))));
+    expect(onSegment).toHaveBeenCalledTimes(3);
   });
 });

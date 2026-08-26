@@ -36,10 +36,13 @@ INGEST_HOST="${INGEST_AGENT_HOST:-ubuntu@35.222.33.58}"
 INGEST_KEY="${INGEST_SSH_KEY:-$SSH_KEY}"
 GIT_REMOTE="${GIT_REMOTE:-https://github.com/BufferStarved/MoQ-Test-Tools.git}"
 GIT_REF="${GIT_REF:-main}"
-GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
-if [[ -n "$GIT_SHA" ]]; then
-  printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
-fi
+# Hosted install is prod. Dev is local (scripts/dev.sh) and stamps SHA-dev.
+# There is no -dirty suffix: a dirty tree is either kept off this host or it
+# is not what we sync (prod exports git archive HEAD).
+export MOQ_ENV="${MOQ_ENV:-prod}"
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/build-identity.sh"
+printf '%s\n' "$GIT_SHA" > "$ROOT_DIR/.build-sha"
 
 SSH_PORT="${WEB_SSH_PORT:-22}"
 
@@ -140,6 +143,14 @@ fi
 
 echo "Syncing local repo to ${WEB_IP}:${INSTALL_ROOT} (preferred over git clone)..."
 remote "sudo mkdir -p ${INSTALL_ROOT} && sudo chown ${SSH_USER}:${SSH_USER} ${INSTALL_ROOT}"
+SYNC_ROOT="$ROOT_DIR"
+if [[ "$MOQ_ENV" == "prod" ]]; then
+  SYNC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/moq-prod-XXXXXX")"
+  trap 'rm -rf "$SYNC_ROOT"' EXIT
+  git -C "$ROOT_DIR" archive HEAD | tar -x -C "$SYNC_ROOT"
+  printf '%s\n' "$GIT_SHA" > "$SYNC_ROOT/.build-sha"
+  echo "Prod sync from git archive HEAD (sha=$GIT_SHA), not the working tree."
+fi
 rsync -az --delete \
   --exclude '.git' \
   --exclude 'venv' \
@@ -150,6 +161,10 @@ rsync -az --delete \
   --exclude 'uploads' \
   --exclude 'web/frontend/dist' \
   --exclude 'tools/moq5' \
+  --exclude 'tools/moq5-publisher/build' \
+  --exclude 'tools/moq5-publisher/bin' \
+  --exclude 'tools/ffmpeg-moq' \
+  --exclude 'tools/ffmpeg-whip' \
   --exclude 'tools/openmoq-publisher' \
   --exclude 'tools/*/node_modules' \
   --exclude 'MoQ-Test-Tools' \
@@ -162,7 +177,7 @@ rsync -az --delete \
   --exclude 'infra/**/tfplan' \
   --exclude 'infra/**/terraform.tfvars' \
   -e "ssh ${SSH_OPTS[*]}" \
-  "${ROOT_DIR}/" \
+  "${SYNC_ROOT}/" \
   "${SSH_USER}@${WEB_IP}:${INSTALL_ROOT}/"
 
 # Fallback clone marker if rsync left an empty tree (should not happen)
@@ -238,6 +253,23 @@ python3 -m venv "\$INSTALL_ROOT/.venv"
 echo "Ensuring openmoq-publisher..."
 bash "\$INSTALL_ROOT/scripts/install-openmoq-publisher.sh" </dev/null || true
 
+# Draft-18 canary only. rsync excludes tools/moq5-publisher/bin so a laptop
+# Mach-O cannot replace the Linux ELF. Prod :4433 stays openmoq-publisher.
+# Kept on the local/dev tree — not part of the prod commit.
+MOQ5_BIN="\$INSTALL_ROOT/tools/moq5-publisher/bin/moq5-fmp4-publish"
+if [[ -x "\$MOQ5_BIN" ]] && file "\$MOQ5_BIN" | grep -q ELF; then
+  echo "Linux moq5-fmp4-publish already present."
+else
+  echo "Installing Linux moq5-fmp4-publish for draft-18 canary jobs..."
+  apt-get install -y cmake pkg-config libssl-dev
+  sudo -u ubuntu bash "\$INSTALL_ROOT/scripts/install-moq5.sh" --rebuild </dev/null || true
+  if [[ -x "\$MOQ5_BIN" ]] && file "\$MOQ5_BIN" | grep -q ELF; then
+    echo "moq5-fmp4-publish OK."
+  else
+    echo "WARNING: moq5-fmp4-publish missing — draft-18 canary cloud encode will fail. Webcam still works from a laptop helper." >&2
+  fi
+fi
+
 # Frontend production build (vite is a devDependency — need full install to build)
 echo "Building frontend..."
 if [[ -n "\$GIT_SHA" ]]; then
@@ -269,6 +301,7 @@ chown -R ubuntu:ubuntu "\$INSTALL_ROOT/results" "\$INSTALL_ROOT/uploads" || true
 chown -R ubuntu:ubuntu "\$INSTALL_ROOT/src" "\$INSTALL_ROOT/web" "\$INSTALL_ROOT/.venv" 2>/dev/null || true
 
 PUB_BIN="\$INSTALL_ROOT/tools/openmoq-publisher/bin"
+MOQ5_PUB_BIN="\$INSTALL_ROOT/tools/moq5-publisher/bin"
 # Keep extra keys (GCP East / Linode stacks, ingest tokens, …) across redeploys.
 # A full rewrite used to drop them and hide those destinations as "coming soon".
 if [[ -f "\$ENV_FILE" ]]; then
@@ -286,12 +319,12 @@ GCP_METRICS_ZONE=\${GCP_METRICS_ZONE}
 GCP_INSTANCE_ZIXI=\${GCP_INSTANCE_ZIXI}
 GCP_INSTANCE_MOQX=\${GCP_INSTANCE_MOQX}
 FFMPEG=\${FFMPEG_BIN}
-PATH=\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
+PATH=\${MOQ5_PUB_BIN}:\${PUB_BIN}:/usr/local/bin:/usr/bin:/bin
 PYTHONPATH=\${INSTALL_ROOT}/src:\${INSTALL_ROOT}/web/api
+MOQ_ENV=prod
 MEDIAMTX_LOOPBACK_PUBLISH=1
-# Local publisher agent is a laptop/dev feature — keep off on the hosted web VM.
-LOCAL_PUBLISHER_ENABLED=1
-LOCAL_PUBLISHER_TOKEN=dev-local-publisher
+# Never attach a laptop webcam agent to the public site.
+LOCAL_PUBLISHER_ENABLED=0
 # 4-way cloud BBB/webcam must encode in parallel. A cap of 1 made Stream 2/4
 # sit queued (no CSV) while testers saw black tiles after MoQ finished.
 MAX_CONCURRENT_CLOUD_ENCODES=4
@@ -309,6 +342,10 @@ append_missing_env() {
     if [[ "\$key" == "MOQ_RECORDER_AGENT_URL" && "\$line" == *"35.222.33.58"* ]]; then
       continue
     fi
+    # Never restore a laptop-publisher token onto the public orchestrator.
+    if [[ "\$key" == "LOCAL_PUBLISHER_TOKEN" || "\$key" == "LOCAL_PUBLISHER_ALLOW_REMOTE" ]]; then
+      continue
+    fi
     if ! grep -q "^\$key=" "\$ENV_FILE"; then
       printf '%s\n' "\$line" >> "\$ENV_FILE"
     fi
@@ -316,7 +353,11 @@ append_missing_env() {
 }
 append_missing_env "\${ENV_FILE}.previous"
 append_missing_env "\$INSTALL_ROOT/infra/web/scripts/gcp-east-stack.env.example"
+append_missing_env "\$INSTALL_ROOT/infra/web/scripts/gcp-west-stack.env.example"
 append_missing_env "\$INSTALL_ROOT/infra/web/scripts/linode-stack.env.example"
+append_missing_env "\$INSTALL_ROOT/infra/web/scripts/linode-central-stack.env.example"
+append_missing_env "\$INSTALL_ROOT/infra/web/scripts/linode-west-stack.env.example"
+sed -i '/^LOCAL_PUBLISHER_TOKEN=/d; /^LOCAL_PUBLISHER_ALLOW_REMOTE=/d' "\$ENV_FILE"
 chmod 600 "\$ENV_FILE"
 
 cat >/etc/systemd/system/\${SERVICE_NAME}.service <<UNITEOF

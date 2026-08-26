@@ -41,11 +41,13 @@ START_JOB = os.environ.get("START_JOB", "").strip().lower() in {"1", "true", "ye
 SKIP_UNITS = os.environ.get("SKIP_UNITS", "").strip().lower() in {"1", "true", "yes"}
 JOB = os.environ.get("JOB", os.environ.get("JOB_ID", "")).strip()
 SITE_PLAYER_SEC = float(os.environ.get("SITE_PLAYER_SEC", "16"))
-LOCAL_PUBLISHER_API = os.environ.get("LOCAL_PUBLISHER_API", BASE_URL)
+LOCAL_PUBLISHER_API = os.environ.get("LOCAL_PUBLISHER_API", "http://127.0.0.1:8000")
 LOCAL_PUBLISHER_TOKEN = os.environ.get("LOCAL_PUBLISHER_TOKEN", "dev-local-publisher")
 
 BROWSER4_PATH = "/?operator=browser4"
 WEBCAM_PATH = "/?source=webcam"
+WEBCAM_FFMPEG_PATH = "/?source=webcam&encoder=ffmpeg"
+WEBCAM_OBS_PATH = "/?source=webcam&encoder=obs"
 HARNESS_TMPL = "/?harnessJob={job}&playback={playback}"
 
 EXPECT_BROWSER4 = (
@@ -55,8 +57,9 @@ EXPECT_BROWSER4 = (
     "(not a catalog-miss)."
 )
 EXPECT_WEBCAM = (
-    "Source = Webcam, Camera = OBS Virtual Camera (1080p60). "
-    "Start a comparison. Capture must not die on 720p30 (ffmpeg 251)."
+    "Source = Webcam. Encode = ffmpeg (helper, default) or Browser. "
+    "OBS is unavailable while public MoQ is draft-18 (plugin is draft-16 only). "
+    "Deep-link: /?source=webcam&encoder=ffmpeg. Capture must not die on 720p30 (ffmpeg 251)."
 )
 EXPECT_CLOUD_MOQ = (
     "Real Chrome tab (not headless, not Cursor WebView). "
@@ -322,6 +325,8 @@ def run_units() -> CaseResult:
         ROOT / "web" / "frontend" / "scripts" / "unit-whep-end-verdict.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-job-error-catalog.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-operator-recipe.mjs",
+        ROOT / "web" / "frontend" / "scripts" / "unit-recipe-support.mjs",
+        ROOT / "web" / "frontend" / "scripts" / "unit-obs.mjs",
         ROOT / "web" / "frontend" / "scripts" / "unit-browser-moq-outputs.mjs",
     ]
     py_mods = [
@@ -358,6 +363,7 @@ def run_units() -> CaseResult:
     ts_tests = [
         ROOT / "web" / "frontend" / "src" / "webrtcPlayback.test.ts",
         ROOT / "web" / "frontend" / "src" / "moqCmafPlayback.test.ts",
+        ROOT / "web" / "frontend" / "src" / "moqLibmoqCatalog.test.ts",
         ROOT / "web" / "frontend" / "src" / "playbackEndVerdict.test.ts",
         ROOT / "web" / "frontend" / "src" / "playbackGate.ts",
     ]
@@ -435,11 +441,10 @@ def run_webcam(features: Optional[Dict[str, Any]], feature_err: Optional[str]) -
     notes = [
         EXPECT_WEBCAM,
         f"URL  {url}",
-        "Start the laptop agent first (This machine):",
-        f"  LOCAL_PUBLISHER_API={LOCAL_PUBLISHER_API} \\",
-        f"  LOCAL_PUBLISHER_TOKEN={LOCAL_PUBLISHER_TOKEN} \\",
-        "  ./scripts/run-local-publisher.sh",
-        "Then Source=Webcam, Camera=OBS Virtual Camera, pick outputs, Start.",
+        "Start the laptop agent on localhost only (never the public site):",
+        "  ./scripts/dev.sh",
+        f"Then http://127.0.0.1:5173{WEBCAM_FFMPEG_PATH} (default helper).",
+        "Source=Webcam, Encode=ffmpeg (default) or OBS + OpenMOQ, pick outputs, Start.",
     ]
     if feature_err:
         return CaseResult("webcam", "FAIL", f"features: {feature_err}", notes)
@@ -522,11 +527,9 @@ def run_cloud_moq() -> CaseResult:
 def run_whip_muxer(features: Optional[Dict[str, Any]], feature_err: Optional[str]) -> CaseResult:
     notes = [
         EXPECT_WHIP,
-        "Same agent as webcam:",
-        f"  LOCAL_PUBLISHER_API={LOCAL_PUBLISHER_API} \\",
-        f"  LOCAL_PUBLISHER_TOKEN={LOCAL_PUBLISHER_TOKEN} \\",
-        "  ./scripts/run-local-publisher.sh",
-        f"Then {site_url(WEBCAM_PATH)} — add WebRTC on Linode or GCP East.",
+        "Same agent as webcam — localhost only:",
+        "  ./scripts/dev.sh",
+        f"Then http://127.0.0.1:5173{WEBCAM_PATH} — add WebRTC on Linode or GCP East.",
     ]
     if feature_err:
         return CaseResult("whip_muxer", "FAIL", f"features: {feature_err}", notes)
@@ -608,7 +611,7 @@ def main() -> int:
         print()
 
     if include("webcam"):
-        print("== webcam (OBS Virtual Camera + local ffmpeg) ==")
+        print("== webcam (last-mile: ffmpeg helper default, OBS optional) ==")
         res = run_webcam(features, feature_err)
         results.append(res)
         print(f" {res.status} {res.detail}")

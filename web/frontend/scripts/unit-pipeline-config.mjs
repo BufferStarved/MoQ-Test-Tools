@@ -12,7 +12,9 @@ const src = fs.readFileSync(
   "utf8",
 );
 
-assert.match(src, /PipelineEncodeKind = "ffmpeg" \| "ffmpeg-local" \| "browser"/);
+assert.match(src, /PipelineEncodeKind = "ffmpeg" \| "ffmpeg-local" \| "obs" \| "browser"/);
+assert.match(src, /value: "OBS Studio"/);
+assert.doesNotMatch(src, /OBS Studio \+ OpenMOQ plugin/);
 assert.match(src, /This browser — ffmpeg is not used/);
 assert.match(src, /Native RTCPeerConnection encode/);
 assert.match(src, /In-page WebCodecs → LOC objects/);
@@ -22,5 +24,7 @@ assert.doesNotMatch(
   src,
   /subtitle: "Shared ffmpeg \/ libx264 settings for every stream in the recipe"/,
 );
+assert.match(src, /encoderSectionMoqGopNote/);
+assert.match(src, /solo file GOP does not apply/);
 
 console.log("unit-pipeline-config: PASS");

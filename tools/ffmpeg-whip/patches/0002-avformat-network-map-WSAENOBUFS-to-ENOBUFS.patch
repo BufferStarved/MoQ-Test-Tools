@@ -1,0 +1,48 @@
+From 09e55d5890af3303e62881750858c5d71c93a801 Mon Sep 17 00:00:00 2001
+From: BufferStarved <spmcc92@gmail.com>
+Date: Sat, 22 Aug 2026 20:46:25 -0400
+Subject: [PATCH 2/2] avformat/network: map WSAENOBUFS to ENOBUFS
+
+ff_neterrno() translates the winsock error codes it knows about into
+their errno equivalents and negates the rest. WSAENOBUFS is not in that
+list, so a full transmit queue reaches callers as -WSAENOBUFS on
+Windows and as AVERROR(ENOBUFS) everywhere else, and code that tests
+for AVERROR(ENOBUFS) silently does nothing on Windows.
+
+Add the mapping, and define ENOBUFS in terms of WSAENOBUFS for the
+toolchains that do not declare it, matching what is already done for
+ETIMEDOUT and the other winsock codes.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ libavformat/network.c | 2 ++
+ libavformat/network.h | 3 +++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/libavformat/network.c b/libavformat/network.c
+index 2b4c78cfb1..e07d4b1a5a 100644
+--- a/libavformat/network.c
++++ b/libavformat/network.c
+@@ -142,6 +142,8 @@ int ff_neterrno(void)
+         return AVERROR(ECONNREFUSED);
+     case WSAEINPROGRESS:
+         return AVERROR(EINPROGRESS);
++    case WSAENOBUFS:
++        return AVERROR(ENOBUFS);
+     }
+     return -err;
+ }
+diff --git a/libavformat/network.h b/libavformat/network.h
+index 7c72c902aa..a2c61a17da 100644
+--- a/libavformat/network.h
++++ b/libavformat/network.h
+@@ -53,6 +53,9 @@
+ #ifndef ENOTCONN
+ #define ENOTCONN        WSAENOTCONN
+ #endif
++#ifndef ENOBUFS
++#define ENOBUFS         WSAENOBUFS
++#endif
+ 
+ #define getsockopt(a, b, c, d, e) getsockopt(a, b, c, (char*) d, e)
+ #define setsockopt(a, b, c, d, e) setsockopt(a, b, c, (const char*) d, e)

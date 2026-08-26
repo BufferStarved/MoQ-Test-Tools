@@ -88,7 +88,6 @@ export function createBrowserVideoEncoder(
   let bytesWindow = 0;
   let framesWindow = 0;
   let windowStarted = 0;
-  let lastFrameAt = 0;
   let lastEncodeLagMs = 0;
   const pendingCaptureUs: number[] = [];
   let sampleTimer: number | null = null;
@@ -122,7 +121,6 @@ export function createBrowserVideoEncoder(
         encoder.encode(frame, { keyFrame: key });
         frameCount += 1;
         framesWindow += 1;
-        lastFrameAt = performance.now();
         lastEncodeLagMs = browserEncodeLagMs({
           captureTimestampUs: pendingCaptureUs[pendingCaptureUs.length - 1] ?? 0,
           encodeQueueSize: encoder.encodeQueueSize,

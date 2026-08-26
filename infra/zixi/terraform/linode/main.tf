@@ -17,9 +17,14 @@ data "linode_image" "ubuntu" {
   id = "linode/ubuntu22.04"
 }
 
+locals {
+  ssh_public_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+}
+
 resource "linode_sshkey" "zixi" {
+  count   = var.register_ssh_key ? 1 : 0
   label   = "${var.project_name}-ssh"
-  ssh_key = trimspace(file(pathexpand(var.ssh_public_key_path)))
+  ssh_key = local.ssh_public_key
 }
 
 resource "linode_instance" "zixi" {
@@ -27,7 +32,7 @@ resource "linode_instance" "zixi" {
   region          = var.region
   type            = var.instance_type
   image           = data.linode_image.ubuntu.id
-  authorized_keys = [linode_sshkey.zixi.ssh_key]
+  authorized_keys = [local.ssh_public_key]
 
   metadata {
     user_data = base64encode(templatefile("${path.module}/../../cloud-init/base.yaml", {
@@ -51,7 +56,7 @@ resource "linode_firewall" "zixi" {
     protocol = "TCP"
     ports    = "22"
     ipv4     = concat([var.allowed_ssh_cidr], var.extra_ssh_ipv4_cidrs)
-    ipv6     = var.allowed_ssh_ipv6_cidrs
+    ipv6     = length(var.allowed_ssh_ipv6_cidrs) > 0 ? var.allowed_ssh_ipv6_cidrs : null
   }
 
   inbound {

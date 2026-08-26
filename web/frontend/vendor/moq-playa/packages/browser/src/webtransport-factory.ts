@@ -118,7 +118,26 @@ export function createWebTransport(
       connected = await attempt(true);
     } catch (err) {
       const detail = failureDetail(err, firstOpts.protocols);
-      throw new Error(`WebTransport connection failed: ${detail}`);
+      if (!firstOpts.protocols) {
+        throw new Error(`WebTransport connection failed: ${detail}`);
+      }
+      // Strict UAs (Safari 26) fail the session when WT-Available-Protocols
+      // negotiation does not complete. MOQT does not require it — the
+      // CLIENT_SETUP version list (§9.3) negotiates in-band — so retry
+      // once without offering before giving up.
+      //
+      // In auto mode, the fallback has no transport.protocol, so the adapter
+      // uses its default draft unless the caller passed draftVersion
+      // explicitly. Callers that need deterministic draft selection should
+      // pass draftVersion.
+      try {
+        connected = await attempt(false);
+      } catch (retryErr) {
+        throw new Error(
+          `WebTransport connection failed: ${detail} ` +
+          `(retry without protocols also failed: ${failureDetail(retryErr)})`,
+        );
+      }
     }
     const { transport, handshakeRttMs } = connected;
     const wt = transport as unknown as WebTransportLike;

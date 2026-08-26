@@ -1,5 +1,5 @@
-import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles";
-import { ingestEndpointLabel, isCustomIngestEndpoint } from "./ingestEndpoints";
+import { encodeProfileSummary, type EncodeProfileSummary } from "./encodeProfiles.ts";
+import { ingestEndpointLabel, isCustomIngestEndpoint, isMoqRelayIngest } from "./ingestEndpoints.ts";
 import type { PlaybackMode } from "./playbackTypes";
 import type { EndpointConfig } from "./types";
 
@@ -93,13 +93,13 @@ export function diagramHopsForStream(
   };
 }
 
-export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "browser";
+export type PipelineEncodeKind = "ffmpeg" | "ffmpeg-local" | "obs" | "browser";
 
 export interface StreamConfigInput {
   label: string;
   protocol?: string | null;
   ingestEndpointId: string;
-  endpointUrl?: string;
+  endpointUrl?: string | null;
   playbackMode?: PlaybackMode | string;
   moqNamespace?: string | null;
   zixiStreamId?: string | null;
@@ -130,6 +130,13 @@ function playbackLabel(mode?: string | null): string {
     default:
       return mode;
   }
+}
+
+/** File / cloud playout must not inherit the webcam-broker GOP comment. */
+export function encoderSectionMoqGopNote(kind: PipelineEncodeKind): string {
+  return kind === "ffmpeg-local"
+    ? "Shared webcam broker copies the 1s master — solo file GOP does not apply"
+    : "MoQ has no segments — player target";
 }
 
 function encoderSection(
@@ -172,6 +179,22 @@ function encoderSection(
     };
   }
 
+  if (kind === "obs") {
+    return {
+      id: "encoder",
+      title: "Encoder",
+      subtitle: "OBS on this computer — MoQ plugin + extra outputs",
+      rows: [
+        {
+          label: "Engine",
+          value: "OBS Studio",
+          note: "Not ffmpeg. The MoQ plugin occupies Settings → Stream. Extra outputs do SRT/RTMP. No WebRTC.",
+        },
+        { label: "Target ladder", value: summary.encode_ladder_label },
+      ],
+    };
+  }
+
   const where = kind === "ffmpeg-local" ? "this computer" : "the API host";
   return {
     id: "encoder",
@@ -182,12 +205,18 @@ function encoderSection(
       {
         label: "GOP / keyint",
         value: `${summary.gop_frames} frames (~${summary.keyframe_interval_sec}s @ 30 fps)`,
-        note: "HLS/SRT only — packagers cut segments on IDRs (2s floor)",
+        note: `Divides the ${summary.hls_segment_sec}s chunk exactly — packagers cut segments on IDRs, so a GOP that does not divide the chunk stretches every segment`,
       },
       {
         label: "MoQ GOP",
-        value: `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
-        note: `MoQ does not use the 2s HLS floor — player target ${summary.moq_target_latency_ms} ms`,
+        value:
+          kind === "ffmpeg-local"
+            ? "30 frames (~1s @ 30 fps, shared broker)"
+            : `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
+        note:
+          kind === "ffmpeg-local"
+            ? "Shared webcam broker copies the 1s master — solo file GOP does not apply"
+            : `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
       },
       {
         label: "VBV bufsize",
@@ -276,7 +305,7 @@ function ingestRows(stream: StreamConfigInput): ConfigDetailRow[] {
       value: "MediaMTX",
       note: "SRT/RTMP/WHIP → LL-HLS / LL-DASH / WHEP",
     });
-  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
+  } else if (isMoqRelayIngest(ingest)) {
     rows.push({
       label: "Ingest role",
       value: "OpenMOQ relay",
@@ -297,7 +326,6 @@ function packagerRows(
   summary: EncodeProfileSummary,
   encodeKind: PipelineEncodeKind = "ffmpeg",
 ): ConfigDetailRow[] {
-  const protocol = (stream.protocol || "").toLowerCase();
   const ingest = stream.ingestEndpointId;
   const mode = (stream.playbackMode || "auto").toLowerCase();
   const rows: ConfigDetailRow[] = [];
@@ -341,7 +369,7 @@ function packagerRows(
         note: "Part duration follows MediaMTX low-latency HLS settings",
       });
     }
-  } else if (ingest === "gcp_moq_relay" || ingest.endsWith("_moq_relay")) {
+  } else if (isMoqRelayIngest(ingest)) {
     rows.push({
       label: "Packager",
       value: encodeKind === "browser" ? "MoQ / LOC objects" : "MoQ / CMAF objects",
@@ -378,7 +406,7 @@ function playerRows(
     rows.push({
       label: "Catch-up",
       value: `maxRate ${catchUp.maxCatchUpRate} · threshold ${catchUp.catchUpThresholdMs} ms · recovery ${catchUp.catchUpRecoveryMs} ms`,
-      note: "Rate stays at 1.0 — live-edge uses buffer seek (avoids A/V warp)",
+      note: "CMAF healthy hold 0.2–0.4s; starve hold 1.15s only while frozen",
     });
   } else if (mode === "whep") {
     rows.push({
@@ -480,7 +508,7 @@ export function buildRecipePipelineSections(
 
 export function buildSessionPipelineSections(streams: Array<{
   protocol?: string | null;
-  endpoint?: string;
+  endpoint?: string | null;
   summary_extra?: {
     encode_ladder?: string | null;
     encode_ladder_label?: string | null;
@@ -534,12 +562,20 @@ export function buildSessionPipelineSections(streams: Array<{
 
 function guessIngestFromEndpoint(endpoint: string): string {
   const url = endpoint.toLowerCase();
+  const canary = url.includes(":14433");
+  if (url.includes("34.138.137.211") || url.includes("34-138-137-211")) {
+    return canary ? "gcp_east_moq_relay_d18" : "gcp_east_moq_relay";
+  }
+  if (url.includes("45.79.177.85") || url.includes("45-79-177-85")) {
+    return canary ? "linode_moq_relay_d18" : "linode_moq_relay";
+  }
   if (
     url.includes("34.28.164.90") ||
+    url.includes("34-28-164-90") ||
     (url.startsWith("https://") && url.includes(":4443")) ||
     url.includes("/anon/")
   ) {
-    return "gcp_moq_relay";
+    return canary ? "gcp_moq_relay_d18" : "gcp_moq_relay";
   }
   if (url.includes("mediamtx") || url.includes(":8890") || url.includes(":8889")) {
     return "gcp_mediamtx";

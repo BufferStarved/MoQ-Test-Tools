@@ -1,9 +1,16 @@
 import { useMemo, useState } from "react";
 import { downloadCombinedCsv, downloadCombinedJsonFromSummaries } from "./combinedDownload";
 import { buildComparisonVerdict } from "./comparisonVerdict";
+import { playbackPolicyBanner } from "./playbackPolicy";
+import {
+  canOverlayTestScopes,
+  resultTestScope,
+  testScopeBanner,
+} from "./testScope";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { resultToSavedStream, savedStreamsToLegs } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
+import { playbackEngineCaveat } from "./metricModel";
 import { PipelineConfigDetails } from "./PipelineConfigDetails";
 import { buildSessionPipelineSections, type PipelineDiagramSpec } from "./pipelineConfig";
 import { ResultsErrorBoundary } from "./ResultsErrorBoundary";
@@ -111,6 +118,30 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
   }, [displayIndex, displayLabels, displayStreams]);
 
   const verdict = useMemo(() => buildComparisonVerdict(streams, labels), [streams, labels]);
+  const [allowScopeConvert, setAllowScopeConvert] = useState(false);
+  const testScopesCompatible = useMemo(
+    () => canOverlayTestScopes(streams.map((result) => resultTestScope(result))),
+    [streams],
+  );
+  const testScopeBannerText = useMemo(() => {
+    const scope = streams.map((result) => resultTestScope(result))[0];
+    return scope ? testScopeBanner(scope) : null;
+  }, [streams]);
+  const playbackPolicyBannerText = useMemo(() => {
+    if (!testScopesCompatible && !allowScopeConvert) {
+      return null;
+    }
+    if (streams.some((result) => resultTestScope(result) === "upload")) {
+      return null;
+    }
+    const policy =
+      streams.find((result) => result.summary_extra?.playback_policy)?.summary_extra?.playback_policy ||
+      streams.find((result) => result.rows?.[0]?.playback_policy)?.rows?.[0]?.playback_policy;
+    if (!policy) {
+      return null;
+    }
+    return playbackPolicyBanner(policy);
+  }, [allowScopeConvert, streams, testScopesCompatible]);
   const pipelineSections = useMemo(
     () => buildSessionPipelineSections(displayIndex >= 0 ? [streams[displayIndex]] : streams),
     [displayIndex, streams],
@@ -144,12 +175,12 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
               : result.summary_extra?.hls_segment_sec
                 ? `HLS ${result.summary_extra.hls_segment_sec}s`
                 : "Packager",
+        // Report the engine that actually produced the playback columns. A
+        // WHIP leg played over the LL-HLS remux must not label itself "WHEP" —
+        // that is what made job c49d2ef4's HLS numbers read as WebRTC.
         player:
-          proto === "moq"
-            ? "MoQ"
-            : proto === "webrtc"
-              ? "WHEP"
-              : "HLS",
+          result.summary_extra?.playback_engine ||
+          (proto === "moq" ? "MoQ" : proto === "webrtc" ? "WHEP" : "HLS"),
         accentColor: protocolColor(result.protocol),
         };
       }),
@@ -172,8 +203,64 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
     ? `Selected session · ${streams.length} streams`
     : `Latest comparison · ${streams.length} streams`;
 
+  // Rendered above the verdict on purpose: the verdict is precisely where a
+  // remuxed leg gets ranked as if it were its published protocol.
+  const engineCaveats = streams
+    .map((result, index) => ({
+      label: streamLabel(result, index, labels),
+      caveat:
+        result.summary_extra?.playback_engine_caveat ||
+        playbackEngineCaveat(result.protocol, result.summary_extra?.playback_engine),
+    }))
+    .filter((entry) => entry.caveat);
+
   return (
     <div className="session-metrics">
+      {engineCaveats.length > 0 && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Comparison caveat</span>
+          {engineCaveats.map((entry) => (
+            <p key={entry.label} className="results-caveat-line">
+              <strong>{entry.label}:</strong> {entry.caveat}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {testScopeBannerText && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Test scope</span>
+          <p className="results-caveat-line">{testScopeBannerText}</p>
+        </div>
+      )}
+
+      {playbackPolicyBannerText && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Playback policy</span>
+          <p className="results-caveat-line">{playbackPolicyBannerText}</p>
+        </div>
+      )}
+
+      {!testScopesCompatible && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Cannot overlay</span>
+          <p className="results-caveat-line">
+            These sessions measured different things (upload-only vs capture-to-glass).
+            Comparison charts stay hidden until you convert explicitly.
+          </p>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={allowScopeConvert}
+              onChange={(event) => setAllowScopeConvert(event.target.checked)}
+            />
+            <span>Convert and compare anyway</span>
+          </label>
+        </div>
+      )}
+
+      {testScopesCompatible || allowScopeConvert ? (
+      <>
       {verdict && (
         <div className="results-verdict">
           <span className="decision-board-kicker">Verdict</span>
@@ -524,6 +611,11 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                   value={formatMs(avg.encode_lag_ms)}
                 />
                 <ScoreCell
+                  metricKey="upload_latency_ms"
+                  label="Upload latency"
+                  value={formatMs(avg.upload_latency_ms)}
+                />
+                <ScoreCell
                   metricKey="fps_stability"
                   label="FPS stability"
                   value={formatNum(avg.fps_stability ?? null, 4)}
@@ -552,6 +644,8 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
           })}
         </div>
       </section>
+      </>
+      ) : null}
     </div>
   );
 }

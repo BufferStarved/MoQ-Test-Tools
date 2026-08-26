@@ -17,6 +17,7 @@ const ABOUT_METRIC_KEYS = [
   "fps_stability",
   "speed",
   "encode_lag_ms",
+  "upload_latency_ms",
   "net_rtt_ms",
   "net_jitter_ms",
   "net_send_mbps",
@@ -109,8 +110,10 @@ export function AboutPage() {
         <h3>Where ffmpeg runs (upload path)</h3>
         <p className="hint">
           The recipe couples source and encode location: Cloud playout always encodes on the API
-          host (a live encode of a file); webcam always encodes on your laptop
-          (realistic ISP/last-mile upload numbers).
+          host (server ffmpeg). Webcam is last-mile — you then pick{" "}
+          <strong>ffmpeg (helper, default)</strong>, <strong>OBS</strong>, or{" "}
+          <strong>Browser (this-tab WebCodecs)</strong>. Browser is an encoder, not a source.
+          OBS does not replace ffmpeg.
         </p>
         <div className="about-encoder-grid">
           <article className="about-encoder-card">
@@ -123,12 +126,14 @@ export function AboutPage() {
           </article>
           <article className="about-encoder-card recommended">
             <span className="about-encoder-badge">Realistic upload numbers</span>
-            <h4>Webcam → this machine + agent</h4>
+            <h4>Webcam → this machine + encoder choice</h4>
             <p>
-              Choose <strong>Webcam</strong> in the recipe, start{" "}
-              <code>./scripts/run-local-publisher.sh</code> against this site, then run the recipe
-              once it shows &quot;Agent connected&quot; — ffmpeg on your laptop opens the camera and
-              publishes over your real network. Full upload + playback metrics. See{" "}
+              Choose <strong>Webcam</strong> on <code>./scripts/dev.sh</code> (localhost
+              only — never the public site), then pick an encoder under Encode.
+              <strong> ffmpeg (default)</strong> uses the helper for SRT, RTMP, WebRTC (if WHIP),
+              and MoQ. <strong>OBS</strong> lets OBS encode: the plugin does MoQ,
+              extra outputs do SRT/RTMP (no WebRTC). <strong>Browser</strong> encodes in this
+              tab (MoQ + WebRTC only). See{" "}
               <a href={GH_LOCAL_PUBLISHER} target="_blank" rel="noreferrer">
                 Local publisher guide
               </a>
@@ -218,7 +223,7 @@ export function AboutPage() {
             <FlowNode
               tone="server"
               title="Publish sidecars"
-              detail="srt-live-transmit · openmoq-publisher"
+              detail="srt-live-transmit · openmoq-publisher · moq5-fmp4-publish (d18)"
             />
           </ArchStage>
           <FlowArrow />
@@ -231,7 +236,7 @@ export function AboutPage() {
             <FlowNode
               tone="transport"
               title="moqx relay"
-              detail="WebTransport :4433 · MOQT draft-16"
+              detail="WebTransport :14433 · MOQT draft-18"
             />
             <FlowNode
               tone="quality"

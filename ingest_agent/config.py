@@ -16,7 +16,7 @@ MOQ_RECORDER_BIN = _env(
     "MOQ_RECORDER_BIN",
     "/opt/moq-test-tools/tools/openmoq-recorder/bin/openmoq-fmp4-record",
 )
-MOQ_RELAY_URL = _env("MOQ_RELAY_URL", "https://127.0.0.1:4433/moq-relay")
+MOQ_RELAY_URL = _env("MOQ_RELAY_URL", "https://127.0.0.1:14433/moq-relay")
 MOQ_RELAY_CERT_SHA256 = _env("MOQ_RELAY_CERT_SHA256", "")
 # Drop a catch-all pin so dockerized openmoq-recorder can use its hostname
 # map (and so recording_service can inject the per-relay hash). A stale

@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import {
     readSegmentTimeRanges,
     readTrexDefaults,
+    readMdhdTimescale,
     type DiagnosticKind,
     type SegmentTimeRange,
     type TrexDefaults,
@@ -509,6 +510,67 @@ describe('readTrexDefaults', () => {
         const init = cat(styp());
         const result = readTrexDefaults(init);
         expect(result.size).toBe(0);
+    });
+});
+
+// ─── readMdhdTimescale tests ──────────────────────────────────────
+
+describe('readMdhdTimescale', () => {
+    /** mdhd v0: creation(4) + modification(4) + timescale(4) + duration(4) + lang/predef(4). */
+    function mdhdV0(timescale: number): Uint8Array {
+        return fullBox('mdhd', 0, 0, cat(u32(0), u32(0), u32(timescale), u32(0), u32(0)));
+    }
+
+    /** mdhd v1: creation(8) + modification(8) + timescale(4) + duration(8) + lang/predef(4). */
+    function mdhdV1(timescale: number): Uint8Array {
+        return fullBox('mdhd', 1, 0, cat(u64(0n), u64(0n), u32(timescale), u64(0n), u32(0)));
+    }
+
+    function initWithMdhd(mdhdBox: Uint8Array): Uint8Array {
+        return moov([box('trak', box('mdia', mdhdBox))]);
+    }
+
+    it('reads the timescale from a version 0 mdhd', () => {
+        expect(readMdhdTimescale(initWithMdhd(mdhdV0(48000)))).toBe(48000);
+    });
+
+    it('reads the timescale from a version 1 mdhd', () => {
+        expect(readMdhdTimescale(initWithMdhd(mdhdV1(90000)))).toBe(90000);
+    });
+
+    it('skips a leading ftyp before moov', () => {
+        const init = cat(box('ftyp', fourcc('isom')), initWithMdhd(mdhdV0(48000)));
+        expect(readMdhdTimescale(init)).toBe(48000);
+    });
+
+    it('returns null when the init has no mdhd', () => {
+        expect(readMdhdTimescale(moov([box('trak', box('mdia', new Uint8Array(0)))]))).toBeNull();
+        expect(readMdhdTimescale(moov([]))).toBeNull();
+        expect(readMdhdTimescale(cat(styp()))).toBeNull();
+    });
+
+    it('rejects zero and unsupported-version timescales', () => {
+        expect(readMdhdTimescale(initWithMdhd(mdhdV0(0)))).toBeNull();
+        expect(readMdhdTimescale(initWithMdhd(
+            fullBox('mdhd', 2, 0, cat(u32(0), u32(0), u32(48000), u32(0), u32(0))),
+        ))).toBeNull();
+    });
+
+    it('does not read a truncated mdhd value from its following sibling', () => {
+        const truncated = box('mdhd', new Uint8Array(0));
+        const sibling = box('free', cat(new Uint8Array(4), u32(48000)));
+        const init = moov([box('trak', box('mdia', cat(truncated, sibling)))]);
+        expect(readMdhdTimescale(init)).toBeNull();
+    });
+
+    it('rejects boxes that overrun their parent or the input buffer', () => {
+        const overrunMdhd = mdhdV0(48000);
+        new DataView(overrunMdhd.buffer).setUint32(0, overrunMdhd.byteLength + 16);
+        expect(readMdhdTimescale(initWithMdhd(overrunMdhd))).toBeNull();
+
+        const overrunMoov = initWithMdhd(mdhdV0(48000));
+        new DataView(overrunMoov.buffer).setUint32(0, overrunMoov.byteLength + 16);
+        expect(readMdhdTimescale(overrunMoov)).toBeNull();
     });
 });
 

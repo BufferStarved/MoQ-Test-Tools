@@ -1,0 +1,14 @@
+BASE_URL=https://moq.sean-mccarthy.net preset=moq_zixi_linode_rtmp player=mpegts duration=40s
+job 0becfbc9-3cb2-4341-968e-59d09a27d442
+ingest ready after 0.4s preview_ready=False
+site player ok=True playing site_player frames=48 video_s=1.31 e2e=1295
+{
+  "job_id": "0becfbc9-3cb2-4341-968e-59d09a27d442",
+  "preset_id": "moq_zixi_linode_rtmp",
+  "player": "mpegts",
+  "playback_ttff_ms": 1721.0,
+  "e2e_latency_ms_first": 1295.0,
+  "samples": 3,
+  "status": "failed",
+  "error": "ffmpeg I/O error: ffmpeg exited with code 251: encoder         : Lavf62.12.102 | Duration: 00:01:00.00, start: 0.000000, bitrate: 236 kb/s | Stream #0:0[0x1](und): Video: h264 (Main) (avc1 / 0x31637661), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], 99 kb/s, 30 fps, 30 tbr, 15360 tbn (default) | Metadata: | handler_name    : VideoHandler | encoder         : Lavc62.28.102 libx264 | Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 128 kb/s (default) | Metadata: | handler_name    : SoundHandler | [out#0/flv @ 0x8d506c300] Error opening output rtmp://45.33.68.151:1935/live/benchmark: Input/output error | Error opening output file rtmp://45.33.68.151:1935/live/benchmark. | Error opening output files: Input/output error Zixi RTMP push requires an ONLINE push input whose Stream ID matches the URL stream key (benchmark for rtmp://host:1935/live/benchmark). Re-run infra/zixi/scripts/configure-zixi-rtmp-input.sh on the ingest host.. The encoder wrote to a closed publisher pipe (publisher exited before CMAF init, or stdin was not attached yet)."
+}

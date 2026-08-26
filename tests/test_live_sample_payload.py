@@ -37,6 +37,7 @@ class LiveSamplePayloadTests(unittest.TestCase):
         self.assertEqual(payload["net_recv_mbps"], 2.1)
         self.assertEqual(payload["net_rtt_ms"], 18.5)
         self.assertEqual(payload["encode_lag_ms"], 12.0)
+        self.assertIn("upload_latency_ms", payload)
 
     def test_keeps_explicit_net_fields(self) -> None:
         sample = UploadSample(
@@ -56,6 +57,22 @@ class LiveSamplePayloadTests(unittest.TestCase):
         payload = live_sample_payload(sample)
         self.assertEqual(payload["net_send_mbps"], 3.0)
         self.assertIn("encode_lag_ms", payload)
+
+    def test_unmeasured_server_cpu_stays_blank(self) -> None:
+        sample = UploadSample(
+            elapsed_sec=1,
+            encoded_bitrate_kbps=1000,
+            fps=30,
+            fps_stability=1.0,
+            speed=1.0,
+            out_time="00:00:01.000000",
+            cpu_percent=1,
+            memory_mb=10,
+            progress="continue",
+            server_cpu_percent=None,
+        )
+        payload = live_sample_payload(sample)
+        self.assertIsNone(payload["server_cpu_percent"])
 
 
 class PathRttProbePortTests(unittest.TestCase):

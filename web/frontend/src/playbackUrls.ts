@@ -1,4 +1,4 @@
-import { ingestRole } from "./ingestEndpoints";
+import { ingestRole } from "./ingestEndpoints.ts";
 import type { PlaybackEngine, PlaybackMode, PlaybackTarget } from "./playbackTypes";
 
 const ZIXI_HTTP_PORT = 7777;
@@ -490,20 +490,12 @@ export function proxiedMoqFingerprintUrl(relayUrl: string): string {
 }
 
 export function isManagedMoqRelay(ingestEndpointId: string): boolean {
-  return ingestEndpointId.endsWith("_moq_relay");
+  return ingestEndpointId.includes("_moq_relay");
 }
 
 function zixiHlsUrl(host: string, streamId: string, dvr: boolean): string {
   const url = `http://${host}:${ZIXI_HTTP_PORT}/playback.m3u8?stream=${encodeURIComponent(streamId)}`;
   return dvr ? `${url}&dvr` : url;
-}
-
-function zixiDashUrl(host: string, streamId: string, dvr: boolean): string {
-  const primary = `http://${host}:${ZIXI_HTTP_PORT}/playback.mpd?stream=${encodeURIComponent(streamId)}`;
-  if (dvr) {
-    return `${primary}&dvr`;
-  }
-  return primary;
 }
 
 function zixiMpegTsUrl(host: string, streamId: string): string {

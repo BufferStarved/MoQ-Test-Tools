@@ -3,7 +3,11 @@ import { fetchUpload, subscribeToUpload } from "./api";
 import { StreamPlayer } from "./StreamPlayer";
 import { deriveEncodeAnchorEpoch } from "./metricModel";
 import { playbackGateForJob } from "./playbackGate";
-import { ingestEndpointIdForPreset } from "./ingestEndpoints";
+import {
+  ingestEndpointIdForPreset,
+  moqDraftForIngest,
+  moqPinTlsCertForIngest,
+} from "./ingestEndpoints";
 import {
   defaultPlaybackModeForProtocol,
   moqDefaultsFromPublishUrl,
@@ -52,7 +56,11 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         if (cancelled) {
           return;
         }
-        setJob((current) => (current ? { ...current, ...status } : current));
+        setJob((current) =>
+          current
+            ? { ...current, ...status, status: status.status as UploadJob["status"] }
+            : current,
+        );
       },
     );
     return () => {
@@ -121,6 +129,9 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         encodeDurationSec={job.duration_sec}
         targetLatencyMs={job.target_latency_ms ?? 800}
         encodeLadder={job.encode_ladder ?? undefined}
+        playbackPolicy={job.playback_policy === "complete" ? "complete" : "live-edge"}
+        moqDraftVersion={moqDraftForIngest(ingestEndpointId)}
+        moqPinTlsCert={moqPinTlsCertForIngest(ingestEndpointId)}
       />
     </div>
   );

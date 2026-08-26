@@ -1,8 +1,11 @@
-# GCP multi-region (us-central1 + us-east1)
+# GCP multi-region (us-central1 + us-east1 + us-west1)
 
 us-central1 stays the **orchestrator** (UI/API + current encode host). us-east1 is a
 second full ingest stack so a user can start a run against either region — or
-Linode — from the same UI.
+Linode — from the same UI. us-west1 (Oregon) is scaffolded the same way
+(`provision-gcp-west.sh`, `infra/*/terraform/gcp-us-west1`). **Do not apply west
+until NETWORKS quota is above 5/5** — west shares one new VPC (`moq-web-west-vpc`)
+like east. Do not terraform-apply AWS.
 
 | Role | us-central1 (prod) | us-east1 |
 |------|--------------------|----------|

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 from publisher_agent.webcam_broker import (  # noqa: E402
+    MASTER_GOP_FRAMES,
     PREFERRED_LANDSCAPE_VIDEO_SIZE,
     WebcamBroker,
 )
@@ -25,6 +26,25 @@ from upload_service import UploadJob  # noqa: E402
 HAS_FFMPEG = bool(shutil.which("ffmpeg")) or Path(
     "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
 ).is_file()
+
+
+class SoloDirectDeviceTests(unittest.TestCase):
+    def test_single_job_keeps_device_path_and_does_not_spawn(self) -> None:
+        broker = WebcamBroker()
+        with patch.object(broker, "_spawn_capture") as spawn:
+            url, session = broker.acquire("device:webcam", duration_sec=10)
+            spawn.assert_not_called()
+            self.assertEqual(url, "device:webcam")
+            self.assertTrue(session.direct_device)
+            self.assertIsNone(session.process)
+            broker.release(session)
+
+
+class MasterGopTests(unittest.TestCase):
+    def test_master_gop_is_one_second_not_half_or_hls_6s(self) -> None:
+        # Shared capture GOP is 1s. Do not drop it for mixed siblings.
+        # Solo MoQ skips the broker and encodes 0.25s groups in moq_publish.
+        self.assertEqual(MASTER_GOP_FRAMES, 30)
 
 
 class LandscapeRetryTests(unittest.TestCase):
@@ -57,7 +77,9 @@ class LandscapeRetryTests(unittest.TestCase):
 
     def test_prefers_landscape_and_succeeds_without_retry(self) -> None:
         broker, calls = self._broker_with_fake_spawn(["ok"])
-        url, session = broker.acquire("device:webcam", duration_sec=10)
+        url, session = broker.acquire(
+            "device:webcam", duration_sec=10, share_policy="always"
+        )
         self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
         self.assertEqual(len(calls), 1)
         self.assertIsNone(session.error)
@@ -66,7 +88,9 @@ class LandscapeRetryTests(unittest.TestCase):
 
     def test_falls_back_to_probed_obs_mode_when_720p30_rejected(self) -> None:
         broker, calls = self._broker_with_fake_spawn(["fail", "ok"])
-        url, session = broker.acquire("device:webcam", duration_sec=10)
+        url, session = broker.acquire(
+            "device:webcam", duration_sec=10, share_policy="always"
+        )
         self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
         self.assertEqual(calls[1], ("1920x1080", "60"))
         self.assertIsNone(session.error)
@@ -76,7 +100,7 @@ class LandscapeRetryTests(unittest.TestCase):
     def test_propagates_error_when_all_attempts_fail(self) -> None:
         broker, calls = self._broker_with_fake_spawn(["fail"] * 6)
         with self.assertRaises(RuntimeError):
-            broker.acquire("device:webcam", duration_sec=10)
+            broker.acquire("device:webcam", duration_sec=10, share_policy="always")
         self.assertGreaterEqual(len(calls), 2)
         self.assertEqual(calls[0][0], PREFERRED_LANDSCAPE_VIDEO_SIZE)
 
@@ -85,7 +109,9 @@ class LandscapeRetryTests(unittest.TestCase):
             ["fail", "fail", "ok"],
             fail_stderr=b"Error opening input: Input/output error",
         )
-        url, session = broker.acquire("device:webcam", duration_sec=10)
+        url, session = broker.acquire(
+            "device:webcam", duration_sec=10, share_policy="always"
+        )
         self.assertEqual(calls[0], (PREFERRED_LANDSCAPE_VIDEO_SIZE, "30"))
         self.assertEqual(calls[1], (None, None))
         self.assertEqual(calls[2], ("1920x1080", "60"))
@@ -158,6 +184,35 @@ class TeeMapArgsTests(unittest.TestCase):
         ):
             broker._spawn_capture("device:webcam", [50000], video_size=None)
         return captured["cmd"]
+
+    def test_popen_eio_is_camera_io_error_not_bare_errno(self) -> None:
+        broker = WebcamBroker()
+        with patch(
+            "publisher_agent.webcam_broker.find_ffmpeg",
+            return_value="ffmpeg",
+        ), patch(
+            "publisher_agent.webcam_broker.subprocess.Popen",
+            side_effect=OSError(5, "Input/output error"),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                broker._spawn_capture(
+                    "device:webcam", [50000], video_size="1280x720"
+                )
+        self.assertIn("camera I/O error", str(raised.exception))
+        self.assertNotEqual(str(raised.exception), "[Errno 5] Input/output error")
+
+    def test_early_exit_eio_is_camera_io_error(self) -> None:
+        from publisher_agent.webcam_broker import _Session
+
+        broker = WebcamBroker()
+        session = _Session(key="device:webcam")
+        session.process = MakeFakeProcess(
+            alive=False,
+            stderr=b"Error opening input: Input/output error",
+        )
+        broker._check_early_exit(session)
+        self.assertIn("camera I/O error", session.error or "")
+        self.assertNotEqual(session.error, "[Errno 5] Input/output error")
 
     def test_macos_style_input_gets_explicit_maps_before_tee(self) -> None:
         # macOS avfoundation: one input ("0:0") carrying both streams, no maps.
@@ -307,7 +362,9 @@ class MapFreeInputIntegrationTests(unittest.TestCase):
             ],
         ):
             broker = WebcamBroker()
-            url, session = broker.acquire("device:webcam", duration_sec=8)
+            url, session = broker.acquire(
+                "device:webcam", duration_sec=8, share_policy="always"
+            )
             port = int(url.split(":")[2].split("?")[0])
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.bind(("127.0.0.1", port))

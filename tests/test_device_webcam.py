@@ -15,11 +15,13 @@ sys.path.insert(0, str(ROOT))
 
 from moq_publish import (  # noqa: E402
     DEVICE_WEBCAM_MEDIA,
+    OBS_OPENMOQ_MEDIA,
     build_device_webcam_input_args,
     build_ffmpeg_input_args,
     device_webcam_index,
     is_device_webcam_source,
     is_live_media_source,
+    is_obs_openmoq_source,
 )
 
 
@@ -33,7 +35,12 @@ class DeviceWebcamTests(unittest.TestCase):
     def test_live_includes_webcam_and_udp(self) -> None:
         self.assertTrue(is_live_media_source("device:webcam"))
         self.assertTrue(is_live_media_source("udp://127.0.0.1:5000"))
+        self.assertTrue(is_live_media_source(OBS_OPENMOQ_MEDIA))
         self.assertFalse(is_live_media_source("dummy.mp4"))
+
+    def test_obs_openmoq_source(self) -> None:
+        self.assertTrue(is_obs_openmoq_source(OBS_OPENMOQ_MEDIA))
+        self.assertFalse(is_obs_openmoq_source("device:webcam"))
 
     def test_macos_avfoundation_args(self) -> None:
         with patch("platform.system", return_value="Darwin"), patch.dict(
@@ -77,7 +84,12 @@ class DeviceWebcamTests(unittest.TestCase):
             return_value=["-f", "avfoundation", "-i", "0:0"],
         ) as mock_webcam:
             out = build_ffmpeg_input_args("device:webcam", duration_sec=10)
-        mock_webcam.assert_called_once_with(duration_sec=10, device_index=None)
+        mock_webcam.assert_called_once_with(
+            duration_sec=10,
+            device_index=None,
+            video_size="1280x720",
+            framerate="30",
+        )
         self.assertEqual(out, ["-f", "avfoundation", "-i", "0:0"])
 
     def test_device_index_parsing(self) -> None:
@@ -112,7 +124,12 @@ class DeviceWebcamTests(unittest.TestCase):
             return_value=["-f", "avfoundation", "-i", "1:0"],
         ) as mock_webcam:
             build_ffmpeg_input_args("device:webcam:1", duration_sec=10)
-        mock_webcam.assert_called_once_with(duration_sec=10, device_index=1)
+        mock_webcam.assert_called_once_with(
+            duration_sec=10,
+            device_index=1,
+            video_size="1280x720",
+            framerate="30",
+        )
 
 
 class WebcamEnumerationTests(unittest.TestCase):

@@ -166,13 +166,14 @@ def check_srt_live_transmit() -> DepStatus:
 
 
 def check_moq_publisher(repo_root: Path) -> DepStatus:
-    env = (os.environ.get("OPENMOQ_PUBLISHER_BIN") or "").strip()
+    env = (os.environ.get("MOQ5_PUBLISHER_BIN") or os.environ.get("OPENMOQ_PUBLISHER_BIN") or "").strip()
     candidates = [
         env,
-        str(repo_root / "tools/openmoq-publisher/bin/openmoq-publisher"),
         str(repo_root / "tools/moq5-publisher/bin/moq5-fmp4-publish"),
-        _which("openmoq-publisher") or "",
+        str(repo_root / "tools/moq5-publisher/build/moq5-fmp4-publish"),
+        str(repo_root / "tools/openmoq-publisher/bin/openmoq-publisher"),
         _which("moq5-fmp4-publish") or "",
+        _which("openmoq-publisher") or "",
     ]
     for path in candidates:
         if path and Path(path).is_file() and os.access(path, os.X_OK):
@@ -181,7 +182,7 @@ def check_moq_publisher(repo_root: Path) -> DepStatus:
         name="moq-publisher",
         ok=False,
         detail="required only for MoQ publish legs",
-        install_hint="./scripts/install-openmoq-publisher.sh",
+        install_hint="./scripts/install-moq5.sh (draft-18) or ./scripts/install-openmoq-publisher.sh (prod :4433)",
     )
 
 

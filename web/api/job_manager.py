@@ -21,12 +21,14 @@ from cmaf_integrity import CmafIntegrityReport
 from media_health import patch_summary_with_media_health
 from playback_metrics import (
     PLAYBACK_FIELD_NAMES,
+    PLAYBACK_NULLABLE_KEYS,
     _playback_high_water,
+    _recompute_derived,
     patch_summary_with_playback,
     robust_e2e_stats,
 )
 from encode_profile import encode_profile_summary
-from moq_publish import is_device_browser_source
+from moq_publish import classify_job_exception, classify_result_error, is_device_browser_source
 from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
 from publisher_protocol import sample_to_dict
@@ -54,7 +56,10 @@ def live_sample_payload(sample: UploadSample) -> dict:
     if not payload.get("net_rtt_ms") and payload.get("transport_rtt_ms"):
         payload["net_rtt_ms"] = payload["transport_rtt_ms"]
     for name in PLAYBACK_FIELD_NAMES:
-        payload.setdefault(name, 0)
+        # The startup phases default to None: on those columns a 0 asserts the
+        # stage was measured and instant, so the live charts have to receive
+        # the same blank the CSV carries.
+        payload.setdefault(name, None if name in PLAYBACK_NULLABLE_KEYS else 0)
     return payload
 
 try:
@@ -138,6 +143,8 @@ class UploadJobRecord:
     compute_vmaf_encoder: bool = False
     encode_ladder: str = ""
     target_latency_ms: Optional[int] = None
+    playback_policy: str = "live-edge"
+    test_scope: str = "e2e"
     ingest_agent_url: str = ""
     ingest_recording_dir: str = ""
     vmaf_status: str = VmafStatus.DISABLED.value
@@ -302,6 +309,8 @@ class JobManager:
             compute_vmaf_encoder=job.compute_vmaf_encoder,
             encode_ladder=job.encode_ladder,
             target_latency_ms=job.target_latency_ms,
+            playback_policy=getattr(job, "playback_policy", None) or "live-edge",
+            test_scope=getattr(job, "test_scope", None) or "e2e",
             ingest_agent_url=job.ingest_agent_url,
             ingest_recording_dir=job.ingest_recording_dir,
             publisher_host=publisher_host,
@@ -362,7 +371,7 @@ class JobManager:
             if not acquired:
                 self._update(
                     job_id,
-                    status=JobStatus.COMPLETED,
+                    status=JobStatus.FAILED,
                     error="Cancelled while waiting for a cloud encode slot",
                 )
                 return
@@ -472,7 +481,10 @@ class JobManager:
                 self._update(
                     job_id,
                     status=JobStatus.FAILED,
-                    error=result.error or "Upload failed",
+                    error=classify_result_error(
+                        result.error or "Upload failed",
+                        media_path=str(getattr(job, "media_path", "") or ""),
+                    ),
                     csv_path=csv_path,
                     summary_path=result.summary_path,
                     vmaf_status=VmafStatus.FAILED.value if job.compute_vmaf_on_ingest else VmafStatus.DISABLED.value,
@@ -486,7 +498,11 @@ class JobManager:
             self._update(
                 job_id,
                 status=JobStatus.FAILED,
-                error=str(exc) or "Upload failed",
+                error=classify_job_exception(
+                    exc,
+                    media_path=str(getattr(job, "media_path", "") or ""),
+                )
+                or "Upload failed",
             )
             raise
         finally:
@@ -725,17 +741,31 @@ class JobManager:
             at_epoch = 0.0
 
         engine = str(sample.get("engine", "") or "").strip().lower()
+        if engine == "monitor":
+            # Confidence-monitor ticks stay isolated — never overlay glass
+            # onto an upload leg's ranking e2e.
+            return True
         payload = {"elapsed_sec": elapsed_sec}
         for name in PLAYBACK_FIELD_NAMES:
+            # A startup phase the browser could not source arrives as null and
+            # must stay null; every other playback column is a counter or gauge
+            # whose absence really is zero.
+            absent = None if name in PLAYBACK_NULLABLE_KEYS else 0
             try:
-                payload[name] = sample.get(name, 0)
+                value = sample.get(name, absent)
             except (TypeError, ValueError):
-                payload[name] = 0
+                value = absent
+            payload[name] = absent if value is None else value
+        payload["playback_policy"] = (
+            "complete" if str(sample.get("playback_policy") or "").strip() == "complete" else "live-edge"
+        )
 
         with self._lock:
             record = self._jobs.get(job_id)
             if not record:
                 return False
+            if (getattr(record, "test_scope", None) or "e2e") == "upload":
+                return True
             # Rebase browser-side elapsed onto the pipeline's elapsed base so
             # this merges with upload samples (see pipeline_start_epoch).
             if at_epoch > 0 and record.pipeline_start_epoch is not None:
@@ -759,6 +789,7 @@ class JobManager:
                 merged = _playback_high_water(target, payload)
                 for name in PLAYBACK_FIELD_NAMES:
                     target[name] = merged[name]
+                _recompute_derived(target, engine=engine, playback_live=True)
         return True
 
     def record_browser_encode_sample(self, job_id: str, sample: dict) -> bool:
@@ -909,7 +940,7 @@ class JobManager:
             extra.update(self._browser_moqx_fields(job_id, endpoint_url))
 
         try:
-            from ingest_host_metrics import IngestHostMetricsPoller
+            from ingest_host_metrics import IngestHostMetricsPoller, measured_server_cpu
 
             with self._lock:
                 poller = self._ingest_pollers.get(job_id)
@@ -923,9 +954,11 @@ class JobManager:
                     self._ingest_pollers[job_id] = poller
             if getattr(poller, "enabled", False):
                 host = poller.poll()
-                extra["server_cpu_percent"] = float(host.cpu_percent or 0)
-                extra["server_memory_percent"] = float(host.memory_percent or 0)
-                extra["server_disk_percent"] = float(host.disk_percent or 0)
+                cpu = measured_server_cpu(host)
+                if cpu is not None:
+                    extra["server_cpu_percent"] = cpu
+                    extra["server_memory_percent"] = float(host.memory_percent or 0)
+                    extra["server_disk_percent"] = float(host.disk_percent or 0)
         except Exception:
             pass
         return extra
@@ -1072,6 +1105,8 @@ class JobManager:
                 "comparison_id": getattr(job, "comparison_id", "") or "",
                 "stream_index": int(getattr(job, "stream_index", 0) or 0),
                 "stream_label": getattr(job, "stream_label", "") or "",
+                "playback_policy": getattr(job, "playback_policy", None) or "live-edge",
+                "test_scope": getattr(job, "test_scope", None) or "e2e",
             },
             "quality": quality,
         }
@@ -1161,12 +1196,17 @@ class JobManager:
         if matched is None:
             matched = playback_samples[-1]
         for name in PLAYBACK_FIELD_NAMES:
-            payload[name] = matched.get(name, 0)
+            payload[name] = matched.get(name, None if name in PLAYBACK_NULLABLE_KEYS else 0)
+        _recompute_derived(payload, playback_live=True)
 
     def _persist_playback_metrics(self, job_id: str, summary_path: Optional[str]) -> None:
         with self._lock:
             record = self._jobs.get(job_id)
             if not record or not record.playback_samples or not summary_path:
+                return
+            if (getattr(record, "test_scope", None) or "e2e") == "upload":
+                return
+            if (record.playback_engine or "").strip().lower() == "monitor":
                 return
             playback_samples = list(record.playback_samples)
             playback_engine = record.playback_engine
@@ -1221,6 +1261,8 @@ class JobManager:
                 compute_vmaf_encoder=record.compute_vmaf_encoder,
                 encode_ladder=record.encode_ladder,
                 target_latency_ms=record.target_latency_ms,
+                playback_policy=getattr(record, "playback_policy", None) or "live-edge",
+                test_scope=getattr(record, "test_scope", None) or "e2e",
                 publisher_host=record.publisher_host,
                 vmaf_status=record.vmaf_status,
                 vmaf_score=record.vmaf_score,
@@ -1265,6 +1307,8 @@ class JobManager:
                     samples=[],
                     encode_ladder=record.encode_ladder,
                     target_latency_ms=record.target_latency_ms,
+                    playback_policy=getattr(record, "playback_policy", None) or "live-edge",
+                    test_scope=getattr(record, "test_scope", None) or "e2e",
                     publisher_host=record.publisher_host,
                     compute_vmaf_on_ingest=record.compute_vmaf_on_ingest,
                     compute_vmaf_encoder=record.compute_vmaf_encoder,
@@ -1424,6 +1468,40 @@ def read_result_summary(csv_path: str) -> dict:
         key: round(sum(_row_value(r, key) for r in rows) / count, 3)
         for key in numeric_keys
     }
+
+    # Headline fps from the frame counter over wall time. ffmpeg's per-sample
+    # `fps=` is a true instantaneous rate, but the sample interval is not
+    # constant, so an unweighted mean over-weights the short fast ticks — it
+    # read 32.2-32.7 fps for a 30fps source on MoQ legs where the counter says
+    # 29.78. See MetricsCollector._compute_averages for the same correction on
+    # the write path; this is the read path that rebuilds from CSV.
+    frame_counts = [
+        _row_value(r, "encode_frames_total")
+        for r in rows
+        if str(r.get("encode_frames_total", "")).strip() not in ("", "0")
+    ]
+    stamps = [
+        _row_value(r, "timestamp")
+        for r in rows
+        if str(r.get("timestamp", "")).strip() != ""
+    ]
+    if len(frame_counts) > 1 and len(stamps) > 1:
+        wall_sec = max(stamps) - min(stamps)
+        produced = max(frame_counts) - min(frame_counts)
+        if wall_sec > 0 and produced > 0:
+            averages["fps"] = round(produced / wall_sec, 3)
+
+    # Live playback gauges are blanked once the player stops reporting (see
+    # playback_metrics.PLAYBACK_STALE_AFTER_SEC). Averaging a blank as 0 would
+    # replace "we stopped measuring" with "it dropped to zero", which is the
+    # same forward-fill dishonesty in the other direction.
+    for gauge in ("playback_buffer_sec", "playback_bitrate_bps", "playback_video_time_sec"):
+        live = [
+            _row_value(r, gauge)
+            for r in rows
+            if str(r.get(gauge, "")).strip() != ""
+        ]
+        averages[gauge] = round(sum(live) / len(live), 3) if live else 0.0
 
     counter_keys = (
         "pkt_rcv_drop",

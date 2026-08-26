@@ -18,6 +18,7 @@ from playback_metrics import PLAYBACK_FIELD_NAMES  # noqa: E402
 
 COMPARABLE_COLUMNS = (
     "encode_lag_ms",
+    "upload_latency_ms",
     "net_rtt_ms",
     "net_jitter_ms",
     "net_loss_pct",
@@ -42,6 +43,13 @@ class CsvComparableMetricsTests(unittest.TestCase):
     def test_playback_merge_includes_e2e_and_error_count(self):
         for name in ("e2e_latency_ms", "playback_error_count", "playback_video_time_sec"):
             self.assertIn(name, PLAYBACK_FIELD_NAMES)
+
+    def test_playback_policy_is_on_the_csv(self):
+        self.assertIn("playback_policy", CSV_COLUMNS)
+        self.assertIn("playback_policy", PLAYBACK_FIELD_NAMES)
+
+    def test_test_scope_is_on_the_csv(self):
+        self.assertIn("test_scope", CSV_COLUMNS)
 
 
 if __name__ == "__main__":

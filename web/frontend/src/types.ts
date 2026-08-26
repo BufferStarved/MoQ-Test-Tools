@@ -40,7 +40,34 @@ export interface UploadSample {
   net_loss_pct?: number;
   net_retrans_pct?: number;
   encode_lag_ms?: number;
+  upload_latency_ms?: number | null;
   e2e_latency_ms?: number;
+  go_live_at_sec?: number;
+  go_live_e2e_ms?: number;
+  // Latency decomposition (src/latency_budget.py ↔ latencyBudget.ts).
+  latency_encode_ms?: number;
+  latency_segmentation_ms?: number;
+  latency_publish_ms?: number;
+  latency_network_ms?: number;
+  latency_packager_ms?: number;
+  latency_player_buffer_ms?: number;
+  latency_accounted_ms?: number;
+  latency_residual_ms?: number;
+  /** Components in excess of measured e2e — the signed other half. */
+  latency_overcount_ms?: number;
+  /** Comma-separated stage names with no instrument on this leg. */
+  latency_unmeasured?: string;
+  /** Comma-separated stages that do not exist on this protocol (WebRTC CMAF group). */
+  latency_not_applicable?: string;
+  /** Which span e2e_latency_ms covers: capture_to_glass | ingest_to_glass | capture_to_ingest. */
+  latency_e2e_scope?: string;
+  test_scope?: string;
+  encode_frames_total?: number;
+  encode_frames_dropped?: number;
+  encode_frames_duped?: number;
+  encode_frame_drop_pct?: number;
+  playback_frame_drop_pct?: number;
+  frame_delivery_pct?: number;
   playback_error_count?: number;
   pkt_rcv_drop?: number;
   pkt_snd_drop?: number;
@@ -87,6 +114,14 @@ export interface UploadSample {
   playback_video_time_sec?: number;
   playback_buffer_sec?: number;
   playback_rebuffer_sec?: number;
+  // Startup decomposition, player half (src/startup_budget.py ↔
+  // startupTiming.ts). Durations in ms that reconcile against
+  // playback_ttff_ms. `null` means no instrument backs the phase on this
+  // engine — never 0, which would read as "measured, and it was free".
+  startup_player_request_ms?: number | null;
+  startup_manifest_ms?: number | null;
+  startup_first_media_ms?: number | null;
+  startup_first_paint_ms?: number | null;
 }
 
 export interface EndpointConfig {
@@ -114,6 +149,8 @@ export interface UploadJob {
   preset_id?: string;
   encode_ladder?: string | null;
   target_latency_ms?: number | null;
+  playback_policy?: "live-edge" | "complete" | string | null;
+  test_scope?: "upload" | "e2e" | string | null;
   publisher_host?: "cloud" | "local" | "browser" | string | null;
   moq_namespace?: string | null;
   zixi_stream_id?: string | null;
@@ -149,12 +186,12 @@ export interface UploadJob {
   samples: UploadSample[];
   compute_vmaf_on_ingest?: boolean;
   compute_vmaf_encoder?: boolean;
-  vmaf_status?: string;
+  vmaf_status?: string | null;
   vmaf_score?: number | null;
   psnr_db?: number | null;
   ssim?: number | null;
   vmaf_error?: string | null;
-  encoder_vmaf_status?: string;
+  encoder_vmaf_status?: string | null;
   encoder_vmaf_score?: number | null;
   encoder_psnr_db?: number | null;
   encoder_ssim?: number | null;
@@ -184,19 +221,71 @@ export interface QualityLeg {
   error?: string;
 }
 
+/**
+ * Per-run summary values keyed by CSV column.
+ *
+ * Named and index-signed on purpose. The backend derives this bag from
+ * whatever columns exist in `CSV_COLUMNS`, so a closed object type forces an
+ * edit here for every new metric — and the common `result.averages ?? {}`
+ * idiom widened to `Averages | {}`, which made *every* property read a type
+ * error. The listed keys stay for autocomplete and documentation.
+ *
+ * Not all entries are means: cumulative counters are run totals from the final
+ * sample (see `averages_note` in the summary JSON).
+ */
+export interface ResultAverages {
+  [column: string]: number | undefined;
+  cpu_percent?: number;
+  memory_mb?: number;
+  encoded_bitrate_kbps?: number;
+  fps?: number;
+  fps_stability?: number;
+  speed?: number;
+  encode_lag_ms?: number;
+  upload_latency_ms?: number;
+  // Latency decomposition (src/latency_budget.py).
+  latency_encode_ms?: number;
+  latency_segmentation_ms?: number;
+  latency_publish_ms?: number;
+  latency_network_ms?: number;
+  latency_packager_ms?: number;
+  latency_player_buffer_ms?: number;
+  latency_accounted_ms?: number;
+  latency_residual_ms?: number;
+  latency_overcount_ms?: number;
+  // Frame accounting.
+  encode_frames_total?: number;
+  encode_frames_dropped?: number;
+  encode_frames_duped?: number;
+  encode_frame_drop_pct?: number;
+  playback_frame_drop_pct?: number;
+  frame_delivery_pct?: number;
+}
+
+/**
+ * The non-numeric entries in the same bag.
+ *
+ * Kept as an intersection rather than extra properties on `ResultAverages`
+ * because that interface's index signature is `number | undefined`, and
+ * widening it to include `string` would make every arithmetic read of an
+ * average a type error. These are annotations, not measurements.
+ *
+ * Note the key is `latency_unmeasured_stages`, not the per-sample
+ * `latency_unmeasured`: the run-level value only lists stages that had no
+ * instrument on *every* sample, so it is a different (stricter) statement
+ * than any single row's.
+ */
+export interface ResultAverageAnnotations {
+  latency_unmeasured_stages?: string;
+}
+
 export interface ResultSummary {
   filename: string;
   samples: number;
   protocol?: string | null;
   endpoint?: string | null;
-  averages?: {
-    cpu_percent: number;
-    memory_mb: number;
-    encoded_bitrate_kbps: number;
-    fps: number;
-    fps_stability?: number;
-    speed: number;
-    encode_lag_ms?: number;
+  averages?: ResultAverages &
+    ResultAverageAnnotations & {
     transport_rtt_ms?: number;
     net_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
@@ -279,5 +368,11 @@ export interface ResultSummary {
     vmaf_distorted_path?: string;
     vmaf_pending_on_ingest?: boolean;
     vmaf_note?: string;
+    /** Player that actually produced the playback columns (whep, ll-hls, moq…). */
+    playback_engine?: string;
+    /** Set when playback_engine is not the protocol's own delivery path. */
+    playback_engine_caveat?: string;
+    playback_policy?: string;
+    test_scope?: string;
   };
 }

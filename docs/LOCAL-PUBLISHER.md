@@ -4,20 +4,14 @@ Run **ffmpeg on your laptop** while the UI/API orchestrates jobs and talks to re
 ingest (Zixi / MediaMTX / MoQ). That is the true internet-acquisition path: your
 ISP and Wi‑Fi sit between the encoder and the cloud ingest hosts.
 
-> **Hosted site:** Local publish is enabled by default (`LOCAL_PUBLISHER_ENABLED=1` on
-> the web VM). Choose **Webcam** under Source in the UI — the Run recipe shows a
-> copy-paste agent command for this site. Set `LOCAL_PUBLISHER_ENABLED=0` to disable the
-> Webcam option entirely (VOD-on-cloud remains available either way).
+> **Public site:** Webcam+ffmpeg is supported, but the helper must be
+> started from **that browser's** command (`LOCAL_PUBLISHER_SESSION=…`).
+> Paste it in any directory — it finds a checkout (or clones one).
+> Jobs only go to the helper for that session — never a shared operator
+> laptop. A helper without a session is refused.
 >
-> **Hosted quick start** (after cloning the repo once):
->
-> ```bash
-> LOCAL_PUBLISHER_API=https://moq.sean-mccarthy.net \
-> LOCAL_PUBLISHER_TOKEN=dev-local-publisher \
-> ./scripts/run-local-publisher.sh
-> ```
->
-> Prefer OBS or your own ffmpeg? See [BYO-ENCODER.md](./BYO-ENCODER.md) for publish URLs and settings.
+> Prefer OBS or your own ffmpeg against cloud ingest URLs? See
+> [BYO-ENCODER.md](./BYO-ENCODER.md).
 
 ## Quick start (dev)
 
@@ -73,10 +67,10 @@ Browser  →  local API (orchestrator, SSE, Results)
            Internet → Zixi / MediaMTX / MoQ ingest
 ```
 
-- Feature flag: `LOCAL_PUBLISHER_ENABLED=1` (default in `scripts/dev.sh` and the web VM install).
-- Shared token: `LOCAL_PUBLISHER_TOKEN` (default `dev-local-publisher`).
-- Agent connects **outbound** to `ws://127.0.0.1:8000/api/publisher-agent/ws` (no inbound ports).
-- Create upload with `publisher_host: "local"`; JobManager dispatches to the agent instead of in-process ffmpeg.
+- Feature flag: `LOCAL_PUBLISHER_ENABLED=1` in `scripts/dev.sh`. Prod keeps Webcam+ffmpeg on via per-browser `LOCAL_PUBLISHER_SESSION` (never a shared agent pool).
+- Shared token: `LOCAL_PUBLISHER_TOKEN` (default `dev-local-publisher`) is localhost-only.
+- Agent connects **outbound** to `/api/publisher-agent/ws` (no inbound ports).
+- Create upload with `publisher_host: "local"` and the browser session; JobManager dispatches only to that session's helper.
 
 ### Media paths
 
@@ -123,9 +117,8 @@ Check only:
 | `POST /api/uploads` + `publisher_host=local` | Dispatch encode to a connected agent |
 | `POST /api/media/upload` | Stage a local file for the agent (same machine in v1) |
 
-Later: point the agent at `wss://moq.sean-mccarthy.net/api/publisher-agent/ws` with a
-user-issued token; the hosted UI will show the same Publisher toggle once the
-flag is enabled server-side for that deployment.
+Do not point the agent at `wss://moq.sean-mccarthy.net`. Laptop webcam
+stays on localhost (`./scripts/dev.sh`).
 
 ## Limits (v1)
 
@@ -140,8 +133,5 @@ flag is enabled server-side for that deployment.
 - [RTMP-STARTUP.md](./RTMP-STARTUP.md) — RTMP join latency
 - [METRICS.md](./METRICS.md) — chart definitions
 
-## Roadmap toward hosted users
-
-1. Issue per-user agent tokens from the hosted API (shared `LOCAL_PUBLISHER_TOKEN` is fine for a single operator).
-2. Point the agent at the hosted API: `--api https://moq.sean-mccarthy.net` (feature flag defaults on).
-3. Stream chosen files to a remote agent (or upload directly to the agent) when API and laptop diverge.
+Laptop webcam encode is a local-dev feature only. The public site must
+keep `LOCAL_PUBLISHER_ENABLED=0`.

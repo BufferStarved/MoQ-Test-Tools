@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import { BuildStamp } from "./BuildStamp";
+import { BuildStamp } from "./BuildStamp.tsx";
 import { HarnessPage } from "./HarnessPage";
 import "./App.css";
 

@@ -9,6 +9,7 @@ import {
 } from "./chartData";
 import { MetricChart } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
+import { StartupBreakdown } from "./StartupBreakdown";
 import { metricUnavailableMessage, metricSupportedForProtocol, WHIP_ENCODE_BITRATE_NOTE, webrtcEncodeBitrateUnreported } from "./metricModel";
 import type { ResultSummary, UploadSample } from "./types";
 
@@ -149,6 +150,7 @@ export function ResultCharts({
               keepZeroSeries
             />
             {(hasData(points, "encode_lag_ms") ||
+              hasData(points, "upload_latency_ms") ||
               hasData(points, "fps_stability") ||
               hasData(points, "speed")) && (
               <MetricChart
@@ -158,6 +160,7 @@ export function ResultCharts({
                 series={encodeGroup.series.filter(
                   (series) =>
                     series.key === "encode_lag_ms" ||
+                    series.key === "upload_latency_ms" ||
                     series.key === "fps_stability" ||
                     series.key === "speed",
                 )}
@@ -203,7 +206,7 @@ export function ResultCharts({
                 "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
                 "SRT RTT: libsrt / Zixi receiver.",
                 "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
-                "MoQ RTT: QUIC qlog when available; otherwise a TCP probe to the relay (same host as WebTransport).",
+                "MoQ RTT/jitter: picoquic qlog from moq5-fmp4-publish. Blank only before the first qlog sample — not a TCP admin probe.",
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}
             />
@@ -412,6 +415,21 @@ export function ResultCharts({
               />
             )}
           </>
+        )}
+
+        {/*
+          Startup happens once, so it draws stacked bars instead of a time
+          series. This block has to stay paired with the chartData mapping: a
+          group with a CHART_GROUPS entry and no mapped keys — or no render
+          block — shows an empty grid, which is how `latency_budget` reads.
+        */}
+        {currentGroup.id === "startup_breakdown" && (
+          <StartupBreakdown
+            result={result}
+            liveSamples={liveSamples}
+            protocol={resolvedProtocol}
+            playbackEngine={result?.summary_extra?.playback_engine}
+          />
         )}
       </div>
     </div>

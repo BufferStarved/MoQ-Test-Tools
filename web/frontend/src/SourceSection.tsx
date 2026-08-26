@@ -4,7 +4,7 @@ import type { CloudEncodeHostId } from "./ingestEndpoints";
 import { LocalPublisherSetup } from "./LocalPublisherSetup";
 import { detectBrowserMoqCapabilities } from "./browserMoq/capabilities";
 import { BrowserMoqPreview } from "./browserMoq/BrowserMoqPreview";
-import { IconCamera, IconCpu, IconFilm } from "./Icons";
+import { IconCamera, IconFilm } from "./Icons";
 import { StatusDot } from "./StatusDot";
 import { StepHeading } from "./StepHeading";
 import { WebcamLivePreview } from "./WebcamLivePreview";
@@ -12,21 +12,29 @@ import { WebcamLivePreview } from "./WebcamLivePreview";
 export type MediaSourceId = "dummy" | "bbb" | "upload" | "webcam" | "browser_moq";
 export const DEVICE_BROWSER_MEDIA = "device:browser";
 export type { CloudEncodeHostId };
-export type EncoderId = "ffmpeg" | "obs" | "wowza";
+export type EncoderId = "ffmpeg" | "obs" | "browser";
 
 export const LOCAL_DEVICE_WEBCAM = "device:webcam";
+export const OBS_OPENMOQ_MEDIA = "obs:openmoq";
 export const BBB_MEDIA_PATH = "bbb.mp4";
 /** Cloud playout clip length — matches color bars and the API bundled cap. */
 export const CLOUD_PLAYOUT_DURATION_SEC = 60;
 
 export function sourceModeExplainer(mediaSource: MediaSourceId): string {
-  if (mediaSource === "webcam") {
-    return "Captures this laptop’s camera. Encodes here with a small helper app. Pick this for last-mile or OBS Virtual Camera.";
+  if (mediaSource === "webcam" || mediaSource === "browser_moq") {
+    return "Laptop → cloud ingest: this computer’s camera (last-mile). ffmpeg (helper, default) opens the camera on the machine where you start the helper. Browser encodes in this tab. OBS is unavailable while public MoQ is draft-18.";
   }
-  if (mediaSource === "browser_moq") {
-    return "Captures this laptop’s camera in this tab. Encodes in the browser. Pick this if you do not have a helper app — no special ffmpeg required.";
+  return "Cloud → cloud ingest: dummy bars, Big Buck Bunny, or a file already on the VM. Encodes on the cloud host with server ffmpeg — not pulled through this laptop. Last-mile engines are under Webcam.";
+}
+
+export function encoderModeExplainer(encoder: EncoderId): string {
+  if (encoder === "obs") {
+    return "OBS encodes. The OpenMOQ plugin is draft-16 only — it cannot publish to this site’s draft-18 relays. Use ffmpeg (helper) for MoQ.";
   }
-  return "Plays color bars or Big Buck Bunny on the server. Encodes in the cloud. Pick this to compare protocols without a camera.";
+  if (encoder === "browser") {
+    return "This tab encodes (WebCodecs). MoQ and WebRTC only — no SRT or RTMP. No helper app.";
+  }
+  return "ffmpeg (helper) encodes every protocol on this laptop: SRT, RTMP, WebRTC (if WHIP), and MoQ. This is the default last-mile path.";
 }
 
 interface SourceSectionProps {
@@ -36,8 +44,8 @@ interface SourceSectionProps {
   mediaLabel: string;
   uploadingMedia: boolean;
   onUploadFile: (file: File) => void;
-  encoder: EncoderId;
-  onEncoderChange: (encoder: EncoderId) => void;
+  /** Last-mile encoder. Preview stays off when OBS owns the camera. */
+  encoder?: EncoderId;
   features: FeatureFlags;
   webcamDeviceIndex: string;
   onWebcamDeviceIndexChange: (index: string) => void;
@@ -50,6 +58,13 @@ interface SourceSectionProps {
   browserPreviewStream?: MediaStream | null;
   bbbAvailable?: boolean;
   bbbHint?: string | null;
+  /** Highlight the draft-18 helper when an output is the :14433 canary. */
+  preferD18Helper?: boolean;
+  step?: number;
+  /** Precanned recipes that already chose Webcam vs Cloud hide the mode cards. */
+  hideModePicker?: boolean;
+  /** Per-browser helper binding so ffmpeg opens this user's camera. */
+  publisherSession?: string;
 }
 
 export function SourceSection({
@@ -59,8 +74,7 @@ export function SourceSection({
   mediaLabel,
   uploadingMedia,
   onUploadFile,
-  encoder: _encoder,
-  onEncoderChange: _onEncoderChange,
+  encoder = "ffmpeg",
   features,
   webcamDeviceIndex,
   onWebcamDeviceIndexChange,
@@ -72,13 +86,24 @@ export function SourceSection({
   browserPreviewStream = null,
   bbbAvailable = false,
   bbbHint = null,
+  preferD18Helper = false,
+  step = 1,
+  hideModePicker = false,
+  publisherSession = "",
 }: SourceSectionProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const isLocalWebcam = mediaSource === "webcam";
-  const isBrowserMoq = mediaSource === "browser_moq";
+  const isBrowserEngine = mediaSource === "browser_moq" || encoder === "browser";
+  const isLocalWebcam = mediaSource === "webcam" || isBrowserEngine;
   const isCloudPlayout = mediaSource === "dummy" || mediaSource === "bbb" || mediaSource === "upload";
   const browserCaps = detectBrowserMoqCapabilities();
   const localAgentAvailable = features.local_publisher;
+  const agentConnected = Boolean(localAgentAvailable && features.local_publisher_connected);
+
+  function selectWebcam() {
+    if (!isLocalWebcam) {
+      onMediaSourceChange("webcam");
+    }
+  }
 
   function selectCloudPlayout() {
     if (!isCloudPlayout) {
@@ -88,10 +113,12 @@ export function SourceSection({
 
   return (
     <div className="source-media-section source-section">
+      {!hideModePicker && (
+        <>
       <StepHeading
-        step={1}
+        step={step}
         title="Source"
-        tip="Webcam uses this laptop’s helper app. Browser captures in this tab. Cloud playout is dummy bars or BBB on the server."
+        tip="Webcam is laptop→cloud contribution from this computer’s camera. Cloud playout / VOD encodes dummy, BBB, or a cloud file on the VM. Then pick ffmpeg or Browser under Encode when using Webcam."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
@@ -100,29 +127,13 @@ export function SourceSection({
             name="source-mode"
             checked={isLocalWebcam}
             disabled={disabled}
-            onChange={() => onMediaSourceChange("webcam")}
+            onChange={selectWebcam}
           />
           <span className="source-mode-card-body">
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
-            <span className="source-mode-card-hint">This laptop + helper app</span>
-          </span>
-        </label>
-        <label className={`source-mode-card${isBrowserMoq ? " selected" : ""}`}>
-          <input
-            type="radio"
-            name="source-mode"
-            checked={isBrowserMoq}
-            disabled={disabled || !browserCaps.ok}
-            onChange={() => onMediaSourceChange("browser_moq")}
-          />
-          <span className="source-mode-card-body">
-            <strong>
-              <IconCpu size={15} /> Browser
-            </strong>
-            <span className="source-mode-card-hint">This tab, no helper app</span>
-            {!browserCaps.ok && <span className="field-hint">{browserCaps.reason}</span>}
+            <span className="source-mode-card-hint">This computer → cloud ingest</span>
           </span>
         </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
@@ -135,15 +146,17 @@ export function SourceSection({
           />
           <span className="source-mode-card-body">
             <strong>
-              <IconFilm size={15} /> Cloud playout
+              <IconFilm size={15} /> Cloud playout / VOD
             </strong>
-            <span className="source-mode-card-hint">Dummy / BBB on the server</span>
+            <span className="source-mode-card-hint">Cloud → cloud ingest</span>
           </span>
         </label>
       </div>
       <p className="source-mode-explainer">{sourceModeExplainer(mediaSource)}</p>
+        </>
+      )}
 
-      {isCloudPlayout && (
+      {!hideModePicker && isCloudPlayout && (
         <div className="source-mode-detail source-cloud-detail">
           <div className="source-asset-row">
             <label>
@@ -200,18 +213,24 @@ export function SourceSection({
         </div>
       )}
 
-      {isLocalWebcam && (
+      {isLocalWebcam && !isBrowserEngine && (
         <div className="source-mode-detail webcam-detail">
           <div className="webcam-detail-main">
             <div className="webcam-detail-controls">
-              {localAgentAvailable && features.local_publisher_connected ? (
+              {agentConnected ? (
                 <>
                   <StatusDot
                     tone="ok"
-                    label="Helper app connected"
-                    className="webcam-detail-connected"
+                    label="Agent Connected"
+                    className="webcam-detail-connected agent-connected-badge"
                   />
-                  {agentWebcamDevices.length > 0 && (
+                  {encoder === "obs" && (
+                    <p className="field-hint">
+                      OBS owns the scene. Pick ffmpeg under Encode if you want this helper
+                      to open the camera instead.
+                    </p>
+                  )}
+                  {agentWebcamDevices.length > 0 && encoder !== "obs" && (
                     <label className="webcam-device-picker">
                       Camera
                       <select
@@ -232,34 +251,40 @@ export function SourceSection({
                   {features.local_publisher_whip === false && (
                     <p className="field-hint">
                       This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch
-                      to Cloud playout or Browser.
+                      to Cloud playout or Webcam + Browser.
                     </p>
                   )}
                 </>
               ) : (
                 <>
-                  <StatusDot tone="warn" label="Webcam helper not running yet" />
+                  <StatusDot
+                    tone="warn"
+                    label="Helper not running"
+                    className="agent-waiting-badge"
+                  />
                   <p className="field-hint">
-                    The site is fine. Switch to Cloud playout or Browser to run a comparison
-                    now — those work in this page without a helper app.
+                    The site is fine. Switch to Cloud playout or Webcam + Browser to run a
+                    comparison now — those work in this page without a helper app.
                   </p>
                   <LocalPublisherSetup
                     apiOrigin={window.location.origin}
                     connected={false}
                     compact
                     variant="webcam"
+                    preferD18={preferD18Helper}
+                    publisherSession={publisherSession}
                   />
                 </>
               )}
             </div>
-            {localAgentAvailable && features.local_publisher_connected ? (
+            {agentConnected && encoder !== "obs" ? (
               <WebcamLivePreview active={isLocalWebcam} running={running} deviceIndex={webcamDeviceIndex} />
             ) : null}
           </div>
         </div>
       )}
 
-      {isBrowserMoq && (
+      {isLocalWebcam && isBrowserEngine && (
         <div className="source-mode-detail webcam-detail">
           <div className={`webcam-detail-main${browserPreviewStream ? "" : " webcam-detail-main-compact"}`}>
             <div className="webcam-detail-controls">
@@ -270,7 +295,7 @@ export function SourceSection({
               {webcamStatus && <span className="field-hint">{webcamStatus}</span>}
             </div>
             {browserPreviewStream ? (
-              <BrowserMoqPreview stream={browserPreviewStream} active={isBrowserMoq} />
+              <BrowserMoqPreview stream={browserPreviewStream} active={isBrowserEngine} />
             ) : null}
           </div>
         </div>

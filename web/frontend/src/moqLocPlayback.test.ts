@@ -26,6 +26,10 @@ describe("moqCatchUpConfig packaging", () => {
   it("enables LOC catch-up so the canvas can close a live-edge gap", () => {
     assert.equal(moqCatchUpConfig(400, "loc").maxCatchUpRate, 1.25);
   });
+
+  it("caps LOC catch-up at 1.0× in complete playback", () => {
+    assert.equal(moqCatchUpConfig(400, "loc", "complete").maxCatchUpRate, 1.0);
+  });
 });
 
 describe("classifyLocFrameStall", () => {

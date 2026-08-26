@@ -1,19 +1,125 @@
 import type { Preset } from "./types";
 
-export type IngestEndpointId =
-  | "gcp_zixi"
-  | "gcp_mediamtx"
-  | "gcp_moq_relay"
-  | "gcp_east_zixi"
-  | "gcp_east_mediamtx"
-  | "gcp_east_moq_relay"
-  | "linode_zixi"
-  | "linode_mediamtx"
-  | "linode_moq_relay"
-  | "aws_zixi"
-  | "custom";
+/**
+ * Nine encode/ingest hosts. Labels are the product names. cloudRegion is the
+ * real provider slug (GCP West = us-west1 Oregon, not Iowa; Linode Central =
+ * us-central Dallas; AWS Central = us-east-2 Ohio).
+ *
+ * ingestPrefix keeps live recipe IDs: gcp_* (central), gcp_east_*, linode_* (east).
+ */
+export const ENCODE_HOSTS = [
+  {
+    id: "gcp_east",
+    provider: "gcp",
+    region: "east",
+    label: "GCP East",
+    cloudRegion: "us-east1",
+    ingestPrefix: "gcp_east",
+    presetSlug: "gcp_east",
+    subtitle: "us-east1",
+    defaultAvailable: true,
+  },
+  {
+    id: "gcp_central",
+    provider: "gcp",
+    region: "central",
+    label: "GCP Central",
+    cloudRegion: "us-central1",
+    ingestPrefix: "gcp",
+    presetSlug: "gcp",
+    subtitle: "us-central1 (Iowa)",
+    defaultAvailable: true,
+  },
+  {
+    id: "gcp_west",
+    provider: "gcp",
+    region: "west",
+    label: "GCP West",
+    cloudRegion: "us-west1",
+    ingestPrefix: "gcp_west",
+    presetSlug: "gcp_west",
+    subtitle: "us-west1 (Oregon)",
+    defaultAvailable: false,
+  },
+  {
+    id: "linode_east",
+    provider: "linode",
+    region: "east",
+    label: "Linode East",
+    cloudRegion: "us-east",
+    ingestPrefix: "linode",
+    presetSlug: "linode",
+    subtitle: "us-east (Newark)",
+    defaultAvailable: false,
+  },
+  {
+    id: "linode_central",
+    provider: "linode",
+    region: "central",
+    label: "Linode Central",
+    cloudRegion: "us-central",
+    ingestPrefix: "linode_central",
+    presetSlug: "linode_central",
+    subtitle: "us-central (Dallas)",
+    defaultAvailable: false,
+  },
+  {
+    id: "linode_west",
+    provider: "linode",
+    region: "west",
+    label: "Linode West",
+    cloudRegion: "us-west",
+    ingestPrefix: "linode_west",
+    presetSlug: "linode_west",
+    subtitle: "us-west (Fremont)",
+    defaultAvailable: false,
+  },
+  {
+    id: "aws_east",
+    provider: "aws",
+    region: "east",
+    label: "AWS East",
+    cloudRegion: "us-east-1",
+    ingestPrefix: "aws_east",
+    presetSlug: "aws_east",
+    subtitle: "us-east-1",
+    defaultAvailable: false,
+  },
+  {
+    id: "aws_central",
+    provider: "aws",
+    region: "central",
+    label: "AWS Central",
+    cloudRegion: "us-east-2",
+    ingestPrefix: "aws_central",
+    presetSlug: "aws_central",
+    subtitle: "us-east-2 (Ohio)",
+    defaultAvailable: false,
+  },
+  {
+    id: "aws_west",
+    provider: "aws",
+    region: "west",
+    label: "AWS West",
+    cloudRegion: "us-west-2",
+    ingestPrefix: "aws_west",
+    presetSlug: "aws_west",
+    subtitle: "us-west-2",
+    defaultAvailable: false,
+  },
+] as const;
 
-export type CloudEncodeHostId = "gcp" | "gcp_east" | "linode" | "aws";
+export type EncodeHostDef = (typeof ENCODE_HOSTS)[number];
+export type CloudEncodeHostId = EncodeHostDef["id"];
+type HostIngestPrefix = EncodeHostDef["ingestPrefix"];
+
+export type IngestEndpointId =
+  | `${HostIngestPrefix}_zixi`
+  | `${HostIngestPrefix}_mediamtx`
+  | `${HostIngestPrefix}_moq_relay`
+  | `${HostIngestPrefix}_moq_relay_d18`
+  | "custom"
+  | "aws_zixi";
 
 export interface IngestEndpointOption {
   id: IngestEndpointId;
@@ -22,57 +128,83 @@ export interface IngestEndpointOption {
   available: boolean;
 }
 
+const HOST_BY_ID: Record<CloudEncodeHostId, EncodeHostDef> = Object.fromEntries(
+  ENCODE_HOSTS.map((host) => [host.id, host]),
+) as Record<CloudEncodeHostId, EncodeHostDef>;
+
+const HOSTS_LONGEST_PREFIX = [...ENCODE_HOSTS].sort(
+  (left, right) => right.ingestPrefix.length - left.ingestPrefix.length,
+);
+
+const LEGACY_HOST_ALIASES: Record<string, CloudEncodeHostId> = {
+  gcp: "gcp_central",
+  linode: "linode_east",
+  aws: "aws_east",
+};
+
+export const CLOUD_ENCODE_HOST_IDS: CloudEncodeHostId[] = ENCODE_HOSTS.map((host) => host.id);
+
+const INGEST_ROLES = [
+  {
+    role: "zixi" as const,
+    labelPrefix: "Zixi",
+    detail: "Broadcaster Fast HLS / MPEG-TS",
+  },
+  {
+    role: "mediamtx" as const,
+    labelPrefix: "MediaMTX",
+    detail: "LL-HLS / LL-DASH / WHEP",
+  },
+  {
+    role: "moq_relay" as const,
+    labelPrefix: "OpenMOQ draft-16",
+    detail: "Legacy :4433 / moqt-16. Hidden — same stall as draft-18, not actively worked.",
+  },
+  {
+    role: "moq_relay_d18" as const,
+    labelPrefix: "OpenMOQ",
+    detail: "WebTransport :14433 · moqt-18",
+  },
+];
+
+function ingestIdFor(host: EncodeHostDef, role: (typeof INGEST_ROLES)[number]["role"]): IngestEndpointId {
+  return `${host.ingestPrefix}_${role}` as IngestEndpointId;
+}
+
+function presetIdsFor(
+  host: EncodeHostDef,
+  role: (typeof INGEST_ROLES)[number]["role"],
+): Partial<Record<string, string>> {
+  const slug = host.presetSlug;
+  if (role === "zixi") {
+    return {
+      srt: `moq_zixi_${slug}`,
+      rtmp: `moq_zixi_${slug}_rtmp`,
+      hls: `moq_zixi_${slug}_hls`,
+      dash: `moq_zixi_${slug}_dash`,
+    };
+  }
+  if (role === "mediamtx") {
+    return {
+      srt: `moq_mediamtx_${slug}_srt`,
+      rtmp: `moq_mediamtx_${slug}_rtmp`,
+      webrtc: `moq_mediamtx_${slug}_whip`,
+    };
+  }
+  if (role === "moq_relay") {
+    return { moq: `moq_${slug}_relay` };
+  }
+  return { moq: `moq_${slug}_relay_d18` };
+}
+
 const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
-  {
-    id: "gcp_zixi",
-    label: "Zixi · GCP us-central1",
-    detail: "Broadcaster Fast HLS / MPEG-TS",
-  },
-  {
-    id: "gcp_mediamtx",
-    label: "MediaMTX · GCP us-central1",
-    detail: "LL-HLS / LL-DASH / WHEP",
-  },
-  {
-    id: "gcp_moq_relay",
-    label: "OpenMOQ · GCP us-central1",
-    detail: "MoQ relay (WebTransport)",
-  },
-  {
-    id: "gcp_east_zixi",
-    label: "Zixi · GCP us-east1",
-    detail: "Broadcaster Fast HLS / MPEG-TS",
-  },
-  {
-    id: "gcp_east_mediamtx",
-    label: "MediaMTX · GCP us-east1",
-    detail: "LL-HLS / LL-DASH / WHEP",
-  },
-  {
-    id: "gcp_east_moq_relay",
-    label: "OpenMOQ · GCP us-east1",
-    detail: "MoQ relay (WebTransport)",
-  },
-  {
-    id: "linode_zixi",
-    label: "Zixi · Linode",
-    detail: "Broadcaster Fast HLS / MPEG-TS",
-  },
-  {
-    id: "linode_mediamtx",
-    label: "MediaMTX · Linode",
-    detail: "LL-HLS / LL-DASH / WHEP",
-  },
-  {
-    id: "linode_moq_relay",
-    label: "OpenMOQ · Linode",
-    detail: "MoQ relay (WebTransport)",
-  },
-  {
-    id: "aws_zixi",
-    label: "Zixi · AWS",
-    detail: "Coming soon",
-  },
+  ...ENCODE_HOSTS.flatMap((host) =>
+    INGEST_ROLES.map((role) => ({
+      id: ingestIdFor(host, role.role),
+      label: `${role.labelPrefix} · ${host.label}`,
+      detail: role.detail,
+    })),
+  ),
   {
     id: "custom",
     label: "Custom URL",
@@ -80,91 +212,52 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   },
 ];
 
-/** Hosts hidden from web recipes. Empty while all configured stacks are live. */
-export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set();
+/** Draft-16 :4433 stays up but is not offered. Same stall; draft-18 is the MoQ path. */
+export const RECIPE_HIDDEN_INGEST_IDS: ReadonlySet<string> = new Set(
+  ENCODE_HOSTS.map((host) => ingestIdFor(host, "moq_relay")),
+);
 
 /** Static list (legacy). Prefer `ingestEndpointsFromPresets` when presets are loaded. */
 export const INGEST_ENDPOINTS: IngestEndpointOption[] = INGEST_ENDPOINT_DEFS.map((item) => ({
   ...item,
   available:
     item.id === "custom" ||
-    (!RECIPE_HIDDEN_INGEST_IDS.has(item.id) && item.id.startsWith("gcp_")),
+    (!RECIPE_HIDDEN_INGEST_IDS.has(item.id) &&
+      encodeHostById(cloudHostFromIngest(item.id)).defaultAvailable),
 }));
 
-const ENDPOINT_PROVIDER: Record<IngestEndpointId, string | ""> = {
-  gcp_zixi: "gcp_zixi",
-  gcp_mediamtx: "gcp_mediamtx",
-  gcp_moq_relay: "gcp_moq_relay",
-  gcp_east_zixi: "gcp_east_zixi",
-  gcp_east_mediamtx: "gcp_east_mediamtx",
-  gcp_east_moq_relay: "gcp_east_moq_relay",
-  linode_zixi: "linode_zixi",
-  linode_mediamtx: "linode_mediamtx",
-  linode_moq_relay: "linode_moq_relay",
-  aws_zixi: "aws_zixi",
-  custom: "",
-};
+const ENDPOINT_PROVIDER: Record<string, string> = Object.fromEntries(
+  INGEST_ENDPOINT_DEFS.map((item) => [item.id, item.id]),
+);
+ENDPOINT_PROVIDER.custom = "";
+ENDPOINT_PROVIDER.aws_zixi = "aws_east_zixi";
 
-const PRESET_IDS_BY_ENDPOINT: Record<IngestEndpointId, Partial<Record<string, string>>> = {
-  gcp_zixi: {
-    srt: "moq_zixi_gcp",
-    rtmp: "moq_zixi_gcp_rtmp",
-    hls: "moq_zixi_gcp_hls",
-    dash: "moq_zixi_gcp_dash",
-  },
-  gcp_mediamtx: {
-    srt: "moq_mediamtx_gcp_srt",
-    rtmp: "moq_mediamtx_gcp_rtmp",
-    webrtc: "moq_mediamtx_gcp_whip",
-  },
-  gcp_moq_relay: {
-    moq: "moq_gcp_relay",
-  },
-  gcp_east_zixi: {
-    srt: "moq_zixi_gcp_east",
-    rtmp: "moq_zixi_gcp_east_rtmp",
-    hls: "moq_zixi_gcp_east_hls",
-    dash: "moq_zixi_gcp_east_dash",
-  },
-  gcp_east_mediamtx: {
-    srt: "moq_mediamtx_gcp_east_srt",
-    rtmp: "moq_mediamtx_gcp_east_rtmp",
-    webrtc: "moq_mediamtx_gcp_east_whip",
-  },
-  gcp_east_moq_relay: {
-    moq: "moq_gcp_east_relay",
-  },
-  linode_zixi: {
-    srt: "moq_zixi_linode",
-    rtmp: "moq_zixi_linode_rtmp",
-    hls: "moq_zixi_linode_hls",
-    dash: "moq_zixi_linode_dash",
-  },
-  linode_mediamtx: {
-    srt: "moq_mediamtx_linode_srt",
-    rtmp: "moq_mediamtx_linode_rtmp",
-    webrtc: "moq_mediamtx_linode_whip",
-  },
-  linode_moq_relay: {
-    moq: "moq_linode_relay",
-  },
-  aws_zixi: {
-    srt: "zixi_aws_srt",
-    rtmp: "zixi_aws_rtmp",
-    hls: "zixi_aws_hls",
-    dash: "zixi_aws_dash",
-  },
-  custom: {},
-};
+const PRESET_IDS_BY_ENDPOINT: Record<string, Partial<Record<string, string>>> = Object.fromEntries(
+  ENCODE_HOSTS.flatMap((host) =>
+    INGEST_ROLES.map((role) => [ingestIdFor(host, role.role), presetIdsFor(host, role.role)]),
+  ),
+);
+PRESET_IDS_BY_ENDPOINT.custom = {};
+PRESET_IDS_BY_ENDPOINT.aws_zixi = presetIdsFor(HOST_BY_ID.aws_east, "zixi");
 
-function regionLabelForProvider(presets: Preset[], ingestPrefix: string): string {
-  const match = presets.find(
-    (preset) =>
-      (preset.ingest_provider || "").startsWith(`${ingestPrefix}_`) &&
-      preset.cloud_region &&
-      preset.web_available,
-  );
-  return match?.cloud_region ? ` · ${match.cloud_region}` : "";
+function encodeHostById(host: CloudEncodeHostId): EncodeHostDef {
+  return HOST_BY_ID[host];
+}
+
+export function normalizeCloudHost(host: string): CloudEncodeHostId {
+  if (host in HOST_BY_ID) {
+    return host as CloudEncodeHostId;
+  }
+  return LEGACY_HOST_ALIASES[host] ?? "gcp_central";
+}
+
+export function encodeHostProvider(host: CloudEncodeHostId): EncodeHostDef["provider"] {
+  return encodeHostById(normalizeCloudHost(host)).provider;
+}
+
+export function encodeHostRank(host: CloudEncodeHostId): number {
+  const index = ENCODE_HOSTS.findIndex((item) => item.id === normalizeCloudHost(host));
+  return index < 0 ? ENCODE_HOSTS.length : index;
 }
 
 function endpointAvailable(endpointId: IngestEndpointId, presets: Preset[]): boolean {
@@ -179,6 +272,9 @@ function endpointAvailable(endpointId: IngestEndpointId, presets: Preset[]): boo
     return false;
   }
   const presetIds = Object.values(PRESET_IDS_BY_ENDPOINT[endpointId] ?? {});
+  if (presets.length === 0) {
+    return encodeHostById(cloudHostFromIngest(endpointId)).defaultAvailable;
+  }
   if (presetIds.length > 0) {
     return presetIds.some((presetId) => {
       const preset = presets.find((item) => item.id === presetId);
@@ -207,34 +303,41 @@ export function isIngestEndpointIdAvailable(
     return false;
   }
   if (presets.length === 0) {
-    return true;
+    return encodeHostById(cloudHostFromIngest(ingestEndpointId)).defaultAvailable;
   }
   const preset = presets.find((item) => item.id === presetId);
   return preset?.web_available !== false && Boolean(preset);
 }
 
 export function ingestEndpointsFromPresets(presets: Preset[]): IngestEndpointOption[] {
-  const linodeSuffix = regionLabelForProvider(presets, "linode");
-  const eastSuffix = regionLabelForProvider(presets, "gcp_east");
   return INGEST_ENDPOINT_DEFS.map((item) => {
     const available = endpointAvailable(item.id, presets);
-    let label = item.label;
-    if (item.id.startsWith("linode_") && linodeSuffix) {
-      label = label.replace(" · Linode", ` · Linode${linodeSuffix}`);
-    }
-    if (item.id.startsWith("gcp_east_") && eastSuffix) {
-      label = label.replace(" · GCP us-east1", ` · GCP${eastSuffix}`);
-    }
     return {
       ...item,
-      label,
       available,
-      detail: available ? item.detail : item.id === "aws_zixi" ? "Coming soon" : item.detail,
+      detail: available
+        ? item.detail
+        : `Not deployed · ${encodeHostById(cloudHostFromIngest(item.id)).subtitle}`,
     };
   });
 }
 
 export const INGEST_PRESET_BY_PROTOCOL = PRESET_IDS_BY_ENDPOINT;
+
+/** Draft-18 :14433 and leftover draft-16 :4433 both count as managed MoQ relays. */
+export function isMoqRelayIngest(ingestEndpointId: string): boolean {
+  return ingestEndpointId.includes("_moq_relay");
+}
+
+/** Headed Chrome playa / in-page publisher: 18 on the public :14433 ingest. */
+export function moqDraftForIngest(ingestEndpointId: string): 16 | 18 {
+  return ingestEndpointId.includes("moq_relay_d18") ? 18 : 16;
+}
+
+/** Prod :4433 uses a ≤14-day WT cert + hash pin. Canary :14433 uses public LE. */
+export function moqPinTlsCertForIngest(ingestEndpointId: string): boolean {
+  return !ingestEndpointId.includes("moq_relay_d18");
+}
 
 export function resolveEndpointUrl(
   endpoint: { ingestEndpointId: string; protocol: string; endpointUrl: string },
@@ -247,7 +350,13 @@ export function resolveEndpointUrl(
   if (!presetId) {
     return "";
   }
-  return presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
+  const url = presets.find((preset) => preset.id === presetId)?.url?.trim() ?? "";
+  // A draft-18 ingest must never publish to prod :4433, even if a stale
+  // preset URL is mis-wired. Empty URL fails Start instead of going silent.
+  if (endpoint.ingestEndpointId.includes("moq_relay_d18") && url.includes(":4433") && !url.includes(":14433")) {
+    return "";
+  }
+  return url;
 }
 
 export function ingestEndpointIdForPreset(presetId: string): IngestEndpointId | "custom" {
@@ -266,7 +375,7 @@ export function presetIdForIngest(
   if (ingestEndpointId === "custom") {
     return undefined;
   }
-  return PRESET_IDS_BY_ENDPOINT[ingestEndpointId as IngestEndpointId]?.[protocol];
+  return PRESET_IDS_BY_ENDPOINT[ingestEndpointId]?.[protocol];
 }
 
 export function ingestEndpointLabel(ingestEndpointId: string): string {
@@ -310,30 +419,26 @@ export function ingestCollisionKey(ingestEndpointId: string, protocol: string): 
 }
 
 export function cloudHostFromIngest(ingestEndpointId: string): CloudEncodeHostId {
-  if (ingestEndpointId.startsWith("gcp_east_")) {
-    return "gcp_east";
+  if (isCustomIngestEndpoint(ingestEndpointId) || !ingestEndpointId) {
+    return "gcp_central";
   }
-  if (ingestEndpointId.startsWith("linode_")) {
-    return "linode";
+  for (const host of HOSTS_LONGEST_PREFIX) {
+    if (ingestEndpointId === host.ingestPrefix || ingestEndpointId.startsWith(`${host.ingestPrefix}_`)) {
+      return host.id;
+    }
   }
   if (ingestEndpointId.startsWith("aws_")) {
-    return "aws";
+    return "aws_east";
   }
-  return "gcp";
+  return "gcp_central";
 }
 
 export function ingestPrefixForCloudHost(host: CloudEncodeHostId): string {
-  if (host === "gcp_east") {
-    return "gcp_east";
-  }
-  if (host === "linode" || host === "aws") {
-    return host;
-  }
-  return "gcp";
+  return encodeHostById(normalizeCloudHost(host)).ingestPrefix;
 }
 
 export function ingestRole(ingestEndpointId: string): "zixi" | "mediamtx" | "moq_relay" | null {
-  if (ingestEndpointId.endsWith("_moq_relay")) {
+  if (isMoqRelayIngest(ingestEndpointId)) {
     return "moq_relay";
   }
   if (ingestEndpointId.endsWith("_mediamtx")) {
@@ -352,22 +457,27 @@ export function remapIngestToCloudHost(
   if (isCustomIngestEndpoint(ingestEndpointId)) {
     return "custom";
   }
+  const prefix = ingestPrefixForCloudHost(host);
+  // Draft-18 canaries stay on :14433 in the chosen cloud (never remap to :4433).
+  if (ingestEndpointId.endsWith("moq_relay_d18")) {
+    return `${prefix}_moq_relay_d18` as IngestEndpointId;
+  }
   const role = ingestRole(ingestEndpointId);
   if (!role) {
     return ingestEndpointId as IngestEndpointId;
   }
-  return `${ingestPrefixForCloudHost(host)}_${role}` as IngestEndpointId;
+  return `${prefix}_${role}` as IngestEndpointId;
 }
 
 /** Default host for a freshly chosen upload protocol. */
 export function defaultIngestForProtocol(
   protocol: string,
-  host: CloudEncodeHostId = "gcp",
+  host: CloudEncodeHostId = "gcp_central",
 ): IngestEndpointId {
   const prefix = ingestPrefixForCloudHost(host);
   const preferred: IngestEndpointId =
     protocol === "moq"
-      ? (`${prefix}_moq_relay` as IngestEndpointId)
+      ? (`${prefix}_moq_relay_d18` as IngestEndpointId)
       : protocol === "srt" || protocol === "webrtc"
         ? (`${prefix}_mediamtx` as IngestEndpointId)
         : (`${prefix}_zixi` as IngestEndpointId);
@@ -378,8 +488,9 @@ export function defaultIngestForProtocol(
   if (!role) {
     return preferred;
   }
-  for (const fallback of ["gcp_east", "linode", "gcp"] as CloudEncodeHostId[]) {
-    const candidate = `${ingestPrefixForCloudHost(fallback)}_${role}` as IngestEndpointId;
+  const d18 = preferred.endsWith("_d18") && role === "moq_relay" ? "_d18" : "";
+  for (const fallback of ["gcp_central", "gcp_east", "linode_east"] as CloudEncodeHostId[]) {
+    const candidate = `${ingestPrefixForCloudHost(fallback)}_${role}${d18}` as IngestEndpointId;
     if (!RECIPE_HIDDEN_INGEST_IDS.has(candidate)) {
       return candidate;
     }
@@ -387,16 +498,15 @@ export function defaultIngestForProtocol(
   return preferred;
 }
 
-/** Host options that make sense for the selected upload protocol. */
+/** Host options for the selected upload protocol. Undeployed hosts stay visible. */
 export function ingestEndpointsForProtocol(protocol: string, presets: Preset[] = []) {
   const options = presets.length > 0 ? ingestEndpointsFromPresets(presets) : INGEST_ENDPOINTS;
   const forProtocol =
     protocol === "moq"
-      ? options.filter((item) => item.id.endsWith("_moq_relay") || item.id === "custom")
+      ? options.filter((item) => isMoqRelayIngest(item.id) || item.id === "custom")
       : protocol === "webrtc"
         ? options.filter((item) => item.id.endsWith("_mediamtx") || item.id === "custom")
-        : options.filter((item) => !item.id.endsWith("_moq_relay"));
-  // Hide unconfigured / roadmap / broken hosts instead of greying them out.
+        : options.filter((item) => !isMoqRelayIngest(item.id));
   return forProtocol.filter((item) => {
     if (RECIPE_HIDDEN_INGEST_IDS.has(item.id)) {
       return false;
@@ -404,10 +514,7 @@ export function ingestEndpointsForProtocol(protocol: string, presets: Preset[] =
     if (item.id === "custom") {
       return true;
     }
-    if (!item.available) {
-      return false;
-    }
-    return isIngestEndpointIdAvailable(item.id, protocol, presets);
+    return Boolean(presetIdForIngest(item.id, protocol));
   });
 }
 
@@ -417,6 +524,13 @@ function browserPublishIngestId(endpoint: {
 }): IngestEndpointId {
   if (endpoint.protocol === "webrtc") {
     return defaultIngestForProtocol("webrtc", cloudHostFromIngest(endpoint.ingestEndpointId));
+  }
+  if (isMoqRelayIngest(endpoint.ingestEndpointId)) {
+    const id = endpoint.ingestEndpointId;
+    if (RECIPE_HIDDEN_INGEST_IDS.has(id) && !id.endsWith("_d18")) {
+      return `${id}_d18` as IngestEndpointId;
+    }
+    return id as IngestEndpointId;
   }
   return defaultIngestForProtocol("moq", cloudHostFromIngest(endpoint.ingestEndpointId));
 }
@@ -504,8 +618,12 @@ export function cloudRegionForIngest(
     return {};
   }
   const preset = presets.find((item) => item.id === presetId);
-  return {
-    cloud_provider: preset?.cloud_provider,
-    cloud_region: preset?.cloud_region,
-  };
+  if (preset?.cloud_provider || preset?.cloud_region) {
+    return {
+      cloud_provider: preset.cloud_provider,
+      cloud_region: preset.cloud_region,
+    };
+  }
+  const host = encodeHostById(cloudHostFromIngest(ingestEndpointId));
+  return { cloud_provider: host.provider, cloud_region: host.cloudRegion };
 }

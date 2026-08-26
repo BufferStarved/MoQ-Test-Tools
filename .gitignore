@@ -31,6 +31,8 @@ tools/moq5/
 tools/deps/
 tools/moq5-publisher/bin/
 tools/moq5-recorder/bin/
+tools/ffmpeg-moq/ffmpeg-src/
+tools/ffmpeg-moq/prefix/
 tools/openmoq-publisher/bin/
 tools/openmoq-publisher/VERSION
 tools/openmoq-publisher/openmoq-publisher-*-macOS/

@@ -9,7 +9,9 @@ import { playbackModeAllowedInBrowser } from "./recipeSupport";
 import { isSafariBrowser } from "./browserDetect";
 import type { PlaybackGate } from "./playbackGate";
 import type { PlaybackMode } from "./playbackTypes";
+import { IconFilm } from "./Icons";
 import { PlayerErrorBoundary } from "./players/PlayerErrorBoundary";
+import { moqDraftForIngest, moqPinTlsCertForIngest } from "./ingestEndpoints";
 
 const HlsPlayer = lazy(() => import("./players/HlsPlayer"));
 const DashPlayer = lazy(() => import("./players/DashPlayer"));
@@ -36,7 +38,7 @@ interface StreamPlayerProps {
   encodeStartedAtEpoch?: number | null;
   /** LL-HLS: server-measured encoder→packager transit added to PDT latency. */
   packagerTransitMs?: number | null;
-  /** Zixi Fast HLS: encode-media seconds at hls.js buffer time 0. */
+  /** Zixi Fast HLS / HTTP-TS: encode-media seconds at buffer time 0. */
   deliveryMediaOriginSec?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
@@ -65,12 +67,17 @@ interface StreamPlayerProps {
   bridgeLagMs?: number;
   /** This leg's encoder lag behind realtime (from -progress samples). */
   encoderLagMs?: number;
+  /** Full capture→muxed component (baseline + lag) for MoQ CMAF rebase. */
+  encodeLatencyMs?: number;
   /** Path RTT from the latest encode/transport sample (ms). */
   netRttMs?: number;
   /** MOQT draft the in-page publisher negotiated; ffmpeg/openmoq legs stay 16. */
   moqDraftVersion?: 16 | 18;
+  /** False for the draft-18 canary (public Let's Encrypt; hash-pin needs ≤14-day certs). */
+  moqPinTlsCert?: boolean;
   /** Browser source publishes LOC; ffmpeg/openmoq publishes CMAF. */
   moqMediaPackaging?: "cmaf" | "loc";
+  playbackPolicy?: "live-edge" | "complete";
 }
 
 function PlayerFallback() {
@@ -117,10 +124,15 @@ export function StreamPlayer({
   moqVideoCodec,
   bridgeLagMs = 0,
   encoderLagMs = 0,
+  encodeLatencyMs = 0,
   netRttMs = 0,
-  moqDraftVersion = 16,
+  moqDraftVersion,
+  moqPinTlsCert,
   moqMediaPackaging = "cmaf",
+  playbackPolicy = "live-edge",
 }: StreamPlayerProps) {
+  const resolvedDraft = moqDraftVersion ?? moqDraftForIngest(ingestEndpointId);
+  const pinTlsCert = moqPinTlsCert ?? moqPinTlsCertForIngest(ingestEndpointId);
   const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);
 
   useEffect(() => {
@@ -187,13 +199,16 @@ export function StreamPlayer({
         </div>
       )}
       {!previewActive ? (
-        <div className="player-idle-placeholder" aria-hidden="true" />
+        <div className="player-idle-placeholder" role="status">
+          <IconFilm size={22} />
+          <span>Awaiting publish…</span>
+        </div>
       ) : (
       <PlayerErrorBoundary engine={target.engine}>
         <Suspense fallback={<PlayerFallback />}>
           {target.engine === "hls" && (
             <HlsPlayer
-              key={`${target.url}:sync${hlsLiveSyncDurationSec}`}
+              key={`${target.url}:sync${hlsLiveSyncDurationSec}:p${playbackPolicy}`}
               url={target.url}
               label={target.label}
               playbackGate={playbackGate}
@@ -212,6 +227,7 @@ export function StreamPlayer({
               targetLatencyMs={targetLatencyMs}
               zixiStreamId={zixiStreamId}
               lowLatencyMode={hlsLowLatency}
+              playbackPolicy={playbackPolicy}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               onUnrecoverableHls={
@@ -240,6 +256,7 @@ export function StreamPlayer({
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              playbackPolicy={playbackPolicy}
             />
           )}
           {target.engine === "mpegts" && (
@@ -250,11 +267,22 @@ export function StreamPlayer({
               playbackGate={playbackGate}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
+              deliveryMediaOriginSec={deliveryMediaOriginSec}
               onPlaybackSample={onPlaybackSample}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
-              skipConnectProbe={playbackGate === "live"}
+              // Skip only when the backend actually validated TS sync bytes.
+              // RTMP/SRT get gate=live while preview_ready is still false, so
+              // keying off the gate skipped the probe exactly when the origin
+              // was most likely empty — mpegts.js then attached to 0 bytes and
+              // burned 1.2s reconnects instead (a chunk of the 23s Linode
+              // join). preview_ready === true means the probe is redundant.
+              skipConnectProbe={previewReady === true}
+              playbackPolicy={playbackPolicy}
               jobStatus={jobStatus}
+              jobError={jobError}
+              waitingForEncodeSlot={waitingForEncodeSlot}
+              encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
             />
@@ -279,13 +307,13 @@ export function StreamPlayer({
           )}
           {target.engine === "moq" && moqReadyNamespace && (
             <MoqPlayer
-              key={`${target.url}:${moqReadyNamespace}:d${moqDraftVersion}:${moqMediaPackaging}`}
+              key={`${target.url}:${moqReadyNamespace}:d${resolvedDraft}:${moqMediaPackaging}`}
               relayUrl={target.url}
               namespace={moqReadyNamespace}
-              fingerprintUrl={target.moqFingerprintUrl}
+              fingerprintUrl={pinTlsCert ? target.moqFingerprintUrl : undefined}
               label={target.label}
               playbackGate={moqPlaybackGate}
-              pinTlsCert
+              pinTlsCert={pinTlsCert}
               jobId={jobId}
               encodeStartedAtEpoch={encodeStartedAtEpoch}
               onPlaybackSample={onPlaybackSample}
@@ -303,9 +331,11 @@ export function StreamPlayer({
               sourceVideoCodec={moqVideoCodec}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              encodeLatencyMs={encodeLatencyMs}
               netRttMs={netRttMs}
-              draftVersion={moqDraftVersion}
+              draftVersion={resolvedDraft}
               mediaPackaging={moqMediaPackaging}
+              playbackPolicy={playbackPolicy}
             />
           )}
           {target.engine === "moq" && !moqReadyNamespace && (

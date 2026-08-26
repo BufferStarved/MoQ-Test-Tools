@@ -2,22 +2,29 @@ import { execSync } from "node:child_process";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-function resolveGitSha(): string {
+function resolveGitSha(command: string): string {
   const fromEnv = (process.env.VITE_GIT_SHA || "").trim();
   if (fromEnv) {
     return fromEnv;
   }
+  let sha = "dev";
   try {
-    return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
+    sha = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim() || "dev";
   } catch {
-    return "dev";
+    sha = "dev";
   }
+  // `vite` / `npm run dev` is the local environment. Production builds bake
+  // VITE_GIT_SHA from the deploy script (short HEAD, no suffix).
+  if (command === "serve" && sha !== "dev" && !sha.endsWith("-dev")) {
+    return `${sha}-dev`;
+  }
+  return sha;
 }
 
-const gitSha = resolveGitSha();
-process.env.VITE_GIT_SHA = gitSha;
-
-export default defineConfig({
+export default defineConfig(({ command }) => {
+  const gitSha = resolveGitSha(command);
+  process.env.VITE_GIT_SHA = gitSha;
+  return {
   define: {
     "import.meta.env.VITE_GIT_SHA": JSON.stringify(gitSha),
   },
@@ -42,4 +49,5 @@ export default defineConfig({
       },
     },
   },
+  };
 });

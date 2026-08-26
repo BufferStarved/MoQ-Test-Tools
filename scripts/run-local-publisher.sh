@@ -27,13 +27,20 @@ if [[ -x "/opt/homebrew/bin/srt-live-transmit" ]]; then
 elif [[ -x "/usr/local/bin/srt-live-transmit" ]]; then
   export PATH="/usr/local/bin:$PATH"
 fi
+if [[ -x "$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish" ]]; then
+  export PATH="$ROOT_DIR/tools/moq5-publisher/bin:$PATH"
+fi
 if [[ -x "$ROOT_DIR/tools/openmoq-publisher/bin/openmoq-publisher" ]]; then
   export PATH="$ROOT_DIR/tools/openmoq-publisher/bin:$PATH"
 fi
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR:$ROOT_DIR/web/api${PYTHONPATH:+:$PYTHONPATH}"
-export LOCAL_PUBLISHER_API="${LOCAL_PUBLISHER_API:-http://127.0.0.1:8000}"
-export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
+
+# Caller exports win over repo .env so a public-site paste cannot be rewritten
+# to localhost (or lose LOCAL_PUBLISHER_SESSION) by a leftover dev file.
+_CALLER_API="${LOCAL_PUBLISHER_API:-}"
+_CALLER_SESSION="${LOCAL_PUBLISHER_SESSION:-}"
+_CALLER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-}"
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -41,6 +48,12 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   source "$ROOT_DIR/.env"
   set +a
 fi
+
+[[ -n "$_CALLER_API" ]] && export LOCAL_PUBLISHER_API="$_CALLER_API"
+[[ -n "$_CALLER_SESSION" ]] && export LOCAL_PUBLISHER_SESSION="$_CALLER_SESSION"
+[[ -n "$_CALLER_TOKEN" ]] && export LOCAL_PUBLISHER_TOKEN="$_CALLER_TOKEN"
+export LOCAL_PUBLISHER_API="${LOCAL_PUBLISHER_API:-http://127.0.0.1:8000}"
+export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
 
 # Must succeed: installs/upgrades a WHIP-capable ffmpeg and writes FFMPEG.
 if ! bash "$ROOT_DIR/scripts/ensure-publisher-tools.sh"; then
@@ -52,4 +65,13 @@ if [[ -f "$ROOT_DIR/.publisher-tools.env" ]]; then
   source "$ROOT_DIR/.publisher-tools.env"
 fi
 
-python -m publisher_agent "$@"
+# Refuse public orchestrator URLs even if .env or the caller set them.
+python - "$LOCAL_PUBLISHER_API" <<'PY'
+import sys
+from publisher_agent.api_guard import assert_publisher_api_allowed
+
+assert_publisher_api_allowed(sys.argv[1])
+PY
+
+# exec so Ctrl+C / reset kill this PID, not a bash parent that orphans the agent.
+exec python -m publisher_agent "$@"

@@ -1,9 +1,35 @@
 import type { ResultSummary, UploadSample } from "./types";
 import { assignStreamColors, STREAM_COLORS } from "./protocolTheme.ts";
+import { STARTUP_NUMERIC_COLUMNS } from "./startupBudget.ts";
 
 export interface ChartPoint {
   second: number;
-  [key: string]: number;
+  [key: string]: number | null;
+}
+
+/** Ingest RTT / jitter: a stored 0 on MoQ is “no qlog”, not 0 ms. */
+export const UNMEASURED_ZERO_INGEST_KEYS = new Set([
+  "net_rtt_ms",
+  "net_jitter_ms",
+  "transport_rtt_ms",
+  "transport_rtt_jitter_ms",
+  "quic_rtt_ms",
+]);
+
+export function unmeasuredIngestValue(
+  protocol: string | null | undefined,
+  key: string,
+  value: number | null | undefined,
+): number | null {
+  if (value == null || !Number.isFinite(value)) {
+    return UNMEASURED_ZERO_INGEST_KEYS.has(key) && (protocol || "").toLowerCase() === "moq"
+      ? null
+      : (value ?? 0);
+  }
+  if ((protocol || "").toLowerCase() === "moq" && UNMEASURED_ZERO_INGEST_KEYS.has(key) && value <= 0) {
+    return null;
+  }
+  return value;
 }
 
 export interface ChartSeries {
@@ -30,6 +56,10 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "memory_mb", label: "Client memory", color: "#f472b6", unit: "MB" },
       { key: "net_jitter_ms", label: "Client network jitter", color: "#fb923c", unit: "ms" },
       { key: "encode_lag_ms", label: "Encode lag", color: "#fbbf24", unit: "ms" },
+      { key: "upload_latency_ms", label: "Upload latency", color: "#f59e0b", unit: "ms" },
+      { key: "encode_frames_dropped", label: "Frames dropped (encode)", color: "#fb923c", unit: "frames" },
+      { key: "encode_frames_duped", label: "Frames duplicated (encode)", color: "#fdba74", unit: "frames" },
+      { key: "encode_frame_drop_pct", label: "Frame drop % (encode)", color: "#f87171", unit: "%" },
       { key: "fps_stability", label: "FPS stability", color: "#a3e635", unit: "cv" },
       { key: "speed", label: "Encode speed", color: "#38bdf8", unit: "x" },
       { key: "vmaf_score_encoder", label: "VMAF", color: "#34d399", unit: "score" },
@@ -100,8 +130,98 @@ export const CHART_GROUPS: ChartGroup[] = [
       { key: "playback_frames_rendered", label: "Frames rendered", color: "#4ade80", unit: "frames" },
       { key: "playback_fps", label: "Playback FPS", color: "#86efac", unit: "fps" },
       { key: "playback_frames_dropped", label: "Frames dropped", color: "#fb923c", unit: "frames" },
+      { key: "playback_frame_drop_pct", label: "Frame drop % (playback)", color: "#f87171", unit: "%" },
+      { key: "frame_delivery_pct", label: "Frame delivery %", color: "#4ade80", unit: "%" },
       { key: "playback_error_count", label: "Player errors", color: "#ef4444", unit: "count" },
       { key: "playback_video_time_sec", label: "Playhead on glass", color: "#c084fc", unit: "s" },
+    ],
+  },
+  {
+    id: "latency_budget",
+    // Chain order, not alphabetical: reading top-to-bottom walks the pipeline
+    // from capture to glass, which is how a slow leg gets attributed.
+    title: "Latency breakdown",
+    series: [
+      { key: "latency_encode_ms", label: "Encode (capture → AU)", color: "#fbbf24", unit: "ms" },
+      {
+        key: "latency_segmentation_ms",
+        label: "CMAF group (segmentation)",
+        color: "#f59e0b",
+        unit: "ms",
+      },
+      { key: "latency_publish_ms", label: "Publish (group → ingest)", color: "#fb923c", unit: "ms" },
+      { key: "latency_network_ms", label: "Network (one-way)", color: "#38bdf8", unit: "ms" },
+      { key: "latency_packager_ms", label: "Packager (ingest → delivery)", color: "#a78bfa", unit: "ms" },
+      { key: "latency_player_buffer_ms", label: "Player buffer (→ glass)", color: "#c084fc", unit: "ms" },
+      { key: "latency_accounted_ms", label: "Accounted total", color: "#4ade80", unit: "ms" },
+      { key: "latency_residual_ms", label: "Unattributed", color: "#f87171", unit: "ms" },
+      // The other half of the reconciliation. Without it, a leg whose stages
+      // sum to more than the measurement is indistinguishable from one that
+      // reconciles exactly — both draw a flat 0 "Unattributed" line.
+      { key: "latency_overcount_ms", label: "Over-attributed", color: "#fb7185", unit: "ms" },
+      { key: "e2e_latency_ms", label: "Measured glass delay", color: "#f472b6", unit: "ms" },
+    ],
+  },
+  {
+    id: "startup_breakdown",
+    // Chain order again, but two chains: the publisher half then the player
+    // half. They are separate spans on purpose (see startupBudget.ts), so they
+    // are never summed into one "total startup" here either.
+    title: "Startup breakdown",
+    series: [
+      { key: "startup_dns_ms", label: "DNS", color: "#38bdf8", unit: "ms" },
+      { key: "startup_connect_ms", label: "Connect", color: "#22d3ee", unit: "ms" },
+      { key: "startup_handshake_ms", label: "Handshake", color: "#818cf8", unit: "ms" },
+      { key: "startup_publish_accept_ms", label: "Publish accept", color: "#a78bfa", unit: "ms" },
+      { key: "startup_first_idr_ms", label: "First IDR", color: "#fbbf24", unit: "ms" },
+      {
+        key: "startup_first_byte_ingest_ms",
+        label: "First byte at ingest",
+        color: "#f59e0b",
+        unit: "ms",
+      },
+      { key: "startup_player_request_ms", label: "Player request", color: "#60a5fa", unit: "ms" },
+      { key: "startup_manifest_ms", label: "Manifest / catalog", color: "#c084fc", unit: "ms" },
+      { key: "startup_first_media_ms", label: "First media", color: "#e879f9", unit: "ms" },
+      { key: "startup_first_paint_ms", label: "First paint", color: "#4ade80", unit: "ms" },
+      {
+        key: "startup_publisher_accounted_ms",
+        label: "Publisher accounted",
+        color: "#34d399",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_measured_ms",
+        label: "Publisher measured (→ ingest)",
+        color: "#2dd4bf",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_residual_ms",
+        label: "Publisher unattributed",
+        color: "#f87171",
+        unit: "ms",
+      },
+      {
+        key: "startup_publisher_overcount_ms",
+        label: "Publisher over-attributed",
+        color: "#fb7185",
+        unit: "ms",
+      },
+      { key: "startup_player_accounted_ms", label: "Player accounted", color: "#86efac", unit: "ms" },
+      {
+        key: "startup_player_measured_ms",
+        label: "Player measured (TTFF)",
+        color: "#22d3ee",
+        unit: "ms",
+      },
+      { key: "startup_player_residual_ms", label: "Player unattributed", color: "#f97316", unit: "ms" },
+      {
+        key: "startup_player_overcount_ms",
+        label: "Player over-attributed",
+        color: "#ef4444",
+        unit: "ms",
+      },
     ],
   },
 ];
@@ -153,6 +273,35 @@ function rowMetric(row: Record<string, string>, key: string, legacyKey?: string)
   return parseNumber(row[key] ?? (legacyKey ? row[legacyKey] : undefined));
 }
 
+/**
+ * Startup phases onto the chart plane.
+ *
+ * `ChartPoint` is `Record<string, number>`, so it structurally cannot carry the
+ * blank-vs-`0.0` distinction the CSV goes to some trouble to keep: a blank
+ * phase arrives here as 0. These points therefore only decide whether the tab
+ * appears and feed the comparison plane — `StartupBreakdown` reads the row or
+ * sample directly through `startupBudgetFromColumns()`, because telling "no
+ * instrument" from "measured zero" is the whole point of that view.
+ */
+function startupRowMetrics(row: Record<string, string>): Record<string, number> {
+  return Object.fromEntries(STARTUP_NUMERIC_COLUMNS.map((key) => [key, rowMetric(row, key)]));
+}
+
+/**
+ * Same mapping for a live sample, read by column name rather than through
+ * `UploadSample` fields so that the group keeps charting whatever subset of the
+ * startup payload the collection side is currently streaming.
+ */
+function startupSampleMetrics(sample: UploadSample): Record<string, number> {
+  const source = sample as unknown as Record<string, unknown>;
+  return Object.fromEntries(
+    STARTUP_NUMERIC_COLUMNS.map((key) => {
+      const value = source[key];
+      return [key, typeof value === "number" && Number.isFinite(value) ? value : 0];
+    }),
+  );
+}
+
 export function rowsToChartPoints(rows: Record<string, string>[] | null | undefined): ChartPoint[] {
   if (!rows || rows.length === 0) {
     return [];
@@ -166,6 +315,7 @@ export function rowsToChartPoints(rows: Record<string, string>[] | null | undefi
       firstTimestamp > 0 && timestamp > 0 ? timestamp - firstTimestamp : index,
     );
 
+    const protocol = (row.protocol || "").toLowerCase();
     const transportRtt = rowMetric(row, "transport_rtt_ms", "rtt_ms");
     const transportJitter = rowMetric(row, "transport_rtt_jitter_ms", "rtt_jitter_ms");
     const quicRtt = rowMetric(row, "quic_rtt_ms");
@@ -173,20 +323,28 @@ export function rowsToChartPoints(rows: Record<string, string>[] | null | undefi
     const recvMbps = rowMetric(row, "transport_recv_rate_mbps", "mbps_recv_rate");
     const hlsErrors = rowMetric(row, "playback_hls_errors");
     const hlsFatal = rowMetric(row, "playback_hls_fatal_errors");
+    const netRtt = rowMetric(row, "net_rtt_ms") || transportRtt || quicRtt;
+    const netJitter = rowMetric(row, "net_jitter_ms") || transportJitter;
 
     return {
+      ...startupRowMetrics(row),
       second,
       encoded_bitrate_kbps: rowMetric(row, "encoded_bitrate_kbps", "bitrate_kbps"),
       fps: rowMetric(row, "fps"),
       fps_stability: rowMetric(row, "fps_stability"),
       speed: rowMetric(row, "speed"),
       encode_lag_ms: rowMetric(row, "encode_lag_ms"),
+      upload_latency_ms: rowMetric(row, "upload_latency_ms"),
       cpu_percent: rowMetric(row, "cpu_percent"),
       memory_mb: rowMetric(row, "memory_mb"),
-      transport_rtt_ms: transportRtt,
-      transport_rtt_jitter_ms: transportJitter,
-      net_rtt_ms: rowMetric(row, "net_rtt_ms") || transportRtt || quicRtt,
-      net_jitter_ms: rowMetric(row, "net_jitter_ms") || transportJitter,
+      transport_rtt_ms: unmeasuredIngestValue(protocol, "transport_rtt_ms", transportRtt),
+      transport_rtt_jitter_ms: unmeasuredIngestValue(
+        protocol,
+        "transport_rtt_jitter_ms",
+        transportJitter,
+      ),
+      net_rtt_ms: unmeasuredIngestValue(protocol, "net_rtt_ms", netRtt),
+      net_jitter_ms: unmeasuredIngestValue(protocol, "net_jitter_ms", netJitter),
       net_send_mbps: rowMetric(row, "net_send_mbps") || sendMbps,
       net_recv_mbps: rowMetric(row, "net_recv_mbps") || recvMbps,
       net_loss_pct: rowMetric(row, "net_loss_pct"),
@@ -218,7 +376,7 @@ export function rowsToChartPoints(rows: Record<string, string>[] | null | undefi
       moqx_publish_namespace_success: rowMetric(row, "moqx_publish_namespace_success"),
       moqx_publish_received: rowMetric(row, "moqx_publish_received"),
       moqx_publish_done: rowMetric(row, "moqx_publish_done"),
-      quic_rtt_ms: quicRtt,
+      quic_rtt_ms: unmeasuredIngestValue(protocol, "quic_rtt_ms", quicRtt),
       quic_cwnd_bytes: rowMetric(row, "quic_cwnd_bytes"),
       quic_packets_lost: rowMetric(row, "quic_packets_lost"),
       playback_stats_events: rowMetric(row, "playback_stats_events"),
@@ -248,9 +406,9 @@ export function rowsToChartPoints(rows: Record<string, string>[] | null | undefi
   let prevSecond = 0;
   return points.map((point, index) => {
     const dt = Math.max(1, point.second - prevSecond);
-    const playbackFps =
-      index === 0 ? 0 : Math.max(0, (point.playback_frames_rendered - prevFrames) / dt);
-    prevFrames = point.playback_frames_rendered;
+    const rendered = point.playback_frames_rendered ?? 0;
+    const playbackFps = index === 0 ? 0 : Math.max(0, (rendered - prevFrames) / dt);
+    prevFrames = rendered;
     prevSecond = point.second;
     return { ...point, playback_fps: playbackFps };
   });
@@ -380,10 +538,17 @@ export function stagedQualityScoresFromResult(result: ResultSummary): {
   };
 }
 
-function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | null): ChartPoint {
+function normalizeSamplePoint(
+  sample: UploadSample,
+  moqxBase?: UploadSample | null,
+  protocol?: string,
+): ChartPoint {
   const sendMbps = sample.encoder_send_rate_mbps ?? sample.encoded_bitrate_kbps / 1000;
-  const rtt = sample.net_rtt_ms ?? sample.transport_rtt_ms ?? sample.quic_rtt_ms ?? 0;
-  const jitter = sample.net_jitter_ms ?? sample.transport_rtt_jitter_ms ?? 0;
+  const proto = (protocol || "").toLowerCase();
+  const rttRaw = sample.net_rtt_ms ?? sample.transport_rtt_ms ?? sample.quic_rtt_ms;
+  const jitterRaw = sample.net_jitter_ms ?? sample.transport_rtt_jitter_ms;
+  const rtt = unmeasuredIngestValue(proto, "net_rtt_ms", rttRaw);
+  const jitter = unmeasuredIngestValue(proto, "net_jitter_ms", jitterRaw);
   const recvMbps = sample.net_recv_mbps ?? sample.transport_recv_rate_mbps ?? 0;
   const sndLoss = sample.pkt_snd_loss ?? 0;
   const retrans = sample.pkt_retrans ?? 0;
@@ -408,12 +573,14 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
   const hlsFatal = sample.playback_hls_fatal_errors ?? 0;
 
   return {
+    ...startupSampleMetrics(sample),
     second: clampChartSecond(sample.elapsed_sec),
     encoded_bitrate_kbps: sample.encoded_bitrate_kbps,
     fps: sample.fps,
     fps_stability: sample.fps_stability ?? 0,
     speed: sample.speed,
     encode_lag_ms: sample.encode_lag_ms ?? 0,
+    upload_latency_ms: sample.upload_latency_ms ?? 0,
     cpu_percent: sample.cpu_percent,
     memory_mb: sample.memory_mb,
     net_rtt_ms: rtt,
@@ -422,8 +589,12 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
     net_recv_mbps: recvMbps,
     net_loss_pct: netLossPct,
     net_retrans_pct: netRetransPct,
-    transport_rtt_ms: sample.transport_rtt_ms ?? 0,
-    transport_rtt_jitter_ms: sample.transport_rtt_jitter_ms ?? 0,
+    transport_rtt_ms: unmeasuredIngestValue(proto, "transport_rtt_ms", sample.transport_rtt_ms),
+    transport_rtt_jitter_ms: unmeasuredIngestValue(
+      proto,
+      "transport_rtt_jitter_ms",
+      sample.transport_rtt_jitter_ms,
+    ),
     pkt_rcv_drop: sample.pkt_rcv_drop ?? 0,
     pkt_snd_drop: sample.pkt_snd_drop ?? 0,
     pkt_snd_loss: sndLoss,
@@ -454,7 +625,7 @@ function normalizeSamplePoint(sample: UploadSample, moqxBase?: UploadSample | nu
     ),
     moqx_publish_received: Math.max(0, (sample.moqx_publish_received ?? 0) - basePub),
     moqx_publish_done: sample.moqx_publish_done ?? 0,
-    quic_rtt_ms: sample.quic_rtt_ms ?? 0,
+    quic_rtt_ms: unmeasuredIngestValue(proto, "quic_rtt_ms", sample.quic_rtt_ms),
     quic_cwnd_bytes: sample.quic_cwnd_bytes ?? 0,
     quic_packets_lost: quicLost,
     playback_stall_count: sample.playback_stall_count ?? 0,
@@ -505,15 +676,22 @@ function withPlaybackFps(points: ChartPoint[]): ChartPoint[] {
   });
 }
 
-export function samplesToChartPoints(samples: UploadSample[]): ChartPoint[] {
+export function samplesToChartPoints(samples: UploadSample[], protocol?: string): ChartPoint[] {
   const base = samples[0] ?? null;
   return withPlaybackFps(
-    dropProbeJitterSpike(samples.map((sample) => normalizeSamplePoint(sample, base))),
+    dropProbeJitterSpike(
+      samples.map((sample) => normalizeSamplePoint(sample, base, protocol)),
+    ),
   );
 }
 
 export function hasSeriesData(points: ChartPoint[], key: string): boolean {
   return points.some((point) => (point[key] ?? 0) > 0);
+}
+
+/** True when any point has a real number, including a measured 0. */
+export function hasFiniteSeries(points: ChartPoint[], key: string): boolean {
+  return points.some((point) => typeof point[key] === "number" && Number.isFinite(point[key]));
 }
 
 export function visibleGroups(points: ChartPoint[], protocol: string): ChartGroup[] {
@@ -537,6 +715,9 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
     }
     if (group.id === "media_health") {
       return (
+        proto === "moq" ||
+        proto === "srt" ||
+        proto === "rtmp" ||
         hasSeriesData(points, "ts_continuity_counter_errors") ||
         hasSeriesData(points, "cmaf_fragment_count") ||
         hasSeriesData(points, "cmaf_seq_gap_count") ||
@@ -545,7 +726,7 @@ export function visibleGroups(points: ChartPoint[], protocol: string): ChartGrou
       );
     }
     if (group.id === "playback") {
-      return group.series.some((series) => hasSeriesData(points, series.key));
+      return points.length > 0;
     }
     return group.series.some((series) => hasSeriesData(points, series.key));
   });
@@ -703,6 +884,7 @@ const COMPARISON_METRIC_KEYS = [
   "fps_stability",
   "speed",
   "encode_lag_ms",
+  "upload_latency_ms",
   "cpu_percent",
   "memory_mb",
   "client_memory_percent",
@@ -755,7 +937,8 @@ export interface ComparisonLegData {
   protocol: string;
   ingestEndpointId?: string;
   playbackMode?: string;
-  endpoint?: string;
+  /** Nullable to match `ResultSummary.endpoint`, which the API can return null. */
+  endpoint?: string | null;
   samples: UploadSample[];
   /** When samples are empty (saved session), charts are built from this summary. */
   result?: ResultSummary;
@@ -783,7 +966,7 @@ export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
     ...leg,
     points:
       leg.samples.length > 0
-        ? samplesToChartPoints(leg.samples)
+        ? samplesToChartPoints(leg.samples, leg.protocol)
         : leg.result
           ? resultToChartPoints(leg.result)
           : [],
@@ -792,16 +975,28 @@ export function buildComparisonPoints(legs: ComparisonLegData[]): ChartPoint[] {
   const seconds = uniqueChartSeconds(normalizedLegs.map((leg) => leg.points));
 
   const points: ChartPoint[] = [];
+  // Sparse legs (SRT sample loop overrunning the 1s tick) only have points on
+  // even seconds. Exact-second alignment left those keys undefined on the
+  // 1s axis; Recharts then drew isolated undotted points that looked like
+  // "SRT reported nothing" (comparison 2026-08-23).
+  const lastByLeg: Array<ChartPoint | undefined> = normalizedLegs.map(() => undefined);
   for (const second of seconds) {
     const point: ChartPoint = { second };
     normalizedLegs.forEach((leg, index) => {
-      const samplePoint = leg.points.find((item) => item.second === second);
+      const exact = leg.points.find((item) => item.second === second);
+      if (exact) {
+        lastByLeg[index] = exact;
+      }
+      const samplePoint = exact ?? lastByLeg[index];
       if (!samplePoint) {
         return;
       }
       const suffix = `_${index}`;
       for (const key of COMPARISON_METRIC_KEYS) {
-        point[`${key}${suffix}`] = samplePoint[key] ?? 0;
+        const raw = samplePoint[key];
+        point[`${key}${suffix}`] = UNMEASURED_ZERO_INGEST_KEYS.has(key)
+          ? unmeasuredIngestValue(leg.protocol, key, raw)
+          : (raw ?? 0);
       }
       if (leg.vmafScore != null && leg.vmafScore > 0) {
         point[`vmaf_score${suffix}`] = leg.vmafScore;
@@ -903,7 +1098,10 @@ export function comparisonVisibleGroups(
     { id: "encode", title: "Encode/Publish" },
   ];
 
-  if (comparisonHasMetric(points, "cpu_percent", legs.length)) {
+  if (
+    comparisonHasMetricPresent(points, "cpu_percent", legs.length) ||
+    comparisonHasMetricPresent(points, "memory_mb", legs.length)
+  ) {
     groups.push({ id: "client", title: "Client" });
   }
   if (
@@ -914,25 +1112,12 @@ export function comparisonVisibleGroups(
   ) {
     groups.push({ id: "ingest", title: "Ingest" });
   }
-  if (
-    comparisonHasMetric(points, "ts_continuity_counter_errors", legs.length) ||
-    comparisonHasMetric(points, "cmaf_fragment_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_seq_gap_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_tfdt_gap_count", legs.length) ||
-    comparisonHasMetric(points, "cmaf_parse_errors", legs.length)
-  ) {
+  // Healthy runs report 0 errors — still show the tab so a flat zero is visible
+  // while the test is running, not only after a fault appears.
+  if (hasMoq || hasSrtOrRtmp) {
     groups.push({ id: "media_health", title: "Media Health" });
   }
-  if (
-    comparisonHasMetric(points, "e2e_latency_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_fps", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_stall_count", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_frames_dropped", legs.length) ||
-    comparisonHasMetric(points, "playback_ttff_ms", legs.length) ||
-    comparisonHasMetric(points, "playback_video_time_sec", legs.length) ||
-    comparisonHasMetricPresent(points, "playback_buffer_sec", legs.length) ||
-    legs.some((leg) => leg.protocol === "webrtc")
-  ) {
+  if (points.length > 0) {
     groups.push({ id: "playback", title: "Browser playback" });
   }
   return groups;

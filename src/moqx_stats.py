@@ -19,6 +19,21 @@ from urllib.parse import urlparse
 logger = logging.getLogger("MoQ-SRT-Bench")
 
 DEFAULT_ADMIN_PORT = int(os.environ.get("MOQX_ADMIN_PORT", "8000"))
+CANARY_ADMIN_PORT = int(os.environ.get("MOQX_CANARY_ADMIN_PORT", "18000"))
+CANARY_WT_PORT = 14433
+
+
+def admin_port_for_endpoint(endpoint_url: str) -> int:
+    """Admin HTTP port for this WebTransport URL.
+
+    Prod moqx is UDP 4433 + TCP 8000. The draft-18 canary is UDP 14433 +
+    TCP 18000. Scraping :8000 for a :14433 publish watches the *other*
+    container and reports a false 'never announced'.
+    """
+    port = urlparse(endpoint_url).port
+    if port == CANARY_WT_PORT:
+        return CANARY_ADMIN_PORT
+    return DEFAULT_ADMIN_PORT
 
 
 @dataclass
@@ -63,7 +78,8 @@ class MoqxStatsPoller:
         if not host:
             return
 
-        self._metrics_url = f"http://{host}:{DEFAULT_ADMIN_PORT}/metrics"
+        admin_port = admin_port_for_endpoint(endpoint_url)
+        self._metrics_url = f"http://{host}:{admin_port}/metrics"
         self._enabled = True
 
     @property

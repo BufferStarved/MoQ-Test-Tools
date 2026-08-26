@@ -38,41 +38,112 @@ fi
 
 echo "Installing MediaMTX into ${INSTALL_DIR} (public IP ${PUBLIC_IP})..."
 sudo mkdir -p "$INSTALL_DIR/dash" "$INSTALL_DIR/scripts" /run/moq-mediamtx-lldash
+# mediamtx.yml is a bind mount read once at startup, so `compose up -d` alone
+# will not pick up an edit. Remember the old digest and only recreate if it moved
+# — a restart drops every live HLS/WHEP viewer on the public bench.
+CONFIG_BEFORE="$(sudo sha256sum "$INSTALL_DIR/mediamtx.yml" 2>/dev/null | cut -d' ' -f1 || true)"
 sudo cp "$MTX_DIR/mediamtx.yml" "$INSTALL_DIR/mediamtx.yml"
 sudo cp "$MTX_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml"
 sudo cp "$MTX_DIR/nginx-lldash.conf" "$INSTALL_DIR/nginx-lldash.conf"
 sudo cp "$MTX_DIR/scripts/lldash-packager.sh" "$INSTALL_DIR/scripts/lldash-packager.sh"
 sudo chmod +x "$INSTALL_DIR/scripts/lldash-packager.sh"
 
-# Pin ICE host to the public IP. Do not advertise interface IPs — ffmpeg WHIP
-# will otherwise try 127.0.0.1 and exit 69 (Conversion failed).
+# Advertise the public IP as the only ICE candidate. Interface IPs must stay off
+# the wire — ffmpeg WHIP will otherwise try 127.0.0.1 and exit 69 (Conversion
+# failed). This is an SDP rewrite, so it is safe on any host.
+#
+# webrtcLocalUDPAddress is a different thing: MediaMTX hands it to
+# net.ListenPacket, so a host part the machine does not own aborts startup with
+# EADDRNOTAVAIL and drops LL-HLS/RTMP/SRT too. On GCE the public IP lives on the
+# 1:1 NAT, never on the NIC. Rather than pin it, sanitise it: keep whatever the
+# repo config ships unless this host cannot bind it, then fall back to wildcard.
 sudo python3 - <<PY
+import socket
 from pathlib import Path
+
+def bindable(host: str) -> bool:
+    """Can this host bind the address? Port 0 so a live MediaMTX is not a false negative."""
+    if not host:
+        return True
+    for family in (socket.AF_INET6, socket.AF_INET) if ":" in host else (socket.AF_INET,):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.bind((host, 0))
+            return True
+        except OSError:
+            continue
+    return False
+
+def sanitise_ice_udp(value: str) -> str:
+    # Drop trailing comments; a blank value legitimately disables the listener.
+    addr = value.split("#", 1)[0].strip()
+    if not addr:
+        return ""
+    host = addr.rsplit(":", 1)[0].strip("[]") if ":" in addr else ""
+    if bindable(host):
+        return addr
+    print(f"WARNING: cannot bind ICE UDP host {host!r} here; falling back to :8189")
+    return ":8189"
+
 path = Path("${INSTALL_DIR}/mediamtx.yml")
 lines = []
-saw_hosts = False
-saw_ifaces = False
+seen = set()
 for line in path.read_text().splitlines():
-    stripped = line.strip()
-    if stripped.startswith("webrtcAdditionalHosts:"):
-        lines.append(f'webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
-        saw_hosts = True
-    elif stripped.startswith("webrtcIPsFromInterfaces:"):
+    key = line.strip().split(":", 1)[0]
+    if key == "webrtcAdditionalHosts":
+        lines.append('webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
+    elif key == "webrtcIPsFromInterfaces":
         lines.append("webrtcIPsFromInterfaces: no")
-        saw_ifaces = True
+    elif key == "webrtcLocalUDPAddress":
+        lines.append(f"webrtcLocalUDPAddress: {sanitise_ice_udp(line.split(':', 1)[1])}")
     else:
         lines.append(line)
-if not saw_hosts:
-    lines.append(f'webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
-if not saw_ifaces:
+        continue
+    seen.add(key)
+if "webrtcAdditionalHosts" not in seen:
+    lines.append('webrtcAdditionalHosts: ["${PUBLIC_IP}"]')
+if "webrtcIPsFromInterfaces" not in seen:
     lines.append("webrtcIPsFromInterfaces: no")
+if "webrtcLocalUDPAddress" not in seen:
+    lines.append("webrtcLocalUDPAddress: :8189")
 path.write_text("\n".join(lines) + "\n")
 print("webrtcAdditionalHosts -> ${PUBLIC_IP}; webrtcIPsFromInterfaces -> no")
 PY
 
+CONFIG_AFTER="$(sudo sha256sum "$INSTALL_DIR/mediamtx.yml" | cut -d' ' -f1)"
+
 cd "$INSTALL_DIR"
 sudo docker compose pull
-sudo docker compose up -d
+if [[ "$CONFIG_BEFORE" != "$CONFIG_AFTER" ]]; then
+  echo "mediamtx.yml changed — recreating the container (live viewers will drop)."
+  sudo docker compose up -d --force-recreate mediamtx
+  sudo docker compose up -d
+else
+  echo "mediamtx.yml unchanged — leaving the running container alone."
+  sudo docker compose up -d
+fi
+
+# A rejected listener address is a silent total outage: MediaMTX exits before the
+# HLS/RTMP/SRT servers start, so "the site is down" is the only symptom. Prove the
+# ICE listener opened *on this run* — the container may have days of scrollback,
+# and docker logs needs -a because the stream contains binary bytes.
+echo "Waiting for the MediaMTX WebRTC listener..."
+for _ in $(seq 1 20); do
+  STARTED_AT="$(sudo docker inspect -f '{{.State.StartedAt}}' moq-mediamtx 2>/dev/null || true)"
+  if [[ -n "$STARTED_AT" ]] && sudo docker logs --since "$STARTED_AT" moq-mediamtx 2>&1 \
+      | grep -aq '\[WebRTC\] listener opened'; then
+    ICE_UP=1
+    break
+  fi
+  sleep 1
+done
+if [[ -z "${ICE_UP:-}" ]]; then
+  echo "ERROR: MediaMTX did not open its WebRTC listener. Recent logs:" >&2
+  sudo docker logs --tail 40 moq-mediamtx 2>&1 | tail -40 >&2
+  echo "ERROR: check webrtcLocalUDPAddress in ${INSTALL_DIR}/mediamtx.yml -- the" >&2
+  echo "ERROR: host part must be an address this machine owns (see docs/WEBRTC-ICE.md)." >&2
+  exit 1
+fi
 sudo docker compose ps
 
 # systemd unit for ffmpeg LL-DASH packager (host ffmpeg → nginx :8891)

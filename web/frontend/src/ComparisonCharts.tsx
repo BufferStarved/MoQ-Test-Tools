@@ -161,19 +161,13 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 the muxer warms up — expected, not a stall or a quality drop.
               </p>
             ) : null}
-            {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) ? null : hasBrowserMoqLeg ? (
+            {hasBrowserMoqLeg && !comparisonHasMetricPresent(points, "encode_lag_ms", activeLegs.length) ? (
               <p className="hint chart-availability-note">
                 Encode lag was not collected for browser MoQ (no ffmpeg
                 progress). The WebCodecs queue vs capture clock should appear
                 here on a new run.
               </p>
-            ) : (
-              <p className="hint chart-availability-note">
-                Encode lag is hidden when every sample is 0 — either not
-                collected, or the encoder stayed at its startup baseline
-                (kept up with realtime).
-              </p>
-            )}
+            ) : null}
             <MetricChart
               title="Frame rate"
               metricKey="fps"
@@ -189,20 +183,14 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
               caption="How much this laptop is sending onto the network."
             />
-            {comparisonHasMetric(points, "memory_mb", activeLegs.length) ? (
-              <MetricChart
-                title="Client memory"
-                metricKey="memory_mb"
-                data={points}
-                series={comparisonSeries(activeLegs, "memory_mb", "MB")}
-                caption="Publisher process memory on this machine."
-              />
-            ) : (
-              <p className="hint chart-availability-note">
-                Client memory (ffmpeg RSS) was not collected for this run — the
-                series is hidden instead of plotting a flat zero.
-              </p>
-            )}
+            <MetricChart
+              title="Client memory"
+              metricKey="memory_mb"
+              data={points}
+              series={comparisonSeries(activeLegs, "memory_mb", "MB")}
+              keepZeroSeries
+              caption="Publisher process memory on this machine."
+            />
             <MetricChart
               title="Client network jitter"
               metricKey="net_jitter_ms"
@@ -210,32 +198,28 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
               caption="Publisher-side RTT variation. The first sample is often a connect-probe spike — ignore a lone 100ms+ blip at t=0."
             />
-            {comparisonHasMetric(points, "encode_lag_ms", activeLegs.length) && (
-              <MetricChart
-                title="Encode lag"
-                metricKey="encode_lag_ms"
-                data={points}
-                series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
-                keepZeroSeries
-                caption="How far the encoder is behind capture/realtime. A flat near-zero means the encoder kept up — not a missing series."
-              />
-            )}
-            {comparisonHasMetric(points, "fps_stability", activeLegs.length) && (
-              <MetricChart
-                title="FPS stability"
-                metricKey="fps_stability"
-                data={points}
-                series={comparisonSeries(activeLegs, "fps_stability", "cv")}
-              />
-            )}
-            {comparisonHasMetric(points, "speed", activeLegs.length) && (
-              <MetricChart
-                title="Encode speed"
-                metricKey="speed"
-                data={points}
-                series={comparisonSeries(activeLegs, "speed", "x")}
-              />
-            )}
+            <MetricChart
+              title="Encode lag"
+              metricKey="encode_lag_ms"
+              data={points}
+              series={comparisonSeries(activeLegs, "encode_lag_ms", "ms")}
+              keepZeroSeries
+              caption="How far the encoder is behind capture/realtime. A flat near-zero means the encoder kept up — not a missing series."
+            />
+            <MetricChart
+              title="FPS stability"
+              metricKey="fps_stability"
+              data={points}
+              series={comparisonSeries(activeLegs, "fps_stability", "cv")}
+              keepZeroSeries
+            />
+            <MetricChart
+              title="Encode speed"
+              metricKey="speed"
+              data={points}
+              series={comparisonSeries(activeLegs, "speed", "x")}
+              keepZeroSeries
+            />
             {qualityRequested && comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) && (
             <MetricChart
               title="VMAF (encoder)"
@@ -307,6 +291,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Shared across MoQ / SRT / RTMP: ingest-host CPU & memory, plus path loss% and retransmit%.",
                 "SRT RTT: libsrt / Zixi receiver.",
                 "RTMP RTT: Zixi receiver when available; otherwise a TCP probe to the RTMP host:port.",
+                "MoQ RTT/jitter: picoquic qlog smoothed_rtt / latest_rtt from moq5-fmp4-publish (MOQ_QLOG_DIR). Blank only before the first qlog sample — not a TCP admin probe.",
                 "ICE RTT from WHIP when publishing from the browser.",
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}
@@ -434,52 +419,55 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             />
             <ProtocolAvailabilityNote metricKey="ts_continuity_counter_errors" legs={activeLegs} />
             <ProtocolAvailabilityNote metricKey="cmaf_seq_gap_count" legs={activeLegs} />
-            {comparisonHasMetric(points, "ts_continuity_counter_errors", activeLegs.length) && (
+            {hasSrtOrRtmpLeg && (
               <MetricChart
                 title="TS continuity errors"
                 metricKey="ts_continuity_counter_errors"
                 data={points}
                 series={comparisonSeries(activeLegs, "ts_continuity_counter_errors", "count")}
+                keepZeroSeries
+                caption="Flat zero is a healthy MPEG-TS timeline, not a missing series."
               />
             )}
-            {comparisonHasMetric(points, "cmaf_seq_gap_count", activeLegs.length) && (
-              <MetricChart
-                title="CMAF sequence gaps"
-                metricKey="cmaf_seq_gap_count"
-                data={points}
-                series={comparisonSeries(activeLegs, "cmaf_seq_gap_count", "count")}
-              />
-            )}
-            {comparisonHasMetric(points, "cmaf_tfdt_gap_count", activeLegs.length) && (
-              <MetricChart
-                title="CMAF decode-time gaps"
-                metricKey="cmaf_tfdt_gap_count"
-                data={points}
-                series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_count", "count")}
-              />
-            )}
-            {comparisonHasMetric(points, "cmaf_tfdt_gap_ms", activeLegs.length) && (
-              <MetricChart
-                title="CMAF decode-time gap (ms)"
-                metricKey="cmaf_tfdt_gap_ms"
-                data={points}
-                series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_ms", "ms")}
-              />
-            )}
-            {comparisonHasMetric(points, "cmaf_parse_errors", activeLegs.length) && (
-              <MetricChart
-                title="CMAF parse errors"
-                metricKey="cmaf_parse_errors"
-                data={points}
-                series={comparisonSeries(activeLegs, "cmaf_parse_errors", "count")}
-              />
+            {hasMoqLeg && (
+              <>
+                <MetricChart
+                  title="CMAF sequence gaps"
+                  metricKey="cmaf_seq_gap_count"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "cmaf_seq_gap_count", "count")}
+                  keepZeroSeries
+                  caption="Flat zero means fragments arrived in order."
+                />
+                <MetricChart
+                  title="CMAF decode-time gaps"
+                  metricKey="cmaf_tfdt_gap_count"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_count", "count")}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="CMAF decode-time gap (ms)"
+                  metricKey="cmaf_tfdt_gap_ms"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_ms", "ms")}
+                  keepZeroSeries
+                />
+                <MetricChart
+                  title="CMAF parse errors"
+                  metricKey="cmaf_parse_errors"
+                  data={points}
+                  series={comparisonSeries(activeLegs, "cmaf_parse_errors", "count")}
+                  keepZeroSeries
+                />
+              </>
             )}
           </>
         )}
 
         {currentGroup.id === "playback" && playbackGroup && (
           <>
-            {comparisonHasMetric(points, "e2e_latency_ms", activeLegs.length) && (
+            {comparisonHasMetric(points, "e2e_latency_ms", activeLegs.length) ? (
               <MetricChart
                 title="Glass delay (estimated)"
                 metricKey="e2e_latency_ms"
@@ -487,6 +475,10 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 series={comparisonSeries(activeLegs, "e2e_latency_ms", "ms")}
                 caption="Capture-to-glass of the frame on screen. A healthy live line stays roughly flat. If the playhead is frozen this line climbs with wall time — that is the stale frame aging, not a 20ms win."
               />
+            ) : (
+              <p className="hint chart-availability-note">
+                Glass delay appears after the first painted frame. Encode charts above are live now.
+              </p>
             )}
             {comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) && (
               <p className="hint chart-availability-note">

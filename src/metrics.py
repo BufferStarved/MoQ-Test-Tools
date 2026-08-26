@@ -3,11 +3,18 @@ import json
 import logging
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import psutil
 
+from latency_budget import (
+    E2E_SCOPE_CAPTURE_TO_GLASS,
+    build_frame_row,
+    build_latency_budget,
+)
 from srt_stats import SrtStatsSummary, summarize_srt_rows
+from startup_budget import StartupHalf
+from startup_probe import publisher_startup_row
 from stats_window import RollingWindow
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -33,6 +40,62 @@ CSV_COLUMNS = [
     "fps_stability",
     "speed",
     "encode_lag_ms",
+    # One-shot STARTUP measurement (encoder-ready → first confirmed publish),
+    # not a per-sample stage. It is deliberately not part of the latency
+    # budget below; adding a startup constant to every steady-state sample
+    # inflated accounted_ms for whole runs.
+    "upload_latency_ms",
+    # Startup phase decomposition (see src/startup_budget.py). Two chains kept
+    # apart on purpose: the publisher chain (job start → first byte at the
+    # ingest) and the player chain (attach → first paint), each reconciling
+    # against its own measured total. Blank means "no instrument"; 0.0 means
+    # "measured, and it was zero". startup_not_applicable names phases that do
+    # not exist on the protocol at all (SRT has no TCP connect).
+    "startup_dns_ms",
+    "startup_connect_ms",
+    "startup_handshake_ms",
+    "startup_publish_accept_ms",
+    "startup_first_idr_ms",
+    "startup_first_byte_ingest_ms",
+    "startup_player_request_ms",
+    "startup_manifest_ms",
+    "startup_first_media_ms",
+    "startup_first_paint_ms",
+    "startup_publisher_accounted_ms",
+    "startup_publisher_measured_ms",
+    "startup_publisher_residual_ms",
+    "startup_publisher_overcount_ms",
+    "startup_player_accounted_ms",
+    "startup_player_measured_ms",
+    "startup_player_residual_ms",
+    "startup_player_overcount_ms",
+    "startup_unmeasured",
+    "startup_not_applicable",
+    # Per-component latency decomposition (see src/latency_budget.py). The
+    # components in scope for this leg's e2e estimator sum to
+    # latency_accounted_ms; the signed difference against e2e_latency_ms is
+    # split into latency_residual_ms (unexplained) and latency_overcount_ms
+    # (over-attributed). latency_unmeasured names stages with no instrument.
+    "latency_encode_ms",
+    "latency_segmentation_ms",
+    "latency_publish_ms",
+    "latency_network_ms",
+    "latency_packager_ms",
+    "latency_player_buffer_ms",
+    "latency_accounted_ms",
+    "latency_residual_ms",
+    "latency_overcount_ms",
+    "latency_unmeasured",
+    "latency_not_applicable",
+    "latency_e2e_scope",
+    # Frame accounting, normalized so encoder and glass use the same
+    # denominator convention (see src/latency_budget.py).
+    "encode_frames_total",
+    "encode_frames_dropped",
+    "encode_frames_duped",
+    "encode_frame_drop_pct",
+    "playback_frame_drop_pct",
+    "frame_delivery_pct",
     "out_time",
     "transport_rtt_ms",
     "transport_rtt_jitter_ms",
@@ -77,9 +140,20 @@ CSV_COLUMNS = [
     "playback_hls_frag_loads",
     "playback_video_time_sec",
     "playback_buffer_sec",
+    # Seconds the glass is BEHIND live (MoQ LOC canvas), the opposite direction
+    # from playback_buffer_sec. Declared here and not only in the playback merge
+    # so every archived run carries the column: without it a large buffer figure
+    # on a MoQ leg is indistinguishable from a behind-live leak, which is exactly
+    # the wrong call the 2026-08-23 audit made on a CMAF/MSE session.
+    "playback_behind_live_sec",
     "playback_rebuffer_sec",
     "playback_error_count",
     "e2e_latency_ms",
+    # Operator Go Live click: elapsed second and glass delay *before* the seek.
+    "go_live_at_sec",
+    "go_live_e2e_ms",
+    "playback_policy",
+    "test_scope",
 ]
 
 
@@ -142,6 +216,61 @@ class EncodeLagTracker:
         if self._baseline_ms is None:
             self._baseline_ms = raw_ms
         return round(max(0.0, raw_ms - self._baseline_ms), 1)
+
+    @property
+    def pipeline_baseline_ms(self) -> float:
+        """The constant startup offset this tracker subtracts from every sample.
+
+        Not encoder *lag*, but real capture→muxed delay that the glass sees.
+        ``latency_budget.encode_latency_ms`` adds it back so the latency
+        decomposition accounts for it exactly once instead of dropping it.
+        """
+        return round(self._baseline_ms or 0.0, 1)
+
+
+def ffmpeg_bits_ready(out_time: str, total_bytes: int = 0) -> bool:
+    """Encode-ready: ffmpeg has muxed at least one packet."""
+    return parse_out_time_seconds(out_time) > 0 or int(total_bytes or 0) > 0
+
+
+class UploadLatencyTracker:
+    """Publisher→ingest: encode-ready wall time to first confirmed publish.
+
+    One-shot like TTFF. Not RTT and not glass-to-glass. Stays None until both
+    signals exist so the UI can show "—" instead of a fake 0.
+    """
+
+    def __init__(self) -> None:
+        self._encode_ready_mono: Optional[float] = None
+        self._latency_ms: Optional[float] = None
+
+    def note_encode_ready(
+        self,
+        ready: bool,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if ready and self._encode_ready_mono is None:
+            self._encode_ready_mono = clock()
+
+    def note_publish_success(
+        self,
+        success: bool,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[float]:
+        if self._latency_ms is not None:
+            return self._latency_ms
+        if not success:
+            return None
+        if self._encode_ready_mono is None:
+            self._encode_ready_mono = clock()
+        self._latency_ms = max(0.0, round((clock() - self._encode_ready_mono) * 1000.0, 1))
+        return self._latency_ms
+
+    @property
+    def value_ms(self) -> Optional[float]:
+        return self._latency_ms
 
 
 class MetricsCollector:
@@ -220,7 +349,7 @@ class MetricsCollector:
         transport_recv_rate_mbps: float = 0.0,
         client_memory_percent: float = 0.0,
         client_disk_percent: float = 0.0,
-        server_cpu_percent: float = 0.0,
+        server_cpu_percent: Optional[float] = None,
         server_memory_percent: float = 0.0,
         server_disk_percent: float = 0.0,
         moqx_subscribe_success: int = 0,
@@ -243,10 +372,30 @@ class MetricsCollector:
         playback_hls_frag_loads: int = 0,
         playback_video_time_sec: float = 0.0,
         playback_buffer_sec: float = 0.0,
+        playback_behind_live_sec: float = 0.0,
         playback_rebuffer_sec: float = 0.0,
         playback_error_count: int = 0,
         e2e_latency_ms: float = 0.0,
         encode_lag_ms: float = 0.0,
+        encode_pipeline_baseline_ms: float = 0.0,
+        encode_frames_total: int = 0,
+        encode_frames_dropped: int = 0,
+        encode_frames_duped: int = 0,
+        # None means "no instrument on this leg" (Zixi carries no PDT) and is
+        # reported as an unmeasured stage; 0.0 means "measured, and it was
+        # zero". Do not default a missing instrument to 0.
+        packager_transit_ms: Optional[float] = None,
+        segmentation_ms: Optional[float] = None,
+        segmentation_not_applicable: bool = False,
+        split_gop_from_encode: bool = False,
+        upload_latency_ms: Optional[float] = None,
+        # Publisher half of the startup decomposition (see src/startup_probe.py).
+        # None means this caller has no startup instrument at all, and every
+        # startup column is written blank — not 0, which would claim the leg
+        # started instantly.
+        startup: Optional[StartupHalf] = None,
+        e2e_scope: str = E2E_SCOPE_CAPTURE_TO_GLASS,
+        test_scope: str = "e2e",
         net_rtt_ms: float = 0.0,
         net_jitter_ms: float = 0.0,
         net_send_mbps: float = 0.0,
@@ -329,6 +478,43 @@ class MetricsCollector:
             resolved_playback_errors = playback_error_count or (
                 playback_hls_errors + playback_hls_fatal_errors
             )
+            # The baseline the sample loop's tracker subtracted is real glass
+            # delay; fall back to our own tracker when the caller passes
+            # encode_lag_ms without it so the component is never silently 0.
+            baseline_ms = encode_pipeline_baseline_ms or (
+                self._encode_lag_tracker.pipeline_baseline_ms
+            )
+            budget = build_latency_budget(
+                pipeline_baseline_ms=baseline_ms,
+                encode_lag_ms=resolved_encode_lag,
+                # upload_latency_ms is startup-only and must not enter the
+                # per-sample chain; no protocol measures steady-state publish
+                # transit yet, so the stage reports as unmeasured.
+                publish_transit_ms=None,
+                # A protocol with no RTT source at all (MoQ today) must land in
+                # `unmeasured`, not report a confident 0 ms network hop.
+                net_rtt_ms=resolved_net_rtt if resolved_net_rtt > 0 else None,
+                packager_transit_ms=packager_transit_ms,
+                playback_buffer_sec=playback_buffer_sec,
+                e2e_latency_ms=e2e_latency_ms,
+                e2e_scope=e2e_scope,
+                protocol=self.protocol,
+                segmentation_ms=segmentation_ms,
+                segmentation_not_applicable=segmentation_not_applicable
+                or self.protocol.strip().lower() == "webrtc",
+                split_gop_from_encode=split_gop_from_encode,
+            )
+            # The encoder loop has no player counters, so there is no common
+            # window here and frame_delivery_pct stays blank; it is filled in
+            # once against merged playback values by
+            # playback_metrics._recompute_derived.
+            frame_row = build_frame_row(
+                encode_frames_total=encode_frames_total,
+                encode_frames_dropped=encode_frames_dropped,
+                encode_frames_duped=encode_frames_duped,
+                playback_frames_rendered=playback_frames_rendered,
+                playback_frames_dropped=playback_frames_dropped,
+            )
 
             row = {
                 "timestamp": now,
@@ -341,7 +527,9 @@ class MetricsCollector:
                 "memory_mb": f"{mem_total:.2f}",
                 "client_memory_percent": f"{client_memory_percent:.2f}",
                 "client_disk_percent": f"{client_disk_percent:.2f}",
-                "server_cpu_percent": f"{server_cpu_percent:.2f}",
+                "server_cpu_percent": (
+                    "" if server_cpu_percent is None else f"{float(server_cpu_percent):.2f}"
+                ),
                 "server_memory_percent": f"{server_memory_percent:.2f}",
                 "server_disk_percent": f"{server_disk_percent:.2f}",
                 "encoded_bitrate_kbps": f"{encoded_bitrate_kbps:.2f}",
@@ -351,6 +539,14 @@ class MetricsCollector:
                 "fps_stability": f"{fps_stability:.4f}",
                 "speed": f"{speed:.2f}",
                 "encode_lag_ms": f"{resolved_encode_lag:.1f}",
+                "upload_latency_ms": (
+                    "" if upload_latency_ms is None else f"{float(upload_latency_ms):.1f}"
+                ),
+                # Publisher phases only; the player half stays blank until
+                # playback data is merged in.
+                **publisher_startup_row(startup),
+                **budget.as_row(),
+                **frame_row,
                 "out_time": out_time,
                 "transport_rtt_ms": f"{transport_rtt_ms:.3f}",
                 "transport_rtt_jitter_ms": f"{transport_rtt_jitter_ms:.3f}",
@@ -395,10 +591,44 @@ class MetricsCollector:
                 "playback_hls_frag_loads": str(playback_hls_frag_loads),
                 "playback_video_time_sec": f"{playback_video_time_sec:.3f}",
                 "playback_buffer_sec": f"{playback_buffer_sec:.3f}",
+                "playback_behind_live_sec": f"{playback_behind_live_sec:.3f}",
                 "playback_rebuffer_sec": f"{playback_rebuffer_sec:.3f}",
                 "playback_error_count": str(resolved_playback_errors),
-                "e2e_latency_ms": f"{e2e_latency_ms:.0f}",
+                "e2e_latency_ms": (
+                    f"{e2e_latency_ms:.0f}"
+                    if (test_scope or "").strip().lower() != "upload" or e2e_latency_ms
+                    else ""
+                ),
+                "go_live_at_sec": "" if (test_scope or "").strip().lower() == "upload" else "0",
+                "go_live_e2e_ms": "" if (test_scope or "").strip().lower() == "upload" else "0",
+                "playback_policy": "",
+                "test_scope": "upload" if (test_scope or "").strip().lower() == "upload" else "e2e",
             }
+            if (test_scope or "").strip().lower() == "upload":
+                # Full header stays; glass / Go Live / player columns stay empty.
+                # Ranking e2e is capture-to-ingest accounted, not monitor glass.
+                for name in (
+                    "playback_stats_events",
+                    "playback_stall_count",
+                    "playback_frames_rendered",
+                    "playback_frames_dropped",
+                    "playback_bitrate_bps",
+                    "playback_ttff_ms",
+                    "playback_hls_errors",
+                    "playback_hls_fatal_errors",
+                    "playback_hls_buffer_stalls",
+                    "playback_hls_frag_loads",
+                    "playback_video_time_sec",
+                    "playback_buffer_sec",
+                    "playback_behind_live_sec",
+                    "playback_rebuffer_sec",
+                    "playback_error_count",
+                    "go_live_at_sec",
+                    "go_live_e2e_ms",
+                    "playback_policy",
+                    "latency_player_buffer_ms",
+                ):
+                    row[name] = ""
             self._rows.append(row)
 
             with open(self.filename, mode="a", newline="") as file:
@@ -439,9 +669,11 @@ class MetricsCollector:
             # cmaf_*_count, cmaf_tfdt_gap_ms, moqx_*, playback counters/
             # rebuffer) are run TOTALS taken from the last sample, not means.
             "averages_note": (
-                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, playback "
-                "counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
-                "totals from the final sample, not per-sample averages."
+                "Cumulative counter fields (pkt_*, cmaf_*, moqx_*, encode_frames_*, "
+                "playback counters, playback_rebuffer_sec, cmaf_tfdt_gap_ms) are run "
+                "totals from the final sample, not per-sample averages. "
+                "e2e_latency_max_ms is the worst observed sample, taken before the "
+                "outlier trim that produces e2e_latency_ms."
             ),
             "srt": srt_summary.__dict__ if srt_summary else {},
             "throughput": {
@@ -479,6 +711,17 @@ class MetricsCollector:
             "fps_stability",
             "speed",
             "encode_lag_ms",
+            "latency_encode_ms",
+            "latency_segmentation_ms",
+            "latency_publish_ms",
+            "latency_network_ms",
+            "latency_packager_ms",
+            "latency_player_buffer_ms",
+            "latency_accounted_ms",
+            "latency_residual_ms",
+            "latency_overcount_ms",
+            "encode_frame_drop_pct",
+            "playback_frame_drop_pct",
             "transport_rtt_ms",
             "transport_rtt_jitter_ms",
             "net_rtt_ms",
@@ -493,6 +736,7 @@ class MetricsCollector:
             "playback_ttff_ms",
             "playback_video_time_sec",
             "playback_buffer_sec",
+            "playback_behind_live_sec",
             "e2e_latency_ms",
             "psnr_db",
             "ssim",
@@ -500,10 +744,75 @@ class MetricsCollector:
         count = len(self._rows)
         averages: Dict[str, float] = {}
         for key in numeric_keys:
+            if key == "server_cpu_percent":
+                # Blank means unmeasured (MediaMTX with no host poller). Do not
+                # average those as 0 and report "the server is free".
+                measured = [
+                    float(row[key])
+                    for row in self._rows
+                    if str(row.get(key, "")).strip() != ""
+                ]
+                if measured:
+                    averages[key] = round(sum(measured) / len(measured), 3)
+                continue
             averages[key] = round(
                 sum(float(row.get(key, 0) or 0) for row in self._rows) / count,
                 3,
             )
+        # Headline fps from the frame COUNTER over wall time, not from the mean
+        # of ffmpeg's instantaneous `fps=` readings.
+        #
+        # The per-sample rate is honest — the MoQ publisher pipe applies
+        # backpressure, so ffmpeg genuinely alternates ~24.9 and ~37.4 fps
+        # (fps_stability, the coefficient of variation, is the metric that
+        # reports that, and it correctly reads 0.198 on MoQ vs 0.019 on SRT).
+        # What is not honest is averaging an instantaneous rate over unequal
+        # sample intervals: it over-weights the short fast ticks and reported
+        # 32.2-32.7 fps for a 30fps source on every MoQ leg (2026-08-22), and
+        # 31.7 on WebRTC. The counter is exact and interval-independent:
+        # 29.78 and 29.75 for those same MoQ legs.
+        #
+        # Numerator and denominator have to span the same rows. Counting frames
+        # only over samples where the encoder had started, while timing across
+        # every sample including the leading idle ones, divides a real 810 RTMP
+        # frames by the full 29.0s run instead of the 27.0s the encoder was
+        # actually producing — and archived 27.933 fps for a leg that held
+        # 30.003 (2026-08-23, upload_20260823-014026_f37981b8).
+        active = [
+            (float(row["timestamp"]), float(row["encode_frames_total"]))
+            for row in self._rows
+            if str(row.get("encode_frames_total", "")).strip() not in ("", "0")
+            and str(row.get("timestamp", "")).strip() != ""
+        ]
+        if len(active) > 1:
+            wall_sec = max(stamp for stamp, _ in active) - min(stamp for stamp, _ in active)
+            produced = max(count for _, count in active) - min(count for _, count in active)
+            if wall_sec > 0 and produced > 0:
+                averages["fps"] = round(produced / wall_sec, 3)
+
+        # frame_delivery_pct is blank on samples with no common encoder/player
+        # window. Averaging blanks as 0 would report "nothing was delivered"
+        # for "not yet comparable", so only real values count.
+        delivery = [
+            float(row["frame_delivery_pct"])
+            for row in self._rows
+            if str(row.get("frame_delivery_pct", "")).strip() not in ("", "0.00")
+        ]
+        if delivery:
+            averages["frame_delivery_pct"] = round(sum(delivery) / len(delivery), 3)
+
+        # upload_latency_ms is a ONE-SHOT startup measurement (encoder-ready →
+        # first confirmed publish) that the sample loop repeats verbatim once
+        # settled. The settled value is the measurement, so the last one is
+        # taken deliberately — this is not a mean and must not be read as a
+        # per-sample publish stage (see latency_budget.build_latency_budget).
+        latencies = [
+            float(row["upload_latency_ms"])
+            for row in self._rows
+            if row.get("upload_latency_ms") not in (None, "")
+        ]
+        if latencies:
+            averages["upload_latency_ms"] = round(latencies[-1], 3)
 
         if self._rows:
             for counter_key in (
@@ -524,6 +833,9 @@ class MetricsCollector:
                 "moqx_publish_received",
                 "moqx_publish_done",
                 "quic_packets_lost",
+                "encode_frames_total",
+                "encode_frames_dropped",
+                "encode_frames_duped",
                 "playback_stats_events",
                 "playback_stall_count",
                 "playback_frames_rendered",

@@ -1,0 +1,37 @@
+diff --git a/service/src/endpoint.c b/service/src/endpoint.c
+index 23bdb10..a89fc59 100644
+--- a/service/src/endpoint.c
++++ b/service/src/endpoint.c
+@@ -51,6 +51,7 @@
+ #include <assert.h>
+ #include <pthread.h>
+ #include <stdatomic.h>
++#include <stdlib.h>
+ #include <time.h>   /* clock_gettime: drain deadline (service tier may use the wall clock) */
+ #include <string.h>
+ 
+@@ -695,6 +696,7 @@ static int ep_wtquic_msquic_pump(moq_wtquic_msquic_managed_t *m,
+ #endif
+ 
+ #if defined(MOQ_SERVICE_HAVE_PQ_THREADED) || defined(MOQ_SERVICE_HAVE_PICO_WT_MANAGED)
++int picoquic_set_qlog(picoquic_quic_t *quic, char const *qlog_dir);
+ /* Apply the caller's handshake bound, then install real certificate
+  * verification unless explicitly skipped: chain + server-name validation
+  * against ep->ca_file (NULL = system roots). The facades' built-in default
+@@ -705,6 +707,16 @@ static int ep_configure_quic(picoquic_quic_t *quic, void *ctx)
+     moq_endpoint_t *ep = (moq_endpoint_t *)ctx;
+     if (ep->handshake_timeout_us > 0)
+         picoquic_set_default_handshake_timeout(quic, ep->handshake_timeout_us);
++    /* Canary measurement only: moq5-fmp4-publish setenv's MOQ_QLOG_DIR.
++     * picoquic does not read that env itself — call picoquic_set_qlog here
++     * so *.client.qlog exists while the ingest is live. Do not treat this
++     * as a product API. */
++    {
++        const char *qlog_dir = getenv("MOQ_QLOG_DIR");
++        if (qlog_dir && qlog_dir[0] != '\0' &&
++            picoquic_set_qlog(quic, qlog_dir) != 0)
++            return -1;
++    }
+     if (ep->insecure) return 0;
+     return moq_picoquic_set_cert_verifier(quic, ep->ca_file);
+ }

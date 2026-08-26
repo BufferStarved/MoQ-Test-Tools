@@ -4,7 +4,14 @@ import { frontendBuildSha } from "./buildStamp";
 export function BuildStamp() {
   const sha = frontendBuildSha();
   return (
-    <p className="build-stamp" title="Frontend git revision from the last production build">
+    <p
+      className="build-stamp"
+      title={
+        sha.endsWith("-dev")
+          ? "Local dev build (SHA-dev). Prod is the same SHA with no suffix."
+          : "Production build — short git SHA, no suffix."
+      }
+    >
       {sha}
     </p>
   );

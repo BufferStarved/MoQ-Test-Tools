@@ -32,7 +32,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json();
 }
 
-export function checkHealth(): Promise<{ status: string; git_sha?: string | null }> {
+export function checkHealth(): Promise<{
+  status: string;
+  git_sha?: string | null;
+  env?: "prod" | "dev";
+}> {
   return request("/health");
 }
 
@@ -49,6 +53,9 @@ export interface LocalPublisherAgentInfo {
   active_jobs?: number;
   webcam_devices?: WebcamDeviceInfo[];
   ffmpeg_whip?: boolean;
+  obs_websocket?: boolean;
+  obs_plugin?: boolean;
+  obs_detail?: string;
 }
 
 export interface EncodeHostInfo {
@@ -57,6 +64,15 @@ export interface EncodeHostInfo {
   available: boolean;
   cloud_provider?: string;
   cloud_region?: string;
+  provider?: string;
+  region?: string;
+  subtitle?: string;
+  unavailable_reason?: string;
+  roles?: {
+    zixi?: boolean;
+    mediamtx?: boolean;
+    moq?: boolean;
+  };
 }
 
 export interface BundledMediaSource {
@@ -73,12 +89,25 @@ export interface FeatureFlags {
   local_publisher_agents: LocalPublisherAgentInfo[];
   /** Connected laptop agent can mux `-f whip`. False until proven. */
   local_publisher_whip?: boolean;
+  /** Connected laptop agent can drive OBS via obs-websocket. */
+  local_publisher_obs?: {
+    websocket: boolean;
+    plugin: boolean;
+    detail?: string;
+  };
   encode_hosts?: EncodeHostInfo[];
   media_sources?: BundledMediaSource[];
 }
 
-export function fetchFeatures(): Promise<FeatureFlags> {
-  return request("/features");
+export function fetchFeatures(session?: string): Promise<FeatureFlags> {
+  const query = session?.trim()
+    ? `?session=${encodeURIComponent(session.trim())}`
+    : "";
+  return request(`/features${query}`);
+}
+
+export function mintPublisherSession(): Promise<{ session_id: string; expires_at: number }> {
+  return request("/publisher-session", { method: "POST" });
 }
 
 export function fetchProtocols(): Promise<{ protocols: Protocol[] }> {
@@ -148,10 +177,14 @@ export function createUpload(payload: {
   compute_vmaf_encoder?: boolean;
   encode_ladder?: string;
   target_latency_ms?: number;
+  playback_policy?: "live-edge" | "complete";
+  test_scope?: "upload" | "e2e";
   comparison_id?: string;
   stream_index?: number;
   stream_label?: string;
   publisher_host?: "cloud" | "local" | "browser";
+  encoder?: "ffmpeg" | "obs";
+  publisher_session?: string;
 }): Promise<UploadJob> {
   return request("/uploads", {
     method: "POST",
@@ -172,12 +205,47 @@ export interface PlaybackMetricsSnapshot {
   playback_hls_buffer_stalls: number;
   playback_hls_frag_loads: number;
   playback_video_time_sec: number;
-  /** Seconds of media buffered ahead of the playhead. */
+  /**
+   * Seconds of media buffered AHEAD of the playhead. This is the only
+   * quantity the latency budget's player-buffer stage may consume, so it must
+   * stay strictly "ahead" for every engine.
+   */
   playback_buffer_sec: number;
+  /**
+   * Seconds the glass is BEHIND live. MoQ LOC only — its canvas has no HTML
+   * media buffer, and this is the opposite direction from playback_buffer_sec.
+   * It lives in its own field precisely so it can never be summed into the
+   * player-buffer stage, which is what charted a 10.9s "buffer" on the Linode
+   * MoQ leg (2026-08-22).
+   */
+  playback_behind_live_sec?: number;
   /** Cumulative seconds the player spent in a rebuffer/stalled state. */
   playback_rebuffer_sec: number;
   playback_error_count?: number;
   e2e_latency_ms?: number;
+  /** Elapsed second of the first Go Live click (0 if never clicked). */
+  go_live_at_sec?: number;
+  /** Glass delay immediately before that click. */
+  go_live_e2e_ms?: number;
+  /**
+   * Startup decomposition, player half (src/startup_budget.py ↔
+   * startupTiming.ts): attach → request sent → manifest received → first media
+   * → first painted frame. Durations in ms, not offsets; they reconcile
+   * against the measured playback_ttff_ms.
+   *
+   * `null` is load-bearing and means "no instrument backs this phase on this
+   * engine" — a raw MPEG-TS pull has no manifest at all, and Resource Timing
+   * marks are zeroed on a cross-origin response without Timing-Allow-Origin.
+   * Sending 0 for either case would report the phase as measured and free, so
+   * these are the one group of playback fields that must never be defaulted.
+   *
+   * One-shot join facts like playback_ttff_ms, not live gauges: they are not
+   * blanked when the player detaches.
+   */
+  startup_player_request_ms?: number | null;
+  startup_manifest_ms?: number | null;
+  startup_first_media_ms?: number | null;
+  startup_first_paint_ms?: number | null;
 }
 
 export function postEncodeSample(
@@ -188,6 +256,7 @@ export function postEncodeSample(
     fps: number;
     encoder_send_rate_mbps?: number;
     encode_lag_ms?: number;
+    upload_latency_ms?: number;
     transport_rtt_ms?: number;
     transport_rtt_jitter_ms?: number;
     net_rtt_ms?: number;

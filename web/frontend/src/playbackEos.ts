@@ -29,6 +29,25 @@ export function playedMostOfEncode(options: {
   return playbackCoveredEncode(options);
 }
 
+/**
+ * Publisher stopped after playa already painted. `playhead_frozen` after
+ * `session_restart_skipped encode_over` is the encode ending — not a stall
+ * failure. Mid-clip RESET_STREAM still uses `isGracefulMoqReset` (coverage).
+ */
+export function isGracefulMoqEncodeOver(options: {
+  playedOk: boolean;
+  jobStatus?: string;
+  runStopped?: boolean;
+}): boolean {
+  if (!options.playedOk) {
+    return false;
+  }
+  if (options.runStopped) {
+    return true;
+  }
+  return options.jobStatus === "completed";
+}
+
 /** HTTP-TS ended after frames were shown. */
 export function isGracefulMpegTsEos(options: {
   playedOk: boolean;

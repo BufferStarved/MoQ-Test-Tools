@@ -6,8 +6,11 @@
  * `ftyp+moov`. A baked 720p Main-4.0 blob (especially one made on a
  * different ffmpeg / ladder / burn-in) initializes SourceBuffers that
  * then reject every live fragment — catalog "ready", zero frames.
- * Subscribe to the publisher `catalog` track instead; `--publish-catalog`
- * ships the matching init for this encode.
+ * Subscribe to the publisher `catalog` track instead. libmoq ships CMAF
+ * init as MSF-01 `initDataList` + `initRef` (and, after the dual-emit
+ * patch, also as MSF-00 `initData`). Playa must flatten that to
+ * `track.initData` or MSE waits 10s for an in-band ftyp+moov that
+ * ffmpeg `+frag_keyframe` never puts on the media track.
  *
  * @see tools/openmoq-publisher relay-interop.md
  */

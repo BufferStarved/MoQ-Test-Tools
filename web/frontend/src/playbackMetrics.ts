@@ -62,6 +62,14 @@ export function usePlaybackMetricsReporter(options: {
         // measurable yet" — never substitute a different formula here,
         // that's how the protocols drifted apart.
         e2e_latency_ms: snapshot.e2e_latency_ms ?? 0,
+        // Startup phases travel as explicit nulls. `?? 0` here — or letting
+        // them go out as `undefined`, which JSON.stringify drops and the API
+        // then fills from a numeric default — would turn "nothing measures
+        // this phase on this engine" into "measured, and it was free".
+        startup_player_request_ms: snapshot.startup_player_request_ms ?? null,
+        startup_manifest_ms: snapshot.startup_manifest_ms ?? null,
+        startup_first_media_ms: snapshot.startup_first_media_ms ?? null,
+        startup_first_paint_ms: snapshot.startup_first_paint_ms ?? null,
       };
       onSampleRef.current?.(payload);
       void postPlaybackSample(jobId, payload).catch(() => {

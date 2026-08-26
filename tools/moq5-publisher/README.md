@@ -30,6 +30,11 @@ The sender runs in publisher-initiated mode (`publish_tracks = true`), which is
 the mode needed when publishing through a relay. Applications do not need to
 construct catalog JSON themselves.
 
+The same logic lives in static library `fmp4_moq` (`fmp4_moq_connect` /
+`fmp4_moq_feed` / `fmp4_moq_close`) so ffmpeg can call it later. See
+[`docs/FFMPEG-MOQ-NATIVE.md`](../../docs/FFMPEG-MOQ-NATIVE.md).
+`moq_link_spike` links that library and publishes a fixture file.
+
 ## Build and test
 
 Set `MOQ5_PREFIX` to an installed libmoq prefix with the service component and

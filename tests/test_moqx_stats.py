@@ -112,6 +112,27 @@ class MoqxStatsPollerTests(unittest.TestCase):
         poller.poll()
         self.assertEqual(poller.publish_namespace_success_delta(), 1)
 
+    def test_canary_wt_port_does_not_scrape_prod_admin(self) -> None:
+        from moqx_stats import admin_port_for_endpoint
+
+        self.assertEqual(
+            admin_port_for_endpoint(
+                "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark"
+            ),
+            18000,
+        )
+        self.assertEqual(
+            admin_port_for_endpoint(
+                "https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark"
+            ),
+            8000,
+        )
+        poller = MoqxStatsPoller(
+            "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=bench-d18"
+        )
+        self.assertTrue(poller.enabled)
+        self.assertTrue(poller._metrics_url.endswith(":18000/metrics"))
+
     def test_disabled_poller_returns_zero(self):
         with patch.dict("os.environ", {}, clear=False):
             poller = MoqxStatsPoller("not-a-url")

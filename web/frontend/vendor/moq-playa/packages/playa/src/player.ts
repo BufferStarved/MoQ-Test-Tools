@@ -79,7 +79,7 @@ export class Player {
   // ─── Static ──────────────────────────────────────────────────────
 
   /** Player version (set at build time). */
-  static readonly version = '0.5.3';
+  static readonly version = '0.5.7';
 
   /** Check if the current browser supports MoQ playback. */
   static isSupported(): boolean {
@@ -270,17 +270,6 @@ export class Player {
   /** Current audio track index. */
   get currentAudioTrack(): number { return this._currentAudioTrack; }
 
-  /**
-   * Join offset on the publisher's media timeline in seconds (CMAF/MSE
-   * path), or null before the first video segment / on the WebCodecs path.
-   * `joinMediaOffsetSec + video.currentTime` is the playhead position on
-   * the encoder's timeline — the anchor a capture-referenced end-to-end
-   * latency estimate needs (MSE re-zeros currentTime at join).
-   */
-  get joinMediaOffsetSec(): number | null {
-    return this.engine.joinMediaOffsetSec;
-  }
-
   /** Simplified stats for UI display. */
   get stats(): PlayerStats {
     const s = this.engine.stats;
@@ -289,7 +278,7 @@ export class Player {
       framesRendered: s.framesRendered,
       framesDropped: s.framesDropped,
       bitrate: s.currentBitrate,
-      latencyMs: s.currentLatencyMs,
+      latencyMs: 0, // TODO: derive from sync controller
       stallCount: s.stallCount,
       timeToFirstFrameMs: s.timeToFirstFrameMs,
       resolution: s.currentResolution ?? null,

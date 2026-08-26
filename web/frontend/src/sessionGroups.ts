@@ -1,5 +1,6 @@
 import { fetchResultDetail, fetchResults } from "./api";
 import { protocolLabel } from "./protocolTheme";
+import { canOverlayTestScopes, resultTestScope } from "./testScope";
 import type { ResultFile, ResultSummary } from "./types";
 
 export interface SessionGroup {
@@ -100,6 +101,11 @@ export async function loadSessionSummaries(
       detail.summary_extra?.stream_label || `Stream ${index + 1} (${protocolLabel(detail.protocol)})`,
   );
   return { summaries: details, labels };
+}
+
+/** True when every summary in the set measured the same test_scope. */
+export function sessionSummariesShareTestScope(summaries: ResultSummary[]): boolean {
+  return canOverlayTestScopes(summaries.map((summary) => resultTestScope(summary)));
 }
 
 export function sessionTimeLabel(isoTimestamp: string): string {

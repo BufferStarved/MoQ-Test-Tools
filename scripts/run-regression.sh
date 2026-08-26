@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fast local gate: Python regressions + frontend unit scripts.
+# Fast local gate: Python regressions + frontend typecheck + frontend unit scripts.
 # Does not hit live ingest. East live matrix:
 #   STACK=east DURATION=18 python3 scripts/e2e_ingest_matrix_test.py
 set -euo pipefail
@@ -23,6 +23,13 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_mediamtx_stats \
   tests.test_job_manager_preview_gate \
   tests.test_playback_merge \
+  tests.test_latency_budget \
+  tests.test_startup_budget \
+  tests.test_startup_publisher \
+  tests.test_startup_player \
+  tests.test_metric_honesty \
+  tests.test_qa_metric_audit_verdict \
+  tests.test_rtmp_startup \
   tests.test_vod_assets \
   tests.test_bbb_deploy_and_whep_import \
   tests.test_cloud_placement \
@@ -41,6 +48,16 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_build_info \
   tests.test_empty_result_csv \
   -q
+
+# Frontend typecheck. `vite build` never runs tsc, so this is the only gate that
+# catches type regressions before they ship — a dropped import once reached prod
+# as a ReferenceError. Baseline is 0 errors; any error fails the run.
+FRONTEND="$ROOT/web/frontend"
+if [[ ! -x "$FRONTEND/node_modules/.bin/tsc" ]]; then
+  echo "run-regression: FAIL frontend typecheck unavailable (run: cd web/frontend && npm install)" >&2
+  exit 1
+fi
+(cd "$FRONTEND" && npm run --silent typecheck)
 
 for script in "$ROOT"/web/frontend/scripts/unit-*.mjs; do
   node "$script"

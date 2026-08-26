@@ -143,6 +143,36 @@ def hls_segment_sec(target_latency_ms: int) -> int:
     )
 
 
+# Uniform IDR cadence for every non-MoQ delivery path (seconds). MediaMTX
+# LL-HLS already pins 1s; Zixi was the lone outlier at 2s because the GOP was
+# keyed to hls_chunk_time. A GOP does not have to equal the chunk — it only has
+# to divide it, and 1s divides the 2s Fast HLS chunk exactly, so packaging is
+# unchanged while the first decodable frame arrives a full second sooner.
+DELIVERY_GOP_SEC = 1
+
+
+def delivery_gop_frames(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
+    """IDR cadence for TS/HLS delivery: 1s, or segment/2 for long segments.
+
+    HTTP-TS (Zixi ``http_ts_auto_out``) is a continuous transport stream —
+    mpegts.js starts decoding at the first IDR it sees, so the GOP *is* the
+    join floor and the chunk duration is irrelevant to it. RTMP→Zixi carried
+    a 2s GOP purely because ``gop_frames_for_latency`` keys off
+    ``hls_segment_sec``, which put a hard ~2s floor under every measured TTFF
+    (23s observed on Linode 2026-08-22, of which 2s was this floor and the
+    rest was probe/attach churn).
+
+    Keeping the GOP an exact divisor of the segment preserves Fast HLS chunk
+    boundaries (2s chunk = 2 GOPs), so nothing downstream of the packager
+    changes. It also gives every protocol the same 1s keyframe cadence —
+    MediaMTX LL-HLS, MoQ, and now Zixi — which is what makes cross-protocol
+    TTFF and glass-delay numbers comparable instead of GOP-confounded.
+    """
+    segment = float(hls_segment_sec(clamp_target_latency_ms(target_latency_ms)))
+    seconds = max(float(DELIVERY_GOP_SEC), segment / 2.0)
+    return max(1, int(round(seconds * fps)))
+
+
 def gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
     """Keyframe interval == intended HLS segment duration, NOT the latency budget.
 
@@ -166,14 +196,16 @@ def srt_latency_us(target_latency_ms: int) -> int:
     return clamp_target_latency_ms(target_latency_ms) * 1000
 
 
-# MoQ GOP bounds (seconds). Floor keeps x264 overhead sane; ceiling keeps the
-# group cadence short enough that join-offset + fragment accumulation stay
-# inside the latency budget. Ceiling lowered 2.0 -> 1.0 after the 2026-07-21
-# webcam run: 2s objects held a rock-steady 7.5s e2e but the 2s arrival
-# bursts read as "inconsistent playback speed" to the viewer; 1s objects
-# halve the burst granularity and shave ~1-2s off the latency floor.
-MOQ_GOP_SEC_MIN = 0.5
+# MoQ GOP bounds (seconds). Solo/file encode only — the shared webcam broker
+# stays at 1s (MASTER_GOP_FRAMES) and MoQ copies that bitstream. Floor 0.25s
+# is 8 frames @ 30fps; ultrafast+zerolatency handles that without a second
+# x264 on the UDP hop. Do not drop the broker master to 0.5s (24fps / 0.8×).
+MOQ_GOP_SEC_MIN = 0.25
 MOQ_GOP_SEC_MAX = 1.0
+# Shared broker master IDR cadence. Must match webcam_broker.MASTER_GOP_FRAMES.
+BROKER_GOP_MS = 1000.0
+# MediaMTX LL-HLS part duration — the HLS object, not a 1s CMAF group.
+LL_HLS_PART_MS = 200.0
 
 
 def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS) -> int:
@@ -186,14 +218,32 @@ def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS
     CaptureTimestamps). So for MoQ the GOP *is* the latency floor twice over:
     a fragment ships only after the whole GOP is encoded (+1 GOP), and a
     subscriber waits up to a GOP for the next join point (+0..1 GOP) — an
-    offset that then persists for the entire session. With a 4s target the old
-    shared mapping produced 4s GOPs -> ~1.9MB objects every 4-5s and a real
-    glass-to-glass of 9-11s (relay logs, 2026-07-20). GOP = target/2 keeps
-    worst-case join latency (2 x GOP) at or under the target.
+    offset that then persists for the entire session. That wait is
+    ``latency_segmentation_ms`` (CMAF group), not ingest RTT. GOP = target/2
+    keeps worst-case join (2 × GOP) at or under the target; the floor is
+    0.25s for solo/file (brokered copy stays 1s).
     """
     ms = clamp_target_latency_ms(target_latency_ms)
     seconds = min(MOQ_GOP_SEC_MAX, max(MOQ_GOP_SEC_MIN, ms / 2000.0))
     return max(1, int(round(seconds * fps)))
+
+
+def moq_group_duration_ms(
+    target_latency_ms: int,
+    *,
+    brokered: bool = False,
+    fps: int = ASSUMED_FPS,
+) -> float:
+    """Closed-group duration the NextGroupStart subscriber must wait.
+
+    Brokered webcam copies the 1s master — do not report the solo 0.25s GOP
+    for a bitstream that still closes every second. File/solo use
+    ``moq_gop_frames_for_latency``. This is object cadence, not ingest RTT.
+    """
+    if brokered:
+        return float(BROKER_GOP_MS)
+    frames = moq_gop_frames_for_latency(target_latency_ms, fps=fps)
+    return round((frames / float(fps)) * 1000.0, 1)
 
 
 def hls_live_sync_duration_sec(target_latency_ms: int) -> float:
@@ -291,6 +341,9 @@ def build_video_encode_args(
     wallclock_pts: bool = False,
     burnin_epoch_sec: int | None = None,
     vbv_stability: bool = False,
+    preset: str | None = None,
+    output_cfr: bool = True,
+    rebase_pts: bool = False,
 ) -> List[str]:
     ladder = resolve_encode_ladder(ladder_id)
     latency_ms = clamp_target_latency_ms(target_latency_ms)
@@ -308,13 +361,20 @@ def build_video_encode_args(
     # Stacking fps=30 with -re pacing + openmoq --paced produced "half-speed"
     # looking playback even when HTMLVideoElement.currentTime advanced at 1×.
     # Device webcam VFR is normalized here via -fps_mode cfr below.
+    vf = f"scale=-2:{ladder.height},{burnin}"
+    if rebase_pts:
+        # AVFoundation PTS are wallclock (~1e5 s, 1000k tbn). File MoQ is
+        # zero-based. Rebase so CMAF tfdt/MSE match the file path.
+        vf = f"setpts=PTS-STARTPTS,{vf}"
     args: List[str] = [
         "-vf",
-        f"scale=-2:{ladder.height},{burnin}",
-        "-fps_mode",
-        "cfr",
-        "-r",
-        str(ASSUMED_FPS),
+        vf,
+    ]
+    if output_cfr:
+        # Do not stack this on a pinned 720p30 AVFoundation capture:
+        # 1000k tbr + -r 30 made speed oscillate 0.8↔1.3 (job 973f0c1b).
+        args.extend(["-fps_mode", "cfr", "-r", str(ASSUMED_FPS)])
+    args.extend([
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -324,7 +384,7 @@ def build_video_encode_args(
         "-level:v",
         "4.0",
         "-preset",
-        "veryfast",
+        preset or "veryfast",
         "-g",
         str(gop),
         "-keyint_min",
@@ -343,7 +403,7 @@ def build_video_encode_args(
         f"{bufsize_kb}k",
         "-x264-params",
         "repeat-headers=1",
-    ]
+    ])
     if latency_ms <= 500:
         # Insert tune after preset for ultra-low latency budgets.
         preset_idx = args.index("-preset")
@@ -368,6 +428,7 @@ def encode_profile_summary(
         "minrate_kbps": ladder.minrate_kbps,
         "target_latency_ms": latency_ms,
         "gop_frames": gop_frames_for_latency(latency_ms),
+        "delivery_gop_frames": delivery_gop_frames(latency_ms),
         "srt_latency_us": srt_latency_us(latency_ms),
         "hls_segment_sec": hls_segment_sec(latency_ms),
         "hls_live_sync_duration_sec": hls_live_sync_duration_sec(latency_ms),
@@ -389,9 +450,11 @@ def ensure_known_ladder(ladder_id: str) -> str:
 # Re-export for callers that already import audio args from moq_publish.
 __all__ = [
     "ASSUMED_FPS",
+    "BROKER_GOP_MS",
     "DEFAULT_ENCODE_LADDER_ID",
     "DEFAULT_MOQ_TARGET_LATENCY_MS",
     "DEFAULT_TARGET_LATENCY_MS",
+    "DELIVERY_GOP_SEC",
     "ENCODE_LADDERS",
     "EncodeLadder",
     "MAX_TARGET_LATENCY_MS",
@@ -402,15 +465,18 @@ __all__ = [
     "build_video_encode_args",
     "clamp_srt_target_latency_ms",
     "clamp_target_latency_ms",
+    "delivery_gop_frames",
     "effective_srt_caller_latency_ms",
     "encode_profile_summary",
     "ensure_known_ladder",
     "gop_frames_for_latency",
     "moq_gop_frames_for_latency",
+    "moq_group_duration_ms",
     "hls_live_sync_count",
     "hls_live_sync_duration_sec",
     "hls_segment_sec",
     "HLS_SEGMENT_SEC_MIN",
+    "LL_HLS_PART_MS",
     "list_encode_ladders",
     "moq_player_target_latency_ms",
     "resolve_encode_ladder",

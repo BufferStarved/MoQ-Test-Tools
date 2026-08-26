@@ -27,13 +27,23 @@ from publisher_protocol import (  # noqa: E402
 )
 from upload_service import UploadService  # noqa: E402
 
+from publisher_agent.api_guard import assert_publisher_api_allowed  # noqa: E402
 from publisher_agent.deps import (  # noqa: E402
     check_all,
     ensure_tool_path,
     list_webcam_devices,
     required_ok,
 )
+from publisher_agent.obs_broker import obs_broker  # noqa: E402
+from publisher_agent.obs_probe import probe_obs  # noqa: E402
+from publisher_agent.obs_websocket import classify_obs_error  # noqa: E402
 from publisher_agent.webcam_broker import webcam_broker  # noqa: E402
+from moq_publish import (  # noqa: E402
+    classify_job_exception,
+    classify_result_error,
+    is_device_webcam_source,
+    is_obs_openmoq_source,
+)
 
 logger = logging.getLogger("publisher-agent")
 
@@ -46,7 +56,10 @@ class PublisherAgent:
         *,
         agent_id: str = "",
         hostname: str = "",
+        session: str = "",
     ) -> None:
+        self.session = (session or os.environ.get("LOCAL_PUBLISHER_SESSION") or "").strip()
+        assert_publisher_api_allowed(api_ws_url, self.session)
         self.api_ws_url = api_ws_url
         self.token = token
         self.agent_id = agent_id or f"agent-{os.getpid()}"
@@ -61,11 +74,17 @@ class PublisherAgent:
         )
         self._ffmpeg_whip = any(dep.name == "ffmpeg-whip" and dep.ok for dep in self._deps)
         self._webcam_devices = list_webcam_devices(ffmpeg_path)
+        self._obs = probe_obs()
         # Never hairpin MediaMTX to loopback on a laptop agent — publish to the
         # public ingest IP over the real internet path under test.
         os.environ.setdefault("MEDIAMTX_LOOPBACK_PUBLISH", "0")
 
-    def capabilities(self) -> Dict[str, Any]:
+    def capabilities(self, *, refresh_obs: bool = False) -> Dict[str, Any]:
+        if refresh_obs:
+            try:
+                self._obs = probe_obs()
+            except Exception as exc:  # noqa: BLE001 — keep last snapshot
+                logger.debug("OBS re-probe failed: %s", exc)
         return {
             "protocol_version": PROTOCOL_VERSION,
             "agent_id": self.agent_id,
@@ -84,6 +103,9 @@ class PublisherAgent:
             ],
             "webcam_devices": self._webcam_devices,
             "ffmpeg_whip": self._ffmpeg_whip,
+            "obs_websocket": bool(self._obs.get("obs_websocket")),
+            "obs_plugin": bool(self._obs.get("obs_plugin")),
+            "obs_detail": self._obs.get("obs_detail") or "",
             "ready": required_ok(self._deps),
         }
 
@@ -108,6 +130,8 @@ class PublisherAgent:
         url = self.api_ws_url
         sep = "&" if "?" in url else "?"
         connect_url = f"{url}{sep}token={self.token}&agent_id={self.agent_id}"
+        if self.session:
+            connect_url = f"{connect_url}&session={self.session}"
         logger.info("Connecting to %s", url)
         backoff = 1.0
         while True:
@@ -123,17 +147,33 @@ class PublisherAgent:
                     )
                     logger.info("Connected as %s (%s)", self.agent_id, self.hostname)
                     backoff = 1.0
-                    async for raw in ws:
-                        try:
-                            message = json.loads(raw)
-                        except json.JSONDecodeError:
-                            logger.warning("Ignoring non-JSON message")
-                            continue
-                        await self._handle_message(ws, message)
+                    refresh = asyncio.create_task(self._obs_refresh_loop(ws))
+                    try:
+                        async for raw in ws:
+                            try:
+                                message = json.loads(raw)
+                            except json.JSONDecodeError:
+                                logger.warning("Ignoring non-JSON message")
+                                continue
+                            await self._handle_message(ws, message)
+                    finally:
+                        refresh.cancel()
             except Exception as exc:  # noqa: BLE001 — reconnect loop
                 logger.warning("Disconnected (%s); retry in %.1fs", exc, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(30.0, backoff * 1.7)
+
+    async def _obs_refresh_loop(self, ws: Any) -> None:
+        """Re-probe OBS so a helper started before OBS is not stuck websocket=false."""
+        while True:
+            await asyncio.sleep(5)
+            try:
+                caps = await asyncio.to_thread(self.capabilities, refresh_obs=True)
+                await ws.send(json.dumps({"type": "hello", "capabilities": caps}))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.debug("OBS capability refresh failed", exc_info=True)
 
     async def _handle_message(self, ws: Any, message: Dict[str, Any]) -> None:
         msg_type = str(message.get("type") or "")
@@ -177,12 +217,26 @@ class PublisherAgent:
         cancel_event: threading.Event,
     ) -> None:
         job_id = str(job_payload.get("job_id") or "")
+        webcam_session = None
+        obs_session = None
+        job = None
         try:
             job = upload_job_from_dict(job_payload)
             job.cancel_event = cancel_event
             media_raw = (job.media_path or "").strip()
-            webcam_session = None
-            if media_raw.lower().startswith("device:webcam"):
+            if is_obs_openmoq_source(media_raw) or (getattr(job, "encoder", "") or "").lower() == "obs":
+                job.encoder = "obs"
+                moq = job.destination.moq_target
+                obs_session = obs_broker.acquire(
+                    job.comparison_id,
+                    protocol=job.destination.protocol,
+                    publish_url=job.destination.url,
+                    moq_endpoint=(moq.endpoint if moq is not None else ""),
+                    moq_namespace=(moq.namespace if moq is not None else ""),
+                    encode_ladder=job.encode_ladder,
+                    cancel_event=cancel_event,
+                )
+            elif media_raw.lower().startswith("device:webcam"):
                 # Multi-protocol comparisons start one job per leg at once;
                 # route them through the shared-capture broker so they don't
                 # race to open the same physical camera (see
@@ -199,6 +253,12 @@ class PublisherAgent:
                 # direct pipelines ignore the rewritten media_path and open
                 # the camera anyway, defeating the broker entirely.
                 job.refresh_ffmpeg_cmd()
+                if webcam_session.direct_device:
+                    logger.info(
+                        "Webcam job %s single-hop (no UDP tee): %s",
+                        job_id[:8],
+                        job.media_path,
+                    )
             else:
                 # Absolute uploads/ paths from the API, or repo-relative files.
                 media = Path(media_raw)
@@ -323,10 +383,20 @@ class PublisherAgent:
             try:
                 os.chdir(ROOT_DIR)
                 result = self._service.run(job, on_sample=on_sample)
+                if result.error:
+                    # After the webcam broker, media_path is udp:// — bare EIO
+                    # is the publisher pipe, not AVFoundation exclusive-open.
+                    result.error = classify_result_error(
+                        result.error,
+                        media_path=job.media_path,
+                        original_media=media_raw,
+                    )
             finally:
                 os.chdir(previous_cwd)
                 if webcam_session is not None:
                     webcam_broker.release(webcam_session)
+                if obs_session is not None:
+                    obs_broker.release(obs_session)
 
             done = {
                 "type": "job_done",
@@ -338,12 +408,29 @@ class PublisherAgent:
             logger.info("Job %s finished success=%s", job_id[:8], result.success)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Job %s failed", job_id[:8])
+            media_raw = str((job_payload or {}).get("media_path") or "")
+            encoder = str((job_payload or {}).get("encoder") or "")
+            if is_obs_openmoq_source(media_raw) or encoder.lower() == "obs":
+                err_text = classify_obs_error(exc)
+            elif webcam_session is not None:
+                # Broker already opened the camera. Job-thread EIO is pipe.
+                err_text = classify_job_exception(
+                    exc,
+                    media_path=job.media_path if job is not None else media_raw,
+                    role="ffmpeg",
+                )
+            else:
+                err_text = classify_job_exception(
+                    exc,
+                    media_path=media_raw,
+                    role="camera" if is_device_webcam_source(media_raw) else "job",
+                )
             err = {
                 "type": "job_done",
                 "job_id": job_id,
                 "result": {
                     "success": False,
-                    "error": str(exc),
+                    "error": err_text,
                     "encoder_vmaf_status": "failed",
                 },
             }

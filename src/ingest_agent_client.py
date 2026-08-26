@@ -37,33 +37,28 @@ class RemoteVmafResult:
     error: Optional[str] = None
 
 
-def _east_ingest_hosts() -> set[str]:
-    hosts = {
-        os.environ.get("GCP_EAST_ZIXI_IP", "").strip(),
-        os.environ.get("GCP_EAST_WEB_IP", "").strip(),
-        os.environ.get("GCP_EAST_RELAY_IP", "").strip(),
-    }
-    hosts.discard("")
-    return hosts
+def _token_for_stack_host(host: str) -> Optional[str]:
+    """Regional stacks use their own token env; never fall back to central."""
+    if not host:
+        return None
+    from cloud_placement import ENCODE_HOSTS, host_relay_ip, host_web_ip, host_zixi_ip
 
-
-def _linode_ingest_hosts() -> set[str]:
-    hosts = {
-        os.environ.get("LINODE_ZIXI_IP", "").strip(),
-        os.environ.get("LINODE_WEB_IP", "").strip(),
-        os.environ.get("LINODE_RELAY_IP", "").strip(),
-    }
-    hosts.discard("")
-    return hosts
+    for encode_host in ENCODE_HOSTS:
+        if encode_host.always_available:
+            continue
+        ips = {host_zixi_ip(encode_host), host_web_ip(encode_host), host_relay_ip(encode_host)}
+        ips.discard("")
+        if host in ips:
+            return os.environ.get(f"{encode_host.env_prefix}_INGEST_AGENT_TOKEN", "").strip()
+    return None
 
 
 def resolve_agent_token(explicit_token: str = "", *, host: str = "") -> str:
     if explicit_token.strip():
         return explicit_token.strip()
-    if host and host in _east_ingest_hosts():
-        return os.environ.get("GCP_EAST_INGEST_AGENT_TOKEN", "").strip()
-    if host and host in _linode_ingest_hosts():
-        return os.environ.get("LINODE_INGEST_AGENT_TOKEN", "").strip()
+    stacked = _token_for_stack_host(host)
+    if stacked is not None:
+        return stacked
     return os.environ.get("INGEST_AGENT_TOKEN", "").strip()
 
 

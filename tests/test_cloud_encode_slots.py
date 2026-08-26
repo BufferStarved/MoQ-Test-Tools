@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -26,8 +27,13 @@ class CloudEncodeSlotTests(unittest.TestCase):
         self.assertFalse(job_needs_cloud_encode_slot("browser"))
         self.assertFalse(job_needs_cloud_encode_slot("local"))
 
-    def test_env_cap_defaults_to_one(self):
-        self.assertEqual(max_concurrent_cloud_encodes(), 1)
+    def test_env_cap_defaults_to_four(self):
+        old = os.environ.pop("MAX_CONCURRENT_CLOUD_ENCODES", None)
+        try:
+            self.assertEqual(max_concurrent_cloud_encodes(), 4)
+        finally:
+            if old is not None:
+                os.environ["MAX_CONCURRENT_CLOUD_ENCODES"] = old
 
     def test_second_job_waits_until_first_releases(self):
         pool = CloudEncodeSlotPool(limit=1)

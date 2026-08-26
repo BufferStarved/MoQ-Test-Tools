@@ -33,6 +33,12 @@ variable "allowed_ssh_ipv6_cidrs" {
   default = []
 }
 
+variable "register_ssh_key" {
+  description = "Register the key on the Linode account. Needs SSH Keys token scope. The instance still gets authorized_keys from the file."
+  type        = bool
+  default     = true
+}
+
 variable "allowed_ingest_cidr" {
   type    = string
   default = "0.0.0.0/0"

@@ -33,6 +33,27 @@ class MediaMtxIceConfigTests(unittest.TestCase):
         text = (ROOT / "infra" / "mediamtx" / "scripts" / "install-mediamtx.sh").read_text()
         self.assertIn('lines.append("webrtcIPsFromInterfaces: no")', text)
 
+    def test_ice_udp_listener_address_stays_bindable(self) -> None:
+        """webrtcLocalUDPAddress goes straight to net.ListenPacket, so it must
+        be an address the host owns. On GCE the public IP lives on the 1:1 NAT,
+        never on the NIC — pinning it there fails EADDRNOTAVAIL and MediaMTX
+        aborts before its HLS/RTMP/SRT servers start, i.e. a full outage whose
+        only symptom is "the site is down". Advertising the public IP is
+        webrtcAdditionalHosts' job (an SDP rewrite), not this listener's."""
+        text = (ROOT / "infra" / "mediamtx" / "mediamtx.yml").read_text()
+        self.assertIn("webrtcLocalUDPAddress: :8189", text)
+        self.assertIn('webrtcAdditionalHosts: ["34.9.217.178"]', text)
+
+    def test_install_script_preflights_the_ice_listener(self) -> None:
+        """Narrowing the listener is only safe behind a bind check, and a
+        rejected address must fail the install loudly instead of leaving the
+        host with no HLS/RTMP/SRT."""
+        text = (ROOT / "infra" / "mediamtx" / "scripts" / "install-mediamtx.sh").read_text()
+        self.assertIn("def bindable(", text)
+        self.assertIn("sanitise_ice_udp", text)
+        self.assertIn("listener opened", text)
+        self.assertIn("MediaMTX did not open its WebRTC listener", text)
+
 
 class WhipEncoderVmafTests(unittest.TestCase):
     def test_tee_rejects_webrtc(self) -> None:
@@ -145,7 +166,8 @@ class FrontendRegressionSourceTests(unittest.TestCase):
     def test_mpegts_enables_stash_for_wan(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "players" / "MpegTsPlayer.tsx").read_text()
         self.assertIn("enableStashBuffer: true", text)
-        self.assertIn("liveBufferLatencyMaxLatency: 3.5", text)
+        self.assertIn("liveBufferLatencyMaxLatency: 1.5", text)
+        self.assertIn("seekNearLiveEdge", text)
         self.assertNotIn("enableStashBuffer: false", text)
 
     def test_ui_does_not_request_encoder_vmaf_for_webrtc(self) -> None:

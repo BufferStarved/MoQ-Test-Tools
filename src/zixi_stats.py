@@ -142,12 +142,14 @@ def zixi_api_base_for_endpoint(endpoint_url: str = "") -> str:
 
 
 def _managed_zixi_hosts() -> set[str]:
+    from cloud_placement import ENCODE_HOSTS, host_zixi_ip
+
     hosts = {
         "35.222.33.58",
         os.environ.get("GCP_ZIXI_IP", "").strip(),
-        os.environ.get("GCP_EAST_ZIXI_IP", "").strip(),
-        os.environ.get("LINODE_ZIXI_IP", "").strip(),
     }
+    for encode_host in ENCODE_HOSTS:
+        hosts.add(host_zixi_ip(encode_host))
     hosts.discard("")
     return hosts
 

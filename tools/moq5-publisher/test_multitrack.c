@@ -1,6 +1,29 @@
-#define main moq5_publisher_cli_main
-#include "main.c"
-#undef main
+#include "fmp4_moq_bridge_priv.h"
+
+#include <moq/msf.h>
+#include <moq/rcbuf.h>
+
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static int contains_lit(const char *hay, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    if (m == 0 || m > n) {
+        return 0;
+    }
+    for (size_t i = 0; i + m <= n; i++) {
+        if (memcmp(hay + i, needle, m) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 #define CHECK(expr) do { \
     if (!(expr)) { \
@@ -271,6 +294,68 @@ int main(int argc, char **argv)
         }
     }
     CHECK(have_audio && have_video);
+
+    /* Reproduce the catalog libmoq actually publishes: CMAF init is
+     * initDataList[] + initRef, not per-track initData. Playa 0.5.3
+     * ignored that shape and timed out waiting for in-band ftyp+moov. */
+    {
+        const moq_alloc_t *alloc = moq_alloc_default();
+        moq_msf_track_t mt[MAX_TRACKS];
+        moq_msf_init_data_entry_t idl[MAX_TRACKS];
+        moq_rcbuf_t *b64[MAX_TRACKS];
+        memset(mt, 0, sizeof(mt));
+        memset(idl, 0, sizeof(idl));
+        memset(b64, 0, sizeof(b64));
+        size_t n = ctx.track_count;
+        CHECK(n <= MAX_TRACKS);
+        for (size_t i = 0; i < n; i++) {
+            track_slot_t *slot = &ctx.tracks[i];
+            CHECK(moq_msf_encode_init_data(
+                      alloc, (moq_bytes_t){slot->init.data, slot->init.len},
+                      &b64[i]) == MOQ_OK);
+            mt[i].struct_size = sizeof(mt[i]);
+            mt[i].name = (moq_bytes_t){(const uint8_t *)slot->name,
+                                       strlen(slot->name)};
+            mt[i].packaging = (moq_bytes_t){(const uint8_t *)"cmaf", 4};
+            mt[i].is_live = true;
+            mt[i].has_role = true;
+            mt[i].role = slot->media_type == MOQ_MEDIA_TYPE_AUDIO
+                ? (moq_bytes_t){(const uint8_t *)"audio", 5}
+                : (moq_bytes_t){(const uint8_t *)"video", 5};
+            mt[i].has_codec = true;
+            mt[i].codec = (moq_bytes_t){(const uint8_t *)slot->codec,
+                                        strlen(slot->codec)};
+            mt[i].has_init_ref = true;
+            mt[i].init_ref = mt[i].name;
+            idl[i].id = mt[i].name;
+            idl[i].type = (moq_bytes_t){(const uint8_t *)"inline", 6};
+            idl[i].data = (moq_bytes_t){moq_rcbuf_data(b64[i]),
+                                        moq_rcbuf_len(b64[i])};
+        }
+        moq_msf_catalog_t cat;
+        memset(&cat, 0, sizeof(cat));
+        cat.struct_size = sizeof(cat);
+        cat.version = MOQ_MSF_VERSION;
+        cat.tracks = mt;
+        cat.track_count = n;
+        cat.init_data_list = idl;
+        cat.init_data_count = n;
+        moq_rcbuf_t *json = NULL;
+        CHECK(moq_msf_catalog_encode(alloc, &cat, &json) == MOQ_OK);
+        CHECK(json != NULL);
+        const char *js = (const char *)moq_rcbuf_data(json);
+        size_t jl = moq_rcbuf_len(json);
+        CHECK(jl > 0);
+        CHECK(contains_lit(js, jl, "\"version\":\"1\""));
+        CHECK(contains_lit(js, jl, "\"initDataList\""));
+        CHECK(contains_lit(js, jl, "\"initRef\""));
+        /* Historical CMAF encode has no per-track initData key. */
+        CHECK(!contains_lit(js, jl, "\"initData\":"));
+        moq_rcbuf_decref(json);
+        for (size_t i = 0; i < n; i++) {
+            moq_rcbuf_decref(b64[i]);
+        }
+    }
 
     bool seen[MAX_TRACKS] = {false};
     pos = 0;

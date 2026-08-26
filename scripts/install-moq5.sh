@@ -7,6 +7,13 @@ MOQ5_DIR="$ROOT_DIR/tools/moq5"
 DEPS_DIR="$ROOT_DIR/tools/deps"
 INSTALL_PREFIX="$MOQ5_DIR/install"
 PUBLISHER_BIN="$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish"
+# Default: openmoq/moq5 main (4a6dcf7 Joining FETCH + catalog bootstrap).
+# Live-write publish_tracks is still open as openmoq/moq5#9 — apply
+# live-write-publish-tracks-catalog.patch so PUBLISH_OK Forward 0 still
+# puts the catalog on the wire.
+# Do not grow a private libmoq (no new dual-emit / catalog-refresh-off).
+# Also applies honor-moq-qlog-dir.patch so MOQ_QLOG_DIR reaches
+# picoquic_set_qlog — measurement only, not a product API.
 MOQ5_REPO="${MOQ5_REPO:-https://github.com/openmoq/moq5.git}"
 MOQ5_REF="${MOQ5_REF:-main}"
 PICOQUIC_REPO="${PICOQUIC_REPO:-https://github.com/private-octopus/picoquic.git}"
@@ -87,15 +94,38 @@ clone_dep() {
 }
 
 ensure_moq5() {
-  if [[ -d "$MOQ5_DIR/.git" ]]; then
+  if [[ ! -d "$MOQ5_DIR/.git" ]]; then
+    if [[ -d "$MOQ5_DIR" ]]; then
+      echo "Replacing non-git moq5 checkout at $MOQ5_DIR"
+      rm -rf "$MOQ5_DIR"
+    fi
+    echo "Cloning moq5 into $MOQ5_DIR ($MOQ5_REPO @$MOQ5_REF)"
+    git clone --depth 1 --branch "$MOQ5_REF" "$MOQ5_REPO" "$MOQ5_DIR"
     return 0
   fi
-  if [[ -d "$MOQ5_DIR" ]]; then
-    echo "Replacing non-git moq5 checkout at $MOQ5_DIR"
-    rm -rf "$MOQ5_DIR"
+  echo "Pinning moq5 checkout to $MOQ5_REPO @$MOQ5_REF"
+  if git -C "$MOQ5_DIR" remote get-url canary >/dev/null 2>&1; then
+    git -C "$MOQ5_DIR" remote set-url canary "$MOQ5_REPO"
+  else
+    git -C "$MOQ5_DIR" remote add canary "$MOQ5_REPO"
   fi
-  echo "Cloning moq5 into $MOQ5_DIR"
-  git clone --depth 1 --branch "$MOQ5_REF" "$MOQ5_REPO" "$MOQ5_DIR"
+  git -C "$MOQ5_DIR" fetch --depth 1 canary "$MOQ5_REF"
+  git -C "$MOQ5_DIR" checkout -B "$MOQ5_REF" FETCH_HEAD
+}
+
+apply_local_moq5_patches() {
+  local patch
+  for patch in "$ROOT_DIR"/tools/moq5-publisher/patches/*.patch; do
+    [[ -f "$patch" ]] || continue
+    if git -C "$MOQ5_DIR" apply --check "$patch" >/dev/null 2>&1; then
+      git -C "$MOQ5_DIR" apply "$patch"
+      echo "Applied $(basename "$patch")"
+    elif git -C "$MOQ5_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+      echo "$(basename "$patch") already applied"
+    else
+      echo "WARNING: could not apply $patch" >&2
+    fi
+  done
 }
 
 build_picotls() {
@@ -153,13 +183,19 @@ build_publisher() {
 }
 
 main() {
+  local rebuild=0
+  if [[ "${1:-}" == "--rebuild" ]]; then
+    rebuild=1
+  fi
   if [[ -x "$PUBLISHER_BIN" ]] && file "$PUBLISHER_BIN" | grep -qE 'ELF|Mach-O'; then
     if [[ "$(uname -s)" == "Linux" ]]; then
       file "$PUBLISHER_BIN" | grep -q 'ELF' || rm -f "$PUBLISHER_BIN"
     fi
   fi
-  if [[ -x "$PUBLISHER_BIN" ]]; then
+  if [[ $rebuild -eq 0 && -x "$PUBLISHER_BIN" ]]; then
     echo "moq5-fmp4-publish already installed at $PUBLISHER_BIN"
+    echo "Pin: $MOQ5_REPO @$MOQ5_REF"
+    echo "Re-pin and rebuild: $0 --rebuild"
     exit 0
   fi
 
@@ -167,6 +203,7 @@ main() {
 
   ensure_prerequisites
   ensure_moq5
+  apply_local_moq5_patches
   build_moq5
   build_publisher
   echo "Installed moq5-fmp4-publish to $PUBLISHER_BIN"

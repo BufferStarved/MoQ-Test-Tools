@@ -1,3 +1,4 @@
+import { isGracefulMoqEncodeOver } from "./playbackEos.ts";
 import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
 
 /**
@@ -13,12 +14,74 @@ import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndV
 export const MOQ_ALL_TRACKS_REFUSED = 4867;
 export const MOQ_SUBSCRIPTION_REFUSED = 4866;
 export const MOQ_LOAD_FAILED = 4865;
+/** playa / WebTransport "Connection lost" — transient, reconnect. */
+export const MOQ_CONNECTION_LOST = 4099;
 
 /** Stay connected through publisher-not-ready; do not burn the one-shot catalog. */
 export const SUBSCRIBE_KEEPALIVE_ON_0X10 = true;
 
 /** Fail the visible player if nothing rendered by then (fits a 60s BBB). */
 export const MOQ_NO_MEDIA_TIMEOUT_MS = 15_000;
+/**
+ * Live namespace + empty first catalog: keep waiting for vide_1 live-write
+ * instead of firing the one-shot miss at the 15s no-media floor.
+ */
+export const MOQ_CATALOG_REFRESH_WAIT_MS = 30_000;
+
+/**
+ * Starve hold: two 0.5s webcam groups. One-group 0.65s froze on a late IDR.
+ * This is NOT the healthy live-edge — only sit here while the playhead is
+ * frozen or the next IDR is late. Healthy CMAF must compete with WebRTC.
+ */
+export const CMAF_STARVE_HOLD_SEC = 1.15;
+/** @deprecated Name kept for call sites; value is the starve hold, not live. */
+export const CMAF_GOP_HOLD_FLOOR_SEC = CMAF_STARVE_HOLD_SEC;
+/** Healthy live-edge: one-frame-class, GOP-aware. Not an HLS window. */
+export const CMAF_HEALTHY_HOLD_FLOOR_SEC = 0.2;
+export const CMAF_HEALTHY_HOLD_CEILING_SEC = 0.4;
+/**
+ * Start catching up just past the healthy hold. A 1.25s slack on a 1.15s
+ * hold meant 1.0× through a 2.4s lead and looked like HLS.
+ */
+export const CMAF_CATCH_UP_START_SLACK_SEC = 0.15;
+export const CMAF_CATCH_UP_STOP_SLACK_SEC = 0.05;
+/**
+ * Seek once lead is a few seconds of runaway. 30s never fired on a 6–10s
+ * balloon (comparison 2026-08-23). The 7s seek froze only during a GOP-wait
+ * hole — the watchdog skips seek while frozen.
+ */
+export const CMAF_SEEK_FLOOR_SEC = 2.5;
+export const CMAF_SEEK_SLACK_SEC = 1.5;
+/** Reach max catch-up well before a 6–10s MSE balloon. */
+export const CMAF_CATCH_UP_SPAN_SEC = 1.5;
+export const CMAF_MAX_CATCH_UP_RATE = 1.35;
+
+export function moqLiveEdgePolicy(targetLatencyMs: number): {
+  holdBehindSec: number;
+  starveHoldSec: number;
+  rateOnSec: number;
+  rateOffSec: number;
+  seekThresholdSec: number;
+  catchUpSpanSec: number;
+} {
+  const requested = Math.max(0.15, (targetLatencyMs || 400) / 1000);
+  // Cap at the healthy ceiling — a 2s HLS-style budget is not a MoQ target.
+  const holdBehindSec = Math.min(
+    CMAF_HEALTHY_HOLD_CEILING_SEC,
+    Math.max(CMAF_HEALTHY_HOLD_FLOOR_SEC, requested),
+  );
+  const rateOnSec = holdBehindSec + CMAF_CATCH_UP_START_SLACK_SEC;
+  const rateOffSec = holdBehindSec + CMAF_CATCH_UP_STOP_SLACK_SEC;
+  const seekThresholdSec = Math.max(CMAF_SEEK_FLOOR_SEC, rateOnSec + CMAF_SEEK_SLACK_SEC);
+  return {
+    holdBehindSec,
+    starveHoldSec: CMAF_STARVE_HOLD_SEC,
+    rateOnSec,
+    rateOffSec,
+    seekThresholdSec,
+    catchUpSpanSec: CMAF_CATCH_UP_SPAN_SEC,
+  };
+}
 
 /** MSE still has a GOP-sized lead — do not tear down a live-edge join. */
 export const CMAF_BUFFERED_HOLD_SEC = 0.35;
@@ -32,6 +95,7 @@ export const CMAF_LATE_FRAME_THRESHOLD_MS = 400;
  * FETCH of the open group. moqx honored a warm-start / mid-stream FETCH
  * for one GOP (~0.5–1s) and never attached later groups — same stall as
  * LOC. Catalog init comes from the publisher; do not fetch the open GOP.
+ * Revisit only after a headed check of estimator + policy + test scope.
  */
 export function cmafSubscribeOptions(): {
   subscriptionFilter: { type: "NextGroupStart" };
@@ -48,6 +112,21 @@ export function cmafSubscribeOptions(): {
 /** CMAF paints MSE on <video>; LOC paints WebCodecs on <canvas>. */
 export function moqRenderSink(mediaPackaging: "cmaf" | "loc"): "video" | "canvas" {
   return mediaPackaging === "loc" ? "canvas" : "video";
+}
+
+/**
+ * Playa `stats.latencyMs` is LOC CaptureTimestamp (Unix-epoch µs). CMAF
+ * ffmpeg has no such stamp — feeding it into `computeMoqE2eMs` short-circuits
+ * the encode-timeline estimator (comparison 26).
+ */
+export function playaLatencyForMoqE2e(
+  mediaPackaging: "cmaf" | "loc",
+  playaLatencyMs: number | undefined,
+): number | undefined {
+  if (mediaPackaging !== "loc") {
+    return undefined;
+  }
+  return playaLatencyMs != null && playaLatencyMs > 0 ? playaLatencyMs : undefined;
 }
 
 export type CmafStallAction = "ok" | "hold" | "restart" | "give_up";
@@ -125,6 +204,18 @@ export function moqHasRenderedMedia(options: {
   );
 }
 
+/**
+ * Catalog "ready" with zero selected video levels is not playback-ready.
+ * Webcam live-write often delivers `{tracks:[]}` first; that must not
+ * arm the post-ready frame watchdog or count as a headed success.
+ */
+export function isPlayableCatalogReady(options: {
+  catalogReady?: boolean;
+  videoLevels?: number;
+}): boolean {
+  return Boolean(options.catalogReady) && (options.videoLevels ?? 0) > 0;
+}
+
 export function noMediaTimeoutMs(encodeDurationSec: number): number {
   const durationMs = Math.max(0, encodeDurationSec) * 1000;
   if (durationMs > 0) {
@@ -148,7 +239,23 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("conversion failed") ||
     text.includes("opening input") ||
     text.includes("never announced namespace") ||
-    text.includes("catalog is not live")
+    text.includes("catalog is not live") ||
+    text.includes("webtransport session never connected") ||
+    text.includes("no connection_id") ||
+    text.includes("did not connect to the relay") ||
+    text.includes("camera i/o error") ||
+    text.includes("publish i/o error") ||
+    text.includes("ffmpeg i/o error") ||
+    text.includes("[errno 5]") ||
+    text.includes("moq5-fmp4-publish not found") ||
+    text.includes("failed to start moq publisher") ||
+    text.includes("moq5 publisher exited") ||
+    text.includes("before webtransport connect") ||
+    text.includes("endpoint connect failed") ||
+    text.includes("sender attach failed") ||
+    text.includes("obs websocket") ||
+    text.includes("startstream failed") ||
+    text.includes("openmoq-plugin")
   );
 }
 
@@ -158,6 +265,9 @@ export function humanizeJobError(error?: string | null): string | null {
   if (!raw) {
     return null;
   }
+  if (/one-shot catalog miss|catalog object never reached/i.test(raw)) {
+    return raw;
+  }
   if (!isCaptureOrPublishError(raw)) {
     return raw;
   }
@@ -166,24 +276,76 @@ export function humanizeJobError(error?: string | null): string | null {
     raw.match(/supported modes?\s*(?:are\s*)?:?\s*[^\n.]+/i) ||
     raw.match(/1920x1080@\d+fps/i);
   const mode = modeMatch ? modeMatch[0].replace(/^supported modes?\s*(?:are\s*)?:?\s*/i, "").trim() : "";
-  if (/framerate|avfoundation|shared webcam/i.test(raw)) {
+  if (/camera i\/o error|framerate|avfoundation|shared webcam/i.test(raw)) {
     return [
       "The camera on this laptop could not start, so nothing was published.",
       mode ? `This device reported: ${mode}.` : first,
       "This is not a player or catalog problem. Use Cloud playout or Browser, or a camera mode the device actually supports.",
     ].join(" ");
   }
-  return `The publisher never started (${first}). This is not a player or catalog problem.`;
+  if (/^\[errno 5\]\s*input\/output error$/i.test(raw) || /^input\/output error$/i.test(raw)) {
+    return (
+      "The publisher pipe closed before encode finished ([Errno 5] Input/output error). " +
+      "This is not a camera or catalog problem."
+    );
+  }
+  if (/publish i\/o error|ffmpeg i\/o error|closed publisher pipe/i.test(raw)) {
+    return `The publisher pipe closed before encode finished (${first}). This is not a player or catalog problem.`;
+  }
+  if (/moq5 publisher exited|before webtransport connect|endpoint connect failed|sender attach failed/i.test(raw)) {
+    return `The MoQ publisher exited before a live catalog (${first}). This is not a player or catalog problem.`;
+  }
+  if (/moq5-fmp4-publish not found|failed to start moq publisher/i.test(raw)) {
+    return `The publisher never started (${first}). This is not a player or catalog problem.`;
+  }
+  if (/webtransport session never connected|no connection_id|did not connect to the relay/i.test(raw)) {
+    return `The publisher ran but did not connect to the relay (${first}). This is not a player or catalog problem.`;
+  }
+  if (/never announced namespace|catalog is not live/i.test(raw)) {
+    return first;
+  }
+  if (/obs websocket|startstream failed|openmoq-plugin|obs openmoq/i.test(raw)) {
+    return first;
+  }
+  return first;
 }
 
 export function playerErrorForFailedJob(options: {
   jobStatus?: string;
   jobError?: string | null;
 }): string | null {
-  if (options.jobStatus !== "failed") {
-    return null;
+  if (options.jobStatus === "failed") {
+    return humanizeJobError(options.jobError);
   }
-  return humanizeJobError(options.jobError);
+  if (
+    options.jobStatus === "completed" &&
+    /cancelled while waiting for a cloud encode slot/i.test(options.jobError || "")
+  ) {
+    return humanizeJobError(options.jobError);
+  }
+  return null;
+}
+
+export function isTransientMoqSessionDrop(options: {
+  code?: number | null;
+  message?: string | null;
+}): boolean {
+  const code = options.code ?? 0;
+  const text = options.message || "";
+  return code === MOQ_CONNECTION_LOST || /connection lost/i.test(text);
+}
+
+export function shouldSkipMoqSessionRestart(options: {
+  runStopped?: boolean;
+  firstFrame?: boolean;
+  videoTimeSec?: number;
+  encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+}): boolean {
+  if (options.runStopped) {
+    return true;
+  }
+  return Boolean(options.firstFrame) && playbackCoveredEncode(options);
 }
 
 export function noMediaFailMessage(options: {
@@ -222,10 +384,15 @@ A 15s timeout while the job is still queued or the publisher has not
 announced the namespace produces a catalog-miss toast for a queue /
 publisher-death problem (bench-733f1d7c). Wait for encode-over, or for
 preview_ready plus the usual deadline.
+
+A live namespace whose catalog is still empty (`{tracks:[]}` then vide_1)
+is not a one-shot miss yet — FETCH/SUBSCRIBE are still allowed to apply
+the later object.
 */
 export function shouldFailNoMediaWatchdog(options: {
   jobStatus?: string;
   previewReady?: boolean;
+  catalogReady?: boolean;
   liveMs: number;
   deadlineMs: number;
 }): boolean {
@@ -238,6 +405,9 @@ export function shouldFailNoMediaWatchdog(options: {
   }
   if (options.previewReady === false) {
     return false;
+  }
+  if (options.previewReady === true && options.catalogReady === false) {
+    return options.liveMs >= Math.max(options.deadlineMs, MOQ_CATALOG_REFRESH_WAIT_MS);
   }
   return options.liveMs >= options.deadlineMs;
 }
@@ -285,6 +455,22 @@ export function classifyMoqEndVerdict(options: {
         restarts > 0
           ? `Playback ended (reconnected ${restarts}× after a freeze)`
           : "Playback OK",
+      error: null,
+    };
+  }
+  // Job completed / operator stop after first_frame: playhead_frozen is the
+  // publisher stopping. Do not keep last_error as "stalled at Xs of a Ys encode".
+  if (
+    played &&
+    isGracefulMoqEncodeOver({
+      playedOk: true,
+      jobStatus: options.jobStatus,
+      runStopped: options.runStopped,
+    })
+  ) {
+    return {
+      ok: true,
+      status: "Encode ended",
       error: null,
     };
   }

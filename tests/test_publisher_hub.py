@@ -37,7 +37,11 @@ def _job(job_id: str = "job-1") -> UploadJob:
 class LocalPublisherFlagTests(unittest.TestCase):
     def test_enabled_truthy(self) -> None:
         for value in ("1", "true", "YES", "on"):
-            with patch.dict(os.environ, {"LOCAL_PUBLISHER_ENABLED": value}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"LOCAL_PUBLISHER_ENABLED": value, "MOQ_ENV": "dev"},
+                clear=False,
+            ):
                 self.assertTrue(local_publisher_enabled(), msg=value)
 
     def test_disabled_falsy(self) -> None:
@@ -46,7 +50,29 @@ class LocalPublisherFlagTests(unittest.TestCase):
                 self.assertFalse(local_publisher_enabled(), msg=repr(value))
 
     def test_default_enabled_when_unset(self) -> None:
-        env = {k: v for k, v in os.environ.items() if k != "LOCAL_PUBLISHER_ENABLED"}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"LOCAL_PUBLISHER_ENABLED", "MOQ_ENV"}
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(local_publisher_enabled())
+
+    def test_prod_feature_stays_on_for_session_helpers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MOQ_ENV": "prod", "LOCAL_PUBLISHER_ENABLED": "0", "LOCAL_PUBLISHER_TOKEN": "dev-local-publisher"},
+            clear=False,
+        ):
+            self.assertTrue(local_publisher_enabled())
+
+    def test_default_enabled_in_prod_when_unset(self) -> None:
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"LOCAL_PUBLISHER_ENABLED", "MOQ_ENV"}
+        }
+        env["MOQ_ENV"] = "prod"
         with patch.dict(os.environ, env, clear=True):
             self.assertTrue(local_publisher_enabled())
 
@@ -62,6 +88,26 @@ class PublisherHubTests(unittest.TestCase):
         self.assertFalse(status["connected"])
         self.assertEqual(status["agents"], [])
 
+    def test_prod_session_never_picks_another_users_helper(self) -> None:
+        with patch.dict(os.environ, {"MOQ_ENV": "prod"}, clear=False):
+            async def _run() -> None:
+                sess_a = self.hub.mint_session().session_id
+                sess_b = self.hub.mint_session().session_id
+                a = await self.hub.register(MagicMock(), "a", session_id=sess_a)
+                b = await self.hub.register(MagicMock(), "b", session_id=sess_b)
+                a.capabilities = {"ready": True, "hostname": "host-a"}
+                b.capabilities = {"ready": True, "hostname": "host-b"}
+                self.assertIs(self.hub.pick_agent(session_id=sess_a), a)
+                self.assertIs(self.hub.pick_agent(session_id=sess_b), b)
+                self.assertIsNone(self.hub.pick_agent())
+                leaked = self.hub.status()
+                self.assertEqual(leaked["agents"], [])
+                own = self.hub.status(sess_a)
+                self.assertEqual(len(own["agents"]), 1)
+                self.assertEqual(own["agents"][0]["agent_id"], "a")
+
+            asyncio.run(_run())
+
     def test_pick_agent_prefers_least_busy_ready(self) -> None:
         async def _run() -> None:
             ws_a = MagicMock()
@@ -73,6 +119,39 @@ class PublisherHubTests(unittest.TestCase):
             b.pending["busy"] = MagicMock()
             picked = self.hub.pick_agent()
             self.assertIs(picked, a)
+
+        asyncio.run(_run())
+
+    def test_pick_agent_pins_comparison_to_one_helper(self) -> None:
+        async def _run() -> None:
+            ws_a = MagicMock()
+            ws_b = MagicMock()
+            a = await self.hub.register(ws_a, "a")
+            b = await self.hub.register(ws_b, "b")
+            a.capabilities = {"ready": True, "hostname": "host-a"}
+            b.capabilities = {"ready": True, "hostname": "host-b"}
+            first = self.hub.pick_agent("cmp-1")
+            first.pending["busy"] = MagicMock()
+            second = self.hub.pick_agent("cmp-1")
+            other = self.hub.pick_agent("cmp-2")
+            self.assertIs(second, first)
+            self.assertIs(other, b if first is a else a)
+
+        asyncio.run(_run())
+
+    def test_pick_agent_repins_when_sticky_helper_disconnects(self) -> None:
+        async def _run() -> None:
+            ws_a = MagicMock()
+            ws_b = MagicMock()
+            a = await self.hub.register(ws_a, "a")
+            b = await self.hub.register(ws_b, "b")
+            a.capabilities = {"ready": True}
+            b.capabilities = {"ready": True}
+            first = self.hub.pick_agent("cmp-sticky")
+            self.hub.unregister(first.agent_id, first.websocket)
+            leftover = self.hub.pick_agent("cmp-sticky")
+            self.assertIsNotNone(leftover)
+            self.assertIsNot(leftover, first)
 
         asyncio.run(_run())
 
@@ -163,6 +242,28 @@ class PublisherHubTests(unittest.TestCase):
         start_msg = ws.send_json.call_args.args[0]
         self.assertEqual(start_msg["type"], "job_start")
         self.assertEqual(start_msg["job_id"], "job-dispatch")
+
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()
+
+    def test_broadcast_cancel_fans_out_without_pending_job(self) -> None:
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        self.hub.set_loop(loop)
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        async def _register() -> None:
+            await self.hub.register(ws, "helper")
+
+        asyncio.run_coroutine_threadsafe(_register(), loop).result(timeout=2)
+        sent = self.hub.broadcast_cancel("ghost-job")
+        self.assertEqual(sent, 1)
+        ws.send_json.assert_awaited()
+        self.assertEqual(ws.send_json.await_args.args[0]["type"], "job_cancel")
+        self.assertEqual(ws.send_json.await_args.args[0]["job_id"], "ghost-job")
 
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)

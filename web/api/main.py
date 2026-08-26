@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from build_info import read_build_sha
+from build_info import read_build_sha, read_moq_env
 
 # Max duration for a live source (device webcam via the local publisher
 # agent) — user can stop earlier from the UI.
@@ -71,8 +71,10 @@ from encode_profile import (  # noqa: E402
 from moq_publish import (  # noqa: E402
     BROWSER_COMPAT_AUDIO_ARGS,
     MPEGTS_VIDEO_BSF,
+    OBS_OPENMOQ_MEDIA,
     is_device_browser_source,
     is_device_webcam_source,
+    is_obs_openmoq_source,
     with_srt_stream_id,
     zixi_srt_streamid_value,
 )
@@ -90,8 +92,10 @@ from job_manager import (  # noqa: E402
     read_result_summary,
 )
 from publisher_hub import (  # noqa: E402
+    _is_prod_env,
     local_publisher_enabled,
     local_publisher_token,
+    normalize_publisher_session,
     publisher_hub,
 )
 
@@ -126,12 +130,18 @@ class CreateUploadRequest(BaseModel):
         ge=MIN_TARGET_LATENCY_MS,
         le=MAX_TARGET_LATENCY_MS,
     )
+    playback_policy: str = "live-edge"
+    test_scope: str = "e2e"
     comparison_id: Optional[str] = None
     stream_index: int = Field(default=0, ge=0, le=9)
     stream_label: str = ""
     # "cloud" = encode on API host. "local" = laptop ffmpeg agent.
     # "browser" = in-page WebCodecs + WebTransport (no terminal agent).
     publisher_host: str = "cloud"
+    encoder: str = "ffmpeg"
+    # Per-browser helper binding. Required on prod so jobs use that
+    # visitor's laptop camera, never a shared operator helper.
+    publisher_session: str = ""
 
 
 def probe_media_duration_sec(media_path: str) -> int:
@@ -184,10 +194,32 @@ class PlaybackSampleRequest(BaseModel):
     playback_hls_buffer_stalls: int = 0
     playback_hls_frag_loads: int = 0
     playback_video_time_sec: float = 0.0
+    #: Seconds queued AHEAD of the playhead. The only quantity the latency
+    #: budget's player-buffer stage consumes.
     playback_buffer_sec: float = 0.0
+    #: Seconds the glass is BEHIND live (MoQ LOC canvas only). Opposite
+    #: direction from playback_buffer_sec, so it is kept separate and never
+    #: summed into the latency chain.
+    playback_behind_live_sec: float = 0.0
     playback_rebuffer_sec: float = 0.0
     playback_error_count: int = 0
     e2e_latency_ms: float = 0.0
+    go_live_at_sec: float = 0.0
+    go_live_e2e_ms: float = 0.0
+    #: Startup decomposition, player half (src/startup_budget.py). Durations in
+    #: ms from the browser's own instruments, reconciling against
+    #: playback_ttff_ms.
+    #:
+    #: These default to None, not 0.0, and that is the point: a phase the
+    #: browser cannot source (no manifest on a raw MPEG-TS pull, or Resource
+    #: Timing marks zeroed by cross-origin opacity) has to stay distinguishable
+    #: from a phase that completed inside the measurement resolution. A 0.0
+    #: default here would silently convert every unmeasured phase into a
+    #: confident zero before it ever reached the CSV.
+    startup_player_request_ms: Optional[float] = None
+    startup_manifest_ms: Optional[float] = None
+    startup_first_media_ms: Optional[float] = None
+    startup_first_paint_ms: Optional[float] = None
 
 
 def job_to_dict(job) -> dict:
@@ -202,6 +234,8 @@ def job_to_dict(job) -> dict:
         "preset_id": job.preset_id,
         "encode_ladder": getattr(job, "encode_ladder", None),
         "target_latency_ms": getattr(job, "target_latency_ms", None),
+        "playback_policy": getattr(job, "playback_policy", None) or "live-edge",
+        "test_scope": getattr(job, "test_scope", None) or "e2e",
         "publisher_host": getattr(job, "publisher_host", "cloud"),
         "moq_namespace": job.moq_namespace,
         "zixi_stream_id": job.zixi_stream_id,
@@ -238,7 +272,11 @@ def job_to_dict(job) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "git_sha": read_build_sha(ROOT_DIR)}
+    return {
+        "status": "ok",
+        "git_sha": read_build_sha(ROOT_DIR),
+        "env": read_moq_env(),
+    }
 
 
 @app.get("/api/time")
@@ -254,34 +292,69 @@ def server_time():
 
 
 @app.get("/api/features")
-def features():
-    """Feature flags for the UI. Local publisher stays off unless explicitly enabled."""
-    hub = publisher_hub.status()
+def features(session: str = ""):
+    """Feature flags for the UI. Agent list is scoped to this browser session."""
+    hub = publisher_hub.status(normalize_publisher_session(session))
     from cloud_placement import encode_hosts_for_api
 
     return {
         "local_publisher": bool(hub.get("enabled")),
         "local_publisher_connected": bool(hub.get("connected")),
         "local_publisher_whip": bool(hub.get("whip")),
+        "local_publisher_obs": hub.get("obs") or {
+            "websocket": False,
+            "plugin": False,
+            "detail": "",
+        },
         "local_publisher_agents": hub.get("agents") or [],
         "encode_hosts": encode_hosts_for_api(),
         "media_sources": media_source_catalog(ROOT_DIR),
     }
 
 
+@app.get("/run-local-publisher.sh")
+def launch_local_publisher_script():
+    """Bootstrap the laptop helper from any cwd (the Webcam copy-paste command)."""
+    path = ROOT_DIR / "scripts" / "launch-local-publisher.sh"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Launcher script is not installed")
+    return FileResponse(
+        path,
+        media_type="text/x-shellscript",
+        filename="run-local-publisher.sh",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/publisher-session")
+def create_publisher_session():
+    """Mint a helper binding so Webcam+ffmpeg uses this browser's laptop only."""
+    sess = publisher_hub.mint_session()
+    return {"session_id": sess.session_id, "expires_at": sess.expires_at}
+
+
 @app.websocket("/api/publisher-agent/ws")
 async def publisher_agent_ws(websocket: WebSocket):
-    """Outbound connection from a laptop publisher agent (dev / future hosted users)."""
+    """Laptop helper. Prod requires a minted browser session — never a shared pool."""
     if not local_publisher_enabled():
         await websocket.close(code=1008)
         return
+    session = normalize_publisher_session(websocket.query_params.get("session") or "")
     token = (websocket.query_params.get("token") or "").strip()
-    if token != local_publisher_token():
+    if _is_prod_env():
+        if not publisher_hub.valid_session(session):
+            await websocket.close(code=1008)
+            return
+    elif session:
+        if not publisher_hub.valid_session(session):
+            await websocket.close(code=1008)
+            return
+    elif token != local_publisher_token():
         await websocket.close(code=1008)
         return
     agent_id = (websocket.query_params.get("agent_id") or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
     await websocket.accept()
-    conn = await publisher_hub.register(websocket, agent_id)
+    conn = await publisher_hub.register(websocket, agent_id, session_id=session)
     try:
         while True:
             message = await websocket.receive_json()
@@ -648,17 +721,26 @@ def presets(protocol: Optional[str] = None):
 @app.post("/api/uploads")
 def create_upload(request: CreateUploadRequest):
     media_path = request.media_path.strip()
+    encoder = (request.encoder or "ffmpeg").strip().lower()
+    if encoder not in {"ffmpeg", "obs"}:
+        raise HTTPException(status_code=400, detail="encoder must be 'ffmpeg' or 'obs'")
+    if encoder == "obs":
+        media_path = OBS_OPENMOQ_MEDIA
     device_webcam = is_device_webcam_source(media_path)
     device_browser = is_device_browser_source(media_path)
-    is_live = device_webcam or device_browser
+    obs_source = is_obs_openmoq_source(media_path)
+    is_live = device_webcam or device_browser or obs_source
 
     publisher_host = (request.publisher_host or "cloud").strip().lower()
+    if encoder == "obs":
+        publisher_host = "local"
     if publisher_host not in {"cloud", "local", "browser"}:
         raise HTTPException(
             status_code=400,
             detail="publisher_host must be 'cloud', 'local', or 'browser'",
         )
 
+    publisher_session = normalize_publisher_session(request.publisher_session)
     if publisher_host == "local":
         if not local_publisher_enabled():
             raise HTTPException(
@@ -668,17 +750,27 @@ def create_upload(request: CreateUploadRequest):
                     "Use ./scripts/dev.sh (sets LOCAL_PUBLISHER_ENABLED=1)."
                 ),
             )
-        if not publisher_hub.status().get("connected"):
+        if _is_prod_env() and not publisher_hub.valid_session(publisher_session):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Webcam+ffmpeg needs a helper started from this browser session "
+                    "so it uses your camera, not someone else's."
+                ),
+            )
+        if not publisher_hub.status(publisher_session).get("connected"):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "No local publisher agent connected. "
-                    "Run ./scripts/run-local-publisher.sh in another terminal."
+                    "No local publisher agent connected for this browser. "
+                    "Run the helper command shown under Webcam, then retry."
                 ),
             )
-        # Local acquisition: webcam device or a user-chosen file — not repo VOD.
+        # Local acquisition: webcam, OBS OpenMOQ, or a user-chosen file — not repo VOD.
         lower = media_path.lower()
-        if lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
+        if obs_source:
+            media_path = OBS_OPENMOQ_MEDIA
+        elif lower.endswith("dummy.mp4") or "big buck" in lower or lower.endswith("/bbb"):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -686,7 +778,7 @@ def create_upload(request: CreateUploadRequest):
                     "Pick a local file or webcam (device:webcam) for This machine."
                 ),
             )
-        if not device_webcam:
+        if not device_webcam and not obs_source:
             if media_path.lower().startswith("udp://"):
                 raise HTTPException(
                     status_code=400,
@@ -756,8 +848,25 @@ def create_upload(request: CreateUploadRequest):
             detail="Browser publish supports MoQ and WebRTC (WHIP). Use a MoQ relay or MediaMTX WHIP destination.",
         )
 
+    if encoder == "obs" and destination.protocol == "webrtc":
+        raise HTTPException(
+            status_code=400,
+            detail="OBS encode supports SRT, RTMP, and MoQ — not WebRTC.",
+        )
+
+    if encoder == "obs" and destination.protocol == "moq":
+        haystack = f"{destination.url} {destination.preset_id}"
+        if ":14433" in haystack or "draft=18" in haystack or "_d18" in (destination.preset_id or ""):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 "
+                    "(:14433). Use ffmpeg (helper) for MoQ."
+                ),
+            )
+
     if publisher_host == "local" and destination.protocol == "webrtc":
-        if not publisher_hub.can_publish_whip():
+        if not publisher_hub.can_publish_whip(publisher_session):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -776,6 +885,7 @@ def create_upload(request: CreateUploadRequest):
     compute_vmaf_encoder = (
         request.compute_vmaf_encoder
         and not device_webcam
+        and not obs_source
         and not device_browser
         and destination.protocol != "webrtc"
     )
@@ -830,10 +940,16 @@ def create_upload(request: CreateUploadRequest):
         compute_vmaf_encoder=compute_vmaf_encoder,
         encode_ladder=encode_ladder,
         target_latency_ms=target_latency_ms,
+        playback_policy=(
+            "complete" if (request.playback_policy or "").strip() == "complete" else "live-edge"
+        ),
+        test_scope="upload" if (request.test_scope or "").strip() == "upload" else "e2e",
         comparison_id=request.comparison_id or "",
         stream_index=request.stream_index,
         stream_label=request.stream_label,
         publisher_host=publisher_host,
+        encoder=encoder,
+        publisher_session=publisher_session,
     )
     record = job_manager.create_job(job, preset_id=request.preset_id or destination.preset_id)
     return job_to_dict(record)
@@ -860,7 +976,9 @@ def post_playback_sample(job_id: str, request: PlaybackSampleRequest):
     if job.status not in {JobStatus.PENDING, JobStatus.RUNNING}:
         raise HTTPException(status_code=409, detail="Upload is not active")
 
-    accepted = job_manager.record_playback_sample(job_id, request.model_dump())
+    payload = request.model_dump()
+    payload["playback_policy"] = getattr(job, "playback_policy", None) or "live-edge"
+    accepted = job_manager.record_playback_sample(job_id, payload)
     if not accepted:
         raise HTTPException(status_code=400, detail="Invalid playback sample")
     return {"ok": True}
@@ -1002,10 +1120,14 @@ def get_playback_diag(job_id: str):
 
 @app.post("/api/uploads/{job_id}/stop")
 def stop_upload(job_id: str):
-    """Request cooperative cancel of a running upload (used by live webcam Stop)."""
-    if not job_manager.request_cancel(job_id):
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"ok": True, "status": "stopping"}
+    """Request cooperative cancel of a running upload (used by live webcam Stop).
+
+    Do not 404 when the in-memory job is gone (API restart). The helper may
+    still be encoding — fan the cancel out, and let the UI unwind.
+    """
+    found = job_manager.request_cancel(job_id)
+    publisher_hub.broadcast_cancel(job_id)
+    return {"ok": True, "status": "stopping" if found else "already_gone"}
 
 
 @app.get("/api/uploads/{job_id}/events")

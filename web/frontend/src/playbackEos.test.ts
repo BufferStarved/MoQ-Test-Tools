@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  isGracefulMoqEncodeOver,
   isGracefulMoqReset,
   isGracefulWhepDisconnect,
   playedMostOfEncode,
@@ -11,6 +12,30 @@ describe("playedMostOfEncode", () => {
     assert.equal(playedMostOfEncode({ videoTimeSec: 12.4, encodeDurationSec: 60 }), false);
     assert.equal(playedMostOfEncode({ videoTimeSec: 48, encodeDurationSec: 60 }), true);
     assert.equal(playedMostOfEncode({ videoTimeSec: 12.4, encodeDurationSec: 0 }), false);
+  });
+});
+
+describe("isGracefulMoqEncodeOver", () => {
+  it("is encode-over after paint when the job completed", () => {
+    assert.equal(
+      isGracefulMoqEncodeOver({ playedOk: true, jobStatus: "completed" }),
+      true,
+    );
+    assert.equal(
+      isGracefulMoqEncodeOver({ playedOk: true, runStopped: true }),
+      true,
+    );
+  });
+
+  it("is not encode-over before first frame or while the job is live", () => {
+    assert.equal(
+      isGracefulMoqEncodeOver({ playedOk: false, jobStatus: "completed" }),
+      false,
+    );
+    assert.equal(
+      isGracefulMoqEncodeOver({ playedOk: true, jobStatus: "running" }),
+      false,
+    );
   });
 });
 

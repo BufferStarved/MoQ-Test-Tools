@@ -37,7 +37,7 @@ export const METRIC_STAGES: MetricStage[] = [
     id: "encode",
     title: "Encode/Publish",
     description:
-      "Publisher-side metrics: bitrate, frame rate, send rate, client memory/jitter, encode lag/speed/FPS stability, and encoder-side VMAF/PSNR/SSIM.",
+      "Publisher-side metrics: bitrate, frame rate, send rate, client memory/jitter, encode lag, upload latency, speed/FPS stability, and encoder-side VMAF/PSNR/SSIM.",
   },
   {
     id: "ingest",
@@ -70,6 +70,85 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   fps_stability: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   speed: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   encode_lag_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  upload_latency_ms: ["srt", "rtmp", "webrtc", "moq"],
+
+  // Latency decomposition. Every leg reports every component in the same
+  // units. A stage with no instrument on a given path reports 0 *and names
+  // itself in latency_unmeasured*, so its time lands in latency_residual_ms
+  // without the 0 reading as "this stage was free".
+  latency_encode_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // MoQ group duration and HLS part/segment object cadence. WebRTC is n/a.
+  latency_segmentation_ms: ["moq", "hls", "dash"],
+  // No protocol measures steady-state publish transit yet; the column exists
+  // so the stage is named rather than silently missing from the chain.
+  latency_publish_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // MoQ is absent on purpose: no RTT source is wired for the openmoq
+  // publisher (no qlog, relay admin TCP unreachable), so a MoQ network figure
+  // would be invented.
+  latency_network_ms: ["srt", "rtmp", "webrtc"],
+  // Measured only where the packager stamps a wall clock we can difference
+  // (MediaMTX LL-HLS PDT). Zixi HTTP-TS is a measured ~0 by construction;
+  // Zixi Fast HLS carries no PDT, so it has no instrument at all.
+  latency_packager_ms: ["srt", "rtmp", "hls", "dash"],
+  latency_player_buffer_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_accounted_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_overcount_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_not_applicable: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  latency_e2e_scope: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+
+  // Startup phase decomposition (src/startup_budget.py). Two chains that stay
+  // apart: the publisher half is keyed on the *publish protocol*, so it only
+  // exists on the four protocols that have a documented milestone per phase.
+  // The player half is keyed on the playback *engine*, and any protocol can be
+  // watched in the site player, so those columns are available everywhere.
+  //
+  // Support here means "an instrument can exist on this path". A phase that
+  // structurally cannot exist is a different statement and travels in
+  // startup_not_applicable, so it is excluded here rather than listed as a
+  // protocol that reports zero.
+  startup_dns_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // SRT is absent on purpose, and not because it is unwired: its caller
+  // handshake IS its connect, so there is no separate UDP connect to time.
+  // MoQ maps the QUIC handshake (transport + crypto in one exchange) here and
+  // the WebTransport session onto handshake, so it does have a connect phase.
+  startup_connect_ms: ["rtmp", "webrtc", "moq"],
+  startup_handshake_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publish_accept_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_first_idr_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_first_byte_ingest_ms: ["srt", "rtmp", "webrtc", "moq"],
+  // Player phases: measured by the browser player on whatever it consumed.
+  // startup_manifest_ms is deliberately NOT restricted here even though a raw
+  // MPEG-TS pull has no manifest — that absence belongs to the engine, and the
+  // same protocol (SRT, RTMP) can be watched over MPEG-TS or over LL-HLS in
+  // the same run. Encoding it as a protocol gap would be wrong for half the
+  // legs; the per-row startup_not_applicable annotation is what carries it.
+  startup_player_request_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_manifest_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_first_media_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_first_paint_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_publisher_accounted_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_measured_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_residual_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_publisher_overcount_ms: ["srt", "rtmp", "webrtc", "moq"],
+  startup_player_accounted_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_measured_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_residual_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_player_overcount_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // Self-describing annotations. They exist wherever either chain does, since
+  // naming what is missing is the point even when nothing was measured.
+  startup_unmeasured: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  startup_not_applicable: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+
+  // Frame accounting. Encoder counters come from ffmpeg -progress, so browser
+  // publish paths (no ffmpeg) cannot fill them.
+  encode_frames_total: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frames_dropped: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frames_duped: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  encode_frame_drop_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  playback_frame_drop_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  frame_delivery_pct: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   encoder_send_rate_mbps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
 
   // Normalized transport
@@ -128,6 +207,10 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   playback_ttff_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_stall_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_buffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  // MoQ only, and only the LOC canvas within it: every other engine has an
+  // HTMLMediaElement whose buffered range is a forward-looking quantity, so
+  // "behind live" has no meaning there and must not be charted as if it did.
+  playback_behind_live_sec: ["moq"],
   playback_rebuffer_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_bitrate_bps: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_frames_rendered: ["moq", "srt", "hls", "webrtc", "rtmp", "dash"],
@@ -136,7 +219,54 @@ export const METRIC_PROTOCOL_SUPPORT: Record<string, ProtocolId[]> = {
   playback_error_count: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   playback_video_time_sec: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
   e2e_latency_ms: ["srt", "rtmp", "http", "hls", "dash", "webrtc", "moq"],
+  go_live_at_sec: ["srt", "rtmp", "http", "hls", "dash", "moq"],
+  go_live_e2e_ms: ["srt", "rtmp", "http", "hls", "dash", "moq"],
 };
+
+/**
+ * Playback engines that measure a protocol's own delivery path. Anything else
+ * means the player consumed a remux, so the playback columns describe the
+ * remux rather than the protocol named in the `protocol` column.
+ */
+const NATIVE_PLAYBACK_ENGINES: Record<string, string[]> = {
+  webrtc: ["whep"],
+  moq: ["moq"],
+  srt: ["mpegts", "hls", "ll-hls", "dash"],
+  rtmp: ["mpegts", "hls", "ll-hls", "dash"],
+  hls: ["hls", "ll-hls", "mpegts"],
+  dash: ["dash"],
+  http: ["mpegts", "hls", "ll-hls", "dash"],
+};
+
+/**
+ * Warn when playback metrics do not describe the published protocol.
+ *
+ * Job c49d2ef4 (2026-08-22) motivates this: tagged `protocol=webrtc`, but the
+ * tile played the LL-HLS remux of the WHIP ingest, so its TTFF, stalls,
+ * rebuffer and glass delay were HLS numbers being ranked against other legs as
+ * if they were WebRTC. Mirror of playback_metrics.playback_engine_caveat.
+ */
+export function playbackEngineCaveat(
+  protocol: string | null | undefined,
+  playbackEngine: string | null | undefined,
+): string {
+  const proto = (protocol || "").trim().toLowerCase();
+  const engine = (playbackEngine || "").trim().toLowerCase();
+  if (!proto || !engine) {
+    return "";
+  }
+  const native = NATIVE_PLAYBACK_ENGINES[proto];
+  if (!native || native.includes(engine)) {
+    return "";
+  }
+  const upper = proto.toUpperCase();
+  return (
+    `Playback metrics were measured with the '${engine}' player, which is not ` +
+    `${upper}'s own delivery path. TTFF, stalls, rebuffer and glass delay describe ` +
+    `that remux, not ${upper} — do not compare them directly against legs played ` +
+    "on their native path."
+  );
+}
 
 export function protocolLabel(protocol: ProtocolId): string {
   const value = (protocol || "").toLowerCase();
