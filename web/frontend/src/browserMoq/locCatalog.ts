@@ -9,7 +9,7 @@ export const BROWSER_LOC_AUDIO_CODEC = "opus";
 export const BROWSER_LOC_CATALOG_GROUP = 0n;
 
 /**
- * Draft-18 LOC uses vi64. `{ deltaEncoded: true }` stays on draft-16 QUIC
+ * Draft-18 LOC uses vi64. The draft-16 delta flag stays on QUIC
  * varint and mis-encodes every value ≥ 64 — playa then drops the objects.
  */
 export function browserLocHeaderOptions(draft: number): {
@@ -25,13 +25,58 @@ export function locCatalogTrackShouldEnd(): boolean {
 
 export function isPublishAccepted(
   message: { type?: string; requestId?: bigint } | null | undefined,
-  requestId: bigint,
+  requestId?: bigint,
 ): boolean {
-  return Boolean(
-    message &&
-      (message.type === "REQUEST_OK" || message.type === "PUBLISH_OK") &&
-      message.requestId === requestId,
-  );
+  if (!message || (message.type !== "REQUEST_OK" && message.type !== "PUBLISH_OK")) {
+    return false;
+  }
+  // draft-18 REQUEST_OK rides the request stream and often omits requestId.
+  return requestId == null || message.requestId == null || message.requestId === requestId;
+}
+
+/**
+ * Correlate an inbound REQUEST_OK to a pending PUBLISH / PUBLISH_NAMESPACE.
+ * When the wire omits requestId, take the oldest waiter (we publish serially).
+ * A stamped id that we did not send must not steal another waiter.
+ */
+export function resolvePublishOkWaiter<T>(
+  messageRequestId: bigint | undefined,
+  waiters: Map<bigint, T>,
+): { requestId: bigint; waiter: T } | undefined {
+  if (messageRequestId != null) {
+    const waiter = waiters.get(messageRequestId);
+    return waiter ? { requestId: messageRequestId, waiter } : undefined;
+  }
+  const firstId = waiters.keys().next().value;
+  if (firstId == null) {
+    return undefined;
+  }
+  const waiter = waiters.get(firstId);
+  return waiter ? { requestId: firstId, waiter } : undefined;
+}
+
+/**
+ * CatalogBootstrap: standalone FETCH(name=catalog) or Joining FETCH on the
+ * catalog SUBSCRIBE. Live-write already put object 0/0 on the wire — serve
+ * a joining FETCH that races the forwarded SUBSCRIBE instead of rejecting.
+ */
+export function locCatalogFetchShouldServe(args: {
+  trackName?: string | null;
+  joiningRequestId?: bigint | null;
+  catalogSubscribeIds?: ReadonlySet<bigint>;
+  liveCatalogWritten?: boolean;
+}): boolean {
+  if (args.trackName === BROWSER_LOC_CATALOG_TRACK) {
+    return true;
+  }
+  const joiningId = args.joiningRequestId;
+  if (joiningId == null) {
+    return false;
+  }
+  if (args.catalogSubscribeIds?.has(joiningId)) {
+    return true;
+  }
+  return Boolean(args.liveCatalogWritten);
 }
 
 /**

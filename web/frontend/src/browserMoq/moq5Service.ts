@@ -1,6 +1,6 @@
 import { encodeLocHeaders } from "@moqt/loc";
 import { buildCatalog } from "@moqt/msf";
-import { PublishDoneCode, SubgroupIdMode, varint } from "@moqt/transport";
+import { SubgroupIdMode, varint } from "@moqt/transport";
 import { MoqtConnection } from "@moqt/webtransport";
 import type { BrowserAudioChunk } from "./audioEncoder";
 import type { BrowserVideoChunk } from "./encoder";
@@ -13,8 +13,9 @@ import {
   browserLocHeaderOptions,
   browserLocPublishTrackNames,
   isPublishAccepted,
-  locCatalogTrackShouldEnd,
+  locCatalogFetchShouldServe,
   locKeyframeVideoConfig,
+  resolvePublishOkWaiter,
 } from "./locCatalog";
 import type { MoqtDraftVersion } from "./moqtVersions";
 import { openStrictMoqtWebTransport } from "./webTransport";
@@ -165,14 +166,15 @@ async function bindPublisherSession(args: {
   connection.onMessage = (message) => {
     priorOnMessage?.(message);
     const typed = message as { type?: string; requestId?: bigint };
-    if (typed.requestId != null && isPublishAccepted(typed, typed.requestId)) {
-      const waiter = publishOkWaiters.get(typed.requestId);
-      if (waiter) {
-        publishOkWaiters.delete(typed.requestId);
-        waiter(true);
-      } else {
-        acceptedPublishIds.add(typed.requestId);
-      }
+    if (!isPublishAccepted(typed)) {
+      return;
+    }
+    const matched = resolvePublishOkWaiter(typed.requestId, publishOkWaiters);
+    if (matched) {
+      publishOkWaiters.delete(matched.requestId);
+      matched.waiter(true);
+    } else if (typed.requestId != null) {
+      acceptedPublishIds.add(typed.requestId);
     }
   };
 
@@ -209,10 +211,6 @@ async function bindPublisherSession(args: {
   async function publishCatalog(requestId: bigint, alias: bigint): Promise<void> {
     await connection.acceptSubscribe(requestId, alias);
     await writeCatalogObject(alias);
-    // Demand-subscribe fallback only. Live catalog stays up for FETCH.
-    if (locCatalogTrackShouldEnd()) {
-      await connection.publishDone(requestId, PublishDoneCode.TRACK_ENDED, "");
-    }
   }
 
   async function sendVideoChunk(chunk: BrowserVideoChunk): Promise<void> {
@@ -378,7 +376,8 @@ async function bindPublisherSession(args: {
     const name = decodeTrackName(trackName);
     const alias = nextAlias;
     nextAlias += 1n;
-    if (name === "catalog") {
+    if (name === "catalog" || name === BROWSER_LOC_CATALOG_TRACK) {
+      catalogSubscribeIds.add(requestId);
       void publishCatalog(requestId, alias).catch((err) => {
         console.warn("browser MoQ catalog publish", err);
       });
@@ -432,13 +431,49 @@ async function bindPublisherSession(args: {
     dropVideoSubscriber(requestId);
   };
 
+  const catalogSubscribeIds = new Set<bigint>();
+  connection.onFetch = (requestId, fetchMsg) => {
+    const standalone = fetchMsg.fetch.fetchType === 0x1 ? fetchMsg.fetch : null;
+    const name = standalone ? decodeTrackName(standalone.trackName) : null;
+    const joiningId =
+      fetchMsg.fetch.fetchType === 0x2 || fetchMsg.fetch.fetchType === 0x3
+        ? fetchMsg.fetch.joiningRequestId
+        : null;
+    const serveCatalog = locCatalogFetchShouldServe({
+      trackName: name,
+      joiningRequestId: joiningId,
+      catalogSubscribeIds,
+      liveCatalogWritten: draft === 18,
+    });
+    if (!serveCatalog) {
+      void connection.rejectFetch(requestId, 0n, "FETCH only served for catalog").catch(() => undefined);
+      return;
+    }
+    void (async () => {
+      await connection.acceptFetch(requestId, { endLocation: { group: 0n, object: 0n } });
+      const sid = await connection.openFetchStream(requestId);
+      await connection.sendFetchObject(sid, {
+        groupId: BROWSER_LOC_CATALOG_GROUP,
+        subgroupId: 0n,
+        objectId: 0n,
+        publisherPriority: 128,
+        payload: catalogPayload,
+      });
+      await connection.sendFetchEndOfRange(sid, true, 0n, 1n);
+      await connection.closeFetchStream(sid);
+    })().catch((err) => {
+      console.warn("browser MoQ catalog FETCH", err);
+    });
+  };
+
   await connection.connect(transport, { maxRequestId: varint(100) });
   if (connection.draftVersion !== draft) {
     throw new Error(`MOQT SETUP negotiated draft-${connection.draftVersion}, expected draft-${draft}`);
   }
   const tuples = namespaceTuples(options.namespace);
   const ns = tuples.length ? tuples : [new TextEncoder().encode(options.namespace)];
-  await connection.publishNamespace(ns);
+  const nsRequestId = await connection.publishNamespace(ns);
+  await waitPublishOk(nsRequestId);
 
   // draft-18 live-write (openmoq publish_tracks). Relays serve FETCH /
   // SUBSCRIBE from these aliases. Waiting for forwarded onSubscribe left
@@ -464,6 +499,7 @@ async function bindPublisherSession(args: {
           objectId: 0n,
           permanent: true,
         });
+        options.onVideoSubscribed?.();
       }
     }
   }

@@ -11,8 +11,10 @@ import {
   browserLocKnownTracks,
   browserLocPublishTrackNames,
   isPublishAccepted,
+  locCatalogFetchShouldServe,
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
+  resolvePublishOkWaiter,
 } from "./locCatalog.ts";
 
 describe("browserLocKnownTracks", () => {
@@ -36,6 +38,14 @@ describe("browserLocCatalogTracks", () => {
     assert.equal(catalog.tracks[0]?.name, "video");
     assert.equal(catalog.tracks[0]?.packaging, "loc");
     assert.equal(catalog.tracks[0]?.codec, "avc1.640028");
+  });
+
+  it("does not inject initData or initRef (9958d69 — FETCH the live catalog)", () => {
+    const catalog = browserLocCatalogTracks({ includeAudio: true });
+    for (const track of catalog.tracks) {
+      assert.equal("initData" in track, false);
+      assert.equal("initRef" in track, false);
+    }
   });
 });
 
@@ -75,9 +85,70 @@ describe("isPublishAccepted", () => {
   it("matches REQUEST_OK for this publish request id", () => {
     assert.equal(isPublishAccepted({ type: "REQUEST_OK", requestId: 7n }, 7n), true);
     assert.equal(isPublishAccepted({ type: "PUBLISH_OK", requestId: 7n }, 7n), true);
+    assert.equal(isPublishAccepted({ type: "REQUEST_OK" }, 7n), true);
     assert.equal(isPublishAccepted({ type: "REQUEST_OK", requestId: 8n }, 7n), false);
     assert.equal(isPublishAccepted({ type: "SUBSCRIBE", requestId: 7n }, 7n), false);
     assert.equal(isPublishAccepted(null, 7n), false);
+  });
+});
+
+describe("resolvePublishOkWaiter", () => {
+  it("uses a stamped requestId and does not steal a different waiter", () => {
+    const waiters = new Map<bigint, string>([
+      [7n, "ns"],
+      [9n, "catalog"],
+    ]);
+    assert.deepEqual(resolvePublishOkWaiter(9n, waiters), { requestId: 9n, waiter: "catalog" });
+    assert.equal(resolvePublishOkWaiter(8n, waiters), undefined);
+  });
+
+  it("takes the oldest waiter when draft-18 omits requestId", () => {
+    const waiters = new Map<bigint, string>([[7n, "ns"]]);
+    assert.deepEqual(resolvePublishOkWaiter(undefined, waiters), { requestId: 7n, waiter: "ns" });
+    assert.equal(resolvePublishOkWaiter(undefined, new Map()), undefined);
+  });
+});
+
+describe("locCatalogFetchShouldServe", () => {
+  it("serves standalone FETCH for the catalog track", () => {
+    assert.equal(locCatalogFetchShouldServe({ trackName: "catalog" }), true);
+    assert.equal(locCatalogFetchShouldServe({ trackName: "video" }), false);
+  });
+
+  it("serves Joining FETCH on the catalog SUBSCRIBE", () => {
+    assert.equal(
+      locCatalogFetchShouldServe({
+        joiningRequestId: 3n,
+        catalogSubscribeIds: new Set([3n]),
+      }),
+      true,
+    );
+    assert.equal(
+      locCatalogFetchShouldServe({
+        joiningRequestId: 3n,
+        catalogSubscribeIds: new Set([4n]),
+      }),
+      false,
+    );
+  });
+
+  it("serves a Joining FETCH that races the forwarded catalog SUBSCRIBE", () => {
+    assert.equal(
+      locCatalogFetchShouldServe({
+        joiningRequestId: 3n,
+        catalogSubscribeIds: new Set(),
+        liveCatalogWritten: true,
+      }),
+      true,
+    );
+    assert.equal(
+      locCatalogFetchShouldServe({
+        joiningRequestId: 3n,
+        catalogSubscribeIds: new Set(),
+        liveCatalogWritten: false,
+      }),
+      false,
+    );
   });
 });
 
