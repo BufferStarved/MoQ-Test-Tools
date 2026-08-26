@@ -1,4 +1,4 @@
-/** LOC catalog the in-browser publisher advertises and the player injects. */
+/** LOC catalog the in-browser publisher advertises. The player FETCHes it. */
 
 export const BROWSER_LOC_VIDEO_TRACK = "video";
 export const BROWSER_LOC_AUDIO_TRACK = "audio";
@@ -12,6 +12,29 @@ export interface BrowserLocCatalogOptions {
   videoCodec?: string;
   audioSampleRate?: number;
   audioChannels?: number;
+}
+
+/** Playa knownTracks — subscribe to `video` in parallel with catalog FETCH. */
+export function browserLocKnownTracks(options: BrowserLocCatalogOptions) {
+  const videoCodec = options.videoCodec || BROWSER_LOC_VIDEO_CODEC;
+  return {
+    video: {
+      name: BROWSER_LOC_VIDEO_TRACK,
+      codec: videoCodec,
+      width: options.width || 1280,
+      height: options.height || 720,
+    },
+    ...(options.includeAudio
+      ? {
+          audio: {
+            name: BROWSER_LOC_AUDIO_TRACK,
+            codec: BROWSER_LOC_AUDIO_CODEC,
+            samplerate: options.audioSampleRate || 48_000,
+            channels: options.audioChannels || 2,
+          },
+        }
+      : {}),
+  };
 }
 
 export function browserLocCatalogTracks(options: BrowserLocCatalogOptions) {

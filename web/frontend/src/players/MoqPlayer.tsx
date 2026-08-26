@@ -3,7 +3,7 @@ import { WebCodecsVideoDecoder } from "@moqt/browser";
 import { Player } from "@playa/player";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "../api";
 import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
-import { browserLocCatalogTracks } from "../browserMoq/locCatalog";
+import { BROWSER_LOC_AUDIO_TRACK, BROWSER_LOC_VIDEO_TRACK, browserLocKnownTracks } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
@@ -749,7 +749,7 @@ export default function MoqPlayer({
       pushDiag(`relay=${relayUrl} namespace=${namespace}`, true);
       pushDiag(
         mediaPackaging === "loc"
-          ? `catalog_mode=injected loc video${sourceHasAudio ? "+audio" : ""} draft=${draftVersion}`
+          ? `catalog_mode=relay catalog FETCH+subscribe then ${BROWSER_LOC_VIDEO_TRACK}${sourceHasAudio ? `+${BROWSER_LOC_AUDIO_TRACK}` : ""} (LOC knownTracks, no injected catalog) draft=${draftVersion}`
           : `catalog_mode=relay catalog FETCH+subscribe then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (MSF-01 initDataList→initData) draft=${draftVersion}`,
         true,
       );
@@ -868,19 +868,18 @@ export default function MoqPlayer({
           // Catch-up + subscribe filter must go through moqtPlayerConfig —
           // @playa/player only forwards a subset of top-level options.
           moqtPlayerConfig: {
-            // LOC: inject names (browser publisher has no MSF catalog track).
-            // CMAF: do NOT inject a canned catalog. NextGroupStart joins
-            // mid-stream, so MSE must initialize from the publisher's
-            // `--publish-catalog` initData for *this* encode. A baked
-            // 720p blob from another ffmpeg produced catalog-ready +
-            // zero frames on every relay.
+            // LOC: do NOT inject a catalog. Injection skipped FETCH and
+            // fired ready with 0 objects (browser4 6eda8170 / 73c6e4d5).
+            // Publisher already advertises MSF `video`/`audio`. knownTracks
+            // parallel-subscribes those names while CatalogBootstrap FETCHes
+            // the live catalog. CMAF still must not inject a canned init.
             createTransport: createStrictMoqtTransport({
               ...(certHash ? { certHash } : {}),
               draftVersion,
             }),
             ...(mediaPackaging === "loc"
               ? {
-                  catalog: browserLocCatalogTracks({
+                  knownTracks: browserLocKnownTracks({
                     includeAudio: sourceHasAudio,
                     videoCodec: sourceVideoCodec,
                   }),
