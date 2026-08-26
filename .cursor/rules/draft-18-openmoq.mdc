@@ -5,13 +5,13 @@ alwaysApply: true
 
 # Draft-18 / OpenMOQ plan
 
-Working branch: `feat/moq-draft-18`. **Do not merge to `main`.** Public MoQ on https://moq.sean-mccarthy.net is **draft-18 `:14433`** (west / east / Linode). Do **not** replace the leftover `moqx:329b98b` container on UDP **4433** — leave it running, keep it out of the UI. Do not terraform-apply new VMs.
+Working branch: `feat/moq-draft-18` — this **is** the default product path (public draft-18). Merging to `main` is allowed when the operator says so. Public MoQ on https://moq.sean-mccarthy.net is **draft-18 `:14433`** (west / east / Linode). Do **not** replace the leftover `moqx:329b98b` container on UDP **4433** — leave it running, keep it out of the UI. Do not terraform-apply new VMs.
 
 ## Order of work
 
 1. Headed playa paints on west canary `:14433` (`moq_gcp_relay_d18`, file source, `http://127.0.0.1:5173/`). **Green** (`bench-6d3a4094`, `first_frame=ok`, 1280x720).
 2. Stay aligned with `openmoq/moq5` `main`. Do not grow a private libmoq fork.
-   - Canary build pin: [BufferStarved/moq5](https://github.com/BufferStarved/moq5) `feat/publish-tracks-live-catalog` via `scripts/install-moq5.sh` (`MOQ5_REPO` / `MOQ5_REF`). That is openmoq/moq5#9 live-write `publish_tracks`. Rebuild with `./scripts/install-moq5.sh --rebuild`. Do not change prod `:4433`.
+   - Default pin: [openmoq/moq5](https://github.com/openmoq/moq5) `main` via `scripts/install-moq5.sh`. Live-write `publish_tracks` (openmoq/moq5#9) is still a local patch until that PR merges. Rebuild with `./scripts/install-moq5.sh --rebuild`. Public moqx on `:14433` is `ghcr.io/openmoq/moqx:75af044`. Do not change leftover `:4433`.
    - Upstream (their vision): live-write the `publish_tracks` catalog without waiting for demand — retained group is the FETCH path (`docs/publisher-retained-groups.md`). PR: https://github.com/openmoq/moq5/pull/9
    - Keep local only until playa vendor ≥ main: `initData` dual-emit, `MOQ_QLOG_DIR`. CMAF `first-sample-flags` is already on moq5 `main`.
    - **Do not** disable catalog refresh. **Do not** treat dual-emit as the long-term catalog shape (MSF-01 is `initDataList` + `initRef`).

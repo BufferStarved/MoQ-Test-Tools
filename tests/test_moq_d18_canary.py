@@ -84,9 +84,9 @@ class Draft18CanaryPresetTests(unittest.TestCase):
 
     def test_canary_path_uses_moq5_live_catalog_init(self) -> None:
         install = (ROOT / "scripts" / "install-moq5.sh").read_text()
-        self.assertIn("BufferStarved/moq5.git", install)
-        self.assertIn("feat/publish-tracks-live-catalog", install)
-        self.assertIn("1ce1cfc", install)
+        self.assertIn("openmoq/moq5.git", install)
+        self.assertIn("MOQ5_REF:-main", install)
+        self.assertIn("live-write-publish-tracks-catalog.patch", install)
         self.assertIn("tools/moq5-publisher/bin/moq5-fmp4-publish", install)
 
         publish = (ROOT / "src" / "moq_publish.py").read_text()
