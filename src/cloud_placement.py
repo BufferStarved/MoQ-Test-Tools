@@ -373,12 +373,15 @@ def encode_hosts_for_api() -> list[dict]:
     rows: list[dict] = []
     for host in ENCODE_HOSTS:
         roles = {
-            "zixi": host_role_configured(host, "zixi"),
+            # gcp_central is always_available, but the public Zixi dest
+            # (35.222.33.58) is down — do not advertise a Start-able role.
+            "zixi": False if host.id == "gcp_central" else host_role_configured(host, "zixi"),
             "mediamtx": host_role_configured(host, "mediamtx"),
             "moq": host_role_configured(host, "moq_relay_d18"),
         }
         available = any(roles.values())
         missing = [name for name, ok in roles.items() if not ok]
+        zixi_down = host.id == "gcp_central" and not roles["zixi"]
         rows.append(
             {
                 "id": host.id,
@@ -391,12 +394,16 @@ def encode_hosts_for_api() -> list[dict]:
                 "region": host.region,
                 "subtitle": host.subtitle,
                 "unavailable_reason": (
-                    ""
-                    if not missing
+                    "Zixi dest 35.222.33.58 is down"
+                    if zixi_down and missing == ["zixi"]
                     else (
-                        "Not deployed"
-                        if not available
-                        else f"Not deployed: {', '.join(missing)}"
+                        ""
+                        if not missing
+                        else (
+                            "Not deployed"
+                            if not available
+                            else f"Not deployed: {', '.join(missing)}"
+                        )
                     )
                 ),
             }

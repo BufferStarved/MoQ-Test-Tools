@@ -22,6 +22,12 @@ CENTRAL_WEB_INGEST_AGENT = "http://34.9.217.178:8090"
 # MoQ recorder lives on the web ingest agent. Do not fall back to the Zixi
 # worker URL even though that host is up again — its recorder path is optional.
 ZIXI_CENTRAL_AGENT = "http://35.222.33.58:8090"
+ZIXI_GCP_ENCODE_HOST = "35.222.33.58"
+ZIXI_GCP_ENCODE_UNAVAILABLE_REASON = (
+    "Zixi Broadcaster at 35.222.33.58 is down (guest frozen, all ingest "
+    "ports dead). SRT/RTMP encode and preview would hang. Use MediaMTX or "
+    "MoQ on this host. Do not start Zixi until the dest is healthy."
+)
 
 
 def _usable_recorder_url(url: str) -> str:
@@ -179,38 +185,24 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         name="Zixi Broadcaster gcp-us-central1",
         protocol="srt",
         url="srt://35.222.33.58:10080?mode=caller&latency=200000",
-        notes=(
-            "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
-            "upload adds streamid=#!::r=SRT Test,m=publish automatically. "
-            "Browser playback uses error-concealed 'SRT Test EC' "
-            "(primary Fast HLS packager wedges after first connect). "
-            "HLS: playback.m3u8?stream=SRT%20Test%20EC. "
-            "HTTP-TS: http://35.222.33.58:7777/SRT%20Test%20EC.ts. "
-            "Publishes apply monotonic -output_ts_offset. "
-            "Upload transcodes to H.264 Main yuv420p for browser playback."
-        ),
+        notes=ZIXI_GCP_ENCODE_UNAVAILABLE_REASON,
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
         ingest_recording_dir="/opt/zixi_broadcaster-linux64",
         ingest_provider="gcp_zixi",
+        web_available=False,
     ),
     ServicePreset(
         id="moq_zixi_gcp_rtmp",
         name="Zixi Broadcaster gcp-us-central1",
         protocol="rtmp",
         url="rtmp://35.222.33.58:1935/live/benchmark",
-        notes=(
-            "Managed Zixi RTMP ingest on GCP. Stream ID must be benchmark "
-            "(rtmp://host:1935/live/benchmark). "
-            "Default browser preview is HTTP-TS (mpegts.js) at "
-            "http://host:7777/benchmark.ts — bypasses Fast HLS for faster join. "
-            "HLS playback.m3u8?stream=benchmark remains available. "
-            "Offline .ts returns empty HTTP 200."
-        ),
+        notes=ZIXI_GCP_ENCODE_UNAVAILABLE_REASON,
         supports_vmaf=True,
         ingest_agent_url="http://35.222.33.58:8090",
         ingest_recording_dir="/opt/zixi_broadcaster-linux64",
         ingest_provider="gcp_zixi",
+        web_available=False,
     ),
     ServicePreset(
         id="moq_zixi_gcp_hls",
@@ -608,6 +600,27 @@ def _finalize_service_presets(raw: List[ServicePreset]) -> List[ServicePreset]:
 SERVICE_PRESETS: List[ServicePreset] = _finalize_service_presets(_SERVICE_PRESETS_RAW)
 
 PRESET_BY_ID: Dict[str, ServicePreset] = {preset.id: preset for preset in SERVICE_PRESETS}
+
+
+def zixi_gcp_encode_blocked(
+    preset_id: Optional[str] = None,
+    url: str = "",
+) -> Optional[str]:
+    """Fail-closed Start gate when the dest is the dead public Zixi VM."""
+    hosts: set[str] = set()
+    dest = (url or "").strip()
+    if dest:
+        host = (urlparse(dest).hostname or "").strip()
+        if host:
+            hosts.add(host)
+    preset = PRESET_BY_ID.get((preset_id or "").strip())
+    if preset is not None and preset.url:
+        host = (urlparse(preset.url).hostname or "").strip()
+        if host:
+            hosts.add(host)
+    if ZIXI_GCP_ENCODE_HOST not in hosts:
+        return None
+    return ZIXI_GCP_ENCODE_UNAVAILABLE_REASON
 
 
 def http_ts_put_preset_blocked(preset_id: Optional[str]) -> Optional[str]:

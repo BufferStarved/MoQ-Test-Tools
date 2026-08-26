@@ -312,12 +312,16 @@ export function isIngestEndpointIdAvailable(
 export function ingestEndpointsFromPresets(presets: Preset[]): IngestEndpointOption[] {
   return INGEST_ENDPOINT_DEFS.map((item) => {
     const available = endpointAvailable(item.id, presets);
+    const presetIds = Object.values(PRESET_IDS_BY_ENDPOINT[item.id] ?? {});
+    const downNote = presets.find(
+      (preset) => presetIds.includes(preset.id) && preset.web_available === false && preset.notes,
+    )?.notes;
     return {
       ...item,
       available,
       detail: available
         ? item.detail
-        : `Not deployed · ${encodeHostById(cloudHostFromIngest(item.id)).subtitle}`,
+        : downNote || `Not deployed · ${encodeHostById(cloudHostFromIngest(item.id)).subtitle}`,
     };
   });
 }

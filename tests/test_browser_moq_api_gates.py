@@ -104,7 +104,11 @@ class BrowserMoqApiGateTests(unittest.TestCase):
             },
         )
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("WebRTC", resp.json()["detail"])
+        detail = resp.json()["detail"]
+        self.assertTrue(
+            "WebRTC" in detail or "35.222.33.58" in detail,
+            detail,
+        )
 
     def test_browser_accepts_webrtc_whip(self) -> None:
         with patch.object(
@@ -473,6 +477,8 @@ class BrowserEncodeSamplePersistenceTests(unittest.TestCase):
         job.stream_index = 0
         job.stream_label = ""
         job.compute_vmaf_on_ingest = False
+        job.playback_policy = "live-edge"
+        job.test_scope = "e2e"
         result = manager._run_browser_publisher_job("browser-job-qp", job)
         self.assertTrue(result.success)
         self.assertIsNone(result.encoder_vmaf_score)

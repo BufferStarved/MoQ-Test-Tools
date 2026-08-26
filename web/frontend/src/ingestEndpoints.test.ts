@@ -98,4 +98,18 @@ describe("9-host encode registry", () => {
     assert.equal(srt.length, 9);
     assert.equal(srt.filter((item) => item.available).length, 3);
   });
+
+  it("surfaces dest-down notes instead of Not deployed for dead GCP Zixi", () => {
+    const presets = [
+      stubPreset("moq_zixi_gcp", false),
+      stubPreset("moq_mediamtx_gcp_srt"),
+      stubPreset("moq_gcp_relay_d18"),
+    ];
+    presets[0]!.notes = "Zixi Broadcaster at 35.222.33.58 is down (guest frozen).";
+    const endpoints = ingestEndpointsFromPresets(presets);
+    const zixi = endpoints.find((item) => item.id === "gcp_zixi");
+    assert.equal(zixi?.available, false);
+    assert.match(zixi?.detail ?? "", /35\.222\.33\.58/);
+    assert.doesNotMatch(zixi?.detail ?? "", /Not deployed/);
+  });
 });

@@ -106,6 +106,23 @@ class HttpTsPutGateTests(unittest.TestCase):
         self.assertIn("srt", ids)
         self.assertIn("moq", ids)
 
+    def test_api_rejects_dead_gcp_zixi_encode(self) -> None:
+        client = TestClient(api_main.app)
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+            tmp.write(b"not-a-real-mp4")
+            tmp.flush()
+            for preset_id in ("moq_zixi_gcp", "moq_zixi_gcp_rtmp"):
+                resp = client.post(
+                    "/api/uploads",
+                    json={
+                        "media_path": tmp.name,
+                        "preset_id": preset_id,
+                        "duration_sec": 5,
+                    },
+                )
+                self.assertEqual(resp.status_code, 400, resp.text)
+                self.assertIn("35.222.33.58", resp.json()["detail"])
+
     def test_api_presets_hide_put_recipes(self) -> None:
         client = TestClient(api_main.app)
         resp = client.get("/api/presets")

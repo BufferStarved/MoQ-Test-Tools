@@ -42,6 +42,7 @@ from destinations import (  # noqa: E402
     DestinationConfigError,
     http_ts_put_preset_blocked,
     ingest_agent_url_for_preset,
+    zixi_gcp_encode_blocked,
     presets_for_api,
     recording_dir_for_preset,
     resolve_destination_request,
@@ -840,6 +841,13 @@ def create_upload(request: CreateUploadRequest):
     put_blocked = http_ts_put_preset_blocked(request.preset_id or destination.preset_id)
     if put_blocked:
         raise HTTPException(status_code=400, detail=put_blocked)
+
+    zixi_blocked = zixi_gcp_encode_blocked(
+        request.preset_id or destination.preset_id,
+        url=destination.url,
+    )
+    if zixi_blocked:
+        raise HTTPException(status_code=400, detail=zixi_blocked)
 
     if publisher_host == "browser" and destination.protocol not in {"moq", "webrtc"}:
         raise HTTPException(

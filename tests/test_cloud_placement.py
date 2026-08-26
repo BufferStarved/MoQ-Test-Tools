@@ -85,6 +85,8 @@ class CloudPlacementTests(unittest.TestCase):
         self.assertEqual(len(hosts), 9)
         self.assertEqual(hosts["gcp_central"]["label"], "GCP Central")
         self.assertTrue(hosts["gcp_central"]["available"])
+        self.assertFalse(hosts["gcp_central"]["roles"]["zixi"])
+        self.assertIn("35.222.33.58", hosts["gcp_central"]["unavailable_reason"])
         self.assertFalse(hosts["gcp_west"]["available"])
         self.assertEqual(hosts["gcp_west"]["unavailable_reason"], "Not deployed")
         self.assertFalse(hosts["aws_east"]["available"])
@@ -219,6 +221,9 @@ class MoqRecorderAgentTests(unittest.TestCase):
             "GCP_EAST_ZIXI_IP": "203.0.113.40",
             "GCP_EAST_WEB_IP": "203.0.113.50",
             "GCP_EAST_RELAY_IP": "203.0.113.60",
+            "LINODE_CENTRAL_STACK_ENABLED": "1",
+            "LINODE_CENTRAL_WEB_IP": "50.116.17.198",
+            "LINODE_CENTRAL_RELAY_IP": "66.228.49.113",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             import importlib
@@ -233,6 +238,14 @@ class MoqRecorderAgentTests(unittest.TestCase):
             )
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_gcp_east_relay"].ingest_agent_url,
+                dest_mod.CENTRAL_WEB_INGEST_AGENT,
+            )
+            self.assertEqual(
+                dest_mod.PRESET_BY_ID["moq_linode_central_relay"].ingest_agent_url,
+                dest_mod.CENTRAL_WEB_INGEST_AGENT,
+            )
+            self.assertEqual(
+                dest_mod.PRESET_BY_ID["moq_linode_central_relay_d18"].ingest_agent_url,
                 dest_mod.CENTRAL_WEB_INGEST_AGENT,
             )
             self.assertNotIn(
@@ -368,6 +381,43 @@ class GcpEastPresetTests(unittest.TestCase):
                 linode_ok = agent_mod.resolve_ingest_agent(agent_url="http://203.0.113.10:8090")
                 self.assertIsNotNone(linode_ok)
                 self.assertEqual(linode_ok.token, "linode-token")
+
+
+class ZixiGcpEncodeGateTests(unittest.TestCase):
+    def test_central_zixi_srt_rtmp_are_not_startable(self) -> None:
+        from destinations import (
+            PRESET_BY_ID,
+            ZIXI_GCP_ENCODE_UNAVAILABLE_REASON,
+            zixi_gcp_encode_blocked,
+        )
+
+        for preset_id in ("moq_zixi_gcp", "moq_zixi_gcp_rtmp"):
+            preset = PRESET_BY_ID[preset_id]
+            self.assertFalse(preset.web_available, preset_id)
+            self.assertIn("35.222.33.58", preset.notes)
+            reason = zixi_gcp_encode_blocked(preset_id, url=preset.url)
+            self.assertEqual(reason, ZIXI_GCP_ENCODE_UNAVAILABLE_REASON)
+
+    def test_custom_url_to_dead_zixi_is_blocked(self) -> None:
+        from destinations import zixi_gcp_encode_blocked
+
+        reason = zixi_gcp_encode_blocked(
+            url="srt://35.222.33.58:10080?mode=caller",
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("35.222.33.58", reason or "")
+
+    def test_central_mediamtx_and_moq_stay_open(self) -> None:
+        from destinations import PRESET_BY_ID, zixi_gcp_encode_blocked
+
+        self.assertTrue(PRESET_BY_ID["moq_mediamtx_gcp_srt"].web_available)
+        self.assertTrue(PRESET_BY_ID["moq_gcp_relay_d18"].web_available)
+        self.assertIsNone(
+            zixi_gcp_encode_blocked(
+                "moq_gcp_relay_d18",
+                url=PRESET_BY_ID["moq_gcp_relay_d18"].url,
+            )
+        )
 
 
 if __name__ == "__main__":

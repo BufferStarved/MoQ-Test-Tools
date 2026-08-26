@@ -17,7 +17,8 @@ logger = logging.getLogger("MoQ-SRT-Bench")
 DEFAULT_AGENT_PORT = int(os.environ.get("INGEST_AGENT_PORT", "8090"))
 HEALTH_TIMEOUT_SEC = 1.5
 # Public moq-zixi-gcp :8090 is down (2026-08-26). Never open a socket — a
-# blackholed SYN hung jobs past health timeouts. Encode and playback stay.
+# blackholed SYN hung jobs past health timeouts. Encode is fail-closed in
+# destinations.zixi_gcp_encode_blocked.
 ZIXI_PUBLIC_INGEST_AGENT_HOST = "35.222.33.58"
 
 
