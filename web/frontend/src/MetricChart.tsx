@@ -11,7 +11,7 @@ import {
 import type { ChartPoint, ChartSeries } from "./chartData";
 import { MetricLabel } from "./MetricLabel";
 
-interface MetricChartProps {
+export interface MetricChartProps {
   title: string;
   metricKey?: string;
   data: ChartPoint[];
@@ -22,6 +22,8 @@ interface MetricChartProps {
   keepZeroSeries?: boolean;
   /** One-line caption under the chart — what testers are looking at. */
   caption?: string;
+  /** Override Recharts' in-plot legend. Comparison views already have a page legend. */
+  showLegend?: boolean;
 }
 
 function formatValue(value: number, unit?: string): string {
@@ -96,6 +98,7 @@ export function MetricChart({
   yDomain,
   keepZeroSeries = false,
   caption,
+  showLegend,
 }: MetricChartProps) {
   // A measured 0 is a finding (encoder kept up, no stalls). Hide only when
   // every point is null/undefined — that is "not collected yet", not zero.
@@ -108,6 +111,7 @@ export function MetricChart({
       : []
     : numericSeries;
   const resolvedMetricKey = metricKey ?? (series.length === 1 ? series[0]?.key : undefined);
+  const legendVisible = showLegend ?? activeSeries.length > 1;
 
   if (activeSeries.length === 0) {
     return null;
@@ -124,7 +128,10 @@ export function MetricChart({
       </div>
       <div className="chart-container" style={{ height }}>
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+          <LineChart
+            data={data}
+            margin={{ top: 8, right: 12, left: 0, bottom: legendVisible ? 24 : 0 }}
+          >
             <CartesianGrid stroke="rgba(148, 163, 184, 0.12)" vertical={false} />
             <XAxis
               dataKey="second"
@@ -141,7 +148,12 @@ export function MetricChart({
               domain={yDomain}
             />
             <Tooltip content={<ChartTooltip series={activeSeries} />} />
-            {activeSeries.length > 1 && <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: 12 }} />}
+            {legendVisible ? (
+              <Legend
+                verticalAlign="bottom"
+                wrapperStyle={{ position: "relative", color: "#64748b", fontSize: 12 }}
+              />
+            ) : null}
             {activeSeries.map((item) => (
               <Line
                 key={item.key}

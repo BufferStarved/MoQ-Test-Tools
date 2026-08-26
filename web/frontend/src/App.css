@@ -276,28 +276,6 @@ h1 {
   .benchmark-split-setup .encoder-profile-body {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .live-charts-panel {
-    position: sticky;
-    bottom: 0;
-    z-index: 15;
-  }
-
-  .benchmark-live.has-charts {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(300px, 38%);
-    align-items: start;
-    gap: 16px;
-  }
-
-  .benchmark-live.has-charts .live-charts-panel {
-    position: sticky;
-    top: 76px;
-    bottom: auto;
-    max-height: calc(100vh - 96px);
-    overflow: auto;
-    margin-top: 0;
-  }
 }
 
 .benchmark-shared-header {
@@ -491,6 +469,13 @@ h1 {
   align-items: center;
   gap: 6px;
   color: var(--text-muted);
+}
+
+.benchmark-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
 }
 
 .benchmark-live {
@@ -869,6 +854,11 @@ h1 {
 .status-panel,
 .live-charts-panel {
   margin-top: 20px;
+}
+
+.benchmark-page > .live-charts-panel {
+  width: 100%;
+  max-width: none;
 }
 
 .panel {
@@ -2148,6 +2138,11 @@ code {
 .chart-container {
   width: 100%;
   min-width: 0;
+  overflow: hidden;
+}
+
+.chart-container .recharts-legend-wrapper {
+  position: relative !important;
 }
 
 .chart-tooltip {
@@ -2532,7 +2527,8 @@ code {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  position: relative;
+  margin-bottom: 16px;
 }
 
 .comparison-legend-item {

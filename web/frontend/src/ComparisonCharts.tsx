@@ -9,7 +9,7 @@ import {
   ttffEventSummaries,
   type ComparisonLegData,
 } from "./chartData";
-import { MetricChart } from "./MetricChart";
+import { MetricChart, type MetricChartProps } from "./MetricChart";
 import { ChartSectionNote } from "./ChartSectionNote";
 import { metricUnavailableMessage, metricSupportedForProtocol, WHIP_ENCODE_BITRATE_NOTE, webrtcEncodeBitrateUnreported } from "./metricModel";
 import { assignStreamColors } from "./protocolTheme";
@@ -18,6 +18,10 @@ interface ComparisonChartsProps {
   legs: ComparisonLegData[];
   /** Minimum legs with data before charts render (default 2 for live compare). */
   minLegs?: number;
+}
+
+function CompareChart(props: Omit<MetricChartProps, "showLegend">) {
+  return <MetricChart {...props} showLegend={false} />;
 }
 
 function ProtocolAvailabilityNote({
@@ -146,7 +150,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Picture-quality scores appear when Score picture quality is on.",
               ]}
             />
-            <MetricChart
+            <CompareChart
               title="Bitrate"
               metricKey="encoded_bitrate_kbps"
               data={points}
@@ -168,14 +172,14 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 here on a new run.
               </p>
             ) : null}
-            <MetricChart
+            <CompareChart
               title="Frame rate"
               metricKey="fps"
               data={points}
               series={comparisonSeries(activeLegs, "fps", "fps")}
               caption="Frames encoded per second — not what the glass painted. Check Playback FPS / dropped frames if the picture looks jumpy."
             />
-            <MetricChart
+            <CompareChart
               title="Send rate"
               metricKey="net_send_mbps"
               data={points}
@@ -183,7 +187,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
               caption="How much this laptop is sending onto the network."
             />
-            <MetricChart
+            <CompareChart
               title="Client memory"
               metricKey="memory_mb"
               data={points}
@@ -191,14 +195,14 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
               caption="Publisher process memory on this machine."
             />
-            <MetricChart
+            <CompareChart
               title="Client network jitter"
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
               caption="Publisher-side RTT variation. The first sample is often a connect-probe spike — ignore a lone 100ms+ blip at t=0."
             />
-            <MetricChart
+            <CompareChart
               title="Encode lag"
               metricKey="encode_lag_ms"
               data={points}
@@ -206,14 +210,14 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
               caption="How far the encoder is behind capture/realtime. A flat near-zero means the encoder kept up — not a missing series."
             />
-            <MetricChart
+            <CompareChart
               title="FPS stability"
               metricKey="fps_stability"
               data={points}
               series={comparisonSeries(activeLegs, "fps_stability", "cv")}
               keepZeroSeries
             />
-            <MetricChart
+            <CompareChart
               title="Encode speed"
               metricKey="speed"
               data={points}
@@ -221,7 +225,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
             />
             {qualityRequested && comparisonHasMetric(points, "vmaf_score_encoder", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="VMAF (encoder)"
               metricKey="vmaf_score_encoder"
               data={points}
@@ -246,7 +250,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 </p>
               )}
             {qualityRequested && comparisonHasMetric(points, "psnr_db_encoder", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="PSNR"
               metricKey="psnr_db_encoder"
               data={points}
@@ -254,7 +258,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             />
             )}
             {qualityRequested && comparisonHasMetric(points, "ssim_encoder", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="SSIM"
               metricKey="ssim_encoder"
               data={points}
@@ -268,13 +272,13 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
 
         {currentGroup.id === "client" && clientGroup && (
           <>
-            <MetricChart
+            <CompareChart
               title="Process CPU"
               metricKey="cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "cpu_percent", "%")}
             />
-            <MetricChart
+            <CompareChart
               title="Process memory"
               metricKey="memory_mb"
               data={points}
@@ -296,38 +300,38 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 "Protocol panels below are native counters (MoQ relay Δ, SRT / Zixi recovery).",
               ]}
             />
-            <MetricChart
+            <CompareChart
               title="RTT"
               metricKey="net_rtt_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_rtt_ms", "ms")}
             />
-            <MetricChart
+            <CompareChart
               title="Server network jitter"
               metricKey="net_jitter_ms"
               data={points}
               series={comparisonSeries(activeLegs, "net_jitter_ms", "ms")}
             />
-            <MetricChart
+            <CompareChart
               title="Server CPU"
               metricKey="server_cpu_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_cpu_percent", "%")}
             />
-            <MetricChart
+            <CompareChart
               title="Server memory"
               metricKey="server_memory_percent"
               data={points}
               series={comparisonSeries(activeLegs, "server_memory_percent", "%")}
             />
-            <MetricChart
+            <CompareChart
               title="Path loss %"
               metricKey="net_loss_pct"
               data={points}
               series={comparisonSeries(activeLegs, "net_loss_pct", "%")}
               keepZeroSeries
             />
-            <MetricChart
+            <CompareChart
               title="Retransmit %"
               metricKey="net_retrans_pct"
               data={points}
@@ -336,7 +340,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             />
             {hasMoqLeg && (
               <>
-                <MetricChart
+                <CompareChart
                   title="Receive loss"
                   metricKey="quic_packets_lost"
                   data={points}
@@ -344,7 +348,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                   keepZeroSeries
                 />
                 {comparisonHasMetric(points, "quic_cwnd_bytes", activeLegs.length) && (
-                  <MetricChart
+                  <CompareChart
                     title="QUIC congestion window"
                     metricKey="quic_cwnd_bytes"
                     data={points}
@@ -354,7 +358,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               </>
             )}
             {hasSrtOrRtmpLeg && (
-              <MetricChart
+              <CompareChart
                 title="FEC extra"
                 metricKey="pkt_fec_extra"
                 data={points}
@@ -363,7 +367,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               />
             )}
             {qualityRequested && comparisonHasMetric(points, "vmaf_score_ingest", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="VMAF (ingest)"
               metricKey="vmaf_score_ingest"
               data={points}
@@ -387,7 +391,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 </p>
               )}
             {qualityRequested && comparisonHasMetric(points, "psnr_db_ingest", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="PSNR (ingest)"
               metricKey="psnr_db_ingest"
               data={points}
@@ -395,7 +399,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             />
             )}
             {qualityRequested && comparisonHasMetric(points, "ssim_ingest", activeLegs.length) && (
-            <MetricChart
+            <CompareChart
               title="SSIM (ingest)"
               metricKey="ssim_ingest"
               data={points}
@@ -420,7 +424,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             <ProtocolAvailabilityNote metricKey="ts_continuity_counter_errors" legs={activeLegs} />
             <ProtocolAvailabilityNote metricKey="cmaf_seq_gap_count" legs={activeLegs} />
             {hasSrtOrRtmpLeg && (
-              <MetricChart
+              <CompareChart
                 title="TS continuity errors"
                 metricKey="ts_continuity_counter_errors"
                 data={points}
@@ -431,7 +435,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             )}
             {hasMoqLeg && (
               <>
-                <MetricChart
+                <CompareChart
                   title="CMAF sequence gaps"
                   metricKey="cmaf_seq_gap_count"
                   data={points}
@@ -439,21 +443,21 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                   keepZeroSeries
                   caption="Flat zero means fragments arrived in order."
                 />
-                <MetricChart
+                <CompareChart
                   title="CMAF decode-time gaps"
                   metricKey="cmaf_tfdt_gap_count"
                   data={points}
                   series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_count", "count")}
                   keepZeroSeries
                 />
-                <MetricChart
+                <CompareChart
                   title="CMAF decode-time gap (ms)"
                   metricKey="cmaf_tfdt_gap_ms"
                   data={points}
                   series={comparisonSeries(activeLegs, "cmaf_tfdt_gap_ms", "ms")}
                   keepZeroSeries
                 />
-                <MetricChart
+                <CompareChart
                   title="CMAF parse errors"
                   metricKey="cmaf_parse_errors"
                   data={points}
@@ -468,7 +472,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
         {currentGroup.id === "playback" && playbackGroup && (
           <>
             {comparisonHasMetric(points, "e2e_latency_ms", activeLegs.length) ? (
-              <MetricChart
+              <CompareChart
                 title="Glass delay (estimated)"
                 metricKey="e2e_latency_ms"
                 data={points}
@@ -488,7 +492,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
                 . After first paint this value does not change.
               </p>
             )}
-            <MetricChart
+            <CompareChart
               title="Playback FPS"
               metricKey="playback_fps"
               data={points}
@@ -496,7 +500,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               keepZeroSeries
               caption="Frames the player actually painted. Encode FPS can look perfect while this drops."
             />
-            <MetricChart
+            <CompareChart
               title="Frames dropped"
               metricKey="playback_frames_dropped"
               data={points}
@@ -507,7 +511,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             {(comparisonHasMetricPresent(points, "playback_stall_count", activeLegs.length) ||
               comparisonHasMetric(points, "playback_ttff_ms", activeLegs.length) ||
               comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length)) && (
-              <MetricChart
+              <CompareChart
                 title="Playback stalls"
                 metricKey="playback_stall_count"
                 data={points}
@@ -517,7 +521,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               />
             )}
             {comparisonHasMetric(points, "playback_rebuffer_sec", activeLegs.length) && (
-              <MetricChart
+              <CompareChart
                 title="Rebuffer time"
                 metricKey="playback_rebuffer_sec"
                 data={points}
@@ -528,7 +532,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
             {(comparisonHasMetric(points, "playback_buffer_sec", activeLegs.length) ||
               comparisonHasMetricPresent(points, "playback_buffer_sec", activeLegs.length) ||
               hasWebrtcLeg) && (
-              <MetricChart
+              <CompareChart
                 title="Buffer size"
                 metricKey="playback_buffer_sec"
                 data={points}
@@ -538,7 +542,7 @@ export function ComparisonCharts({ legs, minLegs = 2 }: ComparisonChartsProps) {
               />
             )}
             {comparisonHasMetric(points, "playback_video_time_sec", activeLegs.length) && (
-              <MetricChart
+              <CompareChart
                 title="Playhead (seconds of media on glass)"
                 metricKey="playback_video_time_sec"
                 data={points}
