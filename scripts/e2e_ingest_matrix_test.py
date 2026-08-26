@@ -892,9 +892,8 @@ def run_case(case: dict, media_path: str) -> CaseResult:
             result.errors.append(f"forbidden_error:{needle}")
         return result
 
-    # Let encode produce the first samples, then Chrome while still running.
-    # Keep this short: DURATION=18 otherwise ends before the site player posts.
-    time.sleep(2)
+    # Open the site player as soon as preview is ready — a 2s settle plus a
+    # 25s preview wait on a 28s job skipped Chrome after encode completed.
     job = get_job(job_id)
     samples = job.get("samples") or []
     # Wait for preview if needed
@@ -941,7 +940,7 @@ def run_case(case: dict, media_path: str) -> CaseResult:
                 seconds=min(12.0, float(os.environ.get("SITE_PLAYER_SEC", "16"))),
             )
             result.detail["moq_recorder"] = recorder_msg
-    if job_now.get("status") == "running":
+    if job_now.get("status") == "running" or preview:
         headed = HEADED
         chrome_ok, chrome_msg = probe_site_player(
             job_id,
