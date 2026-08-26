@@ -109,6 +109,7 @@ import {
   BENCHMARK_PRESET_DEFS,
   cloudCompareProtocolHint,
   cloudCompareProtocolLabel,
+  recipeDef,
   recipeLockedSummary,
   recipeLocksProtocolMix,
   recipeShowsEndpointPickers,
@@ -116,6 +117,16 @@ import {
   wizardStepVisible,
   type BenchmarkPresetId,
 } from "./benchmarkPresets";
+import { SetupStepFrame } from "./SetupStepFrame";
+import {
+  firstStepAfterRecipe,
+  isLastSetupStep,
+  nextSetupStep,
+  setupFlagsForPreset,
+  setupStepState,
+  setupStepsForRecipe,
+  type SetupStepId,
+} from "./setupWizard";
 import { captureClassHintMs, compareLiveMetrics, resolveSampleE2eScope } from "./comparisonVerdict";
 import { PlayerHud } from "./PlayerHud";
 import {
@@ -361,6 +372,16 @@ function App() {
       ? "build-your-own"
       : null,
   );
+  const [setupCursor, setSetupCursor] = useState<SetupStepId>(() => {
+    const initialPreset =
+      operatorPlan.source || operatorPlan.encoder || operatorPlan.outputs.length > 0
+        ? "build-your-own"
+        : null;
+    if (!initialPreset) {
+      return "recipe";
+    }
+    return firstStepAfterRecipe(setupStepsForRecipe(setupFlagsForPreset(initialPreset)));
+  });
   const targetLatencyMs = DEFAULT_TARGET_LATENCY_MS;
   // Source and encode location are coupled 1:1 (cloud playout → API host,
   // webcam → this machine) — no independent "Publisher" toggle.
@@ -921,6 +942,7 @@ function App() {
   function handleBenchmarkPreset(id: BenchmarkPresetId) {
     if (id === "build-your-own") {
       setActivePresetId(id);
+      setSetupCursor(firstStepAfterRecipe(setupStepsForRecipe(setupFlagsForPreset(id))));
       return;
     }
     const plan = applyBenchmarkPreset(id, recipeContext, createEndpointId, {
@@ -929,6 +951,7 @@ function App() {
       encoder: recipeContext.encoder,
     });
     setActivePresetId(id);
+    setSetupCursor(firstStepAfterRecipe(setupStepsForRecipe(setupFlagsForPreset(id))));
     setTestScope(plan.testScope);
     setWebcamStatus(null);
     setEncoder(plan.encoder);
@@ -1884,6 +1907,51 @@ function App() {
   const showOutputTiles = showOutputConfig || showEndpointPickers;
   const lockOutputProtocol = recipeLocksProtocolMix(activePresetId) || !showOutputConfig;
   const lockedRecipeSummary = recipeLockedSummary(activePresetId);
+  const setupSteps = setupStepsForRecipe(setupFlagsForPreset(activePresetId));
+  const runLayout = loading || comparisonLegs.length > 0;
+  const recipeState = setupStepState(setupSteps, setupCursor, "recipe", runLayout);
+  const testScopeState = setupStepState(setupSteps, setupCursor, "testScope", runLayout);
+  const sourceState = setupStepState(setupSteps, setupCursor, "source", runLayout);
+  const protocolState = setupStepState(setupSteps, setupCursor, "protocol", runLayout);
+  const encodeState = setupStepState(setupSteps, setupCursor, "encode", runLayout);
+  const outputsState = setupStepState(setupSteps, setupCursor, "outputs", runLayout);
+  const showOutputsPane = outputsState === "current" || runLayout;
+  const setupHasContinue = !isLastSetupStep(setupSteps, setupCursor);
+  const sourceSummary =
+    mediaSource === "webcam" || mediaSource === "browser_moq"
+      ? mediaSource === "browser_moq"
+        ? "Webcam · Browser"
+        : "Webcam"
+      : mediaSource === "bbb"
+        ? "Cloud playout · Big Buck Bunny"
+        : mediaSource === "upload"
+          ? mediaPath
+            ? `Cloud playout · ${mediaLabel}`
+            : "Cloud playout · choose a file"
+          : "Cloud playout · Color bars";
+  const encodeSummary = [
+    resolveEncodeLadder(encodeLadder).label.split("·")[0]?.trim() ?? encodeLadder,
+    encoder === "browser" ? "Browser" : encoder === "obs" ? "OBS" : "ffmpeg",
+    isUploadOnlyScope(testScope)
+      ? null
+      : playbackPolicy === PLAYBACK_POLICY_LIVE_EDGE
+        ? "Live edge"
+        : "Complete",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const outputsSummary = endpoints
+    .map((endpoint) => protocolLabel(endpoint.protocol))
+    .join(" + ");
+  function continueSetup() {
+    const next = nextSetupStep(setupSteps, setupCursor);
+    if (next) {
+      setSetupCursor(next);
+    }
+  }
+  function reopenSetup(step: SetupStepId) {
+    setSetupCursor(step);
+  }
   const cloudProtocolChoices = showSharedProtocol
     ? publishProtocolIdsForSource(
         recipeContext.source,
@@ -2032,10 +2100,18 @@ function App() {
 
       <main>
         {tab === "benchmark" && (
-          <div className={recipePicked ? "benchmark-split" : undefined}>
-            <div className={recipePicked ? "benchmark-split-setup" : undefined}>
+          <div className={runLayout ? "benchmark-split" : undefined}>
+            <div className={runLayout ? "benchmark-split-setup" : undefined}>
             <section className="panel benchmark-shared">
               <div className="benchmark-shared-stack">
+                <SetupStepFrame
+                  step="recipe"
+                  index={recipeStep}
+                  state={recipeState}
+                  title="Recipe"
+                  summary={recipeDef(activePresetId)?.label ?? "Choose a recipe"}
+                  onReopen={() => reopenSetup("recipe")}
+                >
                 <section className="recipe-section">
                   <StepHeading
                     step={recipeStep}
@@ -2068,7 +2144,16 @@ function App() {
                     <p className="field-hint">Choose a recipe to continue the wizard.</p>
                   ) : null}
                 </section>
-                {showTestScope && (
+                </SetupStepFrame>
+                <SetupStepFrame
+                  step="testScope"
+                  index={testScopeStep}
+                  state={testScopeState}
+                  title="Test"
+                  summary={testScope === TEST_SCOPE_UPLOAD ? "Upload only" : "End-to-end"}
+                  onReopen={() => reopenSetup("testScope")}
+                  onContinue={setupHasContinue ? continueSetup : undefined}
+                >
                 <section className="test-scope-section">
                   <StepHeading
                     step={testScopeStep}
@@ -2105,8 +2190,17 @@ function App() {
                   </div>
                   <p className="field-hint">{testScopeBanner(testScope)}</p>
                 </section>
-                )}
-                {showSourceOps && (
+                </SetupStepFrame>
+                <SetupStepFrame
+                  step="source"
+                  index={sourceStep}
+                  state={sourceState}
+                  title="Source"
+                  summary={sourceSummary}
+                  onReopen={() => reopenSetup("source")}
+                  onContinue={setupHasContinue ? continueSetup : undefined}
+                >
+                {showSourceOps ? (
                 <SourceSection
                   mediaSource={mediaSource}
                   onMediaSourceChange={handleMediaSourceChange}
@@ -2136,9 +2230,18 @@ function App() {
                   hideModePicker={!showSourceMode}
                   publisherSession={publisherSession}
                 />
-                )}
+                ) : null}
+                </SetupStepFrame>
 
-                {showSharedProtocol && (
+                <SetupStepFrame
+                  step="protocol"
+                  index={protocolStep}
+                  state={protocolState}
+                  title="Protocol"
+                  summary={sharedProtocol ? cloudCompareProtocolLabel(sharedProtocol) : "Choose a protocol"}
+                  onReopen={() => reopenSetup("protocol")}
+                  onContinue={setupHasContinue ? continueSetup : undefined}
+                >
                 <section className="cloud-protocol-section">
                   <StepHeading
                     step={protocolStep}
@@ -2166,9 +2269,17 @@ function App() {
                     ))}
                   </div>
                 </section>
-                )}
+                </SetupStepFrame>
 
-                {recipePicked && (
+                <SetupStepFrame
+                  step="encode"
+                  index={encodeStep}
+                  state={encodeState}
+                  title="Encode"
+                  summary={encodeSummary}
+                  onReopen={() => reopenSetup("encode")}
+                  onContinue={setupHasContinue ? continueSetup : undefined}
+                >
                 <section className="encoder-profile-section">
                   <StepHeading
                     step={encodeStep}
@@ -2356,10 +2467,10 @@ function App() {
                     </div>
                   </div>
                 </section>
-                )}
+                </SetupStepFrame>
               </div>
 
-              {recipePicked && (
+              {(isLastSetupStep(setupSteps, setupCursor) || runLayout) && (
               <PipelineConfigDetails
                 sections={pipelineSections}
                 diagram={pipelineDiagram}
@@ -2369,6 +2480,14 @@ function App() {
             </section>
             </div>
 
+            {!showOutputsPane && error ? (
+              <p className="error benchmark-start-error">{error}</p>
+            ) : null}
+            {!showOutputsPane && !error && startHint && !loading ? (
+              <p className="field-hint benchmark-start-error">{startHint}</p>
+            ) : null}
+
+            {showOutputsPane && (
             <div className="benchmark-split-run">
             {recipePicked && (
             <div className="outputs-heading-row">
@@ -2454,6 +2573,7 @@ function App() {
                       </p>
                     )}
 
+                    {runLayout && (
                     <div className="stream-column-preview">
                       {isUploadOnlyScope(testScope) ? (
                         <div className="ingest-monitor" data-testid="ingest-monitor">
@@ -2602,6 +2722,7 @@ function App() {
                       </div>
                       )}
                     </div>
+                    )}
 
                     {(leg || loading) && (
                     <div className="stream-column-status">
@@ -2820,6 +2941,7 @@ function App() {
                 </section>
               )}
             </div>
+            )}
           </div>
         )}
 

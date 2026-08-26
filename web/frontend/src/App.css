@@ -314,6 +314,73 @@ h1 {
   margin: 18px 0 8px;
 }
 
+.setup-step-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.setup-step-summary:hover {
+  border-color: var(--accent-border);
+}
+
+.setup-step-summary-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.setup-step-summary-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.setup-step-summary-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.setup-step-summary-value {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.setup-step-summary-action {
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--accent-strong);
+}
+
+.setup-step-continue {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 14px;
+}
+
 .benchmark-shared-stack .source-media-section {
   margin: 0;
 }
