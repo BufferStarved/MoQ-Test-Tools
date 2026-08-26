@@ -208,7 +208,7 @@ class MoqRecorderAgentTests(unittest.TestCase):
             self.assertEqual(dallas.token, "dallas-token")
             self.assertEqual(fremont.token, "fremont-token")
 
-    def test_east_and_linode_moq_record_on_regional_web_agent(self) -> None:
+    def test_east_and_linode_moq_record_on_central_web_agent(self) -> None:
         env = {
             "MOQ_RECORDER_AGENT_URL": "http://35.222.33.58:8090",
             "LINODE_STACK_ENABLED": "1",
@@ -225,13 +225,15 @@ class MoqRecorderAgentTests(unittest.TestCase):
             import destinations as dest_mod
 
             importlib.reload(dest_mod)
+            # Zixi override is rejected; MoQ VMAF uses the proven central web
+            # recorder (Dallas/Linode local handshake fails).
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_linode_relay"].ingest_agent_url,
-                "http://203.0.113.20:8090",
+                dest_mod.CENTRAL_WEB_INGEST_AGENT,
             )
             self.assertEqual(
                 dest_mod.PRESET_BY_ID["moq_gcp_east_relay"].ingest_agent_url,
-                "http://203.0.113.50:8090",
+                dest_mod.CENTRAL_WEB_INGEST_AGENT,
             )
             self.assertNotIn(
                 "35.222.33.58",

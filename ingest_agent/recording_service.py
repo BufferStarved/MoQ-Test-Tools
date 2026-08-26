@@ -90,13 +90,16 @@ def _docker_record_cmd(
         "--rm",
         "--network",
         "host",
-        "-e",
-        f"MOQ_RELAY_CERT_SHA256={cert_sha256.strip()}",
         "-v",
         f"{output_path.parent}:/out",
         "-v",
         f"{record_js}:/app/tools/openmoq-recorder/record.mjs:ro",
     ]
+    # Only inject a pin when this job supplied one for leftover :4433.
+    # Public :14433 must not inherit a hostname-map hash (Let's Encrypt).
+    pin = cert_sha256.strip()
+    if pin:
+        cmd.extend(["-e", f"MOQ_RELAY_CERT_SHA256={pin}"])
     if cert_js.is_file():
         cmd.extend(["-v", f"{cert_js}:/app/tools/openmoq-recorder/cert.mjs:ro"])
     cmd.extend([

@@ -262,11 +262,29 @@ async function connectRelay(relayUrl, { insecure }) {
         algorithm: 'sha-256',
         value: hash,
       }];
+      log(`wt pin sha-256 host=${parsed.hostname} port=${port}`);
+    } else {
+      // :14433 public LE — Node quiche CA verify is experimental. A leftover
+      // :4433 hostname pin here is what produced "Opening handshake failed".
+      log(`wt public-ca host=${parsed.hostname} port=${port} (no serverCertificateHashes)`);
     }
+  } else {
+    log(`wt insecure host=${parsed.hostname} port=${port}`);
   }
 
   const transport = new WebTransport(wtUrl, wtOptions);
-  await transport.ready;
+  try {
+    await transport.ready;
+  } catch (err) {
+    const msg = String(err?.message ?? err);
+    if (/opening handshake failed/i.test(msg) && !wtOptions.serverCertificateHashes) {
+      throw new Error(
+        `${msg} (Node WebTransport public-CA verify on ${parsed.hostname}:${port}; `
+        + 'do not pin the leftover :4433 hash onto :14433)',
+      );
+    }
+    throw err;
+  }
 
   const conn = new MoqtConnection(18);
   let closing = false;

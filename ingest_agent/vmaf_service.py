@@ -19,6 +19,10 @@ _FFMPEG_CACHE: Optional[str] = None
 _FFMPEG_RESOLVED = False
 VMAF_FFMPEG_TIMEOUT_SEC = 180
 VMAF_N_THREADS = 1
+# 9.5MB leftover Zixi captures pegged e2-medium for minutes. Eight seconds of
+# each file is enough to score; skip entirely when the box is already busy.
+VMAF_INPUT_CAP_SEC = 8
+VMAF_LOAD_BUSY = 0.85
 
 
 @dataclass
@@ -143,10 +147,20 @@ def _looks_like_annex_b(path: Path) -> bool:
     return head[:4] == b"\x00\x00\x00\x01" or head[:3] == b"\x00\x00\x01"
 
 
+def _host_too_busy(threshold: float = VMAF_LOAD_BUSY) -> bool:
+    try:
+        load1 = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return False
+    cpus = os.cpu_count() or 1
+    return load1 >= max(1.2, cpus * threshold)
+
+
 def _ffmpeg_input_args(path: str) -> list[str]:
+    prefix = ["-t", str(VMAF_INPUT_CAP_SEC)]
     if _looks_like_annex_b(Path(path)):
-        return ["-f", "h264", "-framerate", "30", "-i", path]
-    return ["-i", path]
+        return ["-f", "h264", "-framerate", "30", *prefix, "-i", path]
+    return [*prefix, "-i", path]
 
 
 def find_distorted_recording(
@@ -269,6 +283,12 @@ def compute_vmaf(
         return state
 
     state.distorted_path = distorted
+    if _host_too_busy():
+        state.status = "failed"
+        state.error = (
+            "ingest host load too high for libvmaf; encode and playback still stand"
+        )
+        return state
     log_path = job_dir(job_id) / f"vmaf-{Path(distorted).name}.json"
     state.log_path = str(log_path)
 

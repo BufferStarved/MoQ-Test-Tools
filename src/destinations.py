@@ -34,12 +34,19 @@ def _usable_recorder_url(url: str) -> str:
 def moq_recorder_agent_url(regional_fallback: str = "") -> str:
     """MoQ VMAF recordings subscribe over WebTransport on an ingest agent.
 
-    Prefer an explicit MOQ_RECORDER_AGENT_URL, else the regional web agent,
-    else INGEST_AGENT_URL. Do not default to the Zixi worker.
+    Prefer an explicit MOQ_RECORDER_AGENT_URL (never the Zixi worker). Else
+    the central GCP web recorder — that host's docker/quiche handshakes to
+    public :14433 Let's Encrypt (west and Dallas proven 2026-08-26). Regional
+    Linode recorders fail the same URL with ``Opening handshake failed``
+    (stale baked cert.mjs and/or public-IP hairpin). ``regional_fallback`` is
+    last-resort only.
     """
     explicit = _usable_recorder_url(os.environ.get("MOQ_RECORDER_AGENT_URL", ""))
     if explicit:
         return explicit
+    central = _usable_recorder_url(CENTRAL_WEB_INGEST_AGENT)
+    if central:
+        return central
     return _usable_recorder_url(
         regional_fallback or os.environ.get("INGEST_AGENT_URL", "")
     )

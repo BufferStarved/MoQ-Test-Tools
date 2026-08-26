@@ -39,7 +39,9 @@ the job (`docker pull` denied).
 
 `cert.mjs` does **not** apply the leftover `:4433` self-signed pin to port
 **14433** (public Let's Encrypt). Pinning that hash onto `:14433` breaks the
-WebTransport handshake (`Opening handshake failed`).
+WebTransport handshake (`Opening handshake failed`). MoQ ingest VMAF
+subscribes from the central GCP web recorder (`34.9.217.178:8090`) — the
+Dallas/Linode local image fails the same public URL.
 
 ## Linode Weblish (no SSH)
 

@@ -40,8 +40,25 @@ class RecorderTrackTests(unittest.TestCase):
         assert cmd is not None
         joined = " ".join(cmd)
         self.assertIn("record.mjs:/app/tools/openmoq-recorder/record.mjs:ro", joined)
+        self.assertIn("MOQ_RELAY_CERT_SHA256=abc", joined)
         self.assertIn("--track video", joined)
         self.assertNotIn("--track vide_1", joined)
+
+    def test_docker_cmd_omits_empty_cert_pin(self) -> None:
+        recorder = ROOT / "tools" / "openmoq-recorder" / "bin" / "openmoq-fmp4-record"
+        with patch("recording_service.shutil.which", return_value="/usr/bin/docker"):
+            with patch("recording_service._resolve_recorder_bin", return_value=str(recorder)):
+                cmd = _docker_record_cmd(
+                    relay="https://66-228-49-113.sslip.io:14433/moq-relay",
+                    namespace="bench-demo",
+                    output_path=Path("/tmp/job.mp4"),
+                    duration_sec=80,
+                    tracks=["vide_1"],
+                    cert_sha256="",
+                )
+        self.assertIsNotNone(cmd)
+        assert cmd is not None
+        self.assertNotIn("MOQ_RELAY_CERT_SHA256", " ".join(cmd))
 
     def test_recording_has_media_ignores_tiny_or_missing(self) -> None:
         missing = Path("/tmp/moq-recorder-missing-test.mp4")

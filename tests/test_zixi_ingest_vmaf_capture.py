@@ -109,8 +109,28 @@ class FindDistortedRecordingTests(unittest.TestCase):
         cmd = run.call_args.args[0]
         lavfi = next(part for part in cmd if "libvmaf" in part)
         self.assertIn("n_threads=1", lavfi)
+        self.assertIn("-t", cmd)
         self.assertEqual(run.call_args.kwargs["timeout"], 180)
         self.assertTrue(callable(run.call_args.kwargs.get("preexec_fn")))
+
+    def test_compute_vmaf_skips_when_host_is_busy(self) -> None:
+        from vmaf_service import compute_vmaf, job_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("vmaf_service.WORK_DIR", tmp), patch(
+                "vmaf_service.RECORDING_DIR", str(Path(tmp) / "recordings")
+            ), patch("vmaf_service._resolve_ffmpeg", return_value="/usr/bin/ffmpeg"), patch(
+                "vmaf_service._host_too_busy", return_value=True
+            ), patch("vmaf_service.subprocess.run") as run:
+                ref = job_dir("job-busy") / "reference.mp4"
+                cap = job_dir("job-busy") / "http-ts-capture.ts"
+                ref.parent.mkdir(parents=True)
+                ref.write_bytes(b"ref")
+                cap.write_bytes(b"\x47" + b"\x00" * 200)
+                state = compute_vmaf("job-busy", 1.0, 10.0)
+        self.assertEqual(state.status, "failed")
+        self.assertIn("load too high", state.error)
+        run.assert_not_called()
 
     def test_start_compute_vmaf_returns_before_ffmpeg(self) -> None:
         from vmaf_service import start_compute_vmaf
