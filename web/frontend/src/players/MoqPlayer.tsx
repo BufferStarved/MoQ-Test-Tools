@@ -1243,11 +1243,16 @@ export default function MoqPlayer({
           // the catalog-miss window. Wait for the no-media watchdog instead.
           // Webcam announce can take longer than CATALOG_RETRY_MS (4s); tearing
           // down before preview_ready misses the one-shot CMAF catalog.
-          if (keptPublisherNotReady || previewReadyRef.current === false) {
+          // bench-b4b378b5: preview_ready flipped true (grace) while encode
+          // was still live; a 4s teardown then called it a one-shot miss.
+          const encodeRunning = (jobStatusRef.current || "").toLowerCase() === "running";
+          if (keptPublisherNotReady || previewReadyRef.current === false || encodeRunning) {
             pushDiag(
               keptPublisherNotReady
                 ? "catalog_timeout_skipped keepalive_0x10"
-                : "catalog_timeout_skipped waiting_for_announce",
+                : encodeRunning
+                  ? "catalog_timeout_skipped encode_running"
+                  : "catalog_timeout_skipped waiting_for_announce",
               true,
             );
             return;

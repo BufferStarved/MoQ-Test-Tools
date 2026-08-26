@@ -144,6 +144,7 @@ class FrontendRegressionSourceTests(unittest.TestCase):
         self.assertIn("const CATALOG_RETRY_MS = 4_000", text)
         self.assertIn("catalog_timeout_retry", text)
         self.assertIn("catalog_timeout_skipped waiting_for_announce", text)
+        self.assertIn("catalog_timeout_skipped encode_running", text)
         self.assertIn("subscribe_0x10_keepalive", text)
         self.assertIn("noMediaTimeoutMs", text)
 

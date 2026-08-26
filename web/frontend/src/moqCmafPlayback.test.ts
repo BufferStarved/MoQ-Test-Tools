@@ -297,7 +297,7 @@ describe("shouldFailNoMediaWatchdog", () => {
     );
   });
 
-  it("does not call a live empty catalog a one-shot miss during the refresh window", () => {
+  it("does not call a live empty catalog a one-shot miss while encode is still running", () => {
     assert.equal(
       shouldFailNoMediaWatchdog({
         jobStatus: "running",
@@ -314,6 +314,16 @@ describe("shouldFailNoMediaWatchdog", () => {
         previewReady: true,
         catalogReady: false,
         liveMs: MOQ_CATALOG_REFRESH_WAIT_MS + 1,
+        deadlineMs: 15_000,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "completed",
+        previewReady: true,
+        catalogReady: false,
+        liveMs: 1_000,
         deadlineMs: 15_000,
       }),
       true,

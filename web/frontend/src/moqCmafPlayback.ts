@@ -382,12 +382,13 @@ export function noMediaFailMessage(options: {
 
 A 15s timeout while the job is still queued or the publisher has not
 announced the namespace produces a catalog-miss toast for a queue /
-publisher-death problem (bench-733f1d7c). Wait for encode-over, or for
-preview_ready plus the usual deadline.
+publisher-death problem (bench-733f1d7c). Wait for encode-over.
 
 A live namespace whose catalog is still empty (`{tracks:[]}` then vide_1)
-is not a one-shot miss yet — FETCH/SUBSCRIBE are still allowed to apply
-the later object.
+is not a one-shot miss — FETCH/SUBSCRIBE must stay up for the later object.
+Webcam `bench-b4b378b5` (local ffmpeg → east :14433) encoded 1100+ frames
+and then failed at the 30s refresh cap while the 300s job was still
+running. Do not call that a miss until encode ends.
 */
 export function shouldFailNoMediaWatchdog(options: {
   jobStatus?: string;
@@ -406,8 +407,9 @@ export function shouldFailNoMediaWatchdog(options: {
   if (options.previewReady === false) {
     return false;
   }
-  if (options.previewReady === true && options.catalogReady === false) {
-    return options.liveMs >= Math.max(options.deadlineMs, MOQ_CATALOG_REFRESH_WAIT_MS);
+  // Encode still running: empty catalog is live-write in flight, not a miss.
+  if (options.catalogReady === false) {
+    return false;
   }
   return options.liveMs >= options.deadlineMs;
 }
