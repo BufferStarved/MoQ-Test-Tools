@@ -3,11 +3,13 @@ import logging
 import os
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from ingest_agent_client import (
     IngestAgentClient,
     RemoteVmafResult,
     resolve_ingest_agent,
+    skipped_zixi_public_agent_reason,
 )
 
 logger = logging.getLogger("MoQ-SRT-Bench")
@@ -70,6 +72,9 @@ def prepare_reference_via_agent(
     )
     if config is None:
         return "Ingest agent is not configured (set ingest agent token for this endpoint)"
+    skip = skipped_zixi_public_agent_reason(host=config.host, base_url=config.base_url)
+    if skip:
+        return skip
 
     client = IngestAgentClient(config)
     try:
@@ -100,6 +105,9 @@ def prepare_reference_bytes_via_agent(
     )
     if config is None:
         return "Ingest agent is not configured (set ingest agent token for this endpoint)"
+    skip = skipped_zixi_public_agent_reason(host=config.host, base_url=config.base_url)
+    if skip:
+        return skip
 
     client = IngestAgentClient(config)
     try:
@@ -196,6 +204,9 @@ def compute_vmaf_via_agent(
     )
     if config is None:
         return RemoteVmafResult(error="Ingest agent is not configured")
+    skip = skipped_zixi_public_agent_reason(host=config.host, base_url=config.base_url)
+    if skip:
+        return RemoteVmafResult(error=skip)
 
     client = IngestAgentClient(config)
     wait_error = wait_for_moq_recording_via_agent(
@@ -312,8 +323,16 @@ def start_http_ts_capture_via_agent(
     )
     if config is None:
         return "Ingest agent is not configured (set ingest agent token for this endpoint)"
+    skip = skipped_zixi_public_agent_reason(host=config.host, base_url=config.base_url)
+    if skip:
+        return skip
 
     client = IngestAgentClient(config)
+    try:
+        client.health()
+    except RuntimeError as exc:
+        host = config.host or urlparse(config.base_url).hostname or "ingest-agent"
+        return f"Zixi ingest agent unreachable at {host}:8090 ({exc})"
     try:
         client.start_http_ts_capture(job_id, url=http_ts_url, duration_sec=duration_sec)
     except RuntimeError as exc:

@@ -244,6 +244,31 @@ class PrepareRemoteVmafTests(unittest.TestCase):
             manager._prepare_remote_vmaf("job-srt", job)
         start_capture.assert_not_called()
 
+    def test_http_ts_capture_fail_fast_when_zixi_agent_dead(self) -> None:
+        from remote_vmaf import start_http_ts_capture_via_agent
+
+        config = SimpleNamespace(
+            base_url="http://35.222.33.58:8090",
+            token="t",
+            recording_dir="/opt/zixi",
+            host="35.222.33.58",
+        )
+        with patch("remote_vmaf.resolve_ingest_agent", return_value=config), patch(
+            "remote_vmaf.IngestAgentClient"
+        ) as client_cls:
+            client_cls.return_value.health.side_effect = RuntimeError(
+                "Ingest agent health check failed: timed out"
+            )
+            error = start_http_ts_capture_via_agent(
+                "rtmp://35.222.33.58:1935/live/benchmark",
+                "job-dead",
+                http_ts_url="http://127.0.0.1:7777/benchmark.ts",
+                duration_sec=28,
+                agent_url="http://35.222.33.58:8090",
+            )
+        self.assertIn("Zixi ingest agent unreachable at 35.222.33.58:8090", error or "")
+        client_cls.return_value.start_http_ts_capture.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

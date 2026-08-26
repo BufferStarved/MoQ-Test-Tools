@@ -66,7 +66,7 @@ class BrowserMoqApiGateTests(unittest.TestCase):
         self.assertFalse(job.compute_vmaf_on_ingest)
 
     def test_browser_allows_ingest_vmaf_not_encoder(self) -> None:
-        with patch.object(api_main, "vmaf_available_for_endpoint", return_value=True):
+        with patch.object(api_main, "vmaf_availability_for_endpoint", return_value=(True, "")):
             with patch.object(
                 api_main.job_manager,
                 "create_job",

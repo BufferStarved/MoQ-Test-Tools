@@ -16,6 +16,19 @@ logger = logging.getLogger("MoQ-SRT-Bench")
 
 DEFAULT_AGENT_PORT = int(os.environ.get("INGEST_AGENT_PORT", "8090"))
 HEALTH_TIMEOUT_SEC = 1.5
+# Public moq-zixi-gcp :8090 is down (2026-08-26). Never open a socket — a
+# blackholed SYN hung jobs past health timeouts. Encode and playback stay.
+ZIXI_PUBLIC_INGEST_AGENT_HOST = "35.222.33.58"
+
+
+def skipped_zixi_public_agent_reason(*, host: str = "", base_url: str = "") -> str:
+    parsed = (host or urlparse(base_url or "").hostname or "").strip()
+    if parsed != ZIXI_PUBLIC_INGEST_AGENT_HOST:
+        return ""
+    return (
+        f"Zixi ingest agent unreachable at {parsed}:8090 "
+        "(public worker down; ingest VMAF skipped without contacting the host)"
+    )
 
 
 @dataclass(frozen=True)
@@ -143,12 +156,18 @@ def vmaf_availability_for_endpoint(
     )
     if config is None:
         return False, "VMAF is not configured for this destination on the server"
-    if not _preset_needs_moq_recorder(preset_id, endpoint_url):
-        return True, ""
+    skip = skipped_zixi_public_agent_reason(host=config.host, base_url=config.base_url)
+    if skip:
+        return False, skip
     try:
         health = IngestAgentClient(config).health()
     except RuntimeError as exc:
-        return False, f"MoQ ingest VMAF cannot reach the ingest worker ({exc})"
+        host = config.host or urlparse(config.base_url).hostname or "ingest-agent"
+        if _preset_needs_moq_recorder(preset_id, endpoint_url):
+            return False, f"MoQ ingest VMAF cannot reach the ingest worker ({exc})"
+        return False, f"Zixi ingest agent unreachable at {host}:8090 ({exc})"
+    if not _preset_needs_moq_recorder(preset_id, endpoint_url):
+        return True, ""
     if health.get("moq_recorder_available"):
         return True, ""
     return False, (
@@ -196,6 +215,11 @@ class IngestAgentClient:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
+        skip = skipped_zixi_public_agent_reason(
+            host=self._config.host, base_url=self._config.base_url
+        )
+        if skip:
+            raise RuntimeError(skip)
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -221,6 +245,11 @@ class IngestAgentClient:
             raise RuntimeError(f"Ingest agent unreachable at {url}: {exc.reason}") from exc
 
     def health(self) -> dict:
+        skip = skipped_zixi_public_agent_reason(
+            host=self._config.host, base_url=self._config.base_url
+        )
+        if skip:
+            raise RuntimeError(skip)
         url = f"{self._config.base_url}/api/v1/health"
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
@@ -293,6 +322,11 @@ class IngestAgentClient:
             f"--{boundary}--\r\n".encode(),
         ])
 
+        skip = skipped_zixi_public_agent_reason(
+            host=self._config.host, base_url=self._config.base_url
+        )
+        if skip:
+            raise RuntimeError(skip)
         url = f"{self._config.base_url}/api/v1/jobs/{job_id}/reference"
         request = urllib.request.Request(
             url,

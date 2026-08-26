@@ -28,6 +28,10 @@ class VmafAvailabilityTests(unittest.TestCase):
         with patch(
             "ingest_agent_client.resolve_ingest_agent",
             return_value=config,
+        ), patch.object(
+            __import__("ingest_agent_client", fromlist=["IngestAgentClient"]).IngestAgentClient,
+            "health",
+            return_value={"status": "ok", "libvmaf_available": True},
         ):
             ok, reason = vmaf_availability_for_endpoint(
                 "srt://zixi:10080",
@@ -35,6 +39,27 @@ class VmafAvailabilityTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(reason, "")
+
+    def test_zixi_dead_agent_is_named_fail(self) -> None:
+        config = IngestAgentConfig(
+            base_url="http://35.222.33.58:8090",
+            token="t",
+            recording_dir="/opt/zixi",
+            host="35.222.33.58",
+        )
+        with patch(
+            "ingest_agent_client.resolve_ingest_agent",
+            return_value=config,
+        ), patch(
+            "ingest_agent_client.urllib.request.urlopen",
+            side_effect=AssertionError("must not contact 35.222.33.58:8090"),
+        ):
+            ok, reason = vmaf_availability_for_endpoint(
+                "rtmp://35.222.33.58:1935/live/benchmark",
+                preset_id="moq_zixi_gcp_rtmp",
+            )
+        self.assertFalse(ok)
+        self.assertIn("Zixi ingest agent unreachable at 35.222.33.58:8090", reason)
 
     def test_moq_requires_recorder_binary(self) -> None:
         config = IngestAgentConfig(

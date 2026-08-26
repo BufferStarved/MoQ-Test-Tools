@@ -51,7 +51,6 @@ from ingest_agent_client import (  # noqa: E402
     IngestAgentClient,
     resolve_ingest_agent,
     vmaf_availability_for_endpoint,
-    vmaf_available_for_endpoint,
 )
 from vmaf_score import libvmaf_available  # noqa: E402
 from encode_profile import (  # noqa: E402
@@ -898,8 +897,13 @@ def create_upload(request: CreateUploadRequest):
                 detail="Ingest VMAF is not supported for this preset.",
             )
         preset_id = request.preset_id or destination.preset_id
-        if not vmaf_available_for_endpoint(destination.url, preset_id=preset_id):
+        available, vmaf_reason = vmaf_availability_for_endpoint(
+            destination.url, preset_id=preset_id
+        )
+        if not available:
             # Missing regional token must not 401 the ingest agent or block encode.
+            # Dead public Zixi :8090 is skip-listed — do not spawn a VMAF worker
+            # that would POST/upload into 35.222.33.58. Encode still runs.
             compute_vmaf_on_ingest = False
 
     if compute_vmaf_encoder and not libvmaf_available():
