@@ -71,6 +71,24 @@ git -C "$ROOT_DIR" archive HEAD | tar -x -C "$STAGE"
 printf '%s\n' "$GIT_SHA" > "$STAGE/.build-sha"
 echo "==> prod sha $GIT_SHA (git archive HEAD, not the working tree)"
 
+# git archive omits gitignored vendor package dist/. Vite resolves
+# @playa/player to ./dist/index.js, so a playa upgrade that ships source
+# only leaves the previous build on the VM. Copy the local install-playa.sh
+# artifacts that match this vendor source.
+vendor_dists=()
+while IFS= read -r d; do
+  vendor_dists+=("$d")
+done < <(cd "$ROOT_DIR" && find web/frontend/vendor/moq-playa/packages -mindepth 2 -maxdepth 2 -type d -name dist)
+if [[ ${#vendor_dists[@]} -eq 0 ]]; then
+  echo "REFUSING: no vendor package dist/ next to HEAD. Run FORCE=1 ./scripts/install-playa.sh first." >&2
+  exit 4
+fi
+for d in "${vendor_dists[@]}"; do
+  mkdir -p "$STAGE/$d"
+  rsync -a "$ROOT_DIR/$d/" "$STAGE/$d/"
+done
+echo "==> staged ${#vendor_dists[@]} vendor package dist/ trees"
+
 echo "==> rsync app tree"
 rsync -az \
   --exclude '__pycache__' \
@@ -103,6 +121,13 @@ rsync -az \
   --exclude 'dist' \
   -e "ssh ${SSH_OPTS[*]}" \
   "$STAGE/web/frontend/" "$WEB_IP:$INSTALL_ROOT/web/frontend/"
+
+# Frontend rsync excludes every dist/. Push vendor package builds separately
+# so prod @playa/player matches the headed 0.5.7 check, not leftover 0.5.3.
+for d in "${vendor_dists[@]}"; do
+  rsync -az -e "ssh ${SSH_OPTS[*]}" \
+    "$STAGE/$d/" "$WEB_IP:$INSTALL_ROOT/$d/"
+done
 
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
   "$STAGE/.build-sha" "$WEB_IP:$INSTALL_ROOT/.build-sha"

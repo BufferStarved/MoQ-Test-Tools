@@ -35,14 +35,12 @@ function createMockAdapter() {
     unsubscribe: vi.fn(async () => {}),
     fetch: vi.fn(async () => varint(nextRequestId++)),
     fetchCancel: vi.fn(async () => {}),
-    joiningFetch: vi.fn(async () => varint(nextRequestId++)),
     trackStatus: vi.fn(async () => varint(nextRequestId++)),
     subscribeNamespace: vi.fn(async () => varint(nextRequestId++)),
     cancelNamespace: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     _triggerMessage: (msg: ControlMessage) => adapter.onMessage?.(msg),
     _triggerObject: (streamId: bigint, obj: MoqtObject) => adapter.onObject?.(streamId, obj),
-    _triggerDataStream: (streamId: bigint, header: unknown) => adapter.onDataStream?.(streamId, header),
   };
   return adapter;
 }
@@ -80,6 +78,7 @@ function makeMockMs() {
   return {
     initialize: vi.fn(), appendChunk: vi.fn(), endOfStream: vi.fn(),
     reset: vi.fn(), mediaElement: null, destroy: vi.fn(),
+    changeType: vi.fn(async () => {}),
     onFirstFrame: null as (() => void) | null, onError: null, onStall: null,
   };
 }
@@ -95,6 +94,8 @@ async function bootPlayer(catalogJson: string, cfg?: Partial<MoqtPlayerConfig>) 
     createConnection: () => adapter as unknown as MoqtConnection,
     createMediaSource: () => mockMs,
     createCmafAssembler: () => assembler,
+    // Pin pre-bootstrap catalog behavior (legacy escape hatch).
+    catalogBootstrap: 'subscribe',
     ...cfg,
   });
   const errors: any[] = [];
@@ -163,257 +164,6 @@ describe('CMAF bootstrap validation (fail before SUBSCRIBE)', () => {
     )).toBe(true);
     expect(subscribedNames()).toEqual(['catalog']); // nothing else hit the wire
     await player.destroy();
-  });
-});
-
-describe('CMAF libmoq catalog (initDataList + initRef)', () => {
-  it('resolves initDataList before subscribe and initializes MSE immediately', async () => {
-    const videoInit = btoa('\x01\x02\x03\x04');
-    const audioInit = btoa('\x05\x06\x07\x08');
-    const { mockMs, subscribedNames, errors } = await bootPlayer(JSON.stringify({
-      version: '1',
-      tracks: [
-        { ...VIDEO_BASE, name: 'vide_1', initRef: 'vide_1' },
-        { ...AUDIO_BASE, name: 'soun_2', initRef: 'soun_2' },
-      ],
-      initDataList: [
-        { id: 'vide_1', type: 'inline', data: videoInit },
-        { id: 'soun_2', type: 'inline', data: audioInit },
-      ],
-    }));
-
-    expect(subscribedNames()).toEqual(['catalog', 'vide_1', 'soun_2']);
-    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
-    const cfg = mockMs.initialize.mock.calls[0]![0];
-    expect(cfg.video.initData).toEqual(Uint8Array.from(atob(videoInit), (c) => c.charCodeAt(0)));
-    expect(cfg.audio.initData).toEqual(Uint8Array.from(atob(audioInit), (c) => c.charCodeAt(0)));
-    expect(errors).toEqual([]);
-  });
-
-  it('bootstraps from a joining FETCH when SUBSCRIBE delivers no catalog object', async () => {
-    const adapter = createMockAdapter();
-    const mockMs = makeMockMs();
-    const assembler = {
-      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
-      setInitSegment: vi.fn(), clearPending: vi.fn(),
-    };
-    const videoInit = btoa('\x01\x02\x03\x04');
-    const catalogJson = JSON.stringify({
-      version: '1',
-      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
-    });
-    const player = new MoqtPlayer({
-      url: 'https://relay.example.com/moq',
-      namespace: 'live/broadcast',
-      createTransport: vi.fn(async () => ({}) as any),
-      createConnection: () => adapter as unknown as MoqtConnection,
-      createMediaSource: () => mockMs,
-      createCmafAssembler: () => assembler,
-    });
-
-    const loadPromise = player.load();
-    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
-    adapter._connectResolve?.();
-    await loadPromise;
-    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
-
-    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
-    const fetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
-    adapter._triggerMessage({
-      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
-    } as unknown as ControlMessage);
-    adapter._triggerDataStream(5n, {
-      type: 'fetch',
-      header: { requestId: fetchReqId },
-    });
-    adapter._triggerObject(5n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(catalogJson),
-    } as MoqtObject);
-    await new Promise((r) => setTimeout(r, 30));
-
-    const subscribedNames = adapter.subscribe.mock.calls
-      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
-    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
-    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
-    player.destroy();
-  });
-
-  it('replays a catalog FETCH stream that arrived before joiningFetch() resolved', async () => {
-    const adapter = createMockAdapter();
-    let resolveJoin: ((id: ReturnType<typeof varint>) => void) | undefined;
-    adapter.joiningFetch = vi.fn(() => new Promise((resolve) => {
-      resolveJoin = resolve;
-    }));
-    const mockMs = makeMockMs();
-    const assembler = {
-      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
-      setInitSegment: vi.fn(), clearPending: vi.fn(),
-    };
-    const videoInit = btoa('\x01\x02\x03\x04');
-    const catalogJson = JSON.stringify({
-      version: '1',
-      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
-    });
-    const player = new MoqtPlayer({
-      url: 'https://relay.example.com/moq',
-      namespace: 'live/broadcast',
-      createTransport: vi.fn(async () => ({}) as any),
-      createConnection: () => adapter as unknown as MoqtConnection,
-      createMediaSource: () => mockMs,
-      createCmafAssembler: () => assembler,
-    });
-
-    const loadPromise = player.load();
-    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
-    adapter._connectResolve?.();
-    await loadPromise;
-    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
-
-    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
-    const fetchReqId = varint(99n);
-    adapter._triggerMessage({
-      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
-    } as unknown as ControlMessage);
-    adapter._triggerDataStream(5n, {
-      type: 'fetch',
-      header: { requestId: fetchReqId },
-    });
-    adapter._triggerObject(5n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(catalogJson),
-    } as MoqtObject);
-    resolveJoin?.(fetchReqId);
-    await new Promise((r) => setTimeout(r, 30));
-
-    const subscribedNames = adapter.subscribe.mock.calls
-      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
-    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
-    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
-    player.destroy();
-  });
-
-  it('applies vide_1 on the original joining FETCH after an empty first object and a standalone retry', async () => {
-    const adapter = createMockAdapter();
-    const mockMs = makeMockMs();
-    const assembler = {
-      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
-      setInitSegment: vi.fn(), clearPending: vi.fn(),
-    };
-    const videoInit = btoa('\x01\x02\x03\x04');
-    const emptyCatalog = JSON.stringify({ version: 1, tracks: [] });
-    const liveCatalog = JSON.stringify({
-      version: '1',
-      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
-    });
-    const player = new MoqtPlayer({
-      url: 'https://relay.example.com/moq',
-      namespace: 'live/broadcast',
-      createTransport: vi.fn(async () => ({}) as any),
-      createConnection: () => adapter as unknown as MoqtConnection,
-      createMediaSource: () => mockMs,
-      createCmafAssembler: () => assembler,
-    });
-    const received = vi.fn();
-    player.on('catalog_received', received);
-
-    const loadPromise = player.load();
-    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
-    adapter._connectResolve?.();
-    await loadPromise;
-    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
-
-    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
-    const joinFetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
-    adapter._triggerMessage({
-      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
-    } as unknown as ControlMessage);
-    adapter._triggerDataStream(5n, {
-      type: 'fetch',
-      header: { requestId: joinFetchReqId },
-    });
-    adapter._triggerObject(5n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(emptyCatalog),
-    } as MoqtObject);
-    expect(received).not.toHaveBeenCalled();
-
-    await vi.waitFor(() => expect(adapter.fetch).toHaveBeenCalled());
-    adapter._triggerObject(5n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(1), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(liveCatalog),
-    } as MoqtObject);
-    await new Promise((r) => setTimeout(r, 30));
-
-    expect(received).toHaveBeenCalled();
-    const subscribedNames = adapter.subscribe.mock.calls
-      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
-    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
-    player.destroy();
-  });
-
-  it('applies vide_1 from a later standalone FETCH after the empty group-0 object', async () => {
-    const adapter = createMockAdapter();
-    const mockMs = makeMockMs();
-    const assembler = {
-      push: vi.fn(), getEpoch: () => null, reset: vi.fn(), destroy: vi.fn(),
-      setInitSegment: vi.fn(), clearPending: vi.fn(),
-    };
-    const videoInit = btoa('\x01\x02\x03\x04');
-    const emptyCatalog = JSON.stringify({ version: 1, tracks: [] });
-    const liveCatalog = JSON.stringify({
-      version: '1',
-      tracks: [{ ...VIDEO_BASE, name: 'vide_1', initData: videoInit }],
-    });
-    const player = new MoqtPlayer({
-      url: 'https://relay.example.com/moq',
-      namespace: 'live/broadcast',
-      createTransport: vi.fn(async () => ({}) as any),
-      createConnection: () => adapter as unknown as MoqtConnection,
-      createMediaSource: () => mockMs,
-      createCmafAssembler: () => assembler,
-    });
-    const received = vi.fn();
-    player.on('catalog_received', received);
-
-    const loadPromise = player.load();
-    await vi.waitFor(() => expect(adapter.connect).toHaveBeenCalled());
-    adapter._connectResolve?.();
-    await loadPromise;
-    await vi.waitFor(() => expect(adapter.joiningFetch).toHaveBeenCalled());
-
-    const catalogReqId = await adapter.subscribe.mock.results[0]?.value;
-    const joinFetchReqId = await adapter.joiningFetch.mock.results[0]?.value;
-    adapter._triggerMessage({
-      type: 'SUBSCRIBE_OK', requestId: catalogReqId, trackAlias: catalogReqId, parameters: new Map(),
-    } as unknown as ControlMessage);
-    adapter._triggerDataStream(5n, {
-      type: 'fetch',
-      header: { requestId: joinFetchReqId },
-    });
-    adapter._triggerObject(5n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(0), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(emptyCatalog),
-    } as MoqtObject);
-    expect(received).not.toHaveBeenCalled();
-
-    await vi.waitFor(() => expect(adapter.fetch).toHaveBeenCalled());
-    const standaloneReqId = await adapter.fetch.mock.results[0]?.value;
-    adapter._triggerDataStream(6n, {
-      type: 'fetch',
-      header: { requestId: standaloneReqId },
-    });
-    adapter._triggerObject(6n, {
-      kind: 'data', trackAlias: varint(0), groupId: varint(1), subgroupId: varint(0),
-      objectId: varint(0), payload: new TextEncoder().encode(liveCatalog),
-    } as MoqtObject);
-    await new Promise((r) => setTimeout(r, 30));
-
-    expect(received).toHaveBeenCalled();
-    const subscribedNames = adapter.subscribe.mock.calls
-      .map((c: any[]) => { try { return new TextDecoder().decode(c[1]); } catch { return '?'; } });
-    expect(subscribedNames).toEqual(['catalog', 'vide_1']);
-    player.destroy();
   });
 });
 
@@ -608,6 +358,186 @@ describe('CMAF adapter rejection (initialize() === false)', () => {
       objectId: varint(1), payload: boxPayload(['moof', 24], ['mdat', 32]),
     } as MoqtObject);
     expect(mockMs.appendChunk).not.toHaveBeenCalled();
+    await player.destroy();
+  });
+});
+
+// ─── MSF-01 / CMSF-01 init-by-reference (initRef → root initDataList) ──
+
+/** A CMSF-01 catalog: string version "1", plus optional root fields. */
+function cmsfCatalog(tracks: Array<Record<string, unknown>>, root: Record<string, unknown> = {}): string {
+  return JSON.stringify({ version: '1', ...root, tracks });
+}
+/** base64-encode raw bytes the way a publisher ships inline init data. */
+const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+
+describe('CMSF-01 init-by-reference (initRef → root initDataList)', () => {
+  it('[red-first] a clear CMAF track with initRef resolves root inline initDataList and initializes MSE', async () => {
+    const initSeg = initSegmentPayload(48); // ftyp+moov
+    const { player, mockMs, assembler, errors, subscribedNames } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: b64(initSeg) }] },
+      ));
+
+    // Inline init resolved from the root list satisfies bootstrap immediately —
+    // MSE initializes ONCE with the DECODED reference bytes, no injected initData.
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    const cfg = mockMs.initialize.mock.calls[0]![0];
+    expect(cfg.video.codec).toBe('avc1.4D4028');
+    expect(cfg.video.initData).toEqual(initSeg);
+    expect(assembler.setInitSegment).toHaveBeenCalledWith('video', initSeg);
+    expect(subscribedNames()).toContain('video');
+    expect(errors).toEqual([]);
+    await player.destroy();
+  });
+
+  it('initRef to a NON-inline entry is not treated as inline bytes (defers, no bootstrap init)', async () => {
+    const { player, mockMs, errors, subscribedNames } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'external', data: 'https://cdn.example/init.mp4' }] },
+      ),
+      { cmafBootstrapTimeoutMs: 0 });
+    // No inline bytes → nothing to initialize with at bootstrap; the track is
+    // still subscribed (in-band init / timeout is the backstop), no fatal.
+    expect(mockMs.initialize).not.toHaveBeenCalled();
+    expect(subscribedNames()).toContain('video');
+    expect(errors).toEqual([]);
+    await player.destroy();
+  });
+
+  it('resolved inline init that is invalid base64 → fatal CMAF_INIT_INVALID before any media subscribe', async () => {
+    const { player, errors, subscribedNames } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: '!!!not-base64!!!' }] },
+      ));
+    expect(errors.some((e) => e.code === PlayerErrorCode.CMAF_INIT_INVALID)).toBe(true);
+    expect(subscribedNames()).toEqual(['catalog']); // failed before media hit the wire
+    expect(player.state).toBe(PlayerState.ERROR);
+    await player.destroy();
+  });
+
+  it('resolved inline init that decodes to zero bytes → fatal CMAF_INIT_INVALID before subscribe', async () => {
+    const { player, errors, subscribedNames } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: '' }] },
+      ));
+    expect(errors.some((e) => e.code === PlayerErrorCode.CMAF_INIT_INVALID)).toBe(true);
+    expect(subscribedNames()).toEqual(['catalog']);
+    await player.destroy();
+  });
+
+  it('legacy inline initData WINS over initRef when both are present', async () => {
+    const winning = initSegmentPayload(48);
+    const losing = boxPayload(['moov', 60]);
+    const { player, mockMs, errors } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initData: b64(winning), initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: b64(losing) }] },
+      ));
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    expect(mockMs.initialize.mock.calls[0]![0].video.initData).toEqual(winning);
+    expect(errors).toEqual([]);
+    await player.destroy();
+  });
+
+  it('legacy MSF-00 initTrack auto-subscribe still works (no initRef)', async () => {
+    const { player, subscribedNames, mockMs } = await bootPlayer(
+      cmsfCatalog([{ ...VIDEO_BASE, initTrack: 'init-v' }]));
+    // The init track is lazily subscribed; MSE waits for its delivery.
+    expect(subscribedNames()).toContain('init-v');
+    expect(mockMs.initialize).not.toHaveBeenCalled();
+    await player.destroy();
+  });
+
+  it('dangling initRef is rejected at the MSF parse layer (fatal, zero media subscribes)', async () => {
+    const { player, errors, subscribedNames } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'missing' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: b64(initSegmentPayload()) }] },
+      ));
+    expect(errors.some((e) => e.code === PlayerErrorCode.CATALOG_PARSE_ERROR)).toBe(true);
+    expect(subscribedNames()).toEqual(['catalog']);
+    await player.destroy();
+  });
+
+  it('a contentProtectionRefIDs track is metadata-preserved, NOT rejected: clear init still plays', async () => {
+    // Repo policy: content protection is INERT catalog metadata — the player
+    // neither claims protected playback nor blocks on it. A CMSF track carrying
+    // contentProtectionRefIDs + a resolvable clear inline init initializes MSE.
+    const initSeg = initSegmentPayload(48);
+    const { player, mockMs, errors } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, initRef: 'i1', contentProtectionRefIDs: ['1'] }],
+        {
+          initDataList: [{ id: 'i1', type: 'inline', data: b64(initSeg) }],
+          contentProtections: [{
+            refID: '1', defaultKID: ['01234567-89ab-cdef-0123-456789abcdef'], scheme: 'cbcs',
+            drmSystem: { systemID: 'edef8ba9-79d6-4ace-a3c8-27dcd51d21ed', pssh: 'AAAB' },
+          }],
+        }));
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    expect(mockMs.initialize.mock.calls[0]![0].video.initData).toEqual(initSeg);
+    // No protected-playback / unsupported error was raised.
+    expect(errors).toEqual([]);
+    await player.destroy();
+  });
+});
+
+// ─── MSF-01 op-array delta applied by the player ──────────────────────
+
+describe('MSF-01 op-array delta reaches the player (delta-added track usable)', () => {
+  it('a delta-added CMAF track with initRef resolves against the preserved root list', async () => {
+    const initSeg = initSegmentPayload(48);
+    const { player, adapter, mockMs, errors, subscribedNames, reqIdFor } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, name: 'v-avc', altGroup: 1, initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: b64(initSeg) }] },
+      ));
+    // Base track bootstrapped MSE from its initRef.
+    expect(mockMs.initialize).toHaveBeenCalledTimes(1);
+    const catalogReqId = await reqIdFor('catalog');
+
+    // A later op-array delta ADDS an HEVC alternate that reuses the same root
+    // init entry (deltas carry no initDataList of their own).
+    adapter._triggerObject(0n, {
+      kind: 'data', trackAlias: catalogReqId, groupId: varint(1), subgroupId: varint(0), objectId: varint(0),
+      payload: new TextEncoder().encode(JSON.stringify({
+        deltaUpdate: [{ op: 'add', tracks: [{ name: 'v-hevc', packaging: 'cmaf', isLive: true, role: 'video', altGroup: 1, codec: 'hvc1.1.6.L93.90', initRef: 'i1' }] }],
+      })),
+    } as MoqtObject);
+    await sleep(10);
+    expect(errors).toEqual([]); // delta applied cleanly (reference resolved)
+
+    // Switching to the delta-added HEVC track resolves its initRef through the
+    // player (a codec change): it must get PAST init validation and SUBSCRIBE,
+    // proving the delta-added track + preserved initDataList are wired in.
+    await player.selectVideoTrack('v-hevc');
+    expect(subscribedNames()).toContain('v-hevc');
+    await player.destroy();
+  });
+
+  it('a delta introducing a dangling initRef surfaces a degraded CATALOG_DELTA_ERROR, base stays', async () => {
+    const initSeg = initSegmentPayload(48);
+    const { player, adapter, errors, reqIdFor } = await bootPlayer(
+      cmsfCatalog(
+        [{ ...VIDEO_BASE, name: 'v-avc', initRef: 'i1' }],
+        { initDataList: [{ id: 'i1', type: 'inline', data: b64(initSeg) }] },
+      ));
+    const catalogReqId = await reqIdFor('catalog');
+    adapter._triggerObject(0n, {
+      kind: 'data', trackAlias: catalogReqId, groupId: varint(1), subgroupId: varint(0), objectId: varint(0),
+      payload: new TextEncoder().encode(JSON.stringify({
+        deltaUpdate: [{ op: 'add', tracks: [{ name: 'bad', packaging: 'cmaf', isLive: true, initRef: 'missing' }] }],
+      })),
+    } as MoqtObject);
+    await sleep(10);
+    // Delta rejected → degraded (not fatal); the base catalog keeps playing.
+    expect(errors.some((e) => e.code === PlayerErrorCode.CATALOG_DELTA_ERROR && e.severity === 'degraded')).toBe(true);
+    expect(player.state).not.toBe(PlayerState.ERROR);
     await player.destroy();
   });
 });

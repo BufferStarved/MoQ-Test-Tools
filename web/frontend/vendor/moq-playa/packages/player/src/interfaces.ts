@@ -238,9 +238,10 @@ export interface MediaSourceLike {
    * @param mediaType Which SourceBuffer to append to
    * @param data Raw MOQT object payload (one or more moof+mdat pairs)
    * @param trackName Source MoQ track name. Adapters that maintain
-   *                  per-track state (e.g. timeline-overlap detection)
-   *                  rely on this to distinguish across-track splices
-   *                  (ABR switch) from same-track duplicates.
+   *                  per-track state (e.g. timeline containment-based
+   *                  replay suppression) rely on this to distinguish
+   *                  across-track splices (ABR switch) from same-track
+   *                  replays.
    * @see draft-ietf-moq-cmsf-00 §3.3 (Object Packaging)
    */
   appendChunk(
@@ -307,8 +308,40 @@ export interface MediaSourceLike {
   /** Callback: SourceBuffer error. */
   onError: ((error: Error) => void) | null;
 
-  /** Callback: playback stall detected. */
-  onStall: ((durationMs: number) => void) | null;
+  /** Callback: playback stall detected. `cause` is set when the adapter
+   *  itself resolved the stall by jumping a source hole ('media-gap') —
+   *  such stalls are not bandwidth signals. */
+  onStall: ((durationMs: number, cause?: 'media-gap') => void) | null;
+
+  /**
+   * OPTIONAL callback: the adapter jumped the playhead across a bounded
+   * buffered hole (source media missing). Informational; the player wires
+   * it into stats and the public `gap_jump` event.
+   */
+  onGapJump?: ((info: {
+    from: number; to: number; holeSec: number; waitedMs: number;
+    bufferedRanges: string;
+  }) => void) | null;
+
+  /**
+   * OPTIONAL playback-intent contract.
+   *
+   * Arrival of media is not a request to play. Without this, an adapter that
+   * starts playback when data lands has a second, implicit owner of startup —
+   * it can begin playing while the player is still LOADING or has been paused.
+   * The player calls `setPlaybackIntent(true)` on play() and `false` on
+   * pause()/destroy(), and re-states the current intent on a media source
+   * created later (a player paused before the catalog arrives must not get an
+   * adapter that starts anyway). An adapter may buffer freely at any time but
+   * must not begin its startup positioning/play sequence until intent is true;
+   * withdrawing intent pauses playback that has already started.
+   *
+   * Optional for backward compatibility: an adapter that does not implement it
+   * keeps its previous behavior. The player only states an intent it has
+   * actually been given — a player whose play()/pause() was never called leaves
+   * the adapter's own default untouched.
+   */
+  setPlaybackIntent?(intent: boolean): void;
 
   /** Release all resources (MediaSource, SourceBuffers, object URLs). */
   destroy(): void;
@@ -344,16 +377,6 @@ export interface CmafAssemblerLike {
    */
   setInitSegment?(mediaType: 'video' | 'audio', initBytes: Uint8Array): void;
   getEpoch(mediaType: 'video' | 'audio'): bigint | null;
-  /**
-   * Join offset on the publisher's media timeline in seconds — the raw
-   * (pre-rebase) tfdt of the first appended segment divided by the track's
-   * mdhd timescale. Used for capture-anchored latency: the MSE playhead plus
-   * this offset is the position on the encoder's timeline.
-   *
-   * Optional on the interface for back-compat; assemblers that don't parse
-   * the init timescale may omit it.
-   */
-  getJoinOffsetSec?(mediaType: 'video' | 'audio'): number | null;
   /**
    * Drop pending half-pairs (moof without mdat) for one media type, leaving
    * epochs and the other media type untouched. Used by the media-liveness

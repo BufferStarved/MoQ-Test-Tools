@@ -4,11 +4,12 @@ import { parseMsfCatalog } from "../vendor/moq-playa/packages/msf/dist/catalog-m
 
 /**
  * Runtime proof that Vite's published @moqt/msf parser (dist, not src)
- * flattens the catalog libmoq actually ships. Source-only patches left
- * headed playa waiting 10s for an in-band ftyp+moov ffmpeg never sends.
+ * accepts the catalog libmoq actually ships: string version "1", root
+ * initDataList, per-track initRef. 0.5.7+ resolves initRef in the player,
+ * not by flattening bytes onto track.initData at parse time.
  */
 describe("dist parseMsfCatalog vs libmoq CMAF wire", () => {
-  it("turns initDataList + initRef into track.initData", () => {
+  it("keeps version 1 + initRef + catalog.initDataList (no track.initData flatten)", () => {
     const videoInit = btoa("ftyp-moov-video");
     const audioInit = btoa("ftyp-moov-audio");
     const catalog = parseMsfCatalog(
@@ -40,8 +41,15 @@ describe("dist parseMsfCatalog vs libmoq CMAF wire", () => {
         ],
       }),
     );
-    assert.equal(catalog.tracks[0]?.initData, videoInit);
-    assert.equal(catalog.tracks[1]?.initData, audioInit);
-    assert.ok(catalog.tracks[0]!.initData!.length > 0);
+    assert.equal(catalog.version, 1);
+    assert.equal(catalog.tracks[0]?.initRef, "vide_1");
+    assert.equal(catalog.tracks[1]?.initRef, "soun_2");
+    assert.equal(catalog.tracks[0]?.initData, undefined);
+    assert.equal(catalog.tracks[1]?.initData, undefined);
+    assert.equal(catalog.initDataList?.[0]?.id, "vide_1");
+    assert.equal(catalog.initDataList?.[0]?.data, videoInit);
+    assert.equal(catalog.initDataList?.[1]?.id, "soun_2");
+    assert.equal(catalog.initDataList?.[1]?.data, audioInit);
+    assert.ok((catalog.initDataList?.[0]?.data ?? "").length > 0);
   });
 });

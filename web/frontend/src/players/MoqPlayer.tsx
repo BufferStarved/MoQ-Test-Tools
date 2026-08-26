@@ -316,7 +316,9 @@ export default function MoqPlayer({
       rttMs,
       bufferMs: ahead * 1000,
       mediaPackaging,
-      joinOffsetSec: playerRef.current?.joinMediaOffsetSec ?? null,
+      // 0.5.7 Player no longer exposes joinMediaOffsetSec. CMAF e2e falls
+      // through to live-edge rebase / playhead-anchored when join is null.
+      joinOffsetSec: null,
       videoCurrentTimeSec: videoTimeSec,
       bufferedEndSec: videoTimeSec + ahead,
       moqTimelineMs: session.moqTimelineMs,

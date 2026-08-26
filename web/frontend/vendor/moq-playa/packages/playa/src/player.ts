@@ -54,7 +54,6 @@ import { detectStrategy } from './auto-detect.js';
 import type { DecoderStrategy } from './auto-detect.js';
 import { VolumeController } from './volume-controller.js';
 import { TimeController } from './time-controller.js';
-import type { CatalogState } from '@moqt/msf';
 import { mapLevels, mapAudioTracks } from './level-mapper.js';
 import type { PlayerOptions, Level, AudioTrack, PlayerStats, PlayerState } from './types.js';
 import type { PlayerEventMap } from './events.js';
@@ -80,7 +79,7 @@ export class Player {
   // ─── Static ──────────────────────────────────────────────────────
 
   /** Player version (set at build time). */
-  static readonly version = '0.5.3';
+  static readonly version = '0.5.7';
 
   /** Check if the current browser supports MoQ playback. */
   static isSupported(): boolean {
@@ -271,17 +270,6 @@ export class Player {
   /** Current audio track index. */
   get currentAudioTrack(): number { return this._currentAudioTrack; }
 
-  /**
-   * Join offset on the publisher's media timeline in seconds (CMAF/MSE
-   * path), or null before the first video segment / on the WebCodecs path.
-   * `joinMediaOffsetSec + video.currentTime` is the playhead position on
-   * the encoder's timeline — the anchor a capture-referenced end-to-end
-   * latency estimate needs (MSE re-zeros currentTime at join).
-   */
-  get joinMediaOffsetSec(): number | null {
-    return this.engine.joinMediaOffsetSec;
-  }
-
   /** Simplified stats for UI display. */
   get stats(): PlayerStats {
     const s = this.engine.stats;
@@ -290,7 +278,7 @@ export class Player {
       framesRendered: s.framesRendered,
       framesDropped: s.framesDropped,
       bitrate: s.currentBitrate,
-      latencyMs: s.currentLatencyMs,
+      latencyMs: 0, // TODO: derive from sync controller
       stallCount: s.stallCount,
       timeToFirstFrameMs: s.timeToFirstFrameMs,
       resolution: s.currentResolution ?? null,
@@ -588,47 +576,27 @@ export class Player {
 
   // ─── Private: Event Bridging ─────────────────────────────────────
 
-  private applyCatalogLevels(catalog: CatalogState): void {
-    this._levels = mapLevels(catalog);
-    this._audioTracks = mapAudioTracks(catalog);
-    const hasCmaf = catalog.tracks.some(track => track.packaging === 'cmaf');
-
-    // Record which element is the active render sink so callers can react.
-    this._activeMediaType = hasCmaf ? 'video' : 'canvas';
-    this.applyVolumeState();
-
-    // Only toggle visibility on elements the Player created itself.
-    // Caller-provided (borrowed) elements are never mutated.
-    if (this.ownsCanvas && this.canvas) this.canvas.hidden = hasCmaf;
-    if (this.ownsVideo && this.videoElement) this.videoElement.hidden = !hasCmaf;
-    this.emitter.emit('levelsloaded', { levels: this._levels });
-  }
-
   private wireEngineEvents(): void {
     this.engine.on('catalog_received', (e) => {
-      this.applyCatalogLevels(e.catalog);
+      this._levels = mapLevels(e.catalog);
+      this._audioTracks = mapAudioTracks(e.catalog);
+      const hasCmaf = e.catalog.tracks.some(track => track.packaging === 'cmaf');
+
+      // Record which element is the active render sink so callers can react.
+      this._activeMediaType = hasCmaf ? 'video' : 'canvas';
+      this.applyVolumeState();
+
+      // Only toggle visibility on elements the Player created itself.
+      // Caller-provided (borrowed) elements are never mutated.
+      if (this.ownsCanvas && this.canvas) this.canvas.hidden = hasCmaf;
+      if (this.ownsVideo && this.videoElement) this.videoElement.hidden = !hasCmaf;
       this.emitter.emit('ready', {
         levels: this._levels,
         audioTracks: this._audioTracks,
         duration: this._duration,
       });
+      this.emitter.emit('levelsloaded', { levels: this._levels });
       if (this.options.autoplay ?? DEFAULTS.autoplay) this.play();
-    });
-
-    // Webcam live-write: first FETCH catalog can be empty; the refresh
-    // arrives as catalog_updated. Re-map levels and emit ready so the
-    // headed player can subscribe/paint instead of locking on levels=0.
-    this.engine.on('catalog_updated', (e) => {
-      const hadLevels = this._levels.length > 0;
-      this.applyCatalogLevels(e.catalog);
-      if (!hadLevels && this._levels.length > 0) {
-        this.emitter.emit('ready', {
-          levels: this._levels,
-          audioTracks: this._audioTracks,
-          duration: this._duration,
-        });
-        if (this.options.autoplay ?? DEFAULTS.autoplay) this.play();
-      }
     });
 
     this.engine.on('first_frame', () => {

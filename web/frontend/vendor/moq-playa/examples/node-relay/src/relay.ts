@@ -14,7 +14,8 @@
  *     per §5.1.2 and backfill the current group via a Joining FETCH instead);
  *   - standalone + joining FETCH served from the latest-group cache (§9.16 /
  *     draft-18 §10.12) — see handleFetch;
- *   - forwarding preserves the publisher's groupId/subgroupId/objectId.
+ *   - forwarding preserves the publisher's groupId/subgroupId/objectId and
+ *     mirrors graceful subgroup FIN so downstream stream credit is returned.
  *
  * Deliberately a TOY — see README:
  *   - LIVE only: the cache holds just the latest group, so a late joiner gets that
@@ -27,7 +28,7 @@
  * All forwarding uses the public MoqtConnection API — no internals.
  */
 import type { MoqtConnection, IncomingPublish } from '@moqt/webtransport';
-import { RequestError18, type Fetch, type StandaloneFetch } from '@moqt/transport';
+import { MessageParam, RequestError18, locationEncodingLength, varint, writeLocation, type Fetch, type Parameters, type StandaloneFetch } from '@moqt/transport';
 import { DEMO_NAMESPACE, DEMO_TRACK, MEDIA_TRACKS, td, nsStr, hex } from './demo.js';
 
 const log = (...a: unknown[]) => console.log('[relay]', ...a);
@@ -57,6 +58,8 @@ interface Track {
   /** Latest group seen (for late-join replay), and that group's objects. */
   cacheGroupId: bigint | null;
   cache: CachedObject[];
+  /** Subgroups in the cached group whose publisher stream ended gracefully. */
+  cacheClosedSubgroups: Set<string>;
 }
 
 /** ASCII-safe route-table key (hex of each namespace field + the track name). */
@@ -72,7 +75,15 @@ export class Relay {
 
   private getTrack(key: string): Track {
     let track = this.tracks.get(key);
-    if (!track) { track = { subscribers: [], cacheGroupId: null, cache: [] }; this.tracks.set(key, track); }
+    if (!track) {
+      track = {
+        subscribers: [],
+        cacheGroupId: null,
+        cache: [],
+        cacheClosedSubgroups: new Set(),
+      };
+      this.tracks.set(key, track);
+    }
     return track;
   }
 
@@ -92,7 +103,24 @@ export class Relay {
       const name = td(trackName);
       const key = trackKeyOf(namespace, trackName);
       const alias = this.nextAlias++;
-      await conn.acceptSubscribe(requestId, alias);
+      // §5.1 / §9.2.2.7: communicate the Largest Location in SUBSCRIBE_OK when
+      // objects exist — the session SAVES it as the Joining Location, and any
+      // Joining FETCH resolves against that exact snapshot (never the head at
+      // fetch time, which may have advanced and would gap/overlap delivery).
+      const cachedLargest = latestCached(this.tracks.get(key));
+      let acceptParams: Parameters | undefined;
+      if (cachedLargest) {
+        const value = conn.draftVersion === 18
+          ? { group: cachedLargest.groupId, object: cachedLargest.objectId }
+          : (() => {
+              const loc = { group: varint(cachedLargest.groupId), object: varint(cachedLargest.objectId) };
+              const buf = new Uint8Array(locationEncodingLength(loc));
+              writeLocation(loc, buf, 0);
+              return buf;
+            })();
+        acceptParams = new Map([[MessageParam.LARGEST_OBJECT as bigint, [value]]]) as Parameters;
+      }
+      await conn.acceptSubscribe(requestId, alias, acceptParams ? { parameters: acceptParams } : undefined);
 
       const track = this.getTrack(key);
       const sub: Subscriber = { conn, requestId, alias, queue: Promise.resolve(), subgroups: new Map() };
@@ -111,6 +139,9 @@ export class Relay {
         log(`replaying ${track.cache.length} cached object(s) of group ${track.cacheGroupId} to the new ${name} subscriber`);
         for (const c of track.cache) {
           sub.queue = sub.queue.then(() => forwardObject(sub, c.groupId, c.subgroupId, c.objectId, c.payload));
+        }
+        for (const skey of track.cacheClosedSubgroups) {
+          sub.queue = sub.queue.then(() => closeSubscriberSubgroup(sub, skey));
         }
       }
     } catch (err) {
@@ -138,12 +169,28 @@ export class Relay {
       publish.onObject = (obj) => {
         if (obj.kind !== 'data') return; // §see README: gap/status objects are not relayed
         // Maintain the latest-group cache for late joiners.
-        if (track.cacheGroupId !== obj.groupId) { track.cacheGroupId = obj.groupId; track.cache = []; }
+        if (track.cacheGroupId !== obj.groupId) {
+          track.cacheGroupId = obj.groupId;
+          track.cache = [];
+          track.cacheClosedSubgroups.clear();
+        }
         track.cache.push({ groupId: obj.groupId, subgroupId: obj.subgroupId, objectId: obj.objectId, payload: obj.payload });
         // Live fanout (identity preserved), serialized per subscriber.
         const { groupId, subgroupId, objectId, payload } = obj;
         for (const sub of track.subscribers) {
           sub.queue = sub.queue.then(() => forwardObject(sub, groupId, subgroupId, objectId, payload));
+        }
+      };
+      publish.onSubgroupClosed = (header) => {
+        const skey = subgroupKey(header.groupId, header.subgroupId);
+        if (track.cacheGroupId === header.groupId) {
+          track.cacheClosedSubgroups.add(skey);
+        }
+        // onSubgroupClosed follows the final onObject from this incoming stream.
+        // Append the close to each subscriber's queue so every corresponding
+        // downstream send settles before its FIN is written.
+        for (const sub of track.subscribers) {
+          sub.queue = sub.queue.then(() => closeSubscriberSubgroup(sub, skey));
         }
       };
     } catch (err) {
@@ -163,9 +210,10 @@ export class Relay {
    * exist (a real relay would confirm upstream — this toy has no upstream).
    *
    * Joining (§9.16.2 / §10.12.2): the session already validated the joining
-   * reference; resolve the range from this track's largest cached object and
-   * serve identically. No cached objects → REQUEST_ERROR INVALID_RANGE
-   * ("If no Objects have been published for the track").
+   * reference; the range resolves from the subscription's SAVED Joining
+   * Location (the SUBSCRIBE_OK snapshot) and is served identically. No saved
+   * Joining Location → REQUEST_ERROR INVALID_RANGE ("If no Objects have been
+   * published for the track").
    */
   async handleFetch(conn: MoqtConnection, requestId: bigint, fetch: Fetch): Promise<void> {
     try {
@@ -206,10 +254,16 @@ export class Relay {
       }
       let range;
       try {
-        range = conn.resolveJoiningFetch(requestId, { group: largest.groupId, object: largest.objectId });
+        // ONLY the SAVED Joining Location (the SUBSCRIBE_OK snapshot) anchors
+        // the join. A subscription accepted before any object existed has no
+        // Joining Location — the compliant answer is INVALID_RANGE, never a
+        // range derived from the later cache head (it could overlap live
+        // delivery the subscription already carries).
+        range = conn.resolveJoiningFetch(requestId);
       } catch {
-        // Absolute joining start beyond the largest group (§9.16.3).
-        await conn.rejectFetch(requestId, RequestError18.INVALID_RANGE as bigint, 'joining start beyond largest');
+        // No saved Joining Location, or an absolute joining start beyond the
+        // largest group (§9.16.3).
+        await conn.rejectFetch(requestId, RequestError18.INVALID_RANGE as bigint, 'no joining location / start beyond largest');
         return;
       }
       log(`joining FETCH requestId=${requestId} → serving [${range.startLocation.group},${range.startLocation.object}) .. (${range.endLocation.group},${range.endLocation.object})`);
@@ -218,6 +272,14 @@ export class Relay {
       console.error('[relay] FETCH handling failed:', (err as Error).message);
       try { await conn.rejectFetch(requestId, RequestError18.INTERNAL_ERROR as bigint, 'relay error'); } catch { /* stream gone */ }
     }
+  }
+
+  /** The current cached Largest Location for the track a subscription joined —
+   *  the session's Forward-resume provider (§5.1). Null when nothing cached. */
+  currentLargestFor(conn: MoqtConnection, subRequestId: bigint): { group: bigint; object: bigint } | null {
+    const track = this.findSubscriptionTrack(conn, subRequestId);
+    const largest = latestCached(track);
+    return largest ? { group: largest.groupId, object: largest.objectId } : null;
   }
 
   /** Reverse lookup: the track a given (conn, requestId) subscription belongs to. */
@@ -311,7 +373,7 @@ async function forwardObject(
   payload: Uint8Array,
 ): Promise<void> {
   try {
-    const skey = `${groupId}/${subgroupId}`;
+    const skey = subgroupKey(groupId, subgroupId);
     let sid = sub.subgroups.get(skey);
     if (sid === undefined) {
       sid = await sub.conn.openSubgroup(sub.alias, groupId, subgroupId, { publisherPriority: 128, firstObject: objectId === 0n });
@@ -320,6 +382,21 @@ async function forwardObject(
     await sub.conn.sendObject(sid, objectId, payload);
   } catch (err) {
     console.error('[relay] FORWARD ERROR (object dropped):', (err as Error).message);
+  }
+}
+
+const subgroupKey = (groupId: bigint, subgroupId: bigint): string =>
+  `${groupId}/${subgroupId}`;
+
+/** Close one outgoing subgroup after its queued objects have settled. */
+async function closeSubscriberSubgroup(sub: Subscriber, skey: string): Promise<void> {
+  const sid = sub.subgroups.get(skey);
+  if (sid === undefined) return;
+  sub.subgroups.delete(skey);
+  try {
+    await sub.conn.closeSubgroup(sid);
+  } catch (err) {
+    console.error('[relay] SUBGROUP CLOSE ERROR:', (err as Error).message);
   }
 }
 
