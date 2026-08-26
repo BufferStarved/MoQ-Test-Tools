@@ -227,7 +227,8 @@ def compute_vmaf(
         job_id=job_id,
     )
     if not distorted:
-        for attempt in range(4):
+        for attempt in range(2):
+            time.sleep(1)
             distorted = find_distorted_recording(
                 start_epoch,
                 end_epoch,
@@ -236,58 +237,19 @@ def compute_vmaf(
             )
             if distorted:
                 break
-            time.sleep(2)
     if not distorted:
-        # Prefer disk recordings; fall back to Zixi raw HTTP-TS (http_ts_auto_out).
-        http_ts = (http_ts_url or os.environ.get("ZIXI_HTTP_TS_URL") or "").strip()
-        if not http_ts:
-            stream = (os.environ.get("ZIXI_HTTP_TS_STREAM") or "SRT Test").strip()
-            host = (os.environ.get("ZIXI_HTTP_TS_HOST") or "127.0.0.1").strip()
-            port = (os.environ.get("ZIXI_HTTP_TS_PORT") or "7777").strip()
-            from urllib.parse import quote
-
-            http_ts = f"http://{host}:{port}/{quote(stream, safe='')}.ts"
-        pull_secs = max(5, int(max(0.0, end_epoch - start_epoch)) or 15)
-        pulled = job_dir(job_id) / "http-ts-capture.ts"
-        pull_cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-rw_timeout",
-            "15000000",
-            "-y",
-            "-i",
-            http_ts,
-            "-t",
-            str(pull_secs),
-            "-c",
-            "copy",
-            str(pulled),
-        ]
-        try:
-            pull = subprocess.run(
-                pull_cmd,
-                capture_output=True,
-                text=True,
-                timeout=max(60, pull_secs + 30),
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            state.status = "failed"
-            state.error = (
-                f"No recording under {recording_dir or RECORDING_DIR} "
-                f"and HTTP-TS pull failed: {exc}"
-            )
-            return state
-        if pull.returncode != 0 or not pulled.is_file() or pulled.stat().st_size < 188:
-            state.status = "failed"
-            state.error = (
-                f"No recording under {recording_dir or RECORDING_DIR} "
-                f"and HTTP-TS pull from {http_ts} failed"
-            )
-            return state
-        distorted = str(pulled)
+        # Post-job HTTP-TS pulls return empty 200 once the publisher stops and
+        # ffmpeg long-polls :7777 until it wedges the ingest agent (2026-08-26
+        # Zixi RTMP: health timed out, IAP SSH died, VMAF stayed "computing").
+        # Capture during the job via ts_capture.py; do not pull after the fact.
+        _ = http_ts_url  # reserved for callers that already captured
+        state.status = "failed"
+        state.error = (
+            "No during-job capture (http-ts-capture.ts or MoQ recording) "
+            f"under {recording_dir or RECORDING_DIR}. "
+            "Zixi ingest VMAF must start HTTP-TS capture while the push is live."
+        )
+        return state
 
     state.distorted_path = distorted
     log_path = job_dir(job_id) / f"vmaf-{Path(distorted).name}.json"
@@ -306,7 +268,7 @@ def compute_vmaf(
             "[0:v]setpts=PTS-STARTPTS[dis];"
             "[1:v]setpts=PTS-STARTPTS[ref];"
             "[dis][ref]scale2ref[dis2][ref2];"
-            f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads=4:"
+            f"[dis2][ref2]libvmaf=log_fmt=json:log_path={log_path}:n_threads=2:"
             "feature=name=psnr|name=float_ssim"
         ),
         "-f",

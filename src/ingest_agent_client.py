@@ -328,7 +328,7 @@ class IngestAgentClient:
                 "recording_dir": self._config.recording_dir,
                 "http_ts_url": http_ts_url,
             },
-            timeout=900,
+            timeout=240,
         )
         if payload.get("status") != "completed":
             return RemoteVmafResult(error=payload.get("error") or "VMAF computation failed")

@@ -948,9 +948,13 @@ export default function HlsPlayer({
         }
         if (hlsRestarts >= MAX_HLS_RESTARTS) {
           pushDiag(`hls_restart_budget_exhausted reason=${reason}`);
+          // First GOP (~2s / ~35 frames) is not "playback OK" on a 1-deep
+          // Fast HLS pack — that is the freeze we fall back to MPEG-TS for.
+          const paintedOnlyFirstGop = sessionRef.current.maxVideoTime > 0 && sessionRef.current.maxVideoTime < 4;
           fail(
             `HLS playback wedged and ${MAX_HLS_RESTARTS} full player restarts did not recover it (${reason}).`,
-            Boolean(onUnrecoverableHlsRef.current) && !hlsPlaybackOk(sessionRef.current),
+            Boolean(onUnrecoverableHlsRef.current) &&
+              (shallow || paintedOnlyFirstGop || !hlsPlaybackOk(sessionRef.current)),
           );
           return false;
         }
@@ -1129,6 +1133,9 @@ export default function HlsPlayer({
             uniqueUrlCount: uniqueCount,
             sameUrlLoads,
             videoAdvanced: sessionRef.current.maxVideoTime > 0.25,
+            playheadFrozen:
+              sessionRef.current.maxVideoTime > 0.25 &&
+              Math.abs(video.currentTime - sessionRef.current.maxVideoTime) < 0.2,
           });
           sessionRef.current.sawStaleFrag = isStale;
           const stale = isStale ? " stale=yes" : "";
@@ -1371,8 +1378,11 @@ export default function HlsPlayer({
           // kick didn't take — rebuild the player.
           noEscapeStrikes += 1;
           pushDiag(
-            `stuck_no_buffered_escape at=${now.toFixed(2)} ranges=${video.buffered.length} strike=${noEscapeStrikes}`,
+            `stuck_no_buffered_escape at=${now.toFixed(2)} ranges=${video.buffered.length} strike=${noEscapeStrikes} shallow=${shallow ? 1 : 0}`,
           );
+          if (shallow && requestMpegTsFallback("shallow_playhead_frozen")) {
+            return;
+          }
           if (noEscapeStrikes === 1) {
             try {
               hls.startLoad(-1);

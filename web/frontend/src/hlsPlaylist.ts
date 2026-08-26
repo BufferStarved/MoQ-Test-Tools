@@ -8,6 +8,8 @@
 
 export const HLS_TARGET_DURATION_CAP_SEC = 6;
 export const STALE_FRAG_FAIL_AFTER = 12;
+/** Same-URL reloads after the first GOP has painted but the playhead is frozen. */
+export const STALE_FRAG_FROZEN_AFTER = 6;
 
 export function playlistDepth(body: string): number {
   return body.split("\n").filter((row) => {
@@ -65,21 +67,31 @@ export function hlsSyncDurationForPlaylist(body: string, requestedSec: number): 
 }
 
 /**
- * True when hls.js is looping one URL and video has never advanced.
+ * True when hls.js is looping one URL and the playhead is not making progress.
  *
  * A healthy 1-deep Zixi playlist reloads the current chunk until the next
- * IDR — that must not kill a playing player. Only fail (or remount) when
- * the same URL is the only one seen AND the playhead never moved.
+ * IDR — that must not kill a playing player. Fail when:
+ *   - the same URL is the only one seen AND the playhead never moved, or
+ *   - the first GOP painted and the playhead then froze on that same URL
+ *     (2026-08-26 Zixi RTMP: rendered stuck at ~35 / 2.0s).
  */
 export function isStaleHlsFragmentLoop(args: {
   uniqueUrlCount: number;
   sameUrlLoads: number;
   videoAdvanced: boolean;
+  playheadFrozen?: boolean;
   threshold?: number;
 }): boolean {
+  if (args.uniqueUrlCount !== 1) {
+    return false;
+  }
+  if (args.playheadFrozen) {
+    const frozenAfter = args.threshold ?? STALE_FRAG_FROZEN_AFTER;
+    return args.sameUrlLoads >= frozenAfter;
+  }
   if (args.videoAdvanced) {
     return false;
   }
   const threshold = args.threshold ?? STALE_FRAG_FAIL_AFTER;
-  return args.uniqueUrlCount === 1 && args.sameUrlLoads >= threshold;
+  return args.sameUrlLoads >= threshold;
 }

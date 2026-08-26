@@ -37,9 +37,21 @@ function playlistTargetDurationSec(body) {
   return 2;
 }
 
-function isStaleHlsFragmentLoop({ uniqueUrlCount, sameUrlLoads, videoAdvanced, threshold }) {
+const STALE_FRAG_FROZEN_AFTER = 6;
+
+function isStaleHlsFragmentLoop({
+  uniqueUrlCount,
+  sameUrlLoads,
+  videoAdvanced,
+  playheadFrozen,
+  threshold,
+}) {
+  if (uniqueUrlCount !== 1) return false;
+  if (playheadFrozen) {
+    return sameUrlLoads >= (threshold ?? STALE_FRAG_FROZEN_AFTER);
+  }
   if (videoAdvanced) return false;
-  return uniqueUrlCount === 1 && sameUrlLoads >= (threshold ?? STALE_FRAG_FAIL_AFTER);
+  return sameUrlLoads >= (threshold ?? STALE_FRAG_FAIL_AFTER);
 }
 
 function hlsSegmentSec(ms) {
@@ -82,6 +94,16 @@ assert.equal(
 assert.equal(
   isStaleHlsFragmentLoop({
     uniqueUrlCount: 1,
+    sameUrlLoads: 6,
+    videoAdvanced: true,
+    playheadFrozen: true,
+  }),
+  true,
+  "first GOP then a frozen playhead on the same URL is stale",
+);
+assert.equal(
+  isStaleHlsFragmentLoop({
+    uniqueUrlCount: 1,
     sameUrlLoads: 12,
     videoAdvanced: false,
   }),
@@ -107,5 +129,7 @@ const hlsPlayer = readFileSync(
 assert.match(hlsPlayer, /const MANIFEST_STUCK_POLLS_FALLBACK = 8;/);
 assert.match(hlsPlayer, /unreadablePolls/);
 assert.match(hlsPlayer, /Count unreadable segments separately/);
+assert.match(hlsPlayer, /shallow_playhead_frozen/);
+assert.match(hlsPlayer, /paintedOnlyFirstGop/);
 
 console.log("unit-hls-playlist: PASS");

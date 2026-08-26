@@ -55,6 +55,12 @@ export function resolveCertSha256(hostname, port) {
  * Fetch the relay TLS certificate SHA-256 via openssl (TCP TLS probes only).
  */
 export function fetchCertSha256(hostname, port) {
+  const portNum = Number(port);
+  // QUIC-only public draft-18. openssl s_client is TCP and hangs until
+  // spawnSync times out (`spawnSync /bin/sh ETIMEDOUT` on Dallas 2026-08-26).
+  if (portNum === 14433) {
+    return null;
+  }
   const der = execSync(
     `echo | openssl s_client -connect ${hostname}:${port} -servername ${hostname} 2>/dev/null | openssl x509 -outform DER`,
     { encoding: 'buffer', maxBuffer: 16 * 1024, timeout: 15_000 },

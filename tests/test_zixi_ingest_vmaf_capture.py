@@ -50,6 +50,27 @@ class FindDistortedRecordingTests(unittest.TestCase):
             )
         self.assertIsNone(found)
 
+    def test_compute_vmaf_fails_without_capture_instead_of_pulling(self) -> None:
+        from vmaf_service import compute_vmaf, job_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("vmaf_service.WORK_DIR", tmp), patch(
+                "vmaf_service.RECORDING_DIR", str(Path(tmp) / "recordings")
+            ), patch("vmaf_service._resolve_ffmpeg", return_value="/usr/bin/ffmpeg"):
+                ref = job_dir("job-empty") / "reference.mp4"
+                ref.parent.mkdir(parents=True)
+                ref.write_bytes(b"ref")
+                state = compute_vmaf(
+                    "job-empty",
+                    1.0,
+                    10.0,
+                    recording_dir=str(Path(tmp) / "zixi_broadcaster-linux64"),
+                    http_ts_url="http://127.0.0.1:7777/benchmark.ts",
+                )
+        self.assertEqual(state.status, "failed")
+        self.assertIn("during-job capture", state.error)
+        self.assertNotIn("HTTP-TS pull", state.error)
+
 
 class PrepareRemoteVmafTests(unittest.TestCase):
     def test_zixi_starts_http_ts_capture_after_reference(self) -> None:
