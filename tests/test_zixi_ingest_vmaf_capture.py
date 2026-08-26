@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +111,35 @@ class FindDistortedRecordingTests(unittest.TestCase):
         self.assertIn("n_threads=1", lavfi)
         self.assertEqual(run.call_args.kwargs["timeout"], 180)
         self.assertTrue(callable(run.call_args.kwargs.get("preexec_fn")))
+
+    def test_start_compute_vmaf_returns_before_ffmpeg(self) -> None:
+        from vmaf_service import start_compute_vmaf
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def _block(*_args, **_kwargs):
+            started.set()
+            release.wait(2)
+            from vmaf_service import VmafJobState
+
+            return VmafJobState(job_id="job-async", status="completed", vmaf_score=70.0)
+
+        with patch("vmaf_service.compute_vmaf", side_effect=_block):
+            state = start_compute_vmaf("job-async", 1.0, 10.0)
+            self.assertEqual(state.status, "computing")
+            self.assertTrue(started.wait(1))
+            release.set()
+            deadline = time.time() + 2
+            from vmaf_service import get_vmaf_state
+
+            while time.time() < deadline:
+                live = get_vmaf_state("job-async")
+                if live and live.status == "completed":
+                    self.assertEqual(live.vmaf_score, 70.0)
+                    return
+                time.sleep(0.05)
+            self.fail("background VMAF did not finish")
 
 
 class PrepareRemoteVmafTests(unittest.TestCase):

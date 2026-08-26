@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -203,7 +204,8 @@ def compute_vmaf(
 
     from recording_service import get_recording_state, recording_has_media
 
-    recording = get_recording_state(job_id)
+    captured_already = job_dir(job_id) / "http-ts-capture.ts"
+    recording = None if captured_already.is_file() else get_recording_state(job_id)
     if recording is not None:
         for _ in range(180):
             recording = get_recording_state(job_id)
@@ -336,4 +338,66 @@ def compute_vmaf(
         state.status = "failed"
         state.error = f"Could not parse VMAF output: {exc}"
 
+    return state
+
+
+_state_lock = threading.Lock()
+_vmaf_states: dict[str, VmafJobState] = {}
+_vmaf_running: set[str] = set()
+
+
+def get_vmaf_state(job_id: str) -> Optional[VmafJobState]:
+    with _state_lock:
+        return _vmaf_states.get(job_id)
+
+
+def start_compute_vmaf(
+    job_id: str,
+    start_epoch: float,
+    end_epoch: float,
+    recording_dir: str = "",
+    http_ts_url: str = "",
+) -> VmafJobState:
+    """Return immediately; libvmaf runs in a nice'd thread so /health stays up.
+
+    A blocking POST used to hold the only uvicorn worker until ffmpeg finished
+    or the web client's 240s timeout fired (`Ingest agent unreachable … timed
+    out` on Zixi 2026-08-26) and pegged the e2-medium.
+    """
+    with _state_lock:
+        existing = _vmaf_states.get(job_id)
+        if existing and existing.status == "computing":
+            return existing
+        if existing and existing.status in {"completed", "failed"}:
+            return existing
+        if job_id in _vmaf_running:
+            return existing or VmafJobState(job_id=job_id, status="computing")
+        state = VmafJobState(job_id=job_id, status="computing")
+        _vmaf_states[job_id] = state
+        _vmaf_running.add(job_id)
+
+    def _run() -> None:
+        try:
+            result = compute_vmaf(
+                job_id,
+                start_epoch,
+                end_epoch,
+                recording_dir=recording_dir,
+                http_ts_url=http_ts_url,
+            )
+            with _state_lock:
+                _vmaf_states[job_id] = result
+        except Exception as exc:  # noqa: BLE001 — thread must not die silent
+            logger.exception("background VMAF failed for %s", job_id)
+            with _state_lock:
+                _vmaf_states[job_id] = VmafJobState(
+                    job_id=job_id,
+                    status="failed",
+                    error=f"background VMAF failed: {exc}",
+                )
+        finally:
+            with _state_lock:
+                _vmaf_running.discard(job_id)
+
+    threading.Thread(target=_run, daemon=True, name=f"vmaf-{job_id[:8]}").start()
     return state

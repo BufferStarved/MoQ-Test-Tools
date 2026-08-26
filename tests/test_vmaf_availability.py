@@ -84,6 +84,43 @@ class VmafAvailabilityTests(unittest.TestCase):
                     )
                 )
 
+    def test_compute_vmaf_polls_until_complete(self) -> None:
+        from ingest_agent_client import IngestAgentClient
+
+        client = IngestAgentClient(
+            IngestAgentConfig(
+                base_url="http://zixi:8090",
+                token="t",
+                recording_dir="/opt/zixi",
+                host="zixi",
+            )
+        )
+        replies = [
+            {"status": "computing"},
+            {"status": "computing"},
+            {
+                "status": "completed",
+                "vmaf_score": 71.7,
+                "psnr_db": None,
+                "ssim": None,
+                "distorted_path": "/tmp/cap.ts",
+                "reference_path": "/tmp/ref.mp4",
+                "log_path": "/tmp/vmaf.json",
+            },
+        ]
+
+        def _request(method, path, **kwargs):
+            self.assertIn(method, {"POST", "GET"})
+            if method == "POST":
+                self.assertLessEqual(kwargs.get("timeout", 99), 20)
+            return replies.pop(0)
+
+        with patch.object(client, "_request", side_effect=_request):
+            with patch("ingest_agent_client.time.sleep"):
+                result = client.compute_vmaf("job-1", 1.0, 10.0)
+        self.assertEqual(result.vmaf_score, 71.7)
+        self.assertIsNone(result.error)
+
 
 if __name__ == "__main__":
     unittest.main()

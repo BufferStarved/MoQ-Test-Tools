@@ -21,9 +21,10 @@ from ts_capture import (
 )
 from vmaf_service import (
     VmafJobState,
-    compute_vmaf,
+    get_vmaf_state,
     job_dir,
     reference_path_for,
+    start_compute_vmaf,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -390,7 +391,7 @@ def run_vmaf(job_id: str, request: VmafComputeRequest) -> JobResponse:
     if request.end_epoch < request.start_epoch:
         raise HTTPException(status_code=400, detail="end_epoch must be >= start_epoch")
 
-    state = compute_vmaf(
+    state = start_compute_vmaf(
         job_id=job_id,
         start_epoch=request.start_epoch,
         end_epoch=request.end_epoch,
@@ -404,7 +405,7 @@ def run_vmaf(job_id: str, request: VmafComputeRequest) -> JobResponse:
 
 @app.get("/api/v1/jobs/{job_id}", dependencies=[Depends(verify_token)])
 def get_job(job_id: str) -> JobResponse:
-    state = _jobs.get(job_id)
+    state = get_vmaf_state(job_id) or _jobs.get(job_id)
     if state is None:
         reference = None
         for candidate in job_dir(job_id).glob("reference*"):

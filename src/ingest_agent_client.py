@@ -319,6 +319,9 @@ class IngestAgentClient:
         end_epoch: float,
         http_ts_url: str = "",
     ) -> RemoteVmafResult:
+        # Agent scores in a background thread and returns immediately. A
+        # blocking 240s POST idle-timed-out while libvmaf still ran
+        # (`Ingest agent unreachable … timed out` on Zixi 2026-08-26).
         payload = self._request(
             "POST",
             f"/api/v1/jobs/{job_id}/vmaf",
@@ -328,17 +331,26 @@ class IngestAgentClient:
                 "recording_dir": self._config.recording_dir,
                 "http_ts_url": http_ts_url,
             },
-            timeout=240,
+            timeout=20,
         )
-        if payload.get("status") != "completed":
-            return RemoteVmafResult(error=payload.get("error") or "VMAF computation failed")
+        deadline = time.time() + 210
+        while time.time() < deadline:
+            status = str(payload.get("status") or "")
+            if status == "completed":
+                return RemoteVmafResult(
+                    vmaf_score=float(payload["vmaf_score"]),
+                    psnr_db=float(payload["psnr_db"]) if payload.get("psnr_db") is not None else None,
+                    ssim=float(payload["ssim"]) if payload.get("ssim") is not None else None,
+                    distorted_path=payload.get("distorted_path", ""),
+                    reference_path=payload.get("reference_path", ""),
+                    log_path=payload.get("log_path", ""),
+                )
+            if status == "failed":
+                return RemoteVmafResult(error=payload.get("error") or "VMAF computation failed")
+            time.sleep(3)
+            payload = self._request("GET", f"/api/v1/jobs/{job_id}", timeout=10)
         return RemoteVmafResult(
-            vmaf_score=float(payload["vmaf_score"]),
-            psnr_db=float(payload["psnr_db"]) if payload.get("psnr_db") is not None else None,
-            ssim=float(payload["ssim"]) if payload.get("ssim") is not None else None,
-            distorted_path=payload.get("distorted_path", ""),
-            reference_path=payload.get("reference_path", ""),
-            log_path=payload.get("log_path", ""),
+            error="Ingest VMAF still computing after 210s (libvmaf cap is 180s on the agent)",
         )
 
     def compute_media_health(
