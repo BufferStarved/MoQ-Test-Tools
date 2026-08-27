@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -106,22 +106,31 @@ class HttpTsPutGateTests(unittest.TestCase):
         self.assertIn("srt", ids)
         self.assertIn("moq", ids)
 
-    def test_api_rejects_dead_gcp_zixi_encode(self) -> None:
+    def test_api_accepts_gcp_zixi_srt_rtmp(self) -> None:
         client = TestClient(api_main.app)
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
             tmp.write(b"not-a-real-mp4")
             tmp.flush()
-            for preset_id in ("moq_zixi_gcp", "moq_zixi_gcp_rtmp"):
-                resp = client.post(
-                    "/api/uploads",
-                    json={
-                        "media_path": tmp.name,
-                        "preset_id": preset_id,
-                        "duration_sec": 5,
-                    },
-                )
-                self.assertEqual(resp.status_code, 400, resp.text)
-                self.assertIn("35.222.33.58", resp.json()["detail"])
+            with patch.object(
+                api_main.job_manager,
+                "create_job",
+                return_value=MagicMock(job_id="zixi-ok"),
+            ), patch.object(
+                api_main,
+                "job_to_dict",
+                return_value={"id": "zixi-ok", "status": "pending"},
+            ):
+                for preset_id in ("moq_zixi_gcp", "moq_zixi_gcp_rtmp"):
+                    resp = client.post(
+                        "/api/uploads",
+                        json={
+                            "media_path": tmp.name,
+                            "preset_id": preset_id,
+                            "duration_sec": 5,
+                        },
+                    )
+                    self.assertEqual(resp.status_code, 200, resp.text)
+                    self.assertEqual(resp.json()["id"], "zixi-ok")
 
     def test_api_presets_hide_put_recipes(self) -> None:
         client = TestClient(api_main.app)

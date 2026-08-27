@@ -85,8 +85,8 @@ class CloudPlacementTests(unittest.TestCase):
         self.assertEqual(len(hosts), 9)
         self.assertEqual(hosts["gcp_central"]["label"], "GCP Central")
         self.assertTrue(hosts["gcp_central"]["available"])
-        self.assertFalse(hosts["gcp_central"]["roles"]["zixi"])
-        self.assertIn("35.222.33.58", hosts["gcp_central"]["unavailable_reason"])
+        self.assertTrue(hosts["gcp_central"]["roles"]["zixi"])
+        self.assertFalse(hosts["gcp_central"]["unavailable_reason"])
         self.assertFalse(hosts["gcp_west"]["available"])
         self.assertEqual(hosts["gcp_west"]["unavailable_reason"], "Not deployed")
         self.assertFalse(hosts["aws_east"]["available"])
@@ -384,28 +384,22 @@ class GcpEastPresetTests(unittest.TestCase):
 
 
 class ZixiGcpEncodeGateTests(unittest.TestCase):
-    def test_central_zixi_srt_rtmp_are_not_startable(self) -> None:
-        from destinations import (
-            PRESET_BY_ID,
-            ZIXI_GCP_ENCODE_UNAVAILABLE_REASON,
-            zixi_gcp_encode_blocked,
-        )
+    def test_central_zixi_srt_rtmp_are_startable(self) -> None:
+        from destinations import PRESET_BY_ID, zixi_gcp_encode_blocked
 
         for preset_id in ("moq_zixi_gcp", "moq_zixi_gcp_rtmp"):
             preset = PRESET_BY_ID[preset_id]
-            self.assertFalse(preset.web_available, preset_id)
-            self.assertIn("35.222.33.58", preset.notes)
-            reason = zixi_gcp_encode_blocked(preset_id, url=preset.url)
-            self.assertEqual(reason, ZIXI_GCP_ENCODE_UNAVAILABLE_REASON)
+            self.assertTrue(preset.web_available, preset_id)
+            self.assertIsNone(zixi_gcp_encode_blocked(preset_id, url=preset.url))
 
-    def test_custom_url_to_dead_zixi_is_blocked(self) -> None:
+    def test_custom_url_to_zixi_is_not_blocked(self) -> None:
         from destinations import zixi_gcp_encode_blocked
 
-        reason = zixi_gcp_encode_blocked(
-            url="srt://35.222.33.58:10080?mode=caller",
+        self.assertIsNone(
+            zixi_gcp_encode_blocked(
+                url="srt://35.222.33.58:10080?mode=caller",
+            )
         )
-        self.assertIsNotNone(reason)
-        self.assertIn("35.222.33.58", reason or "")
 
     def test_central_mediamtx_and_moq_stay_open(self) -> None:
         from destinations import PRESET_BY_ID, zixi_gcp_encode_blocked

@@ -50,9 +50,10 @@ class VmafAvailabilityTests(unittest.TestCase):
         with patch(
             "ingest_agent_client.resolve_ingest_agent",
             return_value=config,
-        ), patch(
-            "ingest_agent_client.urllib.request.urlopen",
-            side_effect=AssertionError("must not contact 35.222.33.58:8090"),
+        ), patch.object(
+            __import__("ingest_agent_client", fromlist=["IngestAgentClient"]).IngestAgentClient,
+            "health",
+            side_effect=RuntimeError("timed out"),
         ):
             ok, reason = vmaf_availability_for_endpoint(
                 "rtmp://35.222.33.58:1935/live/benchmark",

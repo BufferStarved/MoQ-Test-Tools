@@ -16,20 +16,13 @@ logger = logging.getLogger("MoQ-SRT-Bench")
 
 DEFAULT_AGENT_PORT = int(os.environ.get("INGEST_AGENT_PORT", "8090"))
 HEALTH_TIMEOUT_SEC = 1.5
-# Public moq-zixi-gcp :8090 is down (2026-08-26). Never open a socket — a
-# blackholed SYN hung jobs past health timeouts. Encode is fail-closed in
-# destinations.zixi_gcp_encode_blocked.
 ZIXI_PUBLIC_INGEST_AGENT_HOST = "35.222.33.58"
 
 
 def skipped_zixi_public_agent_reason(*, host: str = "", base_url: str = "") -> str:
-    parsed = (host or urlparse(base_url or "").hostname or "").strip()
-    if parsed != ZIXI_PUBLIC_INGEST_AGENT_HOST:
-        return ""
-    return (
-        f"Zixi ingest agent unreachable at {parsed}:8090 "
-        "(public worker down; ingest VMAF skipped without contacting the host)"
-    )
+    """Kept for callers; public Zixi :8090 is reachable again (2026-08-26)."""
+    del host, base_url
+    return ""
 
 
 @dataclass(frozen=True)
