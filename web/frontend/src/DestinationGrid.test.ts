@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { preferredOptionForHost, softwareLabel } from "./destinationGridModel.ts";
+import { preferredOptionForHost, softwareLabel, unavailableDestLabel } from "./destinationGridModel.ts";
 import type { IngestEndpointOption } from "./ingestEndpoints.ts";
 
 const options: IngestEndpointOption[] = [
@@ -31,5 +31,11 @@ describe("destination grid", () => {
 
   it("does not treat Custom as a host cell", () => {
     assert.equal(preferredOptionForHost("gcp_central", options), undefined);
+  });
+
+  it("names down dests vs undeployed cells", () => {
+    assert.equal(unavailableDestLabel("Zixi dest is down"), "This box is down");
+    assert.equal(unavailableDestLabel("guest frozen", "Zixi"), "Zixi (this box is down)");
+    assert.equal(unavailableDestLabel("Not deployed · us-west1", "MoQ"), "MoQ — not deployed");
   });
 });

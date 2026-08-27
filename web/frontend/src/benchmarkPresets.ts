@@ -67,50 +67,53 @@ export interface BenchmarkPresetDef {
    * Without this, locking outputs hides protocol mix AND ingest hosts.
    */
   showEndpointPickers?: boolean;
-  /** One-line reminder of what the recipe hid. Empty for Build your own. */
+  /** One-line “what you will see” after picking this recipe. */
   lockedSummary: string;
 }
 
+/** No visitor default — the first screen is only “What to run”. */
+export const DEFAULT_BENCHMARK_PRESET: BenchmarkPresetId | null = null;
+
 export const BENCHMARK_PRESET_DEFS: BenchmarkPresetDef[] = [
   {
-    id: "protocol-compare",
-    label: "Capture to glass",
-    hint: "SRT + RTMP + WebRTC + MoQ :14433 · players side by side",
-    locks: ["testScope", "outputs"],
-    lockedSummary: "This recipe locked: 4 outputs (SRT/RTMP/WHIP/MoQ :14433)",
-  },
-  {
-    id: "webrtc-vs-moq",
-    label: "MoQ vs WebRTC",
-    hint: "Webcam + Browser · realtime join on Linode/East",
-    locks: ["testScope", "source", "encoder", "outputs"],
-    lockedSummary: "This recipe locked: Browser encode · 4 outputs (MoQ + WHEP)",
-  },
-  {
-    id: "cloud-compare",
-    label: "Where to host",
-    hint: "Same protocol across GCP / Linode / AWS · grey cells are not deployed",
-    locks: ["testScope"],
-    lockProtocolMix: true,
-    lockEndpoints: false,
-    lockedSummary: "This recipe locked: one protocol × N cloud endpoints.",
+    id: "build-your-own",
+    label: "Build your own",
+    hint: "You pick the source, destinations, and players.",
+    locks: [],
+    lockedSummary: "",
   },
   {
     id: "contribution-compare",
-    label: "Ingest only",
-    hint: "SRT + RTMP + MoQ :14433 · confidence monitor, no players",
+    label: "Ingest comparison",
+    hint: "Contribution and acquisition performance across clouds and protocols",
     locks: ["testScope", "encoder", "outputs"],
     lockProtocolMix: true,
     lockEndpoints: false,
     showEndpointPickers: true,
-    lockedSummary: "This recipe locked: upload-only · helper · protocol mix (SRT/RTMP/MoQ :14433)",
+    lockedSummary: "Encode and ingest meters only. No players.",
   },
   {
-    id: "build-your-own",
-    label: "Custom",
-    hint: "Pick source, outputs, destinations, and players.",
-    locks: [],
-    lockedSummary: "",
+    id: "webrtc-vs-moq",
+    label: "Webcam Browsers",
+    hint: "Webcam & WebCodecs API protocol comparison",
+    locks: ["testScope", "source", "encoder", "outputs"],
+    lockedSummary: "Webcam via WebCodecs: MoQ vs WebRTC.",
+  },
+  {
+    id: "protocol-compare",
+    label: "Protocol Comparison",
+    hint: "Compare SRT, RTMP, WebRTC and MoQ upload and playback (HLS playback for SRT/RTMP uploads)",
+    locks: ["testScope", "outputs"],
+    lockedSummary: "SRT, RTMP, WebRTC, and MoQ — HLS playback for SRT/RTMP.",
+  },
+  {
+    id: "cloud-compare",
+    label: "Cloud/Edge Comparison",
+    hint: "Compare upload and delivery performance of the same protocols across multiple infrastructure providers and regions",
+    locks: ["testScope"],
+    lockProtocolMix: true,
+    lockEndpoints: false,
+    lockedSummary: "One protocol, compared across live clouds and regions.",
   },
 ];
 
@@ -262,7 +265,7 @@ function cloudCompareSource(requested?: RecipeSourceId): RecipeSourceId {
   ) {
     return requested;
   }
-  return "dummy";
+  return "bbb";
 }
 
 function cloudCompareEncoder(source: RecipeSourceId, requested?: RecipeEncoderId): RecipeEncoderId {
@@ -503,7 +506,7 @@ export function applyBenchmarkPreset(
     };
   }
   if (id === "protocol-compare") {
-    const source: RecipeSourceId = options.source ?? "dummy";
+    const source: RecipeSourceId = options.source ?? ctx.source ?? "bbb";
     const encoder: RecipeEncoderId =
       options.encoder ?? (source === "browser_moq" ? "browser" : "ffmpeg");
     const nextCtx = { ...ctx, source, encoder };

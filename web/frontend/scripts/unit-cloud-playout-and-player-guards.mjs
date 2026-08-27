@@ -14,6 +14,7 @@ const whep = fs.readFileSync(path.join(root, "src/players/WhepPlayer.tsx"), "utf
 const moq = fs.readFileSync(path.join(root, "src/players/MoqPlayer.tsx"), "utf8");
 const moqCmaf = fs.readFileSync(path.join(root, "src/moqCmafPlayback.ts"), "utf8");
 const streamPlayer = fs.readFileSync(path.join(root, "src/StreamPlayer.tsx"), "utf8");
+const harness = fs.readFileSync(path.join(root, "src/HarnessPage.tsx"), "utf8");
 
 assert.match(source, /export const CLOUD_PLAYOUT_DURATION_SEC = 60/);
 assert.match(app, /CLOUD_PLAYOUT_DURATION_SEC/);
@@ -36,6 +37,10 @@ assert.match(moq, /isGracefulMoqEncodeOver/);
 assert.match(moq, /encode_over_suppressed_fail/);
 assert.match(moq, /classifyCmafPlayheadStall/);
 assert.match(moq, /cmafSubscribeOptions/);
+assert.match(harness, /previewReady=\{job\.preview_ready\}/);
+assert.match(moq, /moqCatalogBootstrap/);
+assert.match(moq, /catalogBootstrap: moqCatalogBootstrap\(mediaPackaging\)/);
+assert.match(moq, /catalog subscribe AbsoluteStart\{0,0\}/);
 assert.match(moq, /moqRenderSink/);
 assert.doesNotMatch(moq, /playhead_frozen_\$\{video\.currentTime\.toFixed\(2\)\}s_buffered/);
 assert.match(streamPlayer, /player-idle-placeholder/);

@@ -125,6 +125,7 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
         deliveryMediaOriginSec={job.delivery_media_origin_sec ?? null}
         jobStatus={job.status}
         jobError={job.error}
+        previewReady={job.preview_ready}
         benchmarkLoading={job.status === "running"}
         encodeDurationSec={job.duration_sec}
         targetLatencyMs={job.target_latency_ms ?? 800}

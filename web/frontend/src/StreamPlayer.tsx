@@ -343,6 +343,9 @@ export function StreamPlayer({
               <p className="hint">Waiting for MoQ publish namespace…</p>
             </div>
           )}
+          {target.engine === "moq" ? (
+            <p className="player-success-hint">Success is video on screen, not catalog loaded.</p>
+          ) : null}
           {target.engine === "unsupported" && <UnsupportedPlayback target={target} />}
         </Suspense>
       </PlayerErrorBoundary>

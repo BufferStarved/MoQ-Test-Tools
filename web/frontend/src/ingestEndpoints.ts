@@ -208,7 +208,7 @@ const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   {
     id: "custom",
     label: "Custom URL",
-    detail: "Your origin / gateway",
+    detail: "Provide your own ingest endpoint.",
   },
 ];
 

@@ -4,6 +4,7 @@ import {
   classifyCmafPlayheadStall,
   classifyMoqEndVerdict,
   cmafSubscribeOptions,
+  moqCatalogBootstrap,
   moqLiveEdgePolicy,
   CMAF_HEALTHY_HOLD_CEILING_SEC,
   CMAF_HEALTHY_HOLD_FLOOR_SEC,
@@ -297,7 +298,7 @@ describe("shouldFailNoMediaWatchdog", () => {
     );
   });
 
-  it("does not call a live empty catalog a one-shot miss while encode is still running", () => {
+  it("waits for a live-write catalog, then fails if it never arrives mid-encode", () => {
     assert.equal(
       shouldFailNoMediaWatchdog({
         jobStatus: "running",
@@ -316,7 +317,7 @@ describe("shouldFailNoMediaWatchdog", () => {
         liveMs: MOQ_CATALOG_REFRESH_WAIT_MS + 1,
         deadlineMs: 15_000,
       }),
-      false,
+      true,
     );
     assert.equal(
       shouldFailNoMediaWatchdog({
@@ -479,6 +480,13 @@ describe("cmafSubscribeOptions", () => {
     assert.equal(opts.subscriptionFilter.type, "NextGroupStart");
     assert.equal(opts.warmStartCurrentGroup, false);
     assert.equal(opts.lateFrameThresholdMs, CMAF_LATE_FRAME_THRESHOLD_MS);
+  });
+});
+
+describe("moqCatalogBootstrap", () => {
+  it("uses AbsoluteStart subscribe for one-shot CMAF catalogs on moqx", () => {
+    assert.equal(moqCatalogBootstrap("cmaf"), "subscribe");
+    assert.equal(moqCatalogBootstrap("loc"), "auto");
   });
 });
 

@@ -19,23 +19,24 @@ assert.match(presetSrc, /build-your-own/);
 assert.match(presetSrc, /cloud-compare/);
 assert.match(presetSrc, /contribution-compare/);
 assert.match(presetSrc, /webrtc-vs-moq/);
-assert.match(presetSrc, /label: "Ingest only"/);
-assert.match(presetSrc, /label: "Where to host"/);
-assert.match(presetSrc, /label: "MoQ vs WebRTC"/);
-assert.match(presetSrc, /label: "Capture to glass"/);
-assert.match(presetSrc, /label: "Custom"/);
-assert.match(presetSrc, /Pick source, outputs, destinations, and players\./);
-assert.match(presetSrc, /Same protocol across GCP \/ Linode \/ AWS/);
+assert.match(presetSrc, /label: "Ingest comparison"/);
+assert.match(presetSrc, /label: "Cloud\/Edge Comparison"/);
+assert.match(presetSrc, /label: "Webcam Browsers"/);
+assert.match(presetSrc, /label: "Protocol Comparison"/);
+assert.match(presetSrc, /label: "Build your own"/);
+assert.match(presetSrc, /You pick the source, destinations, and players\./);
+assert.match(presetSrc, /Contribution and acquisition performance across clouds and protocols/);
 assert.doesNotMatch(presetSrc, /Contribution Protocol Comparison for Streaming Workflows/);
 assert.doesNotMatch(presetSrc, /WebRTC vs MOQ for realtime video\./);
-assert.doesNotMatch(presetSrc, /label: "Protocol comparison"/);
+assert.doesNotMatch(presetSrc, /label: "Watch all four protocols"/);
 assert.doesNotMatch(presetSrc, /label: "Cloud compare"/);
-assert.doesNotMatch(presetSrc, /label: "Build your own"/);
+assert.doesNotMatch(presetSrc, /label: "Capture to glass"/);
+assert.doesNotMatch(presetSrc, /label: "Custom"/);
 assert.doesNotMatch(presetSrc, /label: "Contribution ingest"/);
 assert.doesNotMatch(presetSrc, /label: "WebRTC vs MoQ"/);
 assert.match(
   presetSrc,
-  /id: "protocol-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "cloud-compare"[\s\S]*id: "contribution-compare"[\s\S]*id: "build-your-own"/,
+  /id: "build-your-own"[\s\S]*id: "contribution-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "protocol-compare"[\s\S]*id: "cloud-compare"/,
 );
 assert.match(appSrc, /recipe-card-custom/);
 assert.match(appSrc, /recipe-card-custom/);
@@ -52,9 +53,9 @@ assert.match(presetSrc, /recipeShowsSharedProtocolPicker/);
 assert.match(presetSrc, /showEndpointPickers:\s*true/);
 assert.match(presetSrc, /lockProtocolMix:\s*true/);
 assert.match(presetSrc, /lockEndpoints:\s*false/);
-assert.match(presetSrc, /4 outputs \(SRT\/RTMP\/WHIP\/MoQ :14433\)/);
-assert.match(presetSrc, /protocol mix \(SRT\/RTMP\/MoQ :14433\)/);
-assert.match(presetSrc, /one protocol × N cloud endpoints/);
+assert.match(presetSrc, /HLS playback for SRT\/RTMP/);
+assert.match(presetSrc, /Encode and ingest meters only/);
+assert.match(presetSrc, /One protocol, compared across live clouds/);
 assert.match(appSrc, /handleBenchmarkPreset/);
 assert.match(appSrc, /BENCHMARK_PRESET_DEFS/);
 assert.match(appSrc, /recipe-options/);

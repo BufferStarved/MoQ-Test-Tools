@@ -18,6 +18,7 @@ import {
   classifyMoqEndVerdict,
   cmafSubscribeOptions,
   CMAF_MAX_CATCH_UP_RATE,
+  moqCatalogBootstrap,
   moqLiveEdgePolicy,
   isPlayableCatalogReady,
   moqHasRenderedMedia,
@@ -116,6 +117,15 @@ interface MoqPlayerProps {
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatPlayaLog(msg: string, args: unknown[]): string {
+  let i = 0;
+  return String(msg).replace(/%[sdioO]/g, () => {
+    const value = args[i];
+    i += 1;
+    return value == null ? "" : String(value);
+  });
 }
 
 // Was 6s — that alone pinned wall−vt E2E near ~7s after join. CMAF catalog is
@@ -750,7 +760,7 @@ export default function MoqPlayer({
       pushDiag(
         mediaPackaging === "loc"
           ? `catalog_mode=relay catalog FETCH+subscribe then ${BROWSER_LOC_VIDEO_TRACK}${sourceHasAudio ? `+${BROWSER_LOC_AUDIO_TRACK}` : ""} (LOC knownTracks, no injected catalog) draft=${draftVersion}`
-          : `catalog_mode=relay catalog FETCH+subscribe then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (MSF-01 initDataList→initData) draft=${draftVersion}`,
+          : `catalog_mode=relay catalog subscribe AbsoluteStart{0,0} then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (MSF-01 initDataList→initData, moqx one-shot) draft=${draftVersion}`,
         true,
       );
       pushDiag(`publisher_forward=1 warmup=${PUBLISHER_WARMUP_MS / 1000}s`, true);
@@ -873,6 +883,39 @@ export default function MoqPlayer({
             // Publisher already advertises MSF `video`/`audio`. knownTracks
             // parallel-subscribes those names while CatalogBootstrap FETCHes
             // the live catalog. CMAF still must not inject a canned init.
+            // CMAF catalog is one-shot on moqx — joining FETCH empty-waits
+            // forever; explicit subscribe accepts MSF-01 via AbsoluteStart.
+            catalogBootstrap: moqCatalogBootstrap(mediaPackaging),
+            logLevel: "info",
+            logger: {
+              debug() {},
+              info(msg: string, ...args: unknown[]) {
+                try {
+                  const line = formatPlayaLog(msg, args);
+                  if (/catalog|bootstrap|SUBSCRIBE|FETCH|joining|legacy/i.test(line)) {
+                    pushDiag(`playa ${line.slice(0, 180)}`);
+                  }
+                } catch {
+                  // Logging must never fail catalog subscribe.
+                }
+              },
+              warn(msg: string, ...args: unknown[]) {
+                try {
+                  console.warn("[playa]", msg, ...args);
+                  pushDiag(`playa_warn ${formatPlayaLog(msg, args).slice(0, 180)}`, true);
+                } catch {
+                  // Logging must never fail catalog subscribe.
+                }
+              },
+              error(msg: string, ...args: unknown[]) {
+                try {
+                  console.error("[playa]", msg, ...args);
+                  pushDiag(`playa_err ${formatPlayaLog(msg, args).slice(0, 180)}`, true);
+                } catch {
+                  // Logging must never fail catalog subscribe.
+                }
+              },
+            },
             createTransport: createStrictMoqtTransport({
               ...(certHash ? { certHash } : {}),
               draftVersion,
@@ -1020,7 +1063,7 @@ export default function MoqPlayer({
           markMoqCatalogReady(jobId);
           updateMediaVisibility(player);
           setIsReady(true);
-          setStatus("Ready");
+          setStatus("Waiting for video…");
           armFrameTimeout("post-ready");
         });
 
@@ -1254,6 +1297,13 @@ export default function MoqPlayer({
                   : "catalog_timeout_skipped waiting_for_announce",
               true,
             );
+            if (!sessionRef.current.catalogReady && !sessionRef.current.firstFrame) {
+              setStatus(
+                keptPublisherNotReady
+                  ? "Waiting for publisher namespace..."
+                  : "Waiting for catalog…",
+              );
+            }
             return;
           }
           if (retrySubscribe("catalog_timeout_retry", 200)) {

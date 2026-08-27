@@ -6,6 +6,7 @@ import {
   compareLiveMetrics,
   e2eScopeHudLabel,
   e2eScopeShortLabel,
+  streamPaintedFrames,
 } from "./comparisonVerdict.ts";
 import type { ResultSummary } from "./types.ts";
 
@@ -101,5 +102,19 @@ describe("buildComparisonVerdict", () => {
     assert.equal(capture?.winner, "SRT");
     const hint = verdict.highlights.find((item) => item.label === "WebRTC as capture-class");
     assert.match(hint?.value ?? "", /564/);
+    assert.equal(verdict.paintLines.length, 4);
+  });
+
+  it("uses peak rendered frames, not a 0 CSV average", () => {
+    const painted = stream({ protocol: "moq", e2e: 2000, label: "MoQ" });
+    painted.averages = { ...(painted.averages ?? {}), playback_frames_rendered: 0 };
+    painted.rows = [
+      { playback_frames_rendered: "0" },
+      { playback_frames_rendered: "62" },
+    ];
+    assert.equal(streamPaintedFrames(painted), 62);
+    const verdict = buildComparisonVerdict([painted]);
+    assert.match(verdict?.headline ?? "", /painted/);
+    assert.equal(verdict?.paintLines[0]?.painted, true);
   });
 });

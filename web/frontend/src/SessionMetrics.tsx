@@ -216,6 +216,39 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
   return (
     <div className="session-metrics">
+      {verdict && (
+        <div className="results-verdict">
+          <span className="decision-board-kicker">Verdict</span>
+          <p className="results-verdict-headline">{verdict.headline}</p>
+          {verdict.paintLines.length > 0 ? (
+            <ul className="results-paint-strip">
+              {verdict.paintLines.map((line) => (
+                <li key={line.label}>
+                  <strong>{line.label}</strong>
+                  {line.painted
+                    ? ` painted · ${line.frames} frames`
+                    : " no video"}
+                  {line.vmaf ? ` · ${line.vmaf}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="decision-board-highlights">
+            {verdict.highlights.map((item) => (
+              <div
+                key={item.label}
+                className="decision-highlight"
+                style={{ "--chip-color": protocolColor(item.protocol) } as never}
+              >
+                <span className="decision-highlight-label">{item.label}</span>
+                <strong>{item.winner}</strong>
+                <span className="decision-highlight-value">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {engineCaveats.length > 0 && (
         <div className="results-caveat">
           <span className="decision-board-kicker">Comparison caveat</span>
@@ -261,25 +294,6 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
       {testScopesCompatible || allowScopeConvert ? (
       <>
-      {verdict && (
-        <div className="results-verdict">
-          <span className="decision-board-kicker">Verdict</span>
-          <p className="results-verdict-headline">{verdict.headline}</p>
-          <div className="decision-board-highlights">
-            {verdict.highlights.map((item) => (
-              <div
-                key={item.label}
-                className="decision-highlight"
-                style={{ "--chip-color": protocolColor(item.protocol) } as never}
-              >
-                <span className="decision-highlight-label">{item.label}</span>
-                <strong>{item.winner}</strong>
-                <span className="decision-highlight-value">{item.value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       <div className="session-metrics-header">
         <div>

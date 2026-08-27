@@ -329,28 +329,34 @@ describe("applyBenchmarkPreset", () => {
 });
 
 describe("recipe wizard locks", () => {
-  it("lists Custom last after the precanned experiments", () => {
+  it("lists recipes in the visitor order, Custom first", () => {
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => item.id),
       [
-        "protocol-compare",
-        "webrtc-vs-moq",
-        "cloud-compare",
-        "contribution-compare",
         "build-your-own",
+        "contribution-compare",
+        "webrtc-vs-moq",
+        "protocol-compare",
+        "cloud-compare",
       ],
     );
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => [item.label, item.hint]),
       [
-        ["Capture to glass", "SRT + RTMP + WebRTC + MoQ :14433 · players side by side"],
-        ["MoQ vs WebRTC", "Webcam + Browser · realtime join on Linode/East"],
+        ["Build your own", "You pick the source, destinations, and players."],
         [
-          "Where to host",
-          "Same protocol across GCP / Linode / AWS · grey cells are not deployed",
+          "Ingest comparison",
+          "Contribution and acquisition performance across clouds and protocols",
         ],
-        ["Ingest only", "SRT + RTMP + MoQ :14433 · confidence monitor, no players"],
-        ["Custom", "Pick source, outputs, destinations, and players."],
+        ["Webcam Browsers", "Webcam & WebCodecs API protocol comparison"],
+        [
+          "Protocol Comparison",
+          "Compare SRT, RTMP, WebRTC and MoQ upload and playback (HLS playback for SRT/RTMP uploads)",
+        ],
+        [
+          "Cloud/Edge Comparison",
+          "Compare upload and delivery performance of the same protocols across multiple infrastructure providers and regions",
+        ],
       ],
     );
   });
@@ -367,7 +373,7 @@ describe("recipe wizard locks", () => {
     assert.equal(wizardStepVisible("protocol-compare", "outputs"), false);
     assert.equal(wizardStepVisible("protocol-compare", "source"), true);
     assert.equal(wizardStepVisible("protocol-compare", "encoder"), true);
-    assert.match(recipeLockedSummary("protocol-compare") ?? "", /4 outputs \(SRT\/RTMP\/WHIP\/MoQ :14433\)/);
+    assert.match(recipeLockedSummary("protocol-compare") ?? "", /HLS playback/);
   });
 
   it("contribution-compare unlocks source and endpoint pickers; protocol mix stays locked", () => {
@@ -387,8 +393,7 @@ describe("recipe wizard locks", () => {
     assert.equal(recipeLocksEndpoints("cloud-compare"), false);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
     assert.equal(recipeShowsSharedProtocolPicker("contribution-compare"), false);
-    assert.match(recipeLockedSummary("contribution-compare") ?? "", /upload-only/);
-    assert.match(recipeLockedSummary("contribution-compare") ?? "", /protocol mix/);
+    assert.match(recipeLockedSummary("contribution-compare") ?? "", /Encode and ingest meters only/);
     assert.doesNotMatch(recipeLockedSummary("contribution-compare") ?? "", /webcam upload-only/);
     assert.equal(recipeNeedsLaptopHelper("contribution-compare"), true);
     assert.equal(recipeNeedsLaptopHelper("webrtc-vs-moq"), false);
@@ -402,7 +407,7 @@ describe("recipe wizard locks", () => {
     assert.equal(recipeLocksProtocolMix("cloud-compare"), true);
     assert.equal(recipeLocksEndpoints("cloud-compare"), false);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
-    assert.match(recipeLockedSummary("cloud-compare") ?? "", /one protocol × N cloud endpoints/);
+    assert.match(recipeLockedSummary("cloud-compare") ?? "", /One protocol, compared across live clouds/);
   });
 
   it("locked-output recipes reveal tiles before Start; Custom does not", () => {

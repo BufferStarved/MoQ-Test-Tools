@@ -60,13 +60,11 @@ import {
   applyEndpointPatch,
   canAddRecipeOutput,
   coerceRecipe,
-  defaultRecipeEndpoints,
   isLocalAgentSource,
   nextAddableEndpoint,
   obsMoqSupported,
   publishProtocolIdsForSource,
   recipeIssue,
-  RECIPE_CHROME_CAPS,
   siblingOccupiedCollisionKeys,
   type PublishProtocolId,
   type RecipeContext,
@@ -235,17 +233,6 @@ function writePublisherSession(sessionId: string): void {
   }
 }
 
-function buildDefaultEndpoints(ctx: RecipeContext = {
-  source: "dummy",
-  presets: [],
-  caps: RECIPE_CHROME_CAPS,
-}): EndpointConfig[] {
-  return defaultRecipeEndpoints(ctx).map((endpoint) => ({
-    ...endpoint,
-    id: createEndpointId(),
-  }));
-}
-
 function endpointLabel(
   endpoint: EndpointConfig,
   index: number,
@@ -325,6 +312,9 @@ function isLegFinished(
   return true;
 }
 
+const SCORE_PICTURE_QUALITY_COPY =
+  "Calculates PSNR, SSIM and VMAF post transcode and post ingest — Note: WebRTC is not scored.";
+
 function App() {
   const [tab, setTab] = useState<Tab>("benchmark");
   const [protocols, setProtocols] = useState<Protocol[]>([]);
@@ -334,7 +324,7 @@ function App() {
     if (operatorPlan.encoder === "browser") {
       return "browser_moq";
     }
-    return operatorPlan.source ?? "dummy";
+    return operatorPlan.source ?? "bbb";
   });
   const [mediaPath, setMediaPath] = useState(() => {
     if (operatorPlan.encoder === "browser" || operatorPlan.source === "browser_moq") {
@@ -343,10 +333,10 @@ function App() {
     if (operatorPlan.source === "webcam") {
       return LOCAL_DEVICE_WEBCAM;
     }
-    if (operatorPlan.source === "bbb") {
-      return BBB_MEDIA_PATH;
+    if (operatorPlan.source === "dummy") {
+      return "dummy.mp4";
     }
-    return "dummy.mp4";
+    return BBB_MEDIA_PATH;
   });
   const [mediaLabel, setMediaLabel] = useState(() => {
     if (operatorPlan.encoder === "browser" || operatorPlan.source === "browser_moq") {
@@ -355,10 +345,10 @@ function App() {
     if (operatorPlan.source === "webcam") {
       return "Webcam";
     }
-    if (operatorPlan.source === "bbb") {
-      return "Big Buck Bunny";
+    if (operatorPlan.source === "dummy") {
+      return "Default Color Bars";
     }
-    return "Default Color Bars";
+    return "Big Buck Bunny";
   });
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [computeVmaf, setComputeVmaf] = useState(false);
@@ -539,7 +529,7 @@ function App() {
           ? "This laptop. OBS encodes the scene (plugin + extra outputs)."
           : mediaSource === "webcam"
             ? "This laptop’s camera, encoded by the helper app"
-            : "Cloud playout on the server";
+            : "VOD-to-Live Cloud Playout on the server";
     const encodeTitle =
       mediaSource === "browser_moq"
         ? "Browser encode"
@@ -610,7 +600,7 @@ function App() {
         const source =
           operatorPlan.encoder === "browser"
             ? "browser_moq"
-            : (operatorPlan.source ?? "dummy");
+            : (operatorPlan.source ?? "bbb");
         const ctx: RecipeContext = {
           source,
           presets: presetData.presets,
@@ -627,8 +617,10 @@ function App() {
         if (operatorPlan.outputs.length > 0) {
           return coerceRecipe(operatorEndpoints(operatorPlan.outputs, createEndpointId), ctx);
         }
-        const seed = current.length > 0 ? current : buildDefaultEndpoints(ctx);
-        return coerceRecipe(seed, ctx);
+        if (current.length > 0) {
+          return coerceRecipe(current, ctx);
+        }
+        return current;
       });
     } catch (err) {
       setApiOnline(false);
@@ -681,9 +673,9 @@ function App() {
           if (!next.local_publisher && (isLocalAgentSource(mediaSource) || encoder === "obs")) {
             setEncoder("ffmpeg");
             if (isLocalAgentSource(mediaSource)) {
-              setMediaSource("dummy");
-              setMediaPath("dummy.mp4");
-              setMediaLabel("Default Color Bars");
+              setMediaSource("bbb");
+              setMediaPath(BBB_MEDIA_PATH);
+              setMediaLabel("Big Buck Bunny");
             }
           }
         }
@@ -943,11 +935,6 @@ function App() {
   }
 
   function handleBenchmarkPreset(id: BenchmarkPresetId) {
-    if (id === "build-your-own") {
-      setActivePresetId(id);
-      setSetupCursor(firstStepAfterRecipe(setupStepsForRecipe(setupFlagsForPreset(id))));
-      return;
-    }
     const plan = applyBenchmarkPreset(id, recipeContext, createEndpointId, {
       currentEndpoints: endpoints,
       source: recipeContext.source,
@@ -1155,7 +1142,7 @@ function App() {
     if (isLocalAgentSource(mediaSource)) {
       setVmafUnavailableReason(
         encoderVmafAvailable
-          ? "Scores the file after encode. WebRTC is not scored."
+          ? SCORE_PICTURE_QUALITY_COPY
           : "This laptop cannot score picture quality yet.",
       );
       return;
@@ -1163,7 +1150,7 @@ function App() {
     if (mediaSource === "browser_moq") {
       setVmafUnavailableReason(
         anyIngestVmafAvailable
-          ? "MoQ can be scored after the relay. WebRTC is not scored."
+          ? SCORE_PICTURE_QUALITY_COPY
           : "Picture-quality scoring is not available for this Browser path.",
       );
       return;
@@ -1176,7 +1163,7 @@ function App() {
       );
       return;
     }
-    setVmafUnavailableReason(null);
+    setVmafUnavailableReason(SCORE_PICTURE_QUALITY_COPY);
   }, [
     vmafSelectable,
     vmafBothAvailable,
@@ -1929,12 +1916,12 @@ function App() {
         ? "Webcam · Browser"
         : "Webcam"
       : mediaSource === "bbb"
-        ? "Cloud playout · Big Buck Bunny"
+        ? "VOD-to-Live Cloud Playout · Big Buck Bunny"
         : mediaSource === "upload"
           ? mediaPath
-            ? `Cloud playout · ${mediaLabel}`
-            : "Cloud playout · choose a file"
-          : "Cloud playout · Color bars";
+            ? `VOD-to-Live Cloud Playout · ${mediaLabel}`
+            : "VOD-to-Live Cloud Playout · choose a file"
+          : "VOD-to-Live Cloud Playout · Color bars";
   const encodeSummary = [
     resolveEncodeLadder(encodeLadder).label.split("·")[0]?.trim() ?? encodeLadder,
     encoder === "browser" ? "Browser" : encoder === "obs" ? "OBS" : "ffmpeg",
@@ -1946,9 +1933,6 @@ function App() {
   ]
     .filter(Boolean)
     .join(" · ");
-  const outputsSummary = endpoints
-    .map((endpoint) => protocolLabel(endpoint.protocol))
-    .join(" + ");
   function continueSetup() {
     const next = nextSetupStep(setupSteps, setupCursor);
     if (next) {
@@ -2062,6 +2046,9 @@ function App() {
           </span>
           <div>
             <h1>MoQ Bench</h1>
+            <p className="hero-lede">
+              Compare live ingest protocols. Pick a recipe, press Start, watch the players.
+            </p>
           </div>
         </div>
         <div className="hero-right">
@@ -2115,15 +2102,15 @@ function App() {
                   step="recipe"
                   index={recipeStep}
                   state={recipeState}
-                  title="Recipe"
+                  title="What to run"
                   summary={recipeDef(activePresetId)?.label ?? "Choose a recipe"}
                   onReopen={() => reopenSetup("recipe")}
                 >
                 <section className="recipe-section">
                   <StepHeading
                     step={recipeStep}
-                    title="Recipe"
-                    tip="Pick a precanned experiment or build your own. Precanned recipes default tiles and hide the steps they already decided."
+                    title="What to run"
+                    tip="Pick what you want to see, then press Start. Or build your own."
                   />
                   <div className="source-mode-options recipe-options" role="radiogroup" aria-label="Harness recipes">
                     {BENCHMARK_PRESET_DEFS.map((preset) => (
@@ -2148,7 +2135,7 @@ function App() {
                   {lockedRecipeSummary ? (
                     <p className="field-hint recipe-locked-summary">{lockedRecipeSummary}</p>
                   ) : !recipePicked ? (
-                    <p className="field-hint">Choose a recipe to continue the wizard.</p>
+                    <p className="field-hint">Choose what you want to see, then press Start.</p>
                   ) : null}
                 </section>
                 </SetupStepFrame>
@@ -2156,7 +2143,7 @@ function App() {
                   step="testScope"
                   index={testScopeStep}
                   state={testScopeState}
-                  title="Test"
+                  title="Scope"
                   summary={testScope === TEST_SCOPE_UPLOAD ? "Upload only" : "End-to-end"}
                   onReopen={() => reopenSetup("testScope")}
                   onContinue={setupHasContinue ? continueSetup : undefined}
@@ -2164,7 +2151,7 @@ function App() {
                 <section className="test-scope-section">
                   <StepHeading
                     step={testScopeStep}
-                    title="Test"
+                    title="Scope"
                     tip="Choose what this run measures. Upload-only stops at ingest — no glass tiles."
                   />
                   <div className="encode-location-options playback-policy-options" role="radiogroup" aria-label="Test scope">
@@ -2253,7 +2240,7 @@ function App() {
                   <StepHeading
                     step={protocolStep}
                     title="Protocol"
-                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way lives in Capture to glass."
+                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way is Protocol Comparison."
                   />
                   <div className="source-mode-options" role="radiogroup" aria-label="Cloud compare protocol">
                     {cloudProtocolChoices.map((protocol) => (
@@ -2282,7 +2269,7 @@ function App() {
                   step="encode"
                   index={encodeStep}
                   state={encodeState}
-                  title="Encode"
+                  title="Configuration Details"
                   summary={encodeSummary}
                   onReopen={() => reopenSetup("encode")}
                   onContinue={setupHasContinue ? continueSetup : undefined}
@@ -2290,8 +2277,8 @@ function App() {
                 <section className="encoder-profile-section">
                   <StepHeading
                     step={encodeStep}
-                    title="Encode"
-                    tip="Same ladder for every output. HLS/SRT stay on a 2s floor; MoQ uses a 400 ms budget. Last-mile Webcam picks ffmpeg (default), OBS, or Browser. ffmpeg opens the camera on the computer running the helper."
+                    title="Configuration Details"
+                    tip="Same quality ladder for every output. Webcam can use ffmpeg (default), Browser, or OBS."
                   />
                   <div className="encoder-profile-body">
                     {showEncoderPicker && (mediaSource === "webcam" || mediaSource === "browser_moq") ? (
@@ -2365,7 +2352,7 @@ function App() {
                                 <IconCpu size={15} /> Browser
                               </strong>
                               <span className="source-mode-card-hint">
-                                This tab · MoQ + WebRTC only
+                                Webcam via WebCodecs — MoQ and WebRTC
                               </span>
                             </span>
                           </label>
@@ -2469,7 +2456,7 @@ function App() {
                       </label>
                       <span className="field-hint">
                         {vmafUnavailableReason ??
-                          "Calculate VMAF, PSNR, and SSIM pre- and post-ingest"}
+                          SCORE_PICTURE_QUALITY_COPY}
                       </span>
                     </div>
                   </div>
@@ -2477,7 +2464,7 @@ function App() {
                 </SetupStepFrame>
               </div>
 
-              {(isLastSetupStep(setupSteps, setupCursor) || runLayout) && (
+              {recipePicked && (isLastSetupStep(setupSteps, setupCursor) || runLayout) && (
               <PipelineConfigDetails
                 sections={pipelineSections}
                 diagram={pipelineDiagram}
@@ -2490,7 +2477,7 @@ function App() {
             {!showOutputsPane && error ? (
               <p className="error benchmark-start-error">{error}</p>
             ) : null}
-            {!showOutputsPane && !error && startHint && !loading ? (
+            {!showOutputsPane && !error && recipePicked && startHint && !loading ? (
               <p className="field-hint benchmark-start-error">{startHint}</p>
             ) : null}
 
@@ -2502,15 +2489,15 @@ function App() {
                 <>
               <StepHeading
                 step={outputsStep}
-                title="Outputs"
+                title="Where it goes"
                 tip={
                   isUploadOnlyScope(testScope)
                     ? showOutputConfig
-                      ? "Encode + publish + ingest only. One confidence monitor — no glass tiles or Go Live."
-                      : "Pick a cloud per output. Protocol mix is fixed (SRT + RTMP + MoQ :14433). Ingest only — no glass tiles or Go Live."
+                      ? "Encode and ingest only — no video tiles."
+                      : "Pick a cloud per output. No video tiles."
                     : lockOutputProtocol && showOutputConfig
-                      ? "Same protocol on every tile. Pick a cloud endpoint per output. Add or remove region tiles."
-                      : "One protocol, ingest, and player per column. Same source and encode."
+                      ? "Same protocol on every tile. Pick a live cloud."
+                      : "One protocol and player per column."
                 }
               />
               {showOutputConfig && canAddOutput && (

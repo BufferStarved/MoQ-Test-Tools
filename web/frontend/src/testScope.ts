@@ -11,7 +11,7 @@ export type TestScope = typeof TEST_SCOPE_E2E | typeof TEST_SCOPE_UPLOAD;
 
 export const DEFAULT_TEST_SCOPE: TestScope = TEST_SCOPE_E2E;
 
-export const TEST_SCOPE_E2E_COPY = "Capture to glass — encode, ingest, and players.";
+export const TEST_SCOPE_E2E_COPY = "Encode, ingest, and players — watch the video.";
 export const TEST_SCOPE_UPLOAD_COPY =
   "Encode, publish, and ingest. One confidence monitor. No glass.";
 

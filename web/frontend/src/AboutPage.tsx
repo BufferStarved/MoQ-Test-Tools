@@ -52,7 +52,7 @@ export function AboutPage() {
     <section className="panel about-panel">
       <header className="about-header">
         <div>
-          <h2>About MOQ Ingest Testing</h2>
+          <h2>About MoQ Bench</h2>
           <p className="about-lede">
             A decision toolkit for streaming architects. Run the same encode against competing
             upload protocols and host locations, watch browser playback side by side, and leave with

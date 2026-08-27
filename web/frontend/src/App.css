@@ -101,6 +101,10 @@ select {
   gap: 12px;
 }
 
+.hero-brand h1 {
+  margin-bottom: 0;
+}
+
 .hero-mark {
   display: inline-flex;
   align-items: center;
@@ -510,7 +514,7 @@ h1 {
 
 .destination-grid {
   display: grid;
-  grid-template-columns: 4.5rem repeat(3, minmax(0, 1fr));
+  grid-template-columns: 4.5rem repeat(var(--dest-cols, 3), minmax(0, 1fr));
   gap: 6px;
   align-items: stretch;
   min-width: 0;
@@ -582,6 +586,12 @@ h1 {
   padding: 0;
 }
 
+.destination-grid-more-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .destination-grid-more {
   align-self: start;
   font-size: 0.78rem;
@@ -609,16 +619,17 @@ h1 {
   color: var(--accent-strong);
 }
 
-.destination-custom-row {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 0;
-  font-size: 0.84rem;
+.destination-custom-cell {
+  width: 100%;
+  min-height: 3.1rem;
 }
 
-.destination-custom-row.selected {
-  color: var(--accent-strong);
+.destination-custom-cell strong {
+  font-size: 0.82rem;
+}
+
+.destination-custom-cell span {
+  font-size: 0.72rem;
 }
 
 .output-card-status-dot {
@@ -1191,6 +1202,34 @@ input:disabled {
   max-width: 720px;
   font-size: 0.82rem;
   line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.source-mode-advanced {
+  margin: 6px 0 0;
+  max-width: 720px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.source-mode-advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.hero-lede {
+  margin: 4px 0 0;
+  max-width: 36rem;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.player-success-hint {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
   color: var(--text-muted);
 }
 
@@ -3408,6 +3447,14 @@ code {
 }
 
 .decision-board-headline p,
+.results-paint-strip {
+  margin: 0 0 10px;
+  padding-left: 1.1rem;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  color: var(--text-soft);
+}
+
 .results-verdict-headline {
   margin: 0;
   color: var(--text);

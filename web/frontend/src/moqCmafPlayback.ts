@@ -91,6 +91,25 @@ export const CMAF_JOINED_PLAYHEAD_SEC = 0.25;
 export const CMAF_LATE_FRAME_THRESHOLD_MS = 400;
 
 /**
+ * How playa retrieves the catalog track.
+ *
+ * CMAF on current moqx is a one-shot group-0 object. Playa `auto` issues
+ * SUBSCRIBE LargestObject + Joining FETCH. FETCH invalid-range parks in
+ * indefinite empty-wait; a later one-shot object is not on the live tail
+ * (headed `bench-c5fc1536`: namespace live, `video_time=0`, catalog pending).
+ * Fallback AbsoluteStart then REJECTS MSF-01 (`initDataList`) unless the
+ * explicit compatibility hatch is set. `subscribe` is that hatch:
+ * AbsoluteStart{0,0}, no FETCH, accepts MSF-01.
+ *
+ * LOC live-writes the catalog and keeps the track fetchable — keep `auto`.
+ */
+export function moqCatalogBootstrap(
+  mediaPackaging: "cmaf" | "loc",
+): "auto" | "subscribe" {
+  return mediaPackaging === "cmaf" ? "subscribe" : "auto";
+}
+
+/**
  * Live CMAF subscribe: NextGroupStart at the next keyframe, no joining
  * FETCH of the open group. moqx honored a warm-start / mid-stream FETCH
  * for one GOP (~0.5–1s) and never attached later groups — same stall as
@@ -385,10 +404,10 @@ announced the namespace produces a catalog-miss toast for a queue /
 publisher-death problem (bench-733f1d7c). Wait for encode-over.
 
 A live namespace whose catalog is still empty (`{tracks:[]}` then vide_1)
-is not a one-shot miss — FETCH/SUBSCRIBE must stay up for the later object.
-Webcam `bench-b4b378b5` (local ffmpeg → east :14433) encoded 1100+ frames
-and then failed at the 30s refresh cap while the 300s job was still
-running. Do not call that a miss until encode ends.
+is not a one-shot miss — FETCH/SUBSCRIBE must stay up for the later object
+through `MOQ_CATALOG_REFRESH_WAIT_MS`. After that cap, sitting on
+`Connecting…` / `video_time=0 (catalog pending)` with no UI error is a
+player failure (headed success is rendered > 0, not “encode still running”).
 */
 export function shouldFailNoMediaWatchdog(options: {
   jobStatus?: string;
@@ -407,9 +426,10 @@ export function shouldFailNoMediaWatchdog(options: {
   if (options.previewReady === false) {
     return false;
   }
-  // Encode still running: empty catalog is live-write in flight, not a miss.
+  // Live-write in flight: wait for vide_1, then fail if the catalog never
+  // becomes playable. Do not wait the whole encode with no error.
   if (options.catalogReady === false) {
-    return false;
+    return options.liveMs >= MOQ_CATALOG_REFRESH_WAIT_MS;
   }
   return options.liveMs >= options.deadlineMs;
 }

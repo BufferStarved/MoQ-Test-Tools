@@ -22,9 +22,16 @@ export const CLOUD_PLAYOUT_DURATION_SEC = 60;
 
 export function sourceModeExplainer(mediaSource: MediaSourceId): string {
   if (mediaSource === "webcam" || mediaSource === "browser_moq") {
-    return "Laptop → cloud ingest: this computer’s camera (last-mile). ffmpeg (helper, default) opens the camera on the machine where you start the helper. Browser encodes in this tab. OBS is unavailable while public MoQ is draft-18.";
+    return "This computer’s camera.";
   }
-  return "Cloud → cloud ingest: dummy bars, Big Buck Bunny, or a file already on the VM. Encodes on the cloud host with server ffmpeg — not pulled through this laptop. Last-mile engines are under Webcam.";
+  return "A file on the server (Big Buck Bunny, color bars, or an upload).";
+}
+
+export function sourceModeAdvancedHelp(mediaSource: MediaSourceId): string {
+  if (mediaSource === "webcam" || mediaSource === "browser_moq") {
+    return "ffmpeg (helper, default) opens the camera on the machine where you start the helper. Browser encodes in this tab. OBS is unavailable while public MoQ is draft-18.";
+  }
+  return "Encodes on the cloud host with server ffmpeg — not pulled through this laptop. Last-mile cameras live under Webcam.";
 }
 
 export function encoderModeExplainer(encoder: EncoderId): string {
@@ -32,7 +39,7 @@ export function encoderModeExplainer(encoder: EncoderId): string {
     return "OBS encodes. The OpenMOQ plugin is draft-16 only — it cannot publish to this site’s draft-18 relays. Use ffmpeg (helper) for MoQ.";
   }
   if (encoder === "browser") {
-    return "This tab encodes (WebCodecs). MoQ and WebRTC only — no SRT or RTMP. No helper app.";
+    return "This tab encodes the webcam with the WebCodecs API. MoQ and WebRTC only — no SRT or RTMP, no helper app.";
   }
   return "ffmpeg (helper) encodes every protocol on this laptop: SRT, RTMP, WebRTC (if WHIP), and MoQ. This is the default last-mile path.";
 }
@@ -107,7 +114,7 @@ export function SourceSection({
 
   function selectCloudPlayout() {
     if (!isCloudPlayout) {
-      onMediaSourceChange("dummy");
+      onMediaSourceChange("bbb");
     }
   }
 
@@ -118,7 +125,7 @@ export function SourceSection({
       <StepHeading
         step={step}
         title="Source"
-        tip="Webcam is laptop→cloud contribution from this computer’s camera. Cloud playout / VOD encodes dummy, BBB, or a cloud file on the VM. Then pick ffmpeg or Browser under Encode when using Webcam."
+        tip="This computer’s camera, or a file already on the server."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
         <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
@@ -133,7 +140,7 @@ export function SourceSection({
             <strong>
               <IconCamera size={15} /> Webcam
             </strong>
-            <span className="source-mode-card-hint">This computer → cloud ingest</span>
+            <span className="source-mode-card-hint">This computer’s camera</span>
           </span>
         </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
@@ -146,13 +153,18 @@ export function SourceSection({
           />
           <span className="source-mode-card-body">
             <strong>
-              <IconFilm size={15} /> Cloud playout / VOD
+              <IconFilm size={15} /> VOD-to-Live Cloud Playout
             </strong>
-            <span className="source-mode-card-hint">Cloud → cloud ingest</span>
+            <span className="source-mode-card-hint">A file on the server</span>
           </span>
         </label>
       </div>
       <p className="source-mode-explainer">{sourceModeExplainer(mediaSource)}</p>
+      <details className="source-mode-advanced">
+        <summary>Advanced</summary>
+        <p className="field-hint">{sourceModeAdvancedHelp(mediaSource)}</p>
+        <p className="field-hint">{encoderModeExplainer(encoder)}</p>
+      </details>
         </>
       )}
 

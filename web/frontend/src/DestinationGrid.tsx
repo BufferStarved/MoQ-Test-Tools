@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { preferredOptionForHost, softwareLabel } from "./destinationGridModel";
+import { preferredOptionForHost, softwareLabel, unavailableDestLabel } from "./destinationGridModel";
 import {
   ENCODE_HOSTS,
   cloudHostFromIngest,
-  encodeHostProvider,
   isCustomIngestEndpoint,
   type CloudEncodeHostId,
   type IngestEndpointOption,
@@ -46,12 +45,14 @@ export function DestinationGrid({
   const selectedHost = isCustomIngestEndpoint(selectedId)
     ? null
     : cloudHostFromIngest(selectedId);
-  const selectedProvider = selectedHost ? encodeHostProvider(selectedHost) : null;
-  const awsHosts = ENCODE_HOSTS.filter((host) => host.provider === "aws");
-  const awsHasLive = awsHosts.some((host) => preferredOptionForHost(host.id, hostOptions)?.available);
-  const awsSelected = selectedProvider === "aws";
-  const [showAws, setShowAws] = useState(awsSelected);
-  const showAwsRow = awsHasLive || awsSelected || showAws;
+  const westHasLive = ENCODE_HOSTS.some(
+    (host) =>
+      host.region === "west" && Boolean(preferredOptionForHost(host.id, hostOptions)?.available),
+  );
+  const westSelected = Boolean(selectedHost && selectedHost.endsWith("_west"));
+  const [showWest, setShowWest] = useState(westSelected);
+  const showWestCol = westHasLive || westSelected || showWest;
+  const visibleRegions = REGIONS.filter((region) => region !== "west" || showWestCol);
 
   const hostOptionsOnSelected = selectedHost
     ? hostOptions.filter(
@@ -62,39 +63,41 @@ export function DestinationGrid({
   return (
     <div className="destination-grid-wrap" data-testid="output-destination">
       <span className="field-label-with-icon destination-grid-label">Destination</span>
-      <div className="destination-grid" role="grid" aria-label={`Output ${outputIndex + 1} destination`}>
+      <div
+        className="destination-grid"
+        role="grid"
+        aria-label={`Output ${outputIndex + 1} destination`}
+        style={{ "--dest-cols": visibleRegions.length } as never}
+      >
         <div className="destination-grid-corner" />
-        {REGIONS.map((region) => (
+        {visibleRegions.map((region) => (
           <div key={region} className="destination-grid-colhead">
             {REGION_LABEL[region]}
           </div>
         ))}
-        {PROVIDERS.map((provider) => {
-          if (provider === "aws" && !showAwsRow) {
-            return null;
-          }
-          return (
-            <DestinationProviderRow
-              key={provider}
-              provider={provider}
-              selectedId={selectedId}
-              selectedHost={selectedHost}
-              hostOptions={hostOptions}
-              disabled={disabled}
-              onSelect={onSelect}
-            />
-          );
-        })}
+        {PROVIDERS.map((provider) => (
+          <DestinationProviderRow
+            key={provider}
+            provider={provider}
+            selectedHost={selectedHost}
+            hostOptions={hostOptions}
+            disabled={disabled}
+            regions={visibleRegions}
+            onSelect={onSelect}
+          />
+        ))}
       </div>
-      {!awsHasLive && !awsSelected ? (
-        <button
-          type="button"
-          className="ghost-button destination-grid-more"
-          onClick={() => setShowAws((open) => !open)}
-        >
-          {showAwsRow ? "Hide undeployed AWS" : "Show undeployed AWS"}
-        </button>
-      ) : null}
+      <div className="destination-grid-more-row">
+        {!westHasLive && !westSelected ? (
+          <button
+            type="button"
+            className="ghost-button destination-grid-more"
+            onClick={() => setShowWest((open) => !open)}
+          >
+            {showWestCol ? "Hide empty West" : "More regions"}
+          </button>
+        ) : null}
+      </div>
       {hostOptionsOnSelected.length > 1 ? (
         <div className="destination-role-alts" role="group" aria-label="Ingest software">
           {hostOptionsOnSelected.map((item) => (
@@ -105,28 +108,29 @@ export function DestinationGrid({
               disabled={disabled || (!item.available && item.id !== selectedId)}
               onClick={() => onSelect(item.id)}
             >
-              {softwareLabel(item.id)}
-              {!item.available ? " · grey" : ""}
+              {item.available
+                ? softwareLabel(item.id)
+                : unavailableDestLabel(item.detail, softwareLabel(item.id))}
             </button>
           ))}
         </div>
       ) : null}
       {!hideCustom ? (
-        <label className={`destination-custom-row${isCustomIngestEndpoint(selectedId) ? " selected" : ""}`}>
-          <input
-            type="radio"
-            name={`output-dest-custom-${outputIndex}`}
-            checked={isCustomIngestEndpoint(selectedId)}
-            disabled={disabled}
-            onChange={() => {
-              const custom = hostOptions.find((item) => isCustomIngestEndpoint(item.id));
-              if (custom) {
-                onSelect(custom.id);
-              }
-            }}
-          />
-          Custom URL
-        </label>
+        <button
+          type="button"
+          className={`destination-cell destination-custom-cell${isCustomIngestEndpoint(selectedId) ? " selected" : ""}`}
+          disabled={disabled}
+          aria-pressed={isCustomIngestEndpoint(selectedId)}
+          onClick={() => {
+            const custom = hostOptions.find((item) => isCustomIngestEndpoint(item.id));
+            if (custom) {
+              onSelect(custom.id);
+            }
+          }}
+        >
+          <strong>Custom URL</strong>
+          <span>Provide your own ingest endpoint.</span>
+        </button>
       ) : null}
     </div>
   );
@@ -134,23 +138,23 @@ export function DestinationGrid({
 
 function DestinationProviderRow({
   provider,
-  selectedId,
   selectedHost,
   hostOptions,
   disabled,
+  regions,
   onSelect,
 }: {
   provider: (typeof PROVIDERS)[number];
-  selectedId: string;
   selectedHost: CloudEncodeHostId | null;
   hostOptions: IngestEndpointOption[];
   disabled: boolean;
+  regions: readonly (typeof REGIONS)[number][];
   onSelect: (ingestEndpointId: string) => void;
 }) {
   return (
     <>
       <div className="destination-grid-rowhead">{PROVIDER_LABEL[provider]}</div>
-      {REGIONS.map((region) => {
+      {regions.map((region) => {
         const host = ENCODE_HOSTS.find((item) => item.provider === provider && item.region === region);
         if (!host) {
           return <div key={`${provider}-${region}`} className="destination-cell empty" />;
@@ -171,7 +175,7 @@ function DestinationProviderRow({
               option
                 ? available
                   ? `${host.label} · ${softwareLabel(option.id)}`
-                  : `${host.label} — Not deployed`
+                  : `${host.label} — ${unavailableDestLabel(option.detail)}`
                 : `${host.label} — Not available for this protocol`
             }
             aria-pressed={selected}
@@ -182,7 +186,11 @@ function DestinationProviderRow({
             }}
           >
             <strong>{liveId ? softwareLabel(liveId) : "—"}</strong>
-            <span>{available ? host.subtitle : "Not deployed"}</span>
+            <span>
+              {available
+                ? host.subtitle
+                : unavailableDestLabel(option?.detail)}
+            </span>
           </button>
         );
       })}

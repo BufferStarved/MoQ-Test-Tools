@@ -20,10 +20,19 @@ export interface VerdictHighlight {
   protocol?: string | null;
 }
 
+export interface PaintLine {
+  label: string;
+  painted: boolean;
+  frames: number;
+  vmaf?: string;
+}
+
 export interface ComparisonVerdict {
   /** One plain-language sentence for architects. */
   headline: string;
   highlights: VerdictHighlight[];
+  /** Per-leg paint / VMAF, not CSV averages (those can read as 0 after a real paint). */
+  paintLines: PaintLine[];
 }
 
 function finitePositive(value?: number | null): value is number {
@@ -165,6 +174,33 @@ function streamRtt(result: ResultSummary): number | undefined {
   return finitePositive(rtt) ? rtt : undefined;
 }
 
+export function streamPaintedFrames(result: ResultSummary): number {
+  let max = 0;
+  for (const row of result.rows ?? []) {
+    const n = Number(row.playback_frames_rendered ?? 0);
+    if (Number.isFinite(n) && n > max) {
+      max = n;
+    }
+  }
+  if (max > 0) {
+    return max;
+  }
+  const avg = result.averages?.playback_frames_rendered;
+  return Number.isFinite(avg) && (avg ?? 0) > 0 ? Math.round(avg as number) : 0;
+}
+
+function streamVmafLabel(result: ResultSummary): string | undefined {
+  const ingest = result.quality?.ingest?.vmaf_score;
+  const encoder = result.quality?.encoder?.vmaf_score;
+  if (Number.isFinite(ingest) && (ingest ?? 0) > 0) {
+    return `VMAF ${Number(ingest).toFixed(1)}`;
+  }
+  if (Number.isFinite(encoder) && (encoder ?? 0) > 0) {
+    return `encoder VMAF ${Number(encoder).toFixed(1)}`;
+  }
+  return undefined;
+}
+
 function streamPlaybackFps(result: ResultSummary): number | undefined {
   const avg = result.averages ?? {};
   if (finitePositive(avg.playback_fps)) {
@@ -185,8 +221,29 @@ export function buildComparisonVerdict(
   streams: ResultSummary[],
   labels?: string[],
 ): ComparisonVerdict | null {
-  if (streams.length < 2) {
+  if (streams.length < 1) {
     return null;
+  }
+
+  const paintLines: PaintLine[] = streams.map((result, index) => {
+    const frames = streamPaintedFrames(result);
+    return {
+      label: streamName(result, index, labels),
+      painted: frames > 0,
+      frames,
+      vmaf: streamVmafLabel(result),
+    };
+  });
+
+  if (streams.length < 2) {
+    const line = paintLines[0];
+    return {
+      headline: line.painted
+        ? `${line.label} painted (${line.frames} frames).`
+        : `${line.label} showed no video.`,
+      highlights: [],
+      paintLines,
+    };
   }
 
   const highlights: VerdictHighlight[] = [];
@@ -236,7 +293,7 @@ export function buildComparisonVerdict(
     E2E_SCOPE_INGEST_TO_GLASS,
     E2E_SCOPE_CAPTURE_TO_GLASS,
     E2E_SCOPE_CAPTURE_TO_INGEST,
-  ]) {
+  ] as const) {
     if (!scopesPresent.has(scope)) {
       continue;
     }
@@ -338,7 +395,15 @@ export function buildComparisonVerdict(
     });
   }
 
-  if (highlights.length === 0) {
+  const stalled = paintLines.filter((line) => !line.painted);
+  const paintLead =
+    stalled.length === 0
+      ? "Every tile painted."
+      : stalled.length === paintLines.length
+        ? "No tile painted — catalog-ready is not success."
+        : `${stalled.map((line) => line.label).join(", ")} showed no video.`;
+
+  if (highlights.length === 0 && paintLines.length === 0) {
     return null;
   }
 
@@ -347,10 +412,10 @@ export function buildComparisonVerdict(
   const headlineParts = glassParts.length > 0 ? glassParts : joinParts;
   const headline =
     headlineParts.length > 0
-      ? `${headlineParts.slice(0, 2).join(" · ")}.`
-      : "Comparison finished — review the scorecard below.";
+      ? `${paintLead} ${headlineParts.slice(0, 2).join(" · ")}.`
+      : paintLead;
 
-  return { headline, highlights };
+  return { headline, highlights, paintLines };
 }
 
 /** Live glance metrics from the latest sample while a run is in progress. */
