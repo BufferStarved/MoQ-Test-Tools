@@ -20,7 +20,9 @@ const whepPlayer = fs.readFileSync(
   "utf8",
 );
 assert.match(whepPlayer, /classifyWhepEndVerdict/);
+assert.match(whepPlayer, /whepHasRenderedMedia/);
 assert.match(whepPlayer, /playbackGate === "ended"/);
+assert.doesNotMatch(whepPlayer, /ttffMs > 0 \|\| sessionRef\.current\.maxVideoTime/);
 assert.doesNotMatch(
   whepPlayer,
   /if \(playbackGate !== "live"\) \{\s*setError\(null\)/,

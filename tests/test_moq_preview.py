@@ -25,13 +25,13 @@ class MoqPreviewReadyGateTests(unittest.TestCase):
             )
         )
 
-    def test_no_poller_falls_back_after_deadline(self):
+    def test_no_poller_does_not_grace_into_ready(self):
         self.assertFalse(
             should_mark_moq_preview_ready(
                 publish_confirmed=False, poller_enabled=False, past_deadline=False
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             should_mark_moq_preview_ready(
                 publish_confirmed=False, poller_enabled=False, past_deadline=True
             )

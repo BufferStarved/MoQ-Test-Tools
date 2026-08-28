@@ -14,6 +14,8 @@ import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndV
 export const MOQ_ALL_TRACKS_REFUSED = 4867;
 export const MOQ_SUBSCRIPTION_REFUSED = 4866;
 export const MOQ_LOAD_FAILED = 4865;
+/** Draft-18 SUBSCRIBE_ERROR "no such namespace or track" (playa may pass this raw). */
+export const MOQ_NO_SUCH_NAMESPACE = 0x10;
 /** playa / WebTransport "Connection lost" — transient, reconnect. */
 export const MOQ_CONNECTION_LOST = 4099;
 
@@ -199,7 +201,14 @@ export function isPublisherNotReadyError(code: number): boolean {
   return (
     code === MOQ_ALL_TRACKS_REFUSED ||
     code === MOQ_SUBSCRIPTION_REFUSED ||
-    code === MOQ_LOAD_FAILED
+    code === MOQ_LOAD_FAILED ||
+    code === MOQ_NO_SUCH_NAMESPACE
+  );
+}
+
+export function isSubscribeRejectedLog(text?: string | null): boolean {
+  return /no such namespace or track|code[=:]?\s*0x10\b|subscribe.*rejected/i.test(
+    text || "",
   );
 }
 
@@ -274,12 +283,42 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("sender attach failed") ||
     text.includes("obs websocket") ||
     text.includes("startstream failed") ||
-    text.includes("openmoq-plugin")
+    text.includes("openmoq-plugin") ||
+    text.includes("rtmp publish failed") ||
+    text.includes("whip publish failed") ||
+    text.includes("srt publish failed")
   );
 }
 
+function publishKindFromError(
+  error: string,
+  protocol?: string | null,
+): "moq" | "rtmp" | "webrtc" | "srt" | "other" {
+  const proto = (protocol || "").toLowerCase();
+  if (proto === "moq" || proto === "rtmp" || proto === "webrtc" || proto === "srt") {
+    return proto;
+  }
+  const text = error.toLowerCase();
+  if (/moq5|moq-relay|cmaf init|pipe:1/.test(text)) {
+    return "moq";
+  }
+  if (/rtmp:\/\//.test(text) || /rtmp publish failed/.test(text)) {
+    return "rtmp";
+  }
+  if (/\bwhip\b|\bwhep\b/.test(text)) {
+    return "webrtc";
+  }
+  if (/srt:\/\//.test(text)) {
+    return "srt";
+  }
+  return "other";
+}
+
 /** Tester-facing job error — capture failures must not read as a catalog miss. */
-export function humanizeJobError(error?: string | null): string | null {
+export function humanizeJobError(
+  error?: string | null,
+  options?: { protocol?: string | null },
+): string | null {
   const raw = (error || "").trim();
   if (!raw) {
     return null;
@@ -291,6 +330,7 @@ export function humanizeJobError(error?: string | null): string | null {
     return raw;
   }
   const first = raw.split("\n")[0].replace(/\s+/g, " ").trim();
+  const kind = publishKindFromError(raw, options?.protocol);
   const modeMatch =
     raw.match(/supported modes?\s*(?:are\s*)?:?\s*[^\n.]+/i) ||
     raw.match(/1920x1080@\d+fps/i);
@@ -301,6 +341,22 @@ export function humanizeJobError(error?: string | null): string | null {
       mode ? `This device reported: ${mode}.` : first,
       "This is not a player or catalog problem. Use Cloud playout or Browser, or a camera mode the device actually supports.",
     ].join(" ");
+  }
+  const ffmpegCode = raw.match(/ffmpeg(?: exited with code)?\s+(\d+)/i)?.[1];
+  if (kind === "rtmp") {
+    return ffmpegCode
+      ? `RTMP publish failed (ffmpeg ${ffmpegCode}). The ingest closed the connection — this is not a MoQ publisher pipe.`
+      : "RTMP publish failed. The ingest closed the connection — this is not a MoQ publisher pipe.";
+  }
+  if (kind === "webrtc") {
+    return ffmpegCode
+      ? `WHIP publish failed (ffmpeg ${ffmpegCode}). The MediaMTX WHIP session ended before encode finished.`
+      : "WHIP publish failed. The MediaMTX WHIP session ended before encode finished.";
+  }
+  if (kind === "srt") {
+    return ffmpegCode
+      ? `SRT publish failed (ffmpeg ${ffmpegCode}). The ingest closed the connection.`
+      : "SRT publish failed. The ingest closed the connection.";
   }
   if (/^\[errno 5\]\s*input\/output error$/i.test(raw) || /^input\/output error$/i.test(raw)) {
     return (
@@ -332,20 +388,22 @@ export function humanizeJobError(error?: string | null): string | null {
 export function playerErrorForFailedJob(options: {
   jobStatus?: string;
   jobError?: string | null;
+  protocol?: string | null;
 }): string | null {
+  const shown = humanizeJobError(options.jobError, { protocol: options.protocol });
   if (options.jobStatus === "failed") {
-    return humanizeJobError(options.jobError);
+    return shown;
   }
   if (
     options.jobStatus === "completed" &&
     /cancelled while waiting for a cloud encode slot/i.test(options.jobError || "")
   ) {
-    return humanizeJobError(options.jobError);
+    return shown;
   }
   // Pipe-close / ffmpeg 224 often lands while status is still "running".
   // Do not wait for the job to flip failed before telling the truth.
   if (isCaptureOrPublishError(options.jobError)) {
-    return humanizeJobError(options.jobError);
+    return shown;
   }
   return null;
 }
@@ -397,11 +455,13 @@ export function noMediaFailMessage(options: {
       ? `MoQ publisher never announced namespace ${ns} on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.`
       : "MoQ publisher never announced the namespace on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.";
   }
-  if (options.jobStatus === "completed") {
+  if (options.jobStatus === "completed" || options.jobStatus === "failed") {
     return ns
       ? `MoQ publisher never announced namespace ${ns} on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.`
       : "MoQ publisher never announced the namespace on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.";
   }
+  // preview_ready is now moqx announce only. If that is true and playa
+  // never saw 0x10, the catalog object itself missed this player.
   if (options.previewReady === true) {
     return ns
       ? `MoQ namespace ${ns} is live on the relay but the catalog object never reached this player (one-shot catalog miss).`

@@ -440,7 +440,7 @@ export function fetchZixiSrtDebug(params?: {
   return request(`/debug/zixi-srt${suffix}`);
 }
 
-export function fetchMoqProbe(relayAdmin = "http://34.28.164.90:8000"): Promise<{
+export function fetchMoqProbe(relayAdmin: string): Promise<{
   relay_admin: string;
   reachable: boolean;
   subscribe_success: number | null;
@@ -454,7 +454,11 @@ export function fetchMoqProbe(relayAdmin = "http://34.28.164.90:8000"): Promise<
   window_basis?: string;
   checks: string[];
 }> {
-  const query = new URLSearchParams({ relay_admin: relayAdmin });
+  const admin = (relayAdmin || "").trim();
+  if (!admin) {
+    throw new Error("relay_admin is required; leftover :8000 is not a default");
+  }
+  const query = new URLSearchParams({ relay_admin: admin });
   return request(`/moq/probe?${query.toString()}`);
 }
 

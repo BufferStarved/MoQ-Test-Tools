@@ -160,7 +160,7 @@ _MOQ_PREVIEW_GRACE_SEC_LIVE_MAX = 30.0
 # libx264 prints per-frame QP/NAL stats on SIGTERM teardown. That dump is
 # normal encoder shutdown, not a codec crash — keep it out of UI errors.
 _FFMPEG_TEARDOWN_NOISE = re.compile(
-    r"^(?:frame=\s*\d+|x264 \[info\]: frame )",
+    r"^(?:frame=\s*\d+|x264 \[info\]: frame |\[libx264 @|\[aac @)",
     re.IGNORECASE,
 )
 _FFMPEG_SIGTERM_LOG = re.compile(
@@ -2789,10 +2789,16 @@ class UploadService:
                         f"{self._tail_file(publisher_log_path)}\n"
                         f"{self._tail_file(publisher_stdout_path)}"
                     )
-                    publish_confirmed = (
-                        moqx_poller.enabled
-                        and moqx_poller.publish_namespace_success_delta() >= 1
-                    ) or publisher_catalog_published(pub_ready_log)
+                    # Local "sender ready" is not a relay announce. East
+                    # comparison 30: moqx_ns=0 the whole run while local
+                    # logs flipped preview_ready and the player called it
+                    # a one-shot miss.
+                    if moqx_poller.observing:
+                        publish_confirmed = (
+                            moqx_poller.publish_namespace_success_delta() >= 1
+                        )
+                    else:
+                        publish_confirmed = publisher_catalog_published(pub_ready_log)
                     if should_mark_moq_preview_ready(
                         publish_confirmed=publish_confirmed,
                         poller_enabled=moqx_poller.observing,
@@ -3330,7 +3336,12 @@ class UploadService:
             )
         return UploadResult(
             success=False,
-            error=self._ffmpeg_failure_message(process, log_path, stderr=stderr),
+            error=self._ffmpeg_failure_message(
+                process,
+                log_path,
+                stderr=stderr,
+                protocol=(job.destination.protocol or ""),
+            ),
         )
 
     def _unexpected_sigterm_message(
@@ -3371,6 +3382,7 @@ class UploadService:
         log_path: str = "",
         *,
         stderr: str = "",
+        protocol: str = "",
     ) -> str:
         if not stderr:
             stderr = self._ffmpeg_stderr_text(process, log_path)
@@ -3381,6 +3393,7 @@ class UploadService:
             )
         detail = ffmpeg_stderr_useful_detail(stderr) or "unknown error"
         message = f"ffmpeg exited with code {process.returncode}: {detail}"
+        proto = (protocol or "").lower()
         if "Input/output error" in stderr and (
             "avfoundation" in stderr.lower() or "v4l2" in stderr.lower()
         ):
@@ -3388,8 +3401,25 @@ class UploadService:
                 f"camera I/O error: {message} The camera may be busy, unplugged, "
                 "or already open in another app (AVFoundation exclusive open)."
             )
-        elif looks_like_closed_pipe_eio(stderr) or looks_like_closed_pipe_eio(message):
+        elif proto == "moq" and (
+            looks_like_closed_pipe_eio(stderr) or looks_like_closed_pipe_eio(message)
+        ):
             message = combine_ffmpeg_closed_pipe_error(message, "")
+        elif proto == "rtmp":
+            message = (
+                f"RTMP publish failed (ffmpeg {process.returncode}): {detail}. "
+                "The ingest closed the connection — this is not a MoQ publisher pipe."
+            )
+        elif proto == "webrtc":
+            message = (
+                f"WHIP publish failed (ffmpeg {process.returncode}): {detail}. "
+                "The MediaMTX WHIP session ended before encode finished."
+            )
+        elif proto == "srt":
+            message = (
+                f"SRT publish failed (ffmpeg {process.returncode}): {detail}. "
+                "The ingest closed the connection — this is not a MoQ publisher pipe."
+            )
         if "Input/output error" in stderr and "rtmp://" in stderr.lower():
             message += (
                 " Zixi RTMP push requires an ONLINE push input whose Stream ID matches "

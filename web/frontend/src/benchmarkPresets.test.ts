@@ -44,6 +44,7 @@ function stubPreset(id: string): Preset {
     env_vars: [],
     requires_env: false,
     web_available: true,
+    url: `https://example.test/${id}`,
   };
 }
 

@@ -107,6 +107,61 @@ class FfmpegFailureMessageTests(unittest.TestCase):
         self.assertIn("Immediate exit requested", message)
         self.assertIn("Conversion failed", message)
 
+    def test_rtmp_closed_pipe_is_not_cmaf_stdin(self) -> None:
+        process = MagicMock()
+        process.returncode = 224
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"[libx264 @ 0x58] frame I:1 Avg QP: 9.29 size: 3417\n"
+            b"Error muxing a packet\n"
+            b"Error writing trailer: Input/output error\n"
+            b"Conversion failed!\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertIn("RTMP publish failed", message)
+        self.assertIn("224", message)
+        self.assertNotIn("CMAF init", message)
+        self.assertNotIn("closed publisher pipe", message)
+        self.assertNotIn("frame I:1", message)
+
+    def test_srt_closed_pipe_is_not_cmaf_stdin(self) -> None:
+        process = MagicMock()
+        process.returncode = 1
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"Error writing trailer: Input/output error\n"
+            b"Conversion failed!\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="srt")
+        self.assertIn("SRT publish failed", message)
+        self.assertNotIn("CMAF init", message)
+        self.assertNotIn("closed publisher pipe", message)
+
+    def test_webrtc_245_is_whip_not_cmaf_pipe(self) -> None:
+        process = MagicMock()
+        process.returncode = 245
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"[out#0/whip @ 0x5fa] video:5920KiB audio:232KiB\n"
+            b"Conversion failed!\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="webrtc")
+        self.assertIn("WHIP publish failed", message)
+        self.assertIn("245", message)
+        self.assertNotIn("closed publisher pipe", message)
+
+    def test_moq_closed_pipe_keeps_cmaf_hint(self) -> None:
+        process = MagicMock()
+        process.returncode = 224
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"Error writing trailer: Input/output error\n"
+            b"Error muxing a packet\n"
+            b"Conversion failed!\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="moq")
+        self.assertIn("closed publisher pipe", message)
+
 
 class EastWhipLoopbackTests(unittest.TestCase):
     def test_east_whip_is_not_rewritten_to_central_loopback(self) -> None:

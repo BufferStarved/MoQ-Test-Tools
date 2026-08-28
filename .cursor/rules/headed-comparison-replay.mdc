@@ -1,0 +1,16 @@
+---
+description: Headed comparison bugs must land as replay fixtures the regression gate runs
+alwaysApply: true
+---
+
+# Headed comparison replay
+
+A headed run is not the first place a catalog/pipe/CSV lie should appear.
+
+When a comparison CSV or HUD shows a wrong user-facing story (one-shot miss, CMAF pipe on RTMP, Playback OK with 0 paint, Playback OK after a mid-clip stall, 6 series from 4 dests, leftover `:8000` scrape of a `:14433` job):
+
+1. Add the **last CSV row per stream + HUD lines** to `web/frontend/src/comparisonReplay.test.ts` (or a sibling fixture). Replay must go through `comparisonReplay.ts` — the same composition the tiles use (`playaLines` → `isSubscribeRejectedLog`, `humanizeJobError({ protocol })`, `mpegTsMayMarkPlaybackOk`, `classifyHlsEndVerdict`).
+2. Add a **wiring** assert in `web/frontend/scripts/unit-headed-contracts.mjs` if the bug was "function correct, call site forgot." Isolated `noMediaFailMessage({ subscribeRejected: true })` tests do not catch that.
+3. Do not call the bug fixed until `./scripts/run-regression.sh` runs that test. That script must keep `node --experimental-strip-types --test` on `web/frontend/src/**/*.test.ts` — the `*.test.ts` files are not optional extras.
+
+Headed West `:14433` paint (`rendered > 0`) is still required to prove media. It is not a substitute for replaying the last failed CSV.

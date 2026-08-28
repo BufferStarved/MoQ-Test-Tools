@@ -13,6 +13,7 @@ import {
   isCaptureOrPublishError,
   isPlayableCatalogReady,
   isPublisherNotReadyError,
+  isSubscribeRejectedLog,
   moqHasRenderedMedia,
   moqRenderSink,
   noMediaFailMessage,
@@ -89,6 +90,11 @@ describe("shouldKeepSessionOnSubscribeError", () => {
       true,
     );
     assert.equal(isPublisherNotReadyError(4865), true);
+    assert.equal(isPublisherNotReadyError(0x10), true);
+    assert.equal(
+      shouldKeepSessionOnSubscribeError({ firstFrame: false, code: 0x10 }),
+      true,
+    );
   });
 
   it("does not swallow a mid-play fatal", () => {
@@ -283,6 +289,52 @@ describe("noMediaFailMessage", () => {
       }),
       /publisher pipe closed/i,
     );
+  });
+
+  it("does not call a playa 0x10 warn a one-shot miss when preview_ready lied", () => {
+    const message = noMediaFailMessage({
+      catalogReady: false,
+      namespace: "bench-9f5befdb",
+      jobStatus: "running",
+      previewReady: true,
+      subscribeRejected: true,
+    });
+    assert.match(message, /never announced namespace bench-9f5befdb/i);
+    assert.doesNotMatch(message, /catalog object never reached/i);
+    assert.doesNotMatch(message, /namespace bench-9f5befdb is live/i);
+  });
+});
+
+describe("isSubscribeRejectedLog", () => {
+  it("treats playa catalog 0x10 warns as publisher-not-ready", () => {
+    assert.equal(
+      isSubscribeRejectedLog(
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+      ),
+      true,
+    );
+    assert.equal(isSubscribeRejectedLog("playa_warn Watchdog timeout: catalog_received"), false);
+  });
+});
+
+describe("humanizeJobError protocol", () => {
+  const rtmp224 =
+    "ffmpeg I/O error: ffmpeg exited with code 224: Conversion failed!. The encoder wrote to a closed publisher pipe (publisher exited before CMAF init, or stdin was not attached yet).";
+  const whip245 =
+    "ffmpeg exited with code 245: [out#0/whip @ 0x5fa1a4001e80] Conversion failed!";
+
+  it("does not dress RTMP 224 as a MoQ CMAF pipe", () => {
+    const shown = humanizeJobError(rtmp224, { protocol: "rtmp" }) ?? "";
+    assert.match(shown, /RTMP publish failed \(ffmpeg 224\)/i);
+    assert.doesNotMatch(shown, /CMAF init/i);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
+  });
+
+  it("names WHIP 245 as a MediaMTX session end", () => {
+    const shown = humanizeJobError(whip245, { protocol: "webrtc" }) ?? "";
+    assert.match(shown, /WHIP publish failed/i);
+    assert.match(shown, /245/);
+    assert.doesNotMatch(shown, /publisher pipe/i);
   });
 });
 

@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ingest = fs.readFileSync(path.join(root, "src/ingestEndpoints.ts"), "utf8");
 const endpoint = fs.readFileSync(path.join(root, "src/EndpointSection.tsx"), "utf8");
+const destGrid = fs.readFileSync(path.join(root, "src/DestinationGrid.tsx"), "utf8");
+const destModel = fs.readFileSync(path.join(root, "src/destinationGridModel.ts"), "utf8");
 const placement = fs.readFileSync(path.join(root, "../../src/cloud_placement.py"), "utf8");
 
 for (const label of [
@@ -33,8 +35,10 @@ assert.match(ingest, /cloudRegion: "us-east-2"/);
 assert.match(ingest, /Dallas/);
 assert.match(ingest, /:14433/);
 assert.match(ingest, /Not deployed/);
-assert.match(endpoint, /Not deployed/);
-assert.match(endpoint, /disabled=\{!item\.available/);
+assert.match(destModel, /Not deployed/);
+assert.match(destGrid, /unavailableDestLabel/);
+assert.match(endpoint, /DestinationGrid/);
+assert.match(destGrid, /disabled=\{disabled \|\| \(!item\.available/);
 assert.doesNotMatch(ingest, /label: "OpenMOQ · GCP us-central1"/);
 
 const unit = spawnSync(

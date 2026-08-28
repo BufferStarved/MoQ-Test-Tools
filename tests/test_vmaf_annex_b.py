@@ -22,7 +22,7 @@ class VmafAnnexBTests(unittest.TestCase):
         self.assertTrue(_looks_like_annex_b(path))
         self.assertEqual(
             _ffmpeg_input_args(str(path)),
-            ["-f", "h264", "-framerate", "30", "-i", str(path)],
+            ["-f", "h264", "-framerate", "30", "-t", "8", "-i", str(path)],
         )
 
     def test_real_mp4_is_not_forced_h264(self) -> None:
@@ -31,7 +31,7 @@ class VmafAnnexBTests(unittest.TestCase):
             handle.write(b"\x00\x00\x00\x18ftypisom")
         self.addCleanup(path.unlink)
         self.assertFalse(_looks_like_annex_b(path))
-        self.assertEqual(_ffmpeg_input_args(str(path)), ["-i", str(path)])
+        self.assertEqual(_ffmpeg_input_args(str(path)), ["-t", "8", "-i", str(path)])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ import {
   persistJobRebuffer,
   readVideoFrameStats,
 } from "../videoPlaybackMetrics";
+import { playbackCoveredEncode, stallAgainstEncodeMessage } from "../playbackEndVerdict";
 
 interface DashPlayerProps {
   url: string;
@@ -34,6 +35,9 @@ interface DashPlayerProps {
   bridgeLagMs?: number;
   encoderLagMs?: number;
   playbackPolicy?: "live-edge" | "complete";
+  encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }
 
 /**
@@ -71,8 +75,12 @@ export default function DashPlayer({
   bridgeLagMs = 0,
   encoderLagMs = 0,
   playbackPolicy = "live-edge",
+  encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
 }: DashPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const lastErrorRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState("Loading DASH player...");
   const rebufferRef = useRef(new RebufferTracker());
@@ -191,6 +199,41 @@ export default function DashPlayer({
     }
 
     if (playbackGate !== "live") {
+      if (playbackGate === "ended") {
+        const painted = sessionRef.current.maxVideoTime > 0.25;
+        if (
+          painted &&
+          (encodeDurationSec || encodeElapsedSec) &&
+          !playbackCoveredEncode({
+            videoTimeSec: sessionRef.current.maxVideoTime,
+            encodeDurationSec,
+            encodeElapsedSec,
+            runStopped,
+          })
+        ) {
+          const message = stallAgainstEncodeMessage({
+            protocolLabel: "DASH",
+            videoTimeSec: sessionRef.current.maxVideoTime,
+            encodeDurationSec,
+            encodeElapsedSec,
+            runStopped,
+          });
+          lastErrorRef.current = message;
+          setError(message);
+          setStatus("Failed (see diagnostics)");
+        } else if (painted) {
+          setError(null);
+          setStatus("Playback OK");
+        } else {
+          const message =
+            lastErrorRef.current ||
+            "DASH never painted. Encode-only is not playback — the MPD 404'd or the packager never cut a segment.";
+          lastErrorRef.current = message;
+          setError(message);
+          setStatus("Failed (see diagnostics)");
+        }
+        return;
+      }
       setError(null);
       setStatus(
         playbackGate === "waiting" ? "Waiting for live DASH..." : "Waiting for encode...",
@@ -310,16 +353,17 @@ export default function DashPlayer({
         const message = e?.error?.message || "";
         const played = sessionRef.current.maxVideoTime > 0.25 || sessionRef.current.ttffMs > 0;
         if (played && /404|manifest|MPD/i.test(message)) {
+          lastErrorRef.current = null;
           setError(null);
           setStatus("Playback OK");
           return;
         }
         const detail = message ? ` (${message})` : "";
-        setError(
-          lowLatencyMode
-            ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
-            : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`,
-        );
+        const shown = lowLatencyMode
+          ? `LL-DASH playback failed${detail}. Is MediaMTX live and the LL-DASH packager running?`
+          : `DASH playback failed${detail}. Is the stream live and DASH enabled on Zixi?`;
+        lastErrorRef.current = shown;
+        setError(shown);
       }) as Parameters<typeof instance.on>[1]);
       // First media segment response completed. Anything between the MPD
       // arriving and this instant is the packager still cutting a segment the

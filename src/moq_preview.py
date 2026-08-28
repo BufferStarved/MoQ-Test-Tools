@@ -14,18 +14,15 @@ def should_mark_moq_preview_ready(
     poller_enabled: bool,
     past_deadline: bool,
 ) -> bool:
-    """True only when this job's namespace is known-live, or we cannot observe.
+    """True only when this job's namespace is known-live on the relay.
 
-    If the moqx admin poller is enabled, never time out into "ready" — an empty
-    east/Linode relay used to look identical to a slow publish and the player
-    joined with a guaranteed 0x10. When metrics are not configured at all,
-    keep the old bounded fallback so VOD is not stuck forever.
+    Grace-deadline "ready" made an empty east relay look live
+    (bench-9f5befdb / bench-2c3781c5: moqx_ns=0, player 0x10, UI said
+    one-shot catalog miss). The player already subscribes on job=running.
+    ``past_deadline`` is unused; keep the argument so call sites stay.
     """
-    if publish_confirmed:
-        return True
-    if poller_enabled:
-        return False
-    return past_deadline
+    del poller_enabled, past_deadline
+    return bool(publish_confirmed)
 
 
 def moq_job_should_fail_without_namespace(

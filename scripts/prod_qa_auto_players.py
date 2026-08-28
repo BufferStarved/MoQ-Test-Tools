@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from moqx_stats import admin_base_url_for_endpoint  # noqa: E402
+
 BASE_URL = os.environ.get("BASE_URL", "https://moq.sean-mccarthy.net").rstrip("/")
 DURATION = int(os.environ.get("DURATION", "24"))
 MEDIA = Path(os.environ.get("MEDIA", str(ROOT / "dummy.mp4")))
@@ -71,10 +74,10 @@ AUTO_LEGS = [
         "id": "moq_relay_auto",
         "label": "Stream 3 (MoQ)",
         "protocol": "moq",
-        "preset_id": "moq_gcp_relay",
+        "preset_id": "moq_gcp_relay_d18",
         "auto_player": "moq",
         "playback": "moq",
-        "playback_url": "https://34-28-164-90.sslip.io:4433/moq-relay",
+        "playback_url": "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
         "expect_preview": False,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps", "fps"),
         "bitrate_floor_kbps": 500,
@@ -451,7 +454,9 @@ def run_vod(report: SuiteReport) -> None:
                 post_playback_sample(jid, "hls", True)
         elif leg["playback"] == "moq":
             try:
-                probe = api("GET", "/api/moq/probe")
+                admin = admin_base_url_for_endpoint(str(leg.get("playback_url") or ""))
+                query = urllib.parse.urlencode({"relay_admin": admin})
+                probe = api("GET", f"/api/moq/probe?{query}")
                 report.add(
                     f"{leg['id']}_moq_probe",
                     bool(probe.get("reachable")),

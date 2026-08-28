@@ -50,7 +50,7 @@ class BbbDeploySurviveTests(unittest.TestCase):
     def test_ingest_agent_health_does_not_probe_recorder(self) -> None:
         text = (ROOT / "ingest_agent" / "main.py").read_text()
         self.assertNotIn("[MOQ_RECORDER_BIN, \"--probe\"]", text)
-        self.assertIn("Do not subprocess --probe here", text)
+        self.assertIn("do not `--probe`", text)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,11 @@ import {
 import { isPlausibleE2eMs, pathDelayMs } from "../glassLatency";
 import { isGracefulWhepDisconnect, unwrapFastApiDetail } from "../playbackEos";
 import { startWhepSession, waitForWhepIceTerminal, waitForWhepMedia, type WhepSession } from "../whepSession";
-import { classifyWhepEndVerdict, whepPlaybackBufferSec } from "../webrtcPlayback";
+import {
+  classifyWhepEndVerdict,
+  whepHasRenderedMedia,
+  whepPlaybackBufferSec,
+} from "../webrtcPlayback";
 
 interface WhepPlayerProps {
   url: string;
@@ -505,8 +509,9 @@ export default function WhepPlayer({
           if (destroyed) {
             return;
           }
-          const playedOk =
-            sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+          const playedOk = whepHasRenderedMedia({
+            framesRendered: sessionRef.current.framesRendered,
+          });
           if (
             isGracefulWhepDisconnect({
               playedOk,
@@ -537,8 +542,9 @@ export default function WhepPlayer({
             return;
           }
           sessionRef.current.errorCount += 1;
-          const playedOk =
-            sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+          const playedOk = whepHasRenderedMedia({
+            framesRendered: sessionRef.current.framesRendered,
+          });
           const iceMatch = /WHEP ICE (failed|disconnected|closed)/i.exec(
             err instanceof Error ? err.message : "",
           );

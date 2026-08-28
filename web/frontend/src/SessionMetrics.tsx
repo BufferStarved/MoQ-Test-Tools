@@ -216,6 +216,17 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
 
   return (
     <div className="session-metrics">
+      {engineCaveats.length > 0 && (
+        <div className="results-caveat">
+          <span className="decision-board-kicker">Comparison caveat</span>
+          {engineCaveats.map((entry) => (
+            <p key={entry.label} className="results-caveat-line">
+              <strong>{entry.label}:</strong> {entry.caveat}
+            </p>
+          ))}
+        </div>
+      )}
+
       {verdict && (
         <div className="results-verdict">
           <span className="decision-board-kicker">Verdict</span>
@@ -246,17 +257,6 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
               </div>
             ))}
           </div>
-        </div>
-      )}
-
-      {engineCaveats.length > 0 && (
-        <div className="results-caveat">
-          <span className="decision-board-kicker">Comparison caveat</span>
-          {engineCaveats.map((entry) => (
-            <p key={entry.label} className="results-caveat-line">
-              <strong>{entry.label}:</strong> {entry.caveat}
-            </p>
-          ))}
         </div>
       )}
 

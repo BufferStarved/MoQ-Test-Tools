@@ -60,8 +60,10 @@ assert.match(helper, /moq\.sean-mccarthy\.net/);
 assert.doesNotMatch(helper, /git clone --branch feat\/moq-draft-18/);
 assert.doesNotMatch(helper, /LOCAL_PUBLISHER_API=\$\{api\}.*sean-mccarthy/);
 const setup = fs.readFileSync(path.join(root, "LocalPublisherSetup.tsx"), "utf8");
-assert.match(setup, /Laptop webcam encode is not available on the public site/);
+assert.match(setup, /not a shared operator webcam/);
+assert.match(setup, /isPublicOrchestrator/);
 assert.doesNotMatch(setup, /Laptop helper/);
+assert.doesNotMatch(setup, /Laptop webcam encode is not available on the public site/);
 assert.doesNotMatch(setup, /LOCAL_PUBLISHER_API=https:\/\/moq/);
 
 const dest = fs.readFileSync(path.join(root, "../../../src/destinations.py"), "utf8");

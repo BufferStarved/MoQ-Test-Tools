@@ -1807,14 +1807,23 @@ from moq_relay_certs import fingerprint_for_host
 
 
 @app.get("/api/moq/probe")
-def moq_probe(relay_admin: str = "http://34.28.164.90:8000"):
+def moq_probe(relay_admin: str = ""):
     """Fetch moqx relay subscribe/publish metrics for playback diagnostics.
 
     Lifetime Prometheus totals stay in the top-level fields (backward
     compatible). ``window`` is the delta since the previous probe of this
     same admin URL — that is what ``relay_playback_broken`` uses, so a busy
     relay's historical ``track_not_exist`` count cannot fail a healthy job.
+
+    ``relay_admin`` is required. The leftover draft-16 admin on ``:8000``
+    is not a default — scraping it for a ``:14433`` job watches the other
+    container and reports a false never-announced.
     """
+    if not (relay_admin or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="relay_admin is required; leftover :8000 is not a default",
+        )
     from moqx_stats import (
         interpret_moqx_probe,
         parse_moqx_metrics,

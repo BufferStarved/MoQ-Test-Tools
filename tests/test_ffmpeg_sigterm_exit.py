@@ -83,6 +83,17 @@ class FfmpegSigtermDetectionTests(unittest.TestCase):
         self.assertNotIn("frame=  124", detail)
         self.assertNotIn("x264 [info]", detail)
 
+    def test_libx264_qp_dump_is_stripped(self) -> None:
+        detail = ffmpeg_stderr_useful_detail(
+            "[libx264 @ 0x58] frame I:1 Avg QP: 9.29 size: 3417\n"
+            "[libx264 @ 0x58] kb/s:1113.46\n"
+            "[aac @ 0x58] Qavg: 0.080\n"
+            "Conversion failed!\n"
+        )
+        self.assertIn("Conversion failed", detail)
+        self.assertNotIn("frame I:1", detail)
+        self.assertNotIn("Qavg", detail)
+
 
 class FfmpegExitOutcomeTests(unittest.TestCase):
     def test_user_stop_is_success_not_crash(self) -> None:

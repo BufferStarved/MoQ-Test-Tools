@@ -90,10 +90,14 @@ class E2eIngestMatrixGateTests(unittest.TestCase):
         self.assertIn("put_start_not_rejected", result.errors)
 
     def test_moq_admin_from_sslip(self) -> None:
-        admin = self.mod.moq_admin_from_relay_url(
+        leftover = self.mod.moq_admin_from_relay_url(
             "https://34-28-164-90.sslip.io:4433/moq-relay"
         )
-        self.assertEqual(admin, "http://34.28.164.90:8000")
+        self.assertEqual(leftover, "http://34.28.164.90:8000")
+        canary = self.mod.moq_admin_from_relay_url(
+            "https://45-79-177-85.sslip.io:14433/moq-relay"
+        )
+        self.assertEqual(canary, "http://45.79.177.85:18000")
 
     def test_moq_requires_webtransport(self) -> None:
         for cases in (self.mod.CASES, self.mod.EAST_CASES, self.mod.LINODE_CASES):
@@ -109,6 +113,19 @@ class E2eIngestMatrixGateTests(unittest.TestCase):
         self.assertEqual(self.mod.chrome_modes_for_case(case), ["hls", "mpegts"])
         mpegts = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_mpegts")
         self.assertTrue(mpegts.get("skip"))
+
+    def test_origin_probe_skips_moq_https(self) -> None:
+        code, _n, note = self.mod.probe_http_origin("https://34-28-164-90.sslip.io:14433/moq-relay")
+        self.assertEqual(code, 0)
+        self.assertEqual(note, "skip_moq")
+
+    def test_zixi_srt_playback_uses_error_concealed_stream(self) -> None:
+        central = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_mpegts")
+        east = next(item for item in self.mod.EAST_CASES if item["id"] == "east_zixi_srt_mpegts")
+        linode = next(item for item in self.mod.LINODE_CASES if item["id"] == "linode_zixi_srt_mpegts")
+        for case in (central, east, linode):
+            self.assertIn("SRT%20Test%20EC", case["url"], case["id"])
+            self.assertNotIn("SRT%20Test.ts", case["url"], case["id"])
 
     def test_live_srt_hls_is_not_skipped(self) -> None:
         case = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_hls")

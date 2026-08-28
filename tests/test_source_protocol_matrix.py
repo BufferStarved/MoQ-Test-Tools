@@ -91,7 +91,7 @@ class SourceProtocolMatrixTests(unittest.TestCase):
             "moq_linode_relay_d18",
         ):
             preset = PRESET_BY_ID.get(preset_id)
-            if preset is None:
+            if preset is None or not (preset.url or "").strip():
                 continue
             self.assertIn(":14433", preset.url, preset_id)
             self.assertNotIn(":4433", preset.url, preset_id)

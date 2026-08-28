@@ -31,6 +31,7 @@ import {
   shouldKeepSessionOnSubscribeError,
   shouldSkipMoqSessionRestart,
   isTransientMoqSessionDrop,
+  isSubscribeRejectedLog,
 } from "../moqCmafPlayback";
 import { moqCmafChasesLiveEdge, type PlaybackPolicy } from "../playbackPolicy";
 import {
@@ -905,7 +906,15 @@ export default function MoqPlayer({
               warn(msg: string, ...args: unknown[]) {
                 try {
                   console.warn("[playa]", msg, ...args);
-                  pushDiag(`playa_warn ${formatPlayaLog(msg, args).slice(0, 180)}`, true);
+                  const line = formatPlayaLog(msg, args);
+                  if (
+                    (isSubscribeRejectedLog(line) || isSubscribeRejectedLog(msg)) &&
+                    !subscribeRejectedRef.current
+                  ) {
+                    subscribeRejectedRef.current = true;
+                    pushDiag("subscribe_0x10_keepalive (playa warn: no such namespace)", true);
+                  }
+                  pushDiag(`playa_warn ${line.slice(0, 180)}`, true);
                 } catch {
                   // Logging must never fail catalog subscribe.
                 }
@@ -913,7 +922,15 @@ export default function MoqPlayer({
               error(msg: string, ...args: unknown[]) {
                 try {
                   console.error("[playa]", msg, ...args);
-                  pushDiag(`playa_err ${formatPlayaLog(msg, args).slice(0, 180)}`, true);
+                  const line = formatPlayaLog(msg, args);
+                  if (
+                    (isSubscribeRejectedLog(line) || isSubscribeRejectedLog(msg)) &&
+                    !subscribeRejectedRef.current
+                  ) {
+                    subscribeRejectedRef.current = true;
+                    pushDiag("subscribe_0x10_keepalive (playa err: no such namespace)", true);
+                  }
+                  pushDiag(`playa_err ${line.slice(0, 180)}`, true);
                 } catch {
                   // Logging must never fail catalog subscribe.
                 }

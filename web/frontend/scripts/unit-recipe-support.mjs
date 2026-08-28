@@ -49,7 +49,7 @@ assert.match(appSrc, /encoderModeExplainer/);
 assert.match(appSrc, /const MIN_ENDPOINTS = 1/);
 assert.match(appSrc, /canRemove=\{showOutputConfig && endpoints.length > minEndpointsForSource/);
 assert.doesNotMatch(appSrc, /OBS \+ OpenMOQ/);
-assert.match(appSrc, /Calculate VMAF, PSNR, and SSIM pre- and post-ingest/);
+assert.match(appSrc, /Calculates PSNR, SSIM and VMAF post transcode and post ingest/);
 assert.doesNotMatch(appSrc, /setMediaSource\("dummy"\);\s*setMediaPath\(OBS_OPENMOQ_MEDIA\)/);
 assert.doesNotMatch(
   fs.readFileSync(path.join(root, "src/SourceSection.tsx"), "utf8"),

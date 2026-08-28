@@ -1606,6 +1606,13 @@ function App() {
     }
 
     if (encoder === "obs") {
+      if (!obsMoqSupported(recipeContext)) {
+        setError(
+          "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 (:14433). Use ffmpeg (helper) for MoQ.",
+        );
+        setLoading(false);
+        return;
+      }
       if (!features.local_publisher) {
         setError("OBS encode requires the local publisher agent, which is not enabled on this deployment.");
         setLoading(false);
@@ -2761,7 +2768,11 @@ function App() {
                             </strong>
                           </div>
                           {leg.job.error && (
-                            <p className="error">{humanizeJobError(leg.job.error) || leg.job.error}</p>
+                            <p className="error">
+                              {humanizeJobError(leg.job.error, {
+                                protocol: leg.protocol || endpoint.protocol,
+                              }) || leg.job.error}
+                            </p>
                           )}
                           {leg.encoderVmafRequested ? (
                             <div className="status-row quality">

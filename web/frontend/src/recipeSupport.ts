@@ -267,7 +267,9 @@ export function destinationsForProtocol(
 
 /** True when OBS can publish MoQ (draft-16 dest exists). Public site is d18-only. */
 export function obsMoqSupported(ctx: RecipeContext): boolean {
-  return destinationsForProtocol("moq", { ...ctx, encoder: "obs" }, new Set()).length > 0;
+  return destinationsForProtocol("moq", { ...ctx, encoder: "obs" }, new Set()).some(
+    (item) => item.available && !isCustomIngestEndpoint(item.id),
+  );
 }
 
 function pickIngest(
@@ -541,8 +543,7 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
     ctx.encoder ?? "ffmpeg",
   );
   if (recipeRequiresMoq(ctx)) {
-    const moqDests = destinationsForProtocol("moq", ctx, new Set());
-    if (moqDests.length === 0) {
+    if (!obsMoqSupported(ctx)) {
       return "OBS OpenMOQ plugin is draft-16 only. Public MoQ is draft-18 (:14433). Use ffmpeg (helper) for MoQ.";
     }
     if (!endpoints.some((endpoint) => endpoint.protocol === "moq")) {
@@ -568,6 +569,13 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
       return "This output’s destination is not supported for that protocol.";
     }
     const resolved = resolveEndpointUrl(endpoint, ctx.presets);
+    if (
+      ctx.presets.length > 0 &&
+      !isCustomIngestEndpoint(endpoint.ingestEndpointId) &&
+      !resolved
+    ) {
+      return "This output’s destination is not deployed.";
+    }
     const keys = publishCollisionKeys(endpoint, resolved);
     if (keys.some((key) => used.has(key))) {
       return "Two outputs share the same ingest path.";

@@ -131,7 +131,15 @@ class MoqxStatsPollerTests(unittest.TestCase):
             "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=bench-d18"
         )
         self.assertTrue(poller.enabled)
-        self.assertTrue(poller._metrics_url.endswith(":18000/metrics"))
+        self.assertEqual(poller._metrics_url, "http://34.28.164.90:18000/metrics")
+        from moqx_stats import admin_base_url_for_endpoint
+
+        self.assertEqual(
+            admin_base_url_for_endpoint(
+                "https://45-79-177-85.sslip.io:14433/moq-relay?namespace=benchmark"
+            ),
+            "http://45.79.177.85:18000",
+        )
 
     def test_disabled_poller_returns_zero(self):
         with patch.dict("os.environ", {}, clear=False):

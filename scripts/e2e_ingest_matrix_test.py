@@ -27,6 +27,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from moqx_stats import admin_base_url_for_endpoint  # noqa: E402
+
 BASE_URL = os.environ.get("BASE_URL", "https://moq.sean-mccarthy.net").rstrip("/")
 DURATION = int(os.environ.get("DURATION", "22"))
 MEDIA = Path(os.environ.get("MEDIA", str(ROOT / "dummy.mp4")))
@@ -183,7 +186,7 @@ EAST_CASES = [
         "id": "east_zixi_srt_mpegts",
         "preset_id": "moq_zixi_gcp_east",
         "playback": "mpegts",
-        "url": f"http://{EAST_ZIXI}:7777/SRT%20Test.ts",
+        "url": f"http://{EAST_ZIXI}:7777/SRT%20Test%20EC.ts",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
@@ -331,6 +334,22 @@ def api(method: str, path: str, data: Optional[dict] = None, files: Optional[dic
     except urllib.error.HTTPError as exc:
         err = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"{method} {path} -> {exc.code}: {err}") from exc
+
+
+def probe_http_origin(url: str, *, method: str = "GET") -> tuple[int, int, str]:
+    """Return HTTP status, body length, and a short note. 0 status = transport fail."""
+    trimmed = (url or "").strip()
+    if not trimmed or ":14433" in trimmed:
+        return 0, 0, "skip_moq"
+    try:
+        req = urllib.request.Request(trimmed, method=method, headers={"User-Agent": "moq-matrix-origin"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            body = resp.read(4096)
+            return int(resp.status), len(body), f"http_{resp.status}"
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), 0, f"http_{exc.code}"
+    except Exception as exc:
+        return 0, 0, f"err:{type(exc).__name__}"
 
 
 def upload_media() -> str:
@@ -756,13 +775,7 @@ def skipped_case_result(case: dict) -> CaseResult:
 
 def moq_admin_from_relay_url(url: str) -> str:
     """Map a WebTransport relay URL to the moqx Prometheus admin base."""
-    host = urllib.parse.urlparse(url).hostname or ""
-    if host.endswith(".sslip.io"):
-        dashed = host.split(".")[0]
-        parts = dashed.split("-")
-        if len(parts) == 4 and all(part.isdigit() for part in parts):
-            host = ".".join(parts)
-    return f"http://{host}:{os.environ.get('MOQX_ADMIN_PORT', '8000')}"
+    return admin_base_url_for_endpoint(url) or f"http://127.0.0.1:{os.environ.get('MOQX_ADMIN_PORT', '8000')}"
 
 
 def probe_moq_relay(relay_url: str) -> tuple[bool, str]:
@@ -923,6 +936,16 @@ def run_case(case: dict, media_path: str) -> CaseResult:
             result.errors.append("preview_not_ready")
     result.ingest = " ".join(ingest_bits)
 
+    origin_url = str(case.get("url") or "")
+    if origin_url and job_now.get("status") == "running" and case.get("playback") not in {"moq", "skip", ""}:
+        method = "OPTIONS" if case.get("playback") == "whep" else "GET"
+        code, body_len, origin_msg = probe_http_origin(origin_url, method=method)
+        result.detail["origin"] = {"url": origin_url, "code": code, "bytes": body_len, "note": origin_msg}
+        ingest_bits.append(f"origin={origin_msg}")
+        result.ingest = " ".join(ingest_bits)
+        if preview and case.get("playback") in {"hls", "mpegts", "dash"} and (code >= 400 or code == 0):
+            result.errors.append(f"origin_{origin_msg}")
+
     # Drive the real site player (same StreamPlayer reporter) while ingest is live.
     chrome_modes = chrome_modes_for_case(case)
     moq_probe_ok = False
@@ -973,6 +996,9 @@ def run_case(case: dict, media_path: str) -> CaseResult:
         if recorder_ok:
             result.chrome = f"playing recorder {result.chrome}"
             chrome_ok = True
+        # Recorder bytes must not hide a leftover-:8000 scrape of a :14433 job.
+        if case.get("playback") == "moq" and "relay_playback_broken" in moq_probe_msg:
+            chrome_ok = False
         if not chrome_ok:
             if case.get("requires_webtransport"):
                 # Encode/preview + relay metrics are the runnable half. Glass

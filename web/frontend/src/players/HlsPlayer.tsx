@@ -4,6 +4,7 @@ import { proxiedPlaybackUrl } from "../playbackUrls";
 import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
 import { isGracefulHlsEos } from "../hlsEos";
+import { classifyHlsEndVerdict, hlsPaintedOk } from "../hlsPlayback";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
@@ -67,6 +68,9 @@ interface HlsPlayerProps {
   /** Zixi SRT/RTMP: switch the card to MPEG-TS when Fast HLS cannot recover. */
   onUnrecoverableHls?: () => void;
   playbackPolicy?: "live-edge" | "complete";
+  encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }
 
 const MANIFEST_POLL_MS = 400;
@@ -337,6 +341,9 @@ export default function HlsPlayer({
   deliveryMediaOriginSec = null,
   onUnrecoverableHls,
   playbackPolicy = "live-edge",
+  encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
 }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -404,6 +411,12 @@ export default function HlsPlayer({
     firstMediaAtMs: 0,
     firstPaintAtMs: 0,
   });
+  const encodeDurationRef = useRef(encodeDurationSec);
+  encodeDurationRef.current = encodeDurationSec;
+  const encodeElapsedRef = useRef(encodeElapsedSec ?? 0);
+  encodeElapsedRef.current = encodeElapsedSec ?? 0;
+  const runStoppedRef = useRef(runStopped);
+  runStoppedRef.current = runStopped;
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
   // reset, raw currentTime IS media position since encode start, so the
@@ -587,8 +600,7 @@ export default function HlsPlayer({
   });
 
   function hlsPlaybackOk(session: (typeof sessionRef)["current"]): boolean {
-    // Successful decode/progress wins over transient early "stale" flags.
-    return session.maxVideoTime > 0.25;
+    return hlsPaintedOk({ maxVideoTime: session.maxVideoTime });
   }
 
   useEffect(() => {
@@ -604,39 +616,26 @@ export default function HlsPlayer({
     if (playbackGate !== "live") {
       if (playbackGate === "ended") {
         const session = sessionRef.current;
-        const hadManifest = session.manifestParsed || session.fragmentLoads > 0;
-        if (hlsPlaybackOk(session)) {
+        const verdict = classifyHlsEndVerdict({
+          maxVideoTime: session.maxVideoTime,
+          lastError: lastErrorRef.current,
+          manifestParsed: session.manifestParsed,
+          fragmentLoads: session.fragmentLoads,
+          uniqueFragCount: session.uniqueFragUrls.size,
+          videoBuffers: session.videoBuffers,
+          audioBuffers: session.audioBuffers,
+          encodeDurationSec: encodeDurationRef.current,
+          encodeElapsedSec: encodeElapsedRef.current,
+          runStopped: runStoppedRef.current,
+        });
+        if (verdict.ok) {
           setError(null);
           lastErrorRef.current = null;
-          setStatus("Playback OK");
-        } else if (lastErrorRef.current) {
-          setError(lastErrorRef.current);
-          setStatus("Failed (see diagnostics)");
-        } else if (session.manifestParsed && session.videoBuffers === 0 && session.audioBuffers > 0) {
-          const message =
-            "HLS buffered audio only — video track never decoded. Zixi TS chunks are missing in-band SPS/PPS (ffprobe: non-existing PPS). Restart dev stack and re-encode; verify Server Probe shows probe_decode=ok.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
-        } else if (hadManifest && session.fragmentLoads > 0 && session.uniqueFragUrls.size <= 1) {
-          const message =
-            "HLS playlist stayed on one stale segment (chunk not advancing). Zixi HLS output is not rolling — run ./scripts/verify-zixi-srt-ingest.sh (must PASS). Fix Zixi HTTP :7777 HLS, not the browser player.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
-        } else if (hadManifest && session.fragmentLoads > 0 && session.maxVideoTime <= 0.25) {
-          const message =
-            "HLS segments downloaded but video never advanced past 0s. Segments may lack decodable H.264 keyframes at chunk boundaries.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
-        } else if (hadManifest) {
-          const message = "HLS manifest loaded but no media segments were fetched during the encode.";
-          lastErrorRef.current = message;
-          setError(message);
-          setStatus("Failed (see diagnostics)");
+          setStatus(verdict.status);
         } else {
-          setStatus("Encode finished");
+          lastErrorRef.current = verdict.error;
+          setError(verdict.error);
+          setStatus(verdict.status);
         }
       } else {
         setStatus(
@@ -1264,9 +1263,28 @@ export default function HlsPlayer({
             } catch {
               /* ignore */
             }
-            setError(null);
-            lastErrorRef.current = null;
-            setStatus("Playback OK");
+            const session = sessionRef.current;
+            const verdict = classifyHlsEndVerdict({
+              maxVideoTime: session.maxVideoTime,
+              lastError: lastErrorRef.current,
+              manifestParsed: session.manifestParsed,
+              fragmentLoads: session.fragmentLoads,
+              uniqueFragCount: session.uniqueFragUrls.size,
+              videoBuffers: session.videoBuffers,
+              audioBuffers: session.audioBuffers,
+              encodeDurationSec: encodeDurationRef.current,
+              encodeElapsedSec: encodeElapsedRef.current,
+              runStopped: runStoppedRef.current,
+            });
+            if (verdict.ok) {
+              setError(null);
+              lastErrorRef.current = null;
+              setStatus(verdict.status);
+            } else {
+              lastErrorRef.current = verdict.error;
+              setError(verdict.error);
+              setStatus(verdict.status);
+            }
             return;
           }
 

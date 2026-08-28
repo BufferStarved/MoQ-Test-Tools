@@ -230,6 +230,9 @@ export function StreamPlayer({
               playbackPolicy={playbackPolicy}
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
+              encodeDurationSec={encodeDurationSec}
+              encodeElapsedSec={encodeElapsedSec}
+              runStopped={runStopped}
               onUnrecoverableHls={
                 resolvedMode === "hls" &&
                 onPlaybackModeChange &&
@@ -257,6 +260,9 @@ export function StreamPlayer({
               bridgeLagMs={bridgeLagMs}
               encoderLagMs={encoderLagMs}
               playbackPolicy={playbackPolicy}
+              encodeDurationSec={encodeDurationSec}
+              encodeElapsedSec={encodeElapsedSec}
+              runStopped={runStopped}
             />
           )}
           {target.engine === "mpegts" && (
@@ -281,10 +287,13 @@ export function StreamPlayer({
               playbackPolicy={playbackPolicy}
               jobStatus={jobStatus}
               jobError={jobError}
+              protocol={protocol}
               waitingForEncodeSlot={waitingForEncodeSlot}
               encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}
               encodeDurationSec={encodeDurationSec}
+              encodeElapsedSec={encodeElapsedSec}
+              runStopped={runStopped}
             />
           )}
           {target.engine === "whep" && (

@@ -19,6 +19,9 @@ const GCP_ZIXI_SRT_STREAM_ID = "SRT Test";
  * jobs also set ``zixi_playback_stream_id`` to this.
  */
 const GCP_ZIXI_SRT_PLAYBACK_STREAM_ID = "SRT Test EC";
+/** Zixi caller listen. MediaMTX SRT is :8890. */
+const ZIXI_SRT_PORT = "10080";
+const KNOWN_ZIXI_HOSTS = new Set(["35.222.33.58", "35.196.215.179", "45.33.68.151"]);
 /** Default MediaMTX path name for publish/play. */
 const MEDIAMTX_PATH = "benchmark";
 
@@ -134,6 +137,7 @@ export function isPlaybackModeCompatible(
 export function defaultPlaybackModeForProtocol(
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): PlaybackMode {
   if (protocol === "moq") {
     return "moq";
@@ -151,7 +155,7 @@ export function defaultPlaybackModeForProtocol(
   // HTTP-TS (mpegts.js) stays the default Zixi player — faster join than
   // Fast HLS. HLS is selectable and uses the EC stream when jobs set
   // zixi_playback_stream_id (primary ``SRT Test`` packager still wedges).
-  if (isZixiManagedIngest(ingest)) {
+  if (isZixiManagedIngest(ingest) || looksLikeZixiPublish(endpointUrl)) {
     return "mpegts";
   }
   // Custom / retired DASH ingest still plays as browser HLS when a packager exists.
@@ -356,6 +360,34 @@ function parseHost(endpointUrl: string): string | null {
   }
 }
 
+function publishPort(endpointUrl: string): string | null {
+  if (!endpointUrl.startsWith("srt://") && !endpointUrl.startsWith("rtmp://")) {
+    return null;
+  }
+  const hostPart = (endpointUrl.split("://")[1] ?? "").split(/[/?]/)[0] ?? "";
+  const port = hostPart.split(":")[1];
+  if (port) {
+    return port;
+  }
+  return endpointUrl.startsWith("rtmp://") ? "1935" : null;
+}
+
+/** Custom URL or missing ingest id — Zixi SRT is :10080; MTX SRT is :8890. */
+export function looksLikeZixiPublish(endpointUrl?: string): boolean {
+  const url = (endpointUrl || "").trim();
+  if (!url) {
+    return false;
+  }
+  const host = parseHost(url);
+  if (host && KNOWN_ZIXI_HOSTS.has(host)) {
+    return true;
+  }
+  if (url.startsWith("srt://") && publishPort(url) === ZIXI_SRT_PORT) {
+    return true;
+  }
+  return url.startsWith("rtmp://") && /:1935\/live\//.test(url);
+}
+
 function parseStreamId(
   endpointUrl: string,
   protocol: string,
@@ -372,20 +404,15 @@ function parseStreamId(
     return zixiPlaybackStreamId.trim();
   }
   // Pre-job / recipe: prefer EC over wedged primary for gcp_zixi SRT.
-  if (
-    protocol === "srt" &&
-    isZixiManagedIngest(ingestEndpointId ?? "") &&
-    !zixiStreamId?.trim()
-  ) {
+  const zixiPublish =
+    isZixiManagedIngest(ingestEndpointId ?? "") || looksLikeZixiPublish(endpointUrl);
+  if (protocol === "srt" && zixiPublish && !zixiStreamId?.trim()) {
     return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
   }
   if (protocol === "srt" && zixiStreamId?.trim()) {
     // Publish id may be "SRT Test"; map to EC for playback unless caller
     // already passed an explicit playback id above.
-    if (
-      isZixiManagedIngest(ingestEndpointId ?? "") &&
-      zixiStreamId.trim() === GCP_ZIXI_SRT_STREAM_ID
-    ) {
+    if (zixiPublish && zixiStreamId.trim() === GCP_ZIXI_SRT_STREAM_ID) {
       return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
     }
     return zixiStreamId.trim();
@@ -441,11 +468,15 @@ function parseStreamId(
   return DEFAULT_STREAM_ID;
 }
 
-function isZixiManagedHost(host: string | null, ingestEndpointId: string): boolean {
-  if (isZixiManagedIngest(ingestEndpointId)) {
+function isZixiManagedHost(
+  host: string | null,
+  ingestEndpointId: string,
+  endpointUrl?: string,
+): boolean {
+  if (isZixiManagedIngest(ingestEndpointId) || looksLikeZixiPublish(endpointUrl)) {
     return true;
   }
-  return host === "35.222.33.58";
+  return Boolean(host && KNOWN_ZIXI_HOSTS.has(host));
 }
 
 export function relayBaseUrl(endpointUrl: string): string {
@@ -581,7 +612,11 @@ export function resolvePlaybackTarget(options: {
   const mode =
     options.playbackMode && options.playbackMode !== "auto"
       ? options.playbackMode
-      : defaultPlaybackModeForProtocol(options.protocol, options.ingestEndpointId);
+      : defaultPlaybackModeForProtocol(
+          options.protocol,
+          options.ingestEndpointId,
+          options.endpointUrl,
+        );
   const dvr = options.playbackDvr ?? false;
   const host = parseHost(options.endpointUrl);
   const streamId = parseStreamId(
@@ -591,7 +626,7 @@ export function resolvePlaybackTarget(options: {
     options.zixiStreamId,
     options.zixiPlaybackStreamId,
   );
-  const zixiManaged = isZixiManagedHost(host, options.ingestEndpointId);
+  const zixiManaged = isZixiManagedHost(host, options.ingestEndpointId, options.endpointUrl);
   const mediamtx = isMediaMtxManaged(options.ingestEndpointId);
   const resolvedHost = host ?? (mediamtx ? "34.9.217.178" : "35.222.33.58");
   const moqNamespace = options.moqNamespace?.trim() || streamId || DEFAULT_MOQ_NAMESPACE;

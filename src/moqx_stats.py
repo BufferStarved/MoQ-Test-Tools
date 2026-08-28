@@ -36,6 +36,24 @@ def admin_port_for_endpoint(endpoint_url: str) -> int:
     return DEFAULT_ADMIN_PORT
 
 
+def admin_host_for_endpoint(endpoint_url: str) -> str:
+    """Dotted IPv4 for sslip.io relays so /metrics hits the VM, not the name."""
+    host = urlparse(endpoint_url).hostname or ""
+    if host.endswith(".sslip.io"):
+        dashed = host.split(".")[0]
+        parts = dashed.split("-")
+        if len(parts) == 4 and all(part.isdigit() for part in parts):
+            return ".".join(parts)
+    return host
+
+
+def admin_base_url_for_endpoint(endpoint_url: str) -> str:
+    host = admin_host_for_endpoint(endpoint_url)
+    if not host:
+        return ""
+    return f"http://{host}:{admin_port_for_endpoint(endpoint_url)}"
+
+
 @dataclass
 class MoqxStatsSnapshot:
     subscribe_success: int = 0
@@ -74,12 +92,10 @@ class MoqxStatsPoller:
             self._enabled = True
             return
 
-        host = urlparse(endpoint_url).hostname
-        if not host:
+        base = admin_base_url_for_endpoint(endpoint_url)
+        if not base:
             return
-
-        admin_port = admin_port_for_endpoint(endpoint_url)
-        self._metrics_url = f"http://{host}:{admin_port}/metrics"
+        self._metrics_url = f"{base}/metrics"
         self._enabled = True
 
     @property

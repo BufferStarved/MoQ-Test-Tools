@@ -22,6 +22,11 @@ import {
 } from "../startupTiming";
 import { isGracefulMpegTsEos } from "../playbackEos";
 import { playerErrorForFailedJob } from "../moqCmafPlayback";
+import {
+  classifyMpegTsEndVerdict,
+  mpegTsMayMarkPlaybackOk,
+  mpegTsPaintedOk,
+} from "../mpegTsPlayback";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 import { GoLiveButton } from "../GoLiveButton";
 import { formatGoLiveDiag, goLiveHoldSec, latchGoLive, seekGoLive } from "../goLive";
@@ -45,10 +50,13 @@ interface MpegTsPlayerProps {
   skipConnectProbe?: boolean;
   jobStatus?: string;
   jobError?: string | null;
+  protocol?: string | null;
   waitingForEncodeSlot?: boolean;
   encodeQueueAhead?: number;
   benchmarkLoading?: boolean;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }
 
 /** Max automatic reconnects after the Zixi HTTP-TS session ends on republish. */
@@ -75,10 +83,13 @@ export default function MpegTsPlayer({
   skipConnectProbe = false,
   jobStatus,
   jobError = null,
+  protocol = null,
   waitingForEncodeSlot = false,
   encodeQueueAhead = 0,
   benchmarkLoading = false,
   encodeDurationSec = 30,
+  encodeElapsedSec,
+  runStopped = false,
   playbackPolicy = "live-edge",
 }: MpegTsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -118,6 +129,10 @@ export default function MpegTsPlayer({
   loadingRef.current = benchmarkLoading;
   const encodeDurationRef = useRef(encodeDurationSec);
   encodeDurationRef.current = encodeDurationSec;
+  const encodeElapsedRef = useRef(encodeElapsedSec ?? 0);
+  encodeElapsedRef.current = encodeElapsedSec ?? 0;
+  const runStoppedRef = useRef(runStopped);
+  runStoppedRef.current = runStopped;
 
   function sessionRelativeVideoTime(video: HTMLVideoElement): number {
     const session = sessionRef.current;
@@ -234,10 +249,35 @@ export default function MpegTsPlayer({
     }
 
     if (playbackGate !== "live") {
-      const jobFail = playerErrorForFailedJob({ jobStatus, jobError });
+      const jobFail = playerErrorForFailedJob({ jobStatus, jobError, protocol });
       if (jobFail) {
         setError(jobFail);
         setStatus("Failed (see diagnostics)");
+        return;
+      }
+      if (playbackGate === "ended") {
+        const frames = readVideoFrameStats(video);
+        const verdict = classifyMpegTsEndVerdict({
+          paintedOk: mpegTsPaintedOk({
+            ttffMs: sessionRef.current.ttffMs,
+            framesRendered: frames.framesRendered,
+            videoWidth: video.videoWidth ?? 0,
+          }),
+          lastReason: lastErrorRef.current,
+          videoTimeSec: sessionRef.current.maxVideoTime,
+          encodeDurationSec: encodeDurationRef.current,
+          encodeElapsedSec: encodeElapsedRef.current,
+          runStopped: runStoppedRef.current,
+        });
+        if (verdict.ok) {
+          setError(null);
+          lastErrorRef.current = null;
+          setStatus(verdict.status);
+        } else {
+          lastErrorRef.current = verdict.error;
+          setError(verdict.error);
+          setStatus(verdict.status);
+        }
         return;
       }
       setError(null);
@@ -249,9 +289,7 @@ export default function MpegTsPlayer({
               waitingForEncodeSlot,
               encodeQueueAhead,
             })
-          : playbackGate === "ended"
-            ? "Encode finished"
-            : playbackGateLabel(playbackGate, "other"),
+          : playbackGateLabel(playbackGate, "other"),
       );
       return;
     }
@@ -322,17 +360,11 @@ export default function MpegTsPlayer({
 
     const paintedOk = () => {
       const frames = readVideoFrameStats(video);
-      return (
-        sessionRef.current.ttffMs > 0 &&
-        (frames.framesRendered > 0 || (video?.videoWidth ?? 0) > 0)
-      );
-    };
-
-    const markPlaybackOk = (diag: string) => {
-      lastErrorRef.current = null;
-      setError(null);
-      setStatus("Playback OK");
-      pushDiag(diag);
+      return mpegTsPaintedOk({
+        ttffMs: sessionRef.current.ttffMs,
+        framesRendered: frames.framesRendered,
+        videoWidth: video?.videoWidth ?? 0,
+      });
     };
 
     const failPlayback = (reason: string) => {
@@ -343,21 +375,42 @@ export default function MpegTsPlayer({
       pushDiag(`fatal=${reason}`);
     };
 
+    const markPlaybackOk = (diag: string, lastReason?: string) => {
+      const verdict = classifyMpegTsEndVerdict({
+        paintedOk: paintedOk(),
+        lastReason,
+        videoTimeSec: sessionRef.current.maxVideoTime,
+        encodeDurationSec: encodeDurationRef.current,
+        encodeElapsedSec: encodeElapsedRef.current,
+        runStopped: runStoppedRef.current,
+      });
+      if (!verdict.ok) {
+        failPlayback(verdict.error || lastReason || diag);
+        return;
+      }
+      lastErrorRef.current = null;
+      setError(null);
+      setStatus("Playback OK");
+      pushDiag(diag);
+    };
+
     const scheduleReconnect = (reason: string) => {
       if (destroyed) {
         return;
       }
       const playedOk = paintedOk();
-      const unreachable = /manifest unreachable|HTTP /i.test(reason);
-      if (!unreachable && isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+      if (
+        mpegTsMayMarkPlaybackOk({ paintedOk: playedOk, lastReason: reason }) &&
+        isGracefulMpegTsEos(mpegTsEosOptions(playedOk))
+      ) {
         destroyPlayer();
-        markPlaybackOk(`graceful_eos ${reason}`);
+        markPlaybackOk(`graceful_eos ${reason}`, reason);
         return;
       }
       pushDiag(`reconnect_reason=${reason}`);
       if (reconnects >= MAX_RECONNECTS) {
-        if (playedOk && !unreachable) {
-          markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`);
+        if (mpegTsMayMarkPlaybackOk({ paintedOk: playedOk, lastReason: reason })) {
+          markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`, reason);
           return;
         }
         failPlayback(reason);
@@ -566,7 +619,7 @@ export default function MpegTsPlayer({
         const playedOk = paintedOk();
         if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
           destroyPlayer();
-          markPlaybackOk("graceful_eos mpegts_error after successful playback");
+          markPlaybackOk("graceful_eos mpegts_error after successful playback", detail);
           return;
         }
         destroyPlayer();
@@ -579,7 +632,7 @@ export default function MpegTsPlayer({
         const playedOk = paintedOk();
         if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
           destroyPlayer();
-          markPlaybackOk("loading_complete (encode ended)");
+          markPlaybackOk("loading_complete (encode ended)", "loading_complete");
           return;
         }
         pushDiag("loading_complete (publisher session ended)");
@@ -613,6 +666,7 @@ export default function MpegTsPlayer({
     jobId,
     jobStatus,
     jobError,
+    protocol,
     waitingForEncodeSlot,
     encodeQueueAhead,
   ]);
