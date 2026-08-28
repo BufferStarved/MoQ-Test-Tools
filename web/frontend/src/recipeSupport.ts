@@ -131,10 +131,10 @@ export function publishProtocolIdsForSource(
     if (!protocolAllowedInBrowser(protocol, caps)) {
       return false;
     }
-    // Laptop ffmpeg encode is the local agent. No WHIP muxer → no WebRTC option.
-    if (protocol === "webrtc" && isLocalAgentSource(source) && effective === "ffmpeg" && !publisher.localFfmpegWhip) {
-      return false;
-    }
+    // ffmpeg always offers WHIP (cloud encode, or laptop `-f whip`). Start
+    // checks the muxer. Hiding the option here remapped Protocol Comparison's
+    // WebRTC tile to a second SRT (2×SRT + RTMP + MoQ).
+    void publisher;
     // OBS + OpenMOQ plugin: MoQ via the plugin, SRT/RTMP via OBS outputs. No WHIP.
     if (protocol === "webrtc" && effective === "obs") {
       return false;
@@ -555,13 +555,6 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
     if (!allowed.includes(endpoint.protocol as PublishProtocolId)) {
       if (endpoint.protocol === "webrtc" && recipeRequiresMoq(ctx)) {
         return "OBS encode supports SRT, RTMP, and MoQ — not WebRTC. Use ffmpeg (helper) for WebRTC.";
-      }
-      if (
-        endpoint.protocol === "webrtc" &&
-        isLocalAgentSource(ctx.source) &&
-        !recipePublisherCaps(ctx).localFfmpegWhip
-      ) {
-        return "This laptop cannot publish WebRTC yet. Use SRT, RTMP, or MoQ, or switch to Cloud playout or Webcam + Browser.";
       }
       return "This output uses a protocol that is not available here.";
     }

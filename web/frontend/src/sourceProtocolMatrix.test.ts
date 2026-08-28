@@ -79,6 +79,11 @@ describe("source × protocol start map", () => {
       "webrtc",
     ]);
     assert.deepEqual(publishProtocolIdsForSource("browser_moq", RECIPE_CHROME_CAPS), ["moq", "webrtc"]);
+    assert.deepEqual(
+      publishProtocolIdsForSource("webcam", RECIPE_CHROME_CAPS, { localFfmpegWhip: false }, "ffmpeg"),
+      ["srt", "rtmp", "webrtc", "moq"],
+      "ffmpeg still offers WebRTC when the helper has not reported a WHIP muxer",
+    );
   });
 
   it("defaults every cloud to public MoQ :14433, never leftover :4433", () => {

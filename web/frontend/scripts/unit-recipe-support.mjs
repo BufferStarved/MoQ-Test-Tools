@@ -178,9 +178,7 @@ function isLegalCombo(
       : ["srt", "rtmp", "webrtc", "moq"];
   if (!sourceProtocols.includes(protocol)) return false;
   if (!protocolAllowed(protocol, caps)) return false;
-  if (protocol === "webrtc" && source === "webcam" && effective === "ffmpeg" && !publisher.localFfmpegWhip) {
-    return false;
-  }
+  // ffmpeg always offers WHIP; Start checks the laptop muxer.
   if (protocol === "webrtc" && effective === "obs") return false;
   if (effective === "obs" && protocol === "moq" && String(ingest).includes("moq_relay_d18")) {
     return false;
@@ -258,8 +256,8 @@ for (const row of [
 
 assert.equal(
   isLegalCombo("webcam", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: false }),
-  false,
-  "webcam webrtc without laptop WHIP muxer",
+  true,
+  "webcam ffmpeg still offers WebRTC; Start checks the WHIP muxer",
 );
 assert.equal(
   isLegalCombo("webcam", "webrtc", "gcp_mediamtx", "whep", CHROME, { localFfmpegWhip: true }),

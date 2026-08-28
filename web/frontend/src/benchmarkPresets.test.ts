@@ -265,6 +265,17 @@ describe("applyBenchmarkPreset", () => {
     assert.equal(benchmarkPresetLegal(plan, chromeCtx("dummy")), true);
   });
 
+  it("protocol-compare keeps WebRTC on webcam ffmpeg even before the helper reports WHIP", () => {
+    const plan = applyBenchmarkPreset(
+      "protocol-compare",
+      chromeCtx("webcam", { encoder: "ffmpeg", publisher: { localFfmpegWhip: false } }),
+      nextId(),
+    );
+    const protocols = plan.endpoints.map((endpoint) => endpoint.protocol);
+    assert.deepEqual(protocols.sort(), ["moq", "rtmp", "srt", "webrtc"].sort());
+    assert.equal(protocols.filter((protocol) => protocol === "srt").length, 1);
+  });
+
   it("protocol-compare reuses the last-used cloud and still skips AWS", () => {
     const current: EndpointConfig[] = [
       {

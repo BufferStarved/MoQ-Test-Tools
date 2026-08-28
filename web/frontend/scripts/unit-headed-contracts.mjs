@@ -59,7 +59,14 @@ assert.match(upload, /if moqx_poller.observing:/);
 
 const preview = py("src/moq_preview.py");
 assert.match(preview, /return bool\(publish_confirmed\)/);
+assert.match(preview, /catalog_published/);
+assert.match(preview, /bench-aef84d9a/);
 assert.doesNotMatch(preview, /return past_deadline/);
+
+assert.match(app, /Copy the helper command under Encode/);
+assert.match(app, /encoder === "ffmpeg" &&\s*mediaSource === "webcam"/);
+assert.doesNotMatch(src("SourceSection.tsx"), /LocalPublisherSetup/);
+assert.match(src("recipeSupport.ts"), /ffmpeg always offers WHIP/);
 
 assert.match(gate, /experimental-strip-types --test/);
 assert.match(gate, /tests.test_moq_preview/);

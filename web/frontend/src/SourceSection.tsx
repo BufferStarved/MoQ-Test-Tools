@@ -1,7 +1,6 @@
 import { useRef } from "react";
 import type { FeatureFlags, WebcamDeviceInfo } from "./api";
 import type { CloudEncodeHostId } from "./ingestEndpoints";
-import { LocalPublisherSetup } from "./LocalPublisherSetup";
 import { detectBrowserMoqCapabilities } from "./browserMoq/capabilities";
 import { BrowserMoqPreview } from "./browserMoq/BrowserMoqPreview";
 import { IconCamera, IconFilm } from "./Icons";
@@ -65,13 +64,9 @@ interface SourceSectionProps {
   browserPreviewStream?: MediaStream | null;
   bbbAvailable?: boolean;
   bbbHint?: string | null;
-  /** Highlight the draft-18 helper when an output is the :14433 canary. */
-  preferD18Helper?: boolean;
   step?: number;
   /** Precanned recipes that already chose Webcam vs Cloud hide the mode cards. */
   hideModePicker?: boolean;
-  /** Per-browser helper binding so ffmpeg opens this user's camera. */
-  publisherSession?: string;
 }
 
 export function SourceSection({
@@ -93,10 +88,8 @@ export function SourceSection({
   browserPreviewStream = null,
   bbbAvailable = false,
   bbbHint = null,
-  preferD18Helper = false,
   step = 1,
   hideModePicker = false,
-  publisherSession = "",
 }: SourceSectionProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isBrowserEngine = mediaSource === "browser_moq" || encoder === "browser";
@@ -275,17 +268,10 @@ export function SourceSection({
                     className="agent-waiting-badge"
                   />
                   <p className="field-hint">
-                    The site is fine. Switch to Cloud playout or Webcam + Browser to run a
-                    comparison now — those work in this page without a helper app.
+                    {encoder === "ffmpeg"
+                      ? "The ffmpeg helper command is under Encode — copy it only after you pick ffmpeg."
+                      : "Cloud playout and Webcam + Browser run in this page without a helper app."}
                   </p>
-                  <LocalPublisherSetup
-                    apiOrigin={window.location.origin}
-                    connected={false}
-                    compact
-                    variant="webcam"
-                    preferD18={preferD18Helper}
-                    publisherSession={publisherSession}
-                  />
                 </>
               )}
             </div>

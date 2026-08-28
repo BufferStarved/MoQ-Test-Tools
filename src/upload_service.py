@@ -3093,9 +3093,14 @@ class UploadService:
         publish_confirmed = (
             moqx_poller.observing and moqx_poller.publish_namespace_success_delta() >= 1
         )
+        catalog_log = (
+            f"{self._tail_file(publisher_stdout_path, max_lines=40)}\n"
+            f"{self._tail_file(publisher_log_path, max_lines=40)}"
+        )
         if moq_job_should_fail_without_namespace(
             publish_confirmed=publish_confirmed,
             poller_observing=moqx_poller.observing,
+            catalog_published=publisher_catalog_published(catalog_log),
         ):
             namespace = ""
             if job.destination.moq_target is not None:
@@ -3123,7 +3128,7 @@ class UploadService:
             else:
                 finalized.error = moq_publish_missing_error(
                     namespace=namespace,
-                    observing=True,
+                    observing=moqx_poller.observing,
                 )
             return finalized
 

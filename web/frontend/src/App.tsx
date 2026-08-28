@@ -87,6 +87,7 @@ import {
   type EncoderId,
   type MediaSourceId,
 } from "./SourceSection";
+import { LocalPublisherSetup } from "./LocalPublisherSetup";
 import {
   DEFAULT_ENCODE_LADDER_ID,
   DEFAULT_MOQ_TARGET_LATENCY_MS,
@@ -1640,7 +1641,17 @@ function App() {
       }
       if (!features.local_publisher_connected) {
         setError(
-          "No local publisher agent connected. Run the agent command shown under Webcam, then retry.",
+          "No local publisher agent connected. Copy the helper command under Encode (ffmpeg), then retry.",
+        );
+        setLoading(false);
+        return;
+      }
+      if (
+        startEndpoints.some((endpoint) => endpoint.protocol === "webrtc") &&
+        !features.local_publisher_whip
+      ) {
+        setError(
+          "This laptop's ffmpeg has no WHIP muxer, so WebRTC cannot publish. Keep SRT/RTMP/MoQ, or switch to Webcam + Browser.",
         );
         setLoading(false);
         return;
@@ -2235,12 +2246,8 @@ function App() {
                   browserPreviewStream={browserPreviewStream}
                   bbbAvailable={bbbAvailable}
                   bbbHint={bbbSource?.hint ?? null}
-                  preferD18Helper={endpoints.some((endpoint) =>
-                    endpoint.ingestEndpointId.includes("moq_relay_d18"),
-                  )}
                   step={sourceStep}
                   hideModePicker={!showSourceMode}
-                  publisherSession={publisherSession}
                 />
                 ) : null}
                 </SetupStepFrame>
@@ -2377,6 +2384,20 @@ function App() {
                           )}
                         </div>
                         <p className="source-mode-explainer">{encoderModeExplainer(encoder)}</p>
+                        {encoder === "ffmpeg" &&
+                          mediaSource === "webcam" &&
+                          !helperConnected && (
+                          <LocalPublisherSetup
+                            apiOrigin={window.location.origin}
+                            connected={false}
+                            compact
+                            variant="webcam"
+                            preferD18={endpoints.some((endpoint) =>
+                              endpoint.ingestEndpointId.includes("moq_relay_d18"),
+                            )}
+                            publisherSession={publisherSession}
+                          />
+                        )}
                         {encoder === "obs" && (
                           <p className="field-hint">
                             {obsEncoderSupported ? (

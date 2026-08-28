@@ -29,6 +29,7 @@ def moq_job_should_fail_without_namespace(
     *,
     publish_confirmed: bool,
     poller_observing: bool,
+    catalog_published: bool = False,
 ) -> bool:
     """True when encode-only success would lie: relay never saw this namespace.
 
@@ -36,8 +37,16 @@ def moq_job_should_fail_without_namespace(
     increments publish_namespace_success is a publisher/relay failure — not a
     player 0x10 miss. The 2026-08-19 east comparison (bench-733f1d7c) completed
     with 240 CMAF fragments and moqx_ns=0; the tile showed catalog-miss.
+
+    When the poller cannot scrape (Linode :18000), local ``sender ready`` is
+    the only catalog proof. Encode-only without that proof is the same lie
+    (bench-aef84d9a: job=completed, SUBSCRIBE 0x10, 0 paint).
     """
-    return bool(poller_observing) and not bool(publish_confirmed)
+    if publish_confirmed:
+        return False
+    if poller_observing:
+        return True
+    return not bool(catalog_published)
 
 
 def moq_publish_missing_error(*, namespace: str = "", observing: bool = True) -> str:

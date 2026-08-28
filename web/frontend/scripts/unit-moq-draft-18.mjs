@@ -65,6 +65,9 @@ assert.match(setup, /isPublicOrchestrator/);
 assert.doesNotMatch(setup, /Laptop helper/);
 assert.doesNotMatch(setup, /Laptop webcam encode is not available on the public site/);
 assert.doesNotMatch(setup, /LOCAL_PUBLISHER_API=https:\/\/moq/);
+const source = fs.readFileSync(path.join(root, "SourceSection.tsx"), "utf8");
+assert.doesNotMatch(source, /LocalPublisherSetup/);
+assert.match(source, /helper command is under Encode/);
 
 const dest = fs.readFileSync(path.join(root, "../../../src/destinations.py"), "utf8");
 assert.match(dest, /moq_gcp_relay_d18/);

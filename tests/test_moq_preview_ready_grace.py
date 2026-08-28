@@ -74,11 +74,22 @@ class MoqNamespacePublishFailureTests(unittest.TestCase):
             )
         )
 
-    def test_unreachable_metrics_do_not_fail_the_job(self):
+    def test_unreachable_metrics_without_catalog_fail_the_job(self):
+        # bench-aef84d9a: Linode :18000 timed out, job completed, 0x10, 0 paint.
+        self.assertTrue(
+            moq_job_should_fail_without_namespace(
+                publish_confirmed=False,
+                poller_observing=False,
+                catalog_published=False,
+            )
+        )
+
+    def test_unreachable_metrics_with_local_catalog_do_not_fail(self):
         self.assertFalse(
             moq_job_should_fail_without_namespace(
                 publish_confirmed=False,
                 poller_observing=False,
+                catalog_published=True,
             )
         )
 

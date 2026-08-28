@@ -197,3 +197,33 @@ describe("comparison 30 replay", () => {
     assert.match(srt.error ?? "", /stalled at 18.8s of a 26s encode/i);
   });
 });
+
+describe("custom 4-way bench-aef84d9a replay", () => {
+  it("does not call completed + 0x10 + 0 paint a catalog miss", () => {
+    const moq: ComparisonLastRow = {
+      stream: "Stream 4 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+      encode_frames_total: 1500,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    assert.equal(moqxNeverAnnounced(moq), true);
+    const error = visibleMoqError(moq, {
+      playaLines: [
+        "subscribe_0x10_keepalive (playa warn: no such namespace)",
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "catalog_timeout_skipped encode_running",
+      ],
+      jobStatus: "completed",
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-aef84d9a",
+    });
+    assert.match(error, /never announced namespace bench-aef84d9a/i);
+    assert.match(error, /SUBSCRIBE 0x10/i);
+    assert.doesNotMatch(error, /catalog object never reached/i);
+  });
+});
