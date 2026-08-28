@@ -71,6 +71,15 @@ resource "linode_firewall" "relay" {
     ipv4     = [var.allowed_client_cidr]
   }
 
+  # Draft-18 canary admin. Prometheus has no auth — web VM only, never 0.0.0.0/0.
+  inbound {
+    label    = "canary-admin-web"
+    action   = "ACCEPT"
+    protocol = "TCP"
+    ports    = "18000"
+    ipv4     = ["34.9.217.178/32"]
+  }
+
   inbound {
     label    = "moqx-quic"
     action   = "ACCEPT"

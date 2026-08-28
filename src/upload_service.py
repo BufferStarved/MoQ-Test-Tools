@@ -194,6 +194,45 @@ def ffmpeg_stderr_useful_detail(stderr: str, *, max_lines: int = 12) -> str:
     return " | ".join(chosen) if chosen else ""
 
 
+# MediaMTX/Zixi often reject the first RTMP/WHIP push (ffmpeg 224 / 245)
+# while the path is still coming up, and can also drop a live session
+# mid-run. Reconnect those two protocols only — MoQ/SRT closed-pipe is a
+# different failure and must not be retried as "ingest not ready".
+_INGEST_SESSION_RETRY_PROTOCOLS = frozenset({"rtmp", "webrtc"})
+_EARLY_EXIT_RETRY_WINDOW_SEC = 8.0
+_EARLY_EXIT_MAX_RETRIES = 2
+_MID_RUN_MAX_RETRIES = 2
+_MID_RUN_MIN_REMAINING_SEC = 3.0
+
+
+def ingest_session_retry_kind(
+    *,
+    protocol: str,
+    ran_sec: float,
+    remaining_sec: float,
+    early_exit_retries: int,
+    mid_run_retries: int,
+    cancelled: bool,
+    error: str = "",
+) -> Optional[str]:
+    """``early`` (reset job clock) | ``mid`` (keep clock) | None."""
+    if cancelled or "SIGTERM" in (error or ""):
+        return None
+    if (protocol or "").strip().lower() not in _INGEST_SESSION_RETRY_PROTOCOLS:
+        return None
+    if (
+        ran_sec < _EARLY_EXIT_RETRY_WINDOW_SEC
+        and early_exit_retries < _EARLY_EXIT_MAX_RETRIES
+    ):
+        return "early"
+    if (
+        remaining_sec >= _MID_RUN_MIN_REMAINING_SEC
+        and mid_run_retries < _MID_RUN_MAX_RETRIES
+    ):
+        return "mid"
+    return None
+
+
 def moq_preview_ready_grace_sec(media_path: str, duration_sec: float) -> float:
     """How long to wait for a *confirmed* relay namespace-publish success
     before falling back to an unconditional "preview ready" (see the
@@ -966,11 +1005,10 @@ class UploadService:
         # push that lands during that window is rejected with an instant I/O
         # error (ffmpeg exit 251 within seconds — reproduced during gauntlet
         # runs 2026-07-22, and the likely cause of intermittent "RTMP never
-        # started" runs). Back-to-back benchmarks make this race common.
-        # Retry the connect a couple of times before declaring failure.
-        _EARLY_EXIT_RETRY_WINDOW_SEC = 8.0
-        _EARLY_EXIT_MAX_RETRIES = 2
+        # started" runs). MediaMTX WHIP does the same on a cold path (ffmpeg
+        # 245) and can also drop a live session mid-run (comparison 30).
         early_exit_retries = 0
+        mid_run_retries = 0
 
         try:
             while time.time() - start_time < job.duration_sec:
@@ -979,6 +1017,7 @@ class UploadService:
                     break
                 if process.poll() is not None:
                     ran_sec = time.time() - start_time
+                    remaining_sec = float(job.duration_sec) - ran_sec
                     outcome = self._ffmpeg_exit_outcome(
                         job,
                         process,
@@ -992,22 +1031,32 @@ class UploadService:
                     if outcome is None:
                         # Clean EOF, user Stop, or SIGTERM after we asked to stop.
                         break
-                    if (
-                        job.destination.protocol == "rtmp"
-                        and ran_sec < _EARLY_EXIT_RETRY_WINDOW_SEC
-                        and early_exit_retries < _EARLY_EXIT_MAX_RETRIES
-                        and not job.is_cancelled()
-                        and "SIGTERM" not in (outcome.error or "")
-                    ):
-                        early_exit_retries += 1
+                    retry_kind = ingest_session_retry_kind(
+                        protocol=job.destination.protocol,
+                        ran_sec=ran_sec,
+                        remaining_sec=remaining_sec,
+                        early_exit_retries=early_exit_retries,
+                        mid_run_retries=mid_run_retries,
+                        cancelled=job.is_cancelled(),
+                        error=outcome.error or "",
+                    )
+                    if retry_kind:
+                        if retry_kind == "early":
+                            early_exit_retries += 1
+                            retry_n, retry_max = early_exit_retries, _EARLY_EXIT_MAX_RETRIES
+                        else:
+                            mid_run_retries += 1
+                            retry_n, retry_max = mid_run_retries, _MID_RUN_MAX_RETRIES
                         logger.warning(
-                            "RTMP publish for %s exited code %s after %.1fs — "
-                            "retrying connect (%d/%d, Zixi input recreate race)",
+                            "%s publish for %s exited code %s after %.1fs — "
+                            "retrying %s connect (%d/%d, ingest not ready)",
+                            job.destination.protocol.upper(),
                             job.job_id,
                             process.returncode,
                             ran_sec,
-                            early_exit_retries,
-                            _EARLY_EXIT_MAX_RETRIES,
+                            retry_kind,
+                            retry_n,
+                            retry_max,
                         )
                         # Zixi accepts the recreated RTMP input almost
                         # immediately; a 2s sleep was pure added TTFF on a leg
@@ -1021,20 +1070,19 @@ class UploadService:
                             stderr=subprocess.PIPE,
                         )
                         progress_reader = FfmpegProgressReader(process.stdout)
-                        start_time = time.time()
                         encode_lag_tracker = EncodeLagTracker()
                         upload_latency_tracker = UploadLatencyTracker()
-                        # A retried connect is a new startup, not a
-                        # continuation: re-probe so dns/connect belong to the
-                        # attempt that actually carried the media.
-                        startup_tracker = StartupTracker(
-                            job.destination.protocol,
-                            preflight=probe_startup(
-                                job.destination.protocol, job.destination.url
-                            ),
-                        )
-                        sample_tick = 1
-                        had_samples = False
+                        if retry_kind == "early":
+                            # A retried first connect is a new startup.
+                            start_time = time.time()
+                            startup_tracker = StartupTracker(
+                                job.destination.protocol,
+                                preflight=probe_startup(
+                                    job.destination.protocol, job.destination.url
+                                ),
+                            )
+                            sample_tick = 1
+                            had_samples = False
                         continue
                     return outcome
 

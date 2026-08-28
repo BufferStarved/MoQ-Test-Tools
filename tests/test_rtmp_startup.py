@@ -103,13 +103,62 @@ class JoinPathTimingTests(unittest.TestCase):
 
     def test_rtmp_retry_backoff_is_not_two_seconds(self):
         source = self._upload_service_source()
+        self.assertIn("ingest_session_retry_kind", source)
         match = re.search(
-            r"retrying connect.*?time\.sleep\(([\d.]+)\)",
+            r"retrying %s connect.*?time\.sleep\(([\d.]+)\)",
             source,
             re.DOTALL,
         )
-        self.assertIsNotNone(match, "RTMP early-exit retry sleep not found")
+        self.assertIsNotNone(match, "RTMP/WHIP session retry sleep not found")
         self.assertLessEqual(float(match.group(1)), 1.0)
+
+    def test_ingest_session_retry_covers_early_rtmp_and_mid_whip(self):
+        from upload_service import ingest_session_retry_kind
+
+        self.assertEqual(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=0.75,
+                remaining_sec=29.25,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+            ),
+            "early",
+        )
+        # Comparison 30: WHIP painted ~18s then ffmpeg 245 with time left.
+        self.assertEqual(
+            ingest_session_retry_kind(
+                protocol="webrtc",
+                ran_sec=18.757,
+                remaining_sec=11.243,
+                early_exit_retries=2,
+                mid_run_retries=0,
+                cancelled=False,
+                error="WHIP publish failed (ffmpeg 245): Conversion failed!",
+            ),
+            "mid",
+        )
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="moq",
+                ran_sec=2.0,
+                remaining_sec=28.0,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+            )
+        )
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="webrtc",
+                ran_sec=18.0,
+                remaining_sec=12.0,
+                early_exit_retries=2,
+                mid_run_retries=2,
+                cancelled=False,
+            )
+        )
 
 
 class PlayerConnectProbeTests(unittest.TestCase):

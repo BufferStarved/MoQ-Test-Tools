@@ -220,6 +220,22 @@ def _fetch_local(url: str, timeout: float = 1.0) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
+@app.get("/api/v1/moqx/metrics", dependencies=[Depends(verify_token)])
+def moqx_metrics(port: int = 18000) -> dict:
+    """Loopback scrape of this host's moqx Prometheus admin.
+
+    Draft-18 canary admin is TCP 18000 and is not public. Leftover draft-16
+    is 8000. Callers must pass the port for the WebTransport they published.
+    """
+    if port not in {8000, 18000}:
+        raise HTTPException(status_code=400, detail="Invalid moqx admin port")
+    try:
+        body = _fetch_local(f"http://127.0.0.1:{port}/metrics")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"moqx metrics unavailable: {exc}") from exc
+    return {"ok": True, "body": body, "port": port}
+
+
 @app.get("/api/v1/mediamtx/metrics", dependencies=[Depends(verify_token)])
 def mediamtx_metrics() -> dict:
     """Loopback Prometheus scrape so a remote encode host can read this MediaMTX."""

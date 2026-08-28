@@ -52,6 +52,21 @@ class BbbDeploySurviveTests(unittest.TestCase):
         self.assertNotIn("[MOQ_RECORDER_BIN, \"--probe\"]", text)
         self.assertIn("do not `--probe`", text)
 
+    def test_ingest_agent_can_loopback_moqx_admin(self) -> None:
+        text = (ROOT / "ingest_agent" / "main.py").read_text()
+        self.assertIn("/api/v1/moqx/metrics", text)
+        self.assertIn("127.0.0.1:{port}/metrics", text)
+
+    def test_canary_admin_firewall_is_web_vm_only(self) -> None:
+        allow = (ROOT / "scripts" / "allow-canary-admin-web.sh").read_text()
+        self.assertIn("34.9.217.178", allow)
+        self.assertNotIn("0.0.0.0/0", allow)
+        self.assertIn("tcp:${CANARY_ADMIN_PORT}", allow)
+        linode_fw = (ROOT / "infra" / "moqx" / "terraform" / "linode" / "main.tf").read_text()
+        self.assertIn('ports    = "18000"', linode_fw)
+        self.assertIn('"34.9.217.178/32"', linode_fw)
+        self.assertIn("never 0.0.0.0/0", linode_fw)
+
 
 if __name__ == "__main__":
     unittest.main()

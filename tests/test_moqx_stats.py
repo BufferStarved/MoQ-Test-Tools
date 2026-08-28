@@ -132,6 +132,10 @@ class MoqxStatsPollerTests(unittest.TestCase):
         )
         self.assertTrue(poller.enabled)
         self.assertEqual(poller._metrics_url, "http://34.28.164.90:18000/metrics")
+        from moqx_stats import fetch_moqx_metrics_body
+
+        with patch("moqx_stats.urllib.request.urlopen", side_effect=OSError("down")):
+            self.assertIsNone(fetch_moqx_metrics_body("http://34.28.164.90:18000/metrics"))
         from moqx_stats import admin_base_url_for_endpoint
 
         self.assertEqual(

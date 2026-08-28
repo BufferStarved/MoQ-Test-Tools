@@ -54,6 +54,17 @@ def admin_base_url_for_endpoint(endpoint_url: str) -> str:
     return f"http://{host}:{admin_port_for_endpoint(endpoint_url)}"
 
 
+def fetch_moqx_metrics_body(metrics_url: str, *, timeout: float = 2.0) -> str | None:
+    """Prometheus text from a moqx admin /metrics URL, or None if unreachable."""
+    try:
+        request = urllib.request.Request(metrics_url)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.debug("moqx relay stats unavailable at %s: %s", metrics_url, exc)
+        return None
+
+
 @dataclass
 class MoqxStatsSnapshot:
     subscribe_success: int = 0
@@ -117,12 +128,8 @@ class MoqxStatsPoller:
         if not self._enabled:
             return self._latest
 
-        try:
-            request = urllib.request.Request(self._metrics_url)
-            with urllib.request.urlopen(request, timeout=0.8) as response:
-                body = response.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            logger.debug("moqx relay stats unavailable at %s: %s", self._metrics_url, exc)
+        body = fetch_moqx_metrics_body(self._metrics_url, timeout=0.8)
+        if body is None:
             return self._latest
 
         self._latest = self._parse(body)

@@ -137,6 +137,22 @@ class FfmpegFailureMessageTests(unittest.TestCase):
         self.assertNotIn("CMAF init", message)
         self.assertNotIn("closed publisher pipe", message)
 
+    def test_webrtc_245_mid_run_is_retryable_ingest_drop(self) -> None:
+        from upload_service import ingest_session_retry_kind
+
+        self.assertEqual(
+            ingest_session_retry_kind(
+                protocol="webrtc",
+                ran_sec=18.757,
+                remaining_sec=11.243,
+                early_exit_retries=2,
+                mid_run_retries=0,
+                cancelled=False,
+                error="WHIP publish failed (ffmpeg 245): Conversion failed!",
+            ),
+            "mid",
+        )
+
     def test_webrtc_245_is_whip_not_cmaf_pipe(self) -> None:
         process = MagicMock()
         process.returncode = 245

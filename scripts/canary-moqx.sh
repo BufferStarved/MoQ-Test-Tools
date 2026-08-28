@@ -33,6 +33,33 @@ remote() {
   gcloud compute ssh "ubuntu@${INSTANCE}" --zone="$ZONE" --tunnel-through-iap --command="$1"
 }
 
+WEB_SCRAPE_IP="${MOQX_ADMIN_SCRAPE_IP:-34.9.217.178}"
+ADMIN_FIREWALL_NAME="${MOQX_CANARY_ADMIN_FIREWALL:-moq-relay-allow-canary-admin-web}"
+
+ensure_admin_firewall() {
+  # Prometheus /metrics has no auth. Allow only the web VM, never 0.0.0.0/0.
+  if gcloud compute firewall-rules describe "$ADMIN_FIREWALL_NAME" --format='value(name)' >/dev/null 2>&1; then
+    echo "firewall ${ADMIN_FIREWALL_NAME} already present"
+    return 0
+  fi
+  local network
+  network="$(
+    gcloud compute instances describe "$INSTANCE" --zone="$ZONE" \
+      --format='value(networkInterfaces[0].network)' | awk -F/ '{print $NF}'
+  )"
+  if [[ -z "$network" ]]; then
+    echo "Could not determine VPC network for ${INSTANCE}" >&2
+    exit 1
+  fi
+  echo "Creating firewall ${ADMIN_FIREWALL_NAME} on ${network} (TCP ${CANARY_ADMIN_PORT} from ${WEB_SCRAPE_IP} only)"
+  gcloud compute firewall-rules create "$ADMIN_FIREWALL_NAME" \
+    --network="$network" \
+    --allow="tcp:${CANARY_ADMIN_PORT}" \
+    --source-ranges="${WEB_SCRAPE_IP}/32" \
+    --target-tags=moq-relay \
+    --description="Web VM scrape of draft-18 canary admin (not public)"
+}
+
 ensure_firewall() {
   if gcloud compute firewall-rules describe "$FIREWALL_NAME" --format='value(name)' >/dev/null 2>&1; then
     echo "firewall ${FIREWALL_NAME} already present"
@@ -59,6 +86,7 @@ ensure_firewall() {
 case "$ACTION" in
   firewall)
     ensure_firewall
+    ensure_admin_firewall
     ;;
   status)
     remote "echo '=== prod ==='; curl -fsS -m 3 http://127.0.0.1:8000/info; echo; sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | sed -n '1p;/moqx/p'; echo '=== canary ==='; curl -fsS -m 3 http://127.0.0.1:${CANARY_ADMIN_PORT}/info || echo 'canary admin down'"

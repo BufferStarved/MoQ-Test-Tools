@@ -1825,6 +1825,7 @@ def moq_probe(relay_admin: str = ""):
             detail="relay_admin is required; leftover :8000 is not a default",
         )
     from moqx_stats import (
+        fetch_moqx_metrics_body,
         interpret_moqx_probe,
         parse_moqx_metrics,
         remember_probe,
@@ -1847,11 +1848,9 @@ def moq_probe(relay_admin: str = ""):
         "window_basis": "none",
         "checks": [],
     }
-    try:
-        with urllib.request.urlopen(urllib.request.Request(metrics_url, method="GET"), timeout=10) as response:
-            body = response.read().decode("utf-8", errors="replace")
-    except urllib.error.URLError as exc:
-        result["checks"].append(f"metrics_unreachable:{exc.reason}")
+    body = fetch_moqx_metrics_body(metrics_url, timeout=4.0)
+    if body is None:
+        result["checks"].append("metrics_unreachable:timed out")
         return result
 
     result["reachable"] = True
