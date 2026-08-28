@@ -110,6 +110,50 @@ describe("source × protocol start map", () => {
     );
     assert.match(issue ?? "", /destination is not supported/i);
   });
+
+  it("blocks a custom WHIP that duplicates a preset path", () => {
+    const whip = "http://66.175.213.81:8889/benchmark/whip";
+    const issue = recipeIssue(
+      [
+        {
+          id: "preset",
+          protocol: "webrtc",
+          ingestEndpointId: "linode_mediamtx",
+          endpointUrl: "",
+          vmafAvailable: false,
+          serverMetricsAvailable: false,
+          playbackMode: "whep",
+          playbackDvr: false,
+        },
+        {
+          id: "custom",
+          protocol: "webrtc",
+          ingestEndpointId: "custom",
+          endpointUrl: whip,
+          vmafAvailable: false,
+          serverMetricsAvailable: false,
+          playbackMode: "whep",
+          playbackDvr: false,
+        },
+      ],
+      {
+        ...ctx("bbb"),
+        presets: [
+          {
+            id: "moq_mediamtx_linode_whip",
+            name: "Linode WHIP",
+            protocol: "webrtc",
+            url: whip,
+            notes: "",
+            env_vars: [],
+            requires_env: false,
+            web_available: true,
+          },
+        ],
+      },
+    );
+    assert.match(issue ?? "", /same ingest path/i);
+  });
 });
 
 describe("test_scope and playback policy per source", () => {

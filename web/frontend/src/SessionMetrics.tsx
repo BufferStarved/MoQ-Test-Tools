@@ -308,6 +308,13 @@ export function SessionMetrics({ streams, labels, fromHistory = false }: Session
                 streams.map((result, index) => ({
                   label: streamLabel(result, index, labels),
                   filename: result.filename,
+                  protocol: result.protocol,
+                  endpoint: result.endpoint,
+                  paint: Number(
+                    result.averages?.playback_frames_rendered ??
+                      result.rows?.[result.rows.length - 1]?.playback_frames_rendered ??
+                      0,
+                  ),
                 })),
                 "comparison.csv",
               )

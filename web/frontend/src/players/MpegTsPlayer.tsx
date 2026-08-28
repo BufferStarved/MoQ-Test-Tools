@@ -320,6 +320,14 @@ export default function MpegTsPlayer({
       encodeDurationSec: encodeDurationRef.current,
     });
 
+    const paintedOk = () => {
+      const frames = readVideoFrameStats(video);
+      return (
+        sessionRef.current.ttffMs > 0 &&
+        (frames.framesRendered > 0 || (video?.videoWidth ?? 0) > 0)
+      );
+    };
+
     const markPlaybackOk = (diag: string) => {
       lastErrorRef.current = null;
       setError(null);
@@ -327,27 +335,32 @@ export default function MpegTsPlayer({
       pushDiag(diag);
     };
 
+    const failPlayback = (reason: string) => {
+      const message = `MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`;
+      lastErrorRef.current = message;
+      setError(message);
+      setStatus("Failed");
+      pushDiag(`fatal=${reason}`);
+    };
+
     const scheduleReconnect = (reason: string) => {
       if (destroyed) {
         return;
       }
-      const playedOk =
-        sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
-      if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+      const playedOk = paintedOk();
+      const unreachable = /manifest unreachable|HTTP /i.test(reason);
+      if (!unreachable && isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
         destroyPlayer();
         markPlaybackOk(`graceful_eos ${reason}`);
         return;
       }
       pushDiag(`reconnect_reason=${reason}`);
       if (reconnects >= MAX_RECONNECTS) {
-        if (playedOk) {
+        if (playedOk && !unreachable) {
           markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`);
           return;
         }
-        const message = `MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`;
-        lastErrorRef.current = message;
-        setError(message);
-        setStatus("Stopped");
+        failPlayback(reason);
         return;
       }
       reconnects += 1;
@@ -396,6 +409,12 @@ export default function MpegTsPlayer({
         return;
       }
       destroyPlayer();
+      if (reconnects === 0) {
+        sessionRef.current.maxVideoTime = 0;
+        sessionRef.current.ttffMs = 0;
+        sessionRef.current.firstPaintAtMs = 0;
+        sessionRef.current.videoTimeOrigin = null;
+      }
       setError(null);
       setStatus(reconnects > 0 ? "Reconnecting…" : "Connecting…");
       try {
@@ -544,8 +563,7 @@ export default function MpegTsPlayer({
           return;
         }
         pushDiag(`mpegtsjs_error type=${type} detail=${detail} code=${info?.code ?? "n/a"}`);
-        const playedOk =
-          sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+        const playedOk = paintedOk();
         if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
           destroyPlayer();
           markPlaybackOk("graceful_eos mpegts_error after successful playback");
@@ -558,8 +576,7 @@ export default function MpegTsPlayer({
         if (destroyed) {
           return;
         }
-        const playedOk =
-          sessionRef.current.ttffMs > 0 || sessionRef.current.maxVideoTime > 0.25;
+        const playedOk = paintedOk();
         if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
           destroyPlayer();
           markPlaybackOk("loading_complete (encode ended)");

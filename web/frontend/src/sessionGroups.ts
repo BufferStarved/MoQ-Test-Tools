@@ -1,4 +1,5 @@
 import { fetchResultDetail, fetchResults } from "./api";
+import { uniqueDownloadStreams } from "./downloadStreams";
 import { protocolLabel } from "./protocolTheme";
 import { canOverlayTestScopes, resultTestScope } from "./testScope";
 import type { ResultFile, ResultSummary } from "./types";
@@ -96,11 +97,27 @@ export async function loadSessionSummaries(
   group: SessionGroup,
 ): Promise<{ summaries: ResultSummary[]; labels: string[] }> {
   const details = await Promise.all(group.files.map((file) => fetchResultDetail(file.filename)));
-  const labels = details.map(
+  const uniqueFiles = new Set(
+    uniqueDownloadStreams(
+      details.map((detail) => ({
+        label: detail.summary_extra?.stream_label || detail.filename,
+        filename: detail.filename,
+        protocol: detail.protocol,
+        endpoint: detail.endpoint,
+        paint: Number(
+          detail.averages?.playback_frames_rendered ??
+            detail.rows?.[detail.rows.length - 1]?.playback_frames_rendered ??
+            0,
+        ),
+      })),
+    ).map((stream) => stream.filename),
+  );
+  const summaries = details.filter((detail) => uniqueFiles.has(detail.filename));
+  const labels = summaries.map(
     (detail, index) =>
       detail.summary_extra?.stream_label || `Stream ${index + 1} (${protocolLabel(detail.protocol)})`,
   );
-  return { summaries: details, labels };
+  return { summaries, labels };
 }
 
 /** True when every summary in the set measured the same test_scope. */

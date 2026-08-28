@@ -259,6 +259,7 @@ export default function MoqPlayer({
   previewReadyRef.current = previewReady;
   const jobErrorRef = useRef(jobError);
   jobErrorRef.current = jobError;
+  const subscribeRejectedRef = useRef(false);
   useEffect(() => {
     const jobFail = playerErrorForFailedJob({ jobStatus, jobError });
     if (!jobFail) {
@@ -480,6 +481,7 @@ export default function MoqPlayer({
           namespace,
           jobStatus: jobStatusRef.current,
           jobError: jobErrorRef.current,
+          subscribeRejected: subscribeRejectedRef.current,
         });
         if (verdict.ok) {
           setError(null);
@@ -527,6 +529,7 @@ export default function MoqPlayer({
     );
 
     let destroyed = false;
+    subscribeRejectedRef.current = false;
     let connectTimeout: ReturnType<typeof window.setTimeout> | undefined;
     let liveEdgeTimer: ReturnType<typeof window.setInterval> | undefined;
     let playKickTimer: ReturnType<typeof window.setInterval> | undefined;
@@ -1244,6 +1247,7 @@ export default function MoqPlayer({
             // the one-shot CMAF catalog is published to nobody (CSV 2026-08-18:
             // moqx_subscribe_error=1, subscribe_success=0, frames=0, no UI error).
             keptPublisherNotReady = true;
+            subscribeRejectedRef.current = true;
             pushDiag("subscribe_0x10_keepalive (waiting for namespace/catalog)", true);
             setStatus("Waiting for publisher namespace...");
             return;
@@ -1316,6 +1320,7 @@ export default function MoqPlayer({
               jobStatus: jobStatusRef.current,
               jobError: jobErrorRef.current,
               previewReady: previewReadyRef.current,
+              subscribeRejected: subscribeRejectedRef.current,
             }),
           );
         }, attempt < MAX_CONNECT_ATTEMPTS ? CATALOG_RETRY_MS : catalogWaitMs);
@@ -1431,6 +1436,7 @@ export default function MoqPlayer({
                 catalogReady: sessionRef.current.catalogReady,
                 liveMs: Date.now() - liveStartedAtMs,
                 deadlineMs: mediaDeadlineMs,
+                subscribeRejected: subscribeRejectedRef.current,
               })
             ) {
               fail(
@@ -1440,6 +1446,7 @@ export default function MoqPlayer({
                   jobStatus: jobStatusRef.current,
                   jobError: jobErrorRef.current,
                   previewReady: previewReadyRef.current,
+                  subscribeRejected: subscribeRejectedRef.current,
                 }),
               );
             }

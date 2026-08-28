@@ -19,6 +19,7 @@ import {
   type FeatureFlags,
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
+import { uniqueDownloadStreams } from "./downloadStreams";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { EndpointSection, playerShortLabel } from "./EndpointSection";
 import { AboutPage, PAYPAL_DONATE_URL } from "./AboutPage";
@@ -66,6 +67,7 @@ import {
   publishProtocolIdsForSource,
   recipeIssue,
   siblingOccupiedCollisionKeys,
+  uniqueEndpointsByPublishSlot,
   type PublishProtocolId,
   type RecipeContext,
 } from "./recipeSupport";
@@ -250,9 +252,15 @@ function endpointLabel(
 function sessionDownloadStreams(
   legs: ComparisonLegState[],
 ): { label: string; filename: string }[] {
-  return legs
-    .map((leg) => ({ label: leg.label, filename: resultFilenameFromPath(leg.job.csv_path) }))
-    .filter((entry): entry is { label: string; filename: string } => Boolean(entry.filename));
+  return uniqueDownloadStreams(
+    legs.map((leg) => ({
+      label: leg.label,
+      filename: resultFilenameFromPath(leg.job.csv_path) || "",
+      protocol: leg.protocol,
+      endpoint: leg.job.endpoint_url,
+      paint: Number(leg.latestSample?.playback_frames_rendered ?? 0),
+    })),
+  );
 }
 
 function resolvePresetId(endpoint: EndpointConfig): string | undefined {
@@ -1553,7 +1561,10 @@ function App() {
     setSessionFromHistory(false);
     setLoading(true);
 
-    const startEndpoints = coerceRecipe(endpoints, recipeContext);
+    const startEndpoints = uniqueEndpointsByPublishSlot(
+      coerceRecipe(endpoints, recipeContext),
+      recipeContext,
+    );
     if (startEndpoints !== endpoints) {
       setEndpoints(startEndpoints);
     }

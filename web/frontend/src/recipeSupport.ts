@@ -12,6 +12,8 @@ import {
   ingestEndpointsForProtocol,
   ingestRole,
   isCustomIngestEndpoint,
+  publishCollisionKeys,
+  resolveEndpointUrl,
   type IngestEndpointId,
 } from "./ingestEndpoints.ts";
 import {
@@ -510,6 +512,27 @@ export function canAddRecipeOutput(
   return current.length < maxEndpoints && nextAddableEndpoint(current, ctx, protocolOrder) !== null;
 }
 
+/** Drop later tiles that publish to the same WHIP/RTMP/MTX slot as an earlier one. */
+export function uniqueEndpointsByPublishSlot(
+  endpoints: EndpointConfig[],
+  ctx: Pick<RecipeContext, "presets">,
+): EndpointConfig[] {
+  const used = new Set<string>();
+  const kept: EndpointConfig[] = [];
+  for (const endpoint of endpoints) {
+    const resolved = resolveEndpointUrl(endpoint, ctx.presets);
+    const keys = publishCollisionKeys(endpoint, resolved);
+    if (keys.some((key) => used.has(key))) {
+      continue;
+    }
+    for (const key of keys) {
+      used.add(key);
+    }
+    kept.push(endpoint);
+  }
+  return kept.length === endpoints.length ? endpoints : kept;
+}
+
 export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): string | null {
   const allowed = publishProtocolIdsForSource(
     ctx.source,
@@ -544,11 +567,12 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
     if (!ingestAllowedForRecipe(endpoint.ingestEndpointId, endpoint.protocol, ctx)) {
       return "This output’s destination is not supported for that protocol.";
     }
-    const key = ingestCollisionKey(endpoint.ingestEndpointId, endpoint.protocol);
-    if (key) {
-      if (used.has(key)) {
-        return "Two outputs share the same ingest path.";
-      }
+    const resolved = resolveEndpointUrl(endpoint, ctx.presets);
+    const keys = publishCollisionKeys(endpoint, resolved);
+    if (keys.some((key) => used.has(key))) {
+      return "Two outputs share the same ingest path.";
+    }
+    for (const key of keys) {
       used.add(key);
     }
     const mode = resolvedSelectablePlaybackMode(

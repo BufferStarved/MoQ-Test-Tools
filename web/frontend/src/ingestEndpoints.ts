@@ -396,6 +396,42 @@ export function isCustomIngestEndpoint(ingestEndpointId: string): boolean {
   return ingestEndpointId === "custom";
 }
 
+/** Host + path only — query (streamid, namespace) does not make a new slot. */
+export function normalizePublishUrl(url: string): string {
+  const trimmed = (url || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.protocol}//${parsed.host.toLowerCase()}${path}`;
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+/**
+ * Keys that mean "these two legs publish to the same slot".
+ * Custom URL + a preset tile can share a WHIP/RTMP path even when
+ * ingestCollisionKey is null for `custom`.
+ */
+export function publishCollisionKeys(
+  endpoint: { protocol: string; ingestEndpointId: string; endpointUrl?: string },
+  resolvedUrl?: string,
+): string[] {
+  const keys: string[] = [];
+  const ingest = ingestCollisionKey(endpoint.ingestEndpointId, endpoint.protocol);
+  if (ingest) {
+    keys.push(`ingest:${ingest}`);
+  }
+  const url = normalizePublishUrl(resolvedUrl || endpoint.endpointUrl || "");
+  if (url && endpoint.protocol !== "moq") {
+    keys.push(`url:${endpoint.protocol}:${url}`);
+  }
+  return keys;
+}
+
 /**
  * Physical publish "slot" a given ingest+protocol combination occupies.
  * Returns null when the combination can never collide with another leg.
@@ -406,8 +442,7 @@ export function isCustomIngestEndpoint(ingestEndpointId: string): boolean {
  * active publisher per path. Zixi instead gives SRT its own named input
  * ("SRT Test") that's independent from RTMP/HLS/DASH (all "benchmark"), so
  * only some protocol groups collide there. MoQ relays hand out a randomized
- * namespace per leg and never collide; "custom" URLs are the user's
- * responsibility.
+ * namespace per job and never collide.
  */
 export function ingestCollisionKey(ingestEndpointId: string, protocol: string): string | null {
   if (protocol === "moq" || isCustomIngestEndpoint(ingestEndpointId)) {

@@ -10,6 +10,8 @@ import {
   ingestEndpointsFromPresets,
   ingestPrefixForCloudHost,
   normalizeCloudHost,
+  normalizePublishUrl,
+  publishCollisionKeys,
 } from "./ingestEndpoints.ts";
 import type { Preset } from "./types.ts";
 
@@ -111,5 +113,30 @@ describe("9-host encode registry", () => {
     assert.equal(zixi?.available, false);
     assert.match(zixi?.detail ?? "", /35\.222\.33\.58/);
     assert.doesNotMatch(zixi?.detail ?? "", /Not deployed/);
+  });
+});
+
+describe("publish collision slots", () => {
+  it("collides a custom WHIP URL with the same path as a preset tile", () => {
+    const whip = "http://66.175.213.81:8889/benchmark/whip";
+    const preset = publishCollisionKeys(
+      { protocol: "webrtc", ingestEndpointId: "linode_mediamtx" },
+      whip,
+    );
+    const custom = publishCollisionKeys({
+      protocol: "webrtc",
+      ingestEndpointId: "custom",
+      endpointUrl: whip,
+    });
+    assert.ok(preset.some((key) => custom.includes(key)));
+    assert.equal(normalizePublishUrl(`${whip}?foo=1`), normalizePublishUrl(whip));
+  });
+
+  it("does not collide two MoQ legs on the same relay", () => {
+    const keys = publishCollisionKeys(
+      { protocol: "moq", ingestEndpointId: "gcp_east_moq_relay_d18" },
+      "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+    );
+    assert.equal(keys.some((key) => key.startsWith("url:")), false);
   });
 });

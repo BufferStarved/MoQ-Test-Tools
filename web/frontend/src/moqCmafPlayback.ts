@@ -342,6 +342,11 @@ export function playerErrorForFailedJob(options: {
   ) {
     return humanizeJobError(options.jobError);
   }
+  // Pipe-close / ffmpeg 224 often lands while status is still "running".
+  // Do not wait for the job to flip failed before telling the truth.
+  if (isCaptureOrPublishError(options.jobError)) {
+    return humanizeJobError(options.jobError);
+  }
   return null;
 }
 
@@ -373,6 +378,8 @@ export function noMediaFailMessage(options: {
   jobStatus?: string;
   jobError?: string | null;
   previewReady?: boolean;
+  /** True when playa kept the session on 0x10 (no such namespace or track). */
+  subscribeRejected?: boolean;
 }): string {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail) {
@@ -382,6 +389,14 @@ export function noMediaFailMessage(options: {
     return "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.";
   }
   const ns = (options.namespace || "").trim();
+  // 0x10 means the relay never had this namespace. preview_ready grace is
+  // not a live announce — treating it as one-shot miss hid the pipe-close
+  // (bench-2c3781c5: moqx_ns=0 the whole run, then ffmpeg 224).
+  if (options.subscribeRejected) {
+    return ns
+      ? `MoQ publisher never announced namespace ${ns} on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.`
+      : "MoQ publisher never announced the namespace on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.";
+  }
   if (options.jobStatus === "completed") {
     return ns
       ? `MoQ publisher never announced namespace ${ns} on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.`
@@ -415,6 +430,7 @@ export function shouldFailNoMediaWatchdog(options: {
   catalogReady?: boolean;
   liveMs: number;
   deadlineMs: number;
+  subscribeRejected?: boolean;
 }): boolean {
   const status = (options.jobStatus || "").toLowerCase();
   if (status === "queued" || status === "pending") {
@@ -424,6 +440,11 @@ export function shouldFailNoMediaWatchdog(options: {
     return true;
   }
   if (options.previewReady === false) {
+    return false;
+  }
+  // 0x10 keepalive: the namespace was never live. Wait for encode-over so
+  // the job error (pipe close, publisher exit) wins over a 30s miss toast.
+  if (options.subscribeRejected && options.catalogReady === false) {
     return false;
   }
   // Live-write in flight: wait for vide_1, then fail if the catalog never
@@ -458,6 +479,7 @@ export function classifyMoqEndVerdict(options: {
   jobStatus?: string;
   jobError?: string | null;
   previewReady?: boolean;
+  subscribeRejected?: boolean;
 }): MoqEndVerdict {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail && !moqHasRenderedMedia(options)) {
@@ -525,6 +547,7 @@ export function classifyMoqEndVerdict(options: {
       jobStatus: options.jobStatus,
       jobError: options.jobError,
       previewReady: options.previewReady,
+      subscribeRejected: options.subscribeRejected,
     }),
   };
 }

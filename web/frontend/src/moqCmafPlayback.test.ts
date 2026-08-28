@@ -252,6 +252,38 @@ describe("noMediaFailMessage", () => {
     assert.match(message, /catalog object never reached this player/i);
     assert.doesNotMatch(message, /0x10 subscribe miss is not OK/);
   });
+
+  it("does not call a 0x10 keepalive a one-shot miss even if preview_ready grace fired", () => {
+    const message = noMediaFailMessage({
+      catalogReady: false,
+      namespace: "bench-2c3781c5",
+      jobStatus: "running",
+      previewReady: true,
+      subscribeRejected: true,
+    });
+    assert.match(message, /never announced namespace bench-2c3781c5/i);
+    assert.match(message, /0x10/i);
+    assert.doesNotMatch(message, /namespace bench-2c3781c5 is live/i);
+    assert.match(message, /not a one-shot catalog miss/i);
+  });
+
+  it("prefers a pipe-close job error while the job is still running", () => {
+    const jobError =
+      "ffmpeg I/O error: ffmpeg exited with code 224: Conversion failed!. The encoder wrote to a closed publisher pipe.";
+    const shown = playerErrorForFailedJob({ jobStatus: "running", jobError });
+    assert.match(shown ?? "", /publisher pipe closed/i);
+    assert.match(
+      noMediaFailMessage({
+        catalogReady: false,
+        namespace: "bench-2c3781c5",
+        jobStatus: "running",
+        jobError,
+        previewReady: true,
+        subscribeRejected: true,
+      }),
+      /publisher pipe closed/i,
+    );
+  });
 });
 
 describe("shouldFailNoMediaWatchdog", () => {
@@ -324,6 +356,31 @@ describe("shouldFailNoMediaWatchdog", () => {
         jobStatus: "completed",
         previewReady: true,
         catalogReady: false,
+        liveMs: 1_000,
+        deadlineMs: 15_000,
+      }),
+      true,
+    );
+  });
+
+  it("waits for encode-over when SUBSCRIBE 0x10 is the only catalog signal", () => {
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "running",
+        previewReady: true,
+        catalogReady: false,
+        subscribeRejected: true,
+        liveMs: MOQ_CATALOG_REFRESH_WAIT_MS + 1,
+        deadlineMs: 15_000,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldFailNoMediaWatchdog({
+        jobStatus: "failed",
+        previewReady: true,
+        catalogReady: false,
+        subscribeRejected: true,
         liveMs: 1_000,
         deadlineMs: 15_000,
       }),

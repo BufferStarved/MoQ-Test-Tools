@@ -1,9 +1,8 @@
 import { resultDownloadUrl } from "./api";
+import { uniqueDownloadStreams, type DownloadableStream } from "./downloadStreams";
 
-export interface DownloadableStream {
-  label: string;
-  filename: string;
-}
+export type { DownloadableStream };
+export { uniqueDownloadStreams };
 
 function triggerBlobDownload(content: string, mimeType: string, filename: string): void {
   const blob = new Blob([content], { type: mimeType });
@@ -34,7 +33,7 @@ export async function downloadCombinedCsv(
   combinedFilename: string,
 ): Promise<void> {
   const lines: string[] = [];
-  for (const stream of streams) {
+  for (const stream of uniqueDownloadStreams(streams)) {
     const response = await fetch(resultDownloadUrl(stream.filename, "csv"));
     if (!response.ok) {
       continue;
@@ -66,7 +65,7 @@ export async function downloadCombinedJson(
   combinedFilename: string,
 ): Promise<void> {
   const combined: Record<string, unknown>[] = [];
-  for (const stream of streams) {
+  for (const stream of uniqueDownloadStreams(streams)) {
     const response = await fetch(resultDownloadUrl(stream.filename, "json"));
     if (!response.ok) {
       continue;
