@@ -129,6 +129,31 @@ for d in "${vendor_dists[@]}"; do
     "$STAGE/$d/" "$WEB_IP:$INSTALL_ROOT/$d/"
 done
 
+# Recorder JS is bind-mounted into openmoq-recorder:latest. Missing
+# record-policy.mjs makes Linode :14433 ingest record 0 bytes after §11.1.
+remote "mkdir -p $INSTALL_ROOT/tools/openmoq-recorder $INSTALL_ROOT/tools/moq5-publisher $INSTALL_ROOT/ingest_agent"
+rsync -az -e "ssh ${SSH_OPTS[*]}" \
+  "$STAGE/tools/openmoq-recorder/record.mjs" \
+  "$STAGE/tools/openmoq-recorder/record-policy.mjs" \
+  "$STAGE/tools/openmoq-recorder/cert.mjs" \
+  "$STAGE/tools/openmoq-recorder/openmoq-init.mjs" \
+  "$STAGE/tools/openmoq-recorder/wt-adapter.mjs" \
+  "$WEB_IP:$INSTALL_ROOT/tools/openmoq-recorder/"
+
+rsync -az --exclude '__pycache__' --exclude '*.pyc' \
+  -e "ssh ${SSH_OPTS[*]}" \
+  "$STAGE/ingest_agent/" "$WEB_IP:$INSTALL_ROOT/ingest_agent/"
+
+# Publisher C (CONNECT-before-moov). Binary is rebuilt on the VM below
+# only when the tree is already cmake-configured.
+rsync -az -e "ssh ${SSH_OPTS[*]}" \
+  "$STAGE/tools/moq5-publisher/fmp4_moq_bridge.c" \
+  "$STAGE/tools/moq5-publisher/fmp4_moq_bridge.h" \
+  "$STAGE/tools/moq5-publisher/fmp4_moq_bridge_priv.h" \
+  "$STAGE/tools/moq5-publisher/main.c" \
+  "$STAGE/tools/moq5-publisher/CMakeLists.txt" \
+  "$WEB_IP:$INSTALL_ROOT/tools/moq5-publisher/"
+
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
   "$STAGE/.build-sha" "$WEB_IP:$INSTALL_ROOT/.build-sha"
 
@@ -152,6 +177,20 @@ fi
 ENV
   echo "==> restart $SERVICE_NAME"
   remote "sudo systemctl restart $SERVICE_NAME && sleep 4 && systemctl is-active $SERVICE_NAME"
+  echo "==> rebuild moq5-fmp4-publish if a build tree exists"
+  remote "if [[ -f $INSTALL_ROOT/tools/moq5-publisher/build/Makefile ]]; then
+    cmake --build $INSTALL_ROOT/tools/moq5-publisher/build --target moq5-fmp4-publish -j2
+    install -m 0755 $INSTALL_ROOT/tools/moq5-publisher/build/moq5-fmp4-publish \
+      $INSTALL_ROOT/tools/moq5-publisher/bin/moq5-fmp4-publish
+  else
+    echo '    skip (no cmake build tree)'
+  fi"
+  if remote "systemctl is-active --quiet moq-ingest-agent.service"; then
+    echo "==> restart moq-ingest-agent (recorder bind-mount)"
+    remote "sudo systemctl restart moq-ingest-agent.service && sleep 2 && systemctl is-active moq-ingest-agent.service"
+  else
+    echo "==> moq-ingest-agent not active (recorder may live in-process on moq-web)"
+  fi
 fi
 
 echo "==> health"
