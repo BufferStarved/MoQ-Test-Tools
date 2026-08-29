@@ -34,6 +34,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_bbb_deploy_and_whep_import \
   tests.test_cloud_placement \
   tests.test_cloud_encode_slots \
+  tests.test_comparison_encode_hub \
   tests.test_moq_preview_ready_grace \
   tests.test_moq_preview \
   tests.test_moq_publish_announce \

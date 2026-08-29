@@ -198,6 +198,84 @@ describe("comparison 30 replay", () => {
   });
 });
 
+/** Last sample per series from comparison (31).csv — 4 dests, 0 paint, encode ~0.3x. */
+const COMPARISON_31: ComparisonLastRow[] = [
+  {
+    stream: "Stream 1 (MoQ)",
+    protocol: "moq",
+    endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+    encode_frames_total: 846,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 1,
+  },
+  {
+    stream: "Stream 2 (RTMP)",
+    protocol: "rtmp",
+    endpoint: "rtmp://45.33.68.151:1935/live/benchmark",
+    encode_frames_total: 872,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 0,
+  },
+  {
+    stream: "Stream 3 (SRT)",
+    protocol: "srt",
+    endpoint: "srt://66.175.213.81:8890?mode=caller&latency=2000000&streamid=publish:benchmark",
+    encode_frames_total: 861,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 0,
+  },
+  {
+    stream: "Stream 4 (SRT)",
+    protocol: "srt",
+    endpoint: "srt://35.196.97.22:8890?mode=caller&latency=2000000&streamid=publish:benchmark",
+    encode_frames_total: 876,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 0,
+  },
+];
+
+describe("comparison 31 replay", () => {
+  it("exports one series per dest", () => {
+    assert.equal(uniquePublishSeriesCount(COMPARISON_31), 4);
+  });
+
+  it("does not call late ns=1 plus 0x10 a never-announce or one-shot miss", () => {
+    const moq = COMPARISON_31[0];
+    assert.equal(moqxNeverAnnounced(moq), false);
+    const error = visibleMoqError(moq, {
+      playaLines: [
+        "subscribe_0x10_keepalive (playa warn: no such namespace)",
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "Watchdog timeout: catalog_received after 10004ms",
+      ],
+      jobStatus: "completed",
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-comparison-31",
+    });
+    assert.match(error, /after SUBSCRIBE 0x10/i);
+    assert.match(error, /watchdog expired/i);
+    assert.doesNotMatch(error, /never announced/i);
+    assert.doesNotMatch(error, /catalog object never reached/i);
+  });
+
+  it("does not call SRT/RTMP with zero paint Playback OK", () => {
+    for (const row of COMPARISON_31.slice(1)) {
+      const leg = visibleLeg(row, { encodeDurationSec: 60 });
+      assert.notEqual(leg.status, "Playback OK");
+      assert.match(leg.error ?? "", /manifest never loaded|never painted/i);
+    }
+  });
+});
+
 describe("custom 4-way bench-aef84d9a replay", () => {
   it("does not call completed + 0x10 + 0 paint a catalog miss", () => {
     const moq: ComparisonLastRow = {

@@ -314,7 +314,16 @@ def api(method: str, path: str, data: Optional[dict] = None, files: Optional[dic
     url = f"{BASE_URL}{path}"
     if files:
         # multipart via curl for simplicity
-        cmd = ["curl", "-sS", "-m", "120", "-X", method]
+        cmd = [
+            "curl",
+            "-sS",
+            "-m",
+            "120",
+            "-A",
+            "Mozilla/5.0 (MoQ-matrix)",
+            "-X",
+            method,
+        ]
         for key, (filename, raw, ctype) in files.items():
             tmp = Path(tempfile.mkstemp(suffix=Path(filename).suffix)[1])
             tmp.write_bytes(raw)
@@ -323,17 +332,26 @@ def api(method: str, path: str, data: Optional[dict] = None, files: Optional[dic
         out = subprocess.check_output(cmd, text=True)
         return json.loads(out)
     body = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (MoQ-matrix)",
+    }
     if data is not None:
         body = json.dumps(data).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        err = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {path} -> {exc.code}: {err}") from exc
+    last_exc: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            err = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"{method} {path} -> {exc.code}: {err}") from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionResetError, ConnectionAbortedError) as exc:
+            last_exc = exc
+            time.sleep(0.8 * (attempt + 1))
+    raise RuntimeError(f"{method} {path} -> {last_exc}") from last_exc
 
 
 def probe_http_origin(url: str, *, method: str = "GET") -> tuple[int, int, str]:
@@ -940,6 +958,9 @@ def run_case(case: dict, media_path: str) -> CaseResult:
     if origin_url and job_now.get("status") == "running" and case.get("playback") not in {"moq", "skip", ""}:
         method = "OPTIONS" if case.get("playback") == "whep" else "GET"
         code, body_len, origin_msg = probe_http_origin(origin_url, method=method)
+        if preview and case.get("playback") in {"hls", "mpegts", "dash"} and (code >= 400 or code == 0):
+            time.sleep(2.0)
+            code, body_len, origin_msg = probe_http_origin(origin_url, method=method)
         result.detail["origin"] = {"url": origin_url, "code": code, "bytes": body_len, "note": origin_msg}
         ingest_bits.append(f"origin={origin_msg}")
         result.ingest = " ".join(ingest_bits)

@@ -75,6 +75,7 @@ from moq_publish import (
     find_moq_publisher,
     whip_ffmpeg_missing_error,
     is_brokered_webcam_udp,
+    is_shared_encode_udp,
     is_device_webcam_source,
     is_live_media_source,
     mediamtx_loopback_publish_url,
@@ -121,7 +122,7 @@ from quality_metrics import (
 )
 from vmaf_score import compute_vmaf
 from mediamtx_stats import MediaMtxStatsPoller, MediaMtxStatsSnapshot
-from zixi_stats import ZixiStatsPoller
+from zixi_stats import ZixiStatsPoller, zixi_ingest_observed
 
 logger = logging.getLogger("MoQ-SRT-Bench")
 
@@ -374,7 +375,9 @@ class UploadJob:
         # Webcam broker already emitted H.264. A second x264 plus the WHIP
         # muxer is what died at ~20s on c49d2ef4 (fps→0, encode_lag 31s,
         # 8 stalls). Copy video; Opus is still required for `-f whip`.
-        if self.destination.protocol == "webrtc" and is_brokered_webcam_udp(self.media_path):
+        if is_shared_encode_udp(self.media_path) or (
+            self.destination.protocol == "webrtc" and is_brokered_webcam_udp(self.media_path)
+        ):
             return ["-c:v", "copy"]
         # One IDR cadence for every delivery path (MediaMTX LL-HLS, Zixi Fast
         # HLS / HTTP-TS): 1s. Zixi used to inherit the 2s chunk duration as its
@@ -1116,8 +1119,15 @@ class UploadService:
                 if send_mbps <= 0 and encoded_bitrate_kbps > 0:
                     send_mbps = encoded_bitrate_kbps / 1000.0
                     merged["net_send_mbps"] = send_mbps
-                publish_success = _ingest_receive_observed(mtx_stats) or (
-                    job.destination.protocol == "rtmp" and (zixi_stats.rtt_ms or 0) > 0
+                rtmp_path_sent = (
+                    job.destination.protocol == "rtmp"
+                    and send_mbps > 0
+                    and bool(path_rtt and (path_rtt.rtt_ms or 0) > 0)
+                )
+                publish_success = (
+                    _ingest_receive_observed(mtx_stats)
+                    or zixi_ingest_observed(zixi_stats)
+                    or rtmp_path_sent
                 )
                 upload_latency_ms = _observe_upload_latency(
                     upload_latency_tracker,
@@ -1131,13 +1141,11 @@ class UploadService:
                 # tick, and a 0.0 ms phase is the correct reading when they are.
                 startup_half = startup_tracker.observe(
                     encode_frames=status.frame,
-                    # Zixi's RTT is only read as an accept on RTMP, matching the
-                    # gate on publish_success above: on the HTTP-TS presets the
-                    # poller can be answering for a different input object.
+                    # Zixi RTMP often has rtt=0; accept on kb/bitrate/packets
+                    # or a live TCP path + send rate (comparison 31).
                     publish_accepted=bool(getattr(mtx_stats, "ready", False))
-                    or (
-                        job.destination.protocol == "rtmp" and (zixi_stats.rtt_ms or 0) > 0
-                    ),
+                    or zixi_ingest_observed(zixi_stats)
+                    or rtmp_path_sent,
                     first_byte_ingest=publish_success,
                 )
 
@@ -2346,7 +2354,7 @@ class UploadService:
                 startup_half = startup_tracker.observe(
                     encode_frames=status.frame,
                     publish_accepted=bool(getattr(mtx_stats, "ready", False))
-                    or (zixi_stats.rtt_ms or 0) > 0,
+                    or zixi_ingest_observed(zixi_stats),
                     first_byte_ingest=publish_success,
                 )
 
@@ -2463,6 +2471,11 @@ class UploadService:
             server_metrics_enabled=ingest_poller.enabled,
         )
 
+    # publisher_catalog_published needs attach + track added + obj vide.
+    # A 5-line tail dropped those on Linode (no :18000 scrape) so preview
+    # stayed false while the 40-line end-of-job check passed.
+    _MOQ_PUBLISHER_LOG_TAIL = 40
+
     @staticmethod
     def _tail_file(path: str, max_lines: int = 5) -> str:
         try:
@@ -2471,6 +2484,13 @@ class UploadService:
         except OSError:
             return ""
         return "".join(lines[-max_lines:]).strip()
+
+    def _moq_publisher_logs(self, stderr_path: str, stdout_path: str) -> str:
+        n = self._MOQ_PUBLISHER_LOG_TAIL
+        return (
+            f"{self._tail_file(stderr_path, max_lines=n)}\n"
+            f"{self._tail_file(stdout_path, max_lines=n)}"
+        )
 
     @staticmethod
     def _drain_stream_to_file(stream, path: str) -> None:
@@ -2833,9 +2853,8 @@ class UploadService:
                 moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
                 moqx_deltas = moqx_poller.job_window_deltas() if moqx_poller.enabled else None
                 if not preview_ready_notified:
-                    pub_ready_log = (
-                        f"{self._tail_file(publisher_log_path)}\n"
-                        f"{self._tail_file(publisher_stdout_path)}"
+                    pub_ready_log = self._moq_publisher_logs(
+                        publisher_log_path, publisher_stdout_path
                     )
                     # Local "sender ready" is not a relay announce. East
                     # comparison 30: moqx_ns=0 the whole run while local
@@ -2903,9 +2922,8 @@ class UploadService:
                         net_loss_pct = min(100.0, (loss_delta / denom) * 100.0)
                         net_retrans_pct = min(100.0, (retrans_delta / denom) * 100.0)
 
-                wt_log = (
-                    f"{self._tail_file(publisher_log_path)}\n"
-                    f"{self._tail_file(publisher_stdout_path)}"
+                wt_log = self._moq_publisher_logs(
+                    publisher_log_path, publisher_stdout_path
                 )
                 publish_success = (
                     publisher_first_object_sent(wt_log)

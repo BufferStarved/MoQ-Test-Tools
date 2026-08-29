@@ -1,10 +1,9 @@
-"""Cap concurrent cloud ffmpeg encodes on the orchestrator VM.
+"""Cap concurrent *independent* cloud ffmpeg encodes on the orchestrator VM.
 
-A four-way BBB comparison used to spawn four libx264 jobs at once. The
-encode host then ran at speed≈0.4x, dropped frames, and SIGTERM'd at
-4–10s while RTMP/SRT sat on "Waiting" for HLS that never arrived.
-Browser and laptop publishers do not take a slot — they do not use this
-VM's CPU for encode.
+A four-way BBB comparison shares one x264 master (comparison_encode_hub)
+and copy-remuxes each dest — those remux legs do not take a slot.
+This ceiling is a safety net for unrelated solo encodes, not a product
+rule that testers may only run one dest.
 """
 
 from __future__ import annotations

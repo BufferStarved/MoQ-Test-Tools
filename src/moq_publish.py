@@ -819,6 +819,15 @@ def is_brokered_webcam_udp(media_path: str) -> bool:
     return (media_path or "").strip().lower().startswith("udp://")
 
 
+SHARED_ENCODE_QUERY = "shared_encode=1"
+
+
+def is_shared_encode_udp(media_path: str) -> bool:
+    """Comparison hub already encoded this hop (one x264 → loopback MPEG-TS)."""
+    value = (media_path or "").strip().lower()
+    return value.startswith("udp://") and SHARED_ENCODE_QUERY in value
+
+
 def build_device_webcam_input_args(
     *,
     duration_sec: Optional[int] = None,
@@ -977,7 +986,7 @@ def build_ffmpeg_moq_cmd(
     # ultrafast) still ran at 24↔37 fps / 0.84↔1.28× while the RTMP sibling
     # held 30/0.99 (comparison CSV 2026-08-21). Remux copy; groups follow
     # the master's 1s IDRs.
-    if is_brokered_webcam_udp(media_path):
+    if is_shared_encode_udp(media_path) or is_brokered_webcam_udp(media_path):
         # Video copy. Audio must be re-encoded: empty_moov writes the
         # header before the first ADTS packet, so -c:a copy leaves no
         # AudioSpecificConfig and moq5 fails "CMAF track 1" (job 7037dc27).

@@ -3,8 +3,10 @@ import unittest
 from zixi_hls_health import zixi_http_ts_playback_url
 from zixi_stats import (
     ZixiStatsPoller,
+    ZixiStatsSnapshot,
     parse_zixi_jsonp,
     snapshot_from_zixi_payload,
+    zixi_ingest_observed,
 )
 
 # Captured from the GCP ingest VM (2026-07-15) while "SRT Test" was offline.
@@ -25,6 +27,27 @@ class ZixiStatsTests(unittest.TestCase):
         self.assertEqual(snap.jitter_ms, 1.0)
         self.assertEqual(snap.rtp_drops, 17)
         self.assertEqual(snap.cc_errors, 0)
+        self.assertEqual(snap.kb_received, 11574)
+        self.assertFalse(snap.connected)
+        # Offline leftover counters are not this job's first byte.
+        self.assertFalse(zixi_ingest_observed(snap))
+
+    def test_rtmp_ingest_without_rtt_is_still_first_byte(self):
+        """Comparison 31 Linode RTMP: rtt=0 while the input was receiving."""
+        live = ZixiStatsSnapshot(
+            rtt_ms=0.0,
+            connected=True,
+            bitrate_kbps=3200.0,
+            kb_received=4096,
+            total_packets=800,
+        )
+        self.assertTrue(zixi_ingest_observed(live))
+        packets_only = ZixiStatsSnapshot(connected=True, total_packets=12)
+        self.assertTrue(zixi_ingest_observed(packets_only))
+        rtt_only = ZixiStatsSnapshot(rtt_ms=18.0)
+        self.assertTrue(zixi_ingest_observed(rtt_only))
+        empty = ZixiStatsSnapshot()
+        self.assertFalse(zixi_ingest_observed(empty))
 
     def test_snapshot_maps_tr101_continuity_errors(self):
         data = parse_zixi_jsonp(SAMPLE_TR101_JSONP)

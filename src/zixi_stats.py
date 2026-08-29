@@ -26,6 +26,11 @@ class ZixiStatsSnapshot:
     packet_loss_pct: float = 0.0
     cc_errors: int = 0
     rtp_drops: int = 0
+    connected: bool = False
+    bitrate_kbps: float = 0.0
+    packet_rate: float = 0.0
+    kb_received: float = 0.0
+    total_packets: float = 0.0
 
 
 def parse_zixi_jsonp(payload: str) -> Dict[str, Any]:
@@ -125,7 +130,30 @@ def snapshot_from_zixi_payload(data: Dict[str, Any]) -> ZixiStatsSnapshot:
         packet_loss_pct=packet_loss_pct,
         cc_errors=cc_errors,
         rtp_drops=rtp_drops,
+        connected=bool(data.get("connected")),
+        bitrate_kbps=_nested_float(data, "net", "bitrate"),
+        packet_rate=_nested_float(data, "net", "packet_rate"),
+        kb_received=_nested_float(data, "net", "kb_received"),
+        total_packets=_nested_float(data, "net", "total_packets"),
     )
+
+
+def zixi_ingest_observed(stats: Optional[ZixiStatsSnapshot]) -> bool:
+    """True when Zixi has seen media, not just a TCP/SRT RTT.
+
+    RTMP inputs often report rtt=0 while kb_received / bitrate / packets
+    move (comparison 31 Linode rtmp://45.33.68.151). Treating RTT-only as
+    first_byte_ingest left the CSV blank for a live publish.
+    """
+    if stats is None:
+        return False
+    if (stats.rtt_ms or 0) > 0:
+        return True
+    if (stats.bitrate_kbps or 0) > 0 or (stats.packet_rate or 0) > 0:
+        return True
+    if stats.connected and ((stats.kb_received or 0) > 0 or (stats.total_packets or 0) > 0):
+        return True
+    return False
 
 
 def zixi_api_base_for_endpoint(endpoint_url: str = "") -> str:

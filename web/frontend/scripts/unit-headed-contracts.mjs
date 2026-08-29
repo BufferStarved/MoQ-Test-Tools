@@ -21,8 +21,18 @@ const moqPlayer = src("players/MoqPlayer.tsx");
 assert.match(moqPlayer, /isSubscribeRejectedLog/);
 assert.match(moqPlayer, /subscribe_0x10_keepalive \(playa warn/);
 
+const replay = src("comparisonReplay.ts");
+assert.match(replay, /moqx_publish_namespace_success >= 1/);
+assert.match(replay, /catalog watchdog expired/);
+assert.match(src("comparisonReplay.test.ts"), /COMPARISON_31/);
+
 const app = src("App.tsx");
 assert.match(app, /humanizeJobError\(leg\.job\.error,\s*\{\s*protocol:/);
+assert.match(app, /one shared encode, copy remux per dest/);
+assert.match(py("src/cloud_encode_slots.py"), /DEFAULT_MAX_CONCURRENT_CLOUD_ENCODES = 4/);
+assert.match(py("src/comparison_encode_hub.py"), /SHARED_ENCODE_QUERY/);
+assert.match(py("web/api/job_manager.py"), /attach_shared_encode/);
+assert.match(py("web/api/job_manager.py"), /not shared_url/);
 
 const cmaf = src("moqCmafPlayback.ts");
 assert.match(cmaf, /MOQ_NO_SUCH_NAMESPACE = 0x10/);

@@ -325,8 +325,8 @@ MOQ_ENV=prod
 MEDIAMTX_LOOPBACK_PUBLISH=1
 # Never attach a laptop webcam agent to the public site.
 LOCAL_PUBLISHER_ENABLED=0
-# 4-way cloud BBB/webcam must encode in parallel. A cap of 1 made Stream 2/4
-# sit queued (no CSV) while testers saw black tiles after MoQ finished.
+# Safety ceiling for independent cloud encodes. A comparison shares one
+# x264 master and copy-remuxes each dest (comparison_encode_hub).
 MAX_CONCURRENT_CLOUD_ENCODES=4
 ENVEOF
 append_missing_env() {

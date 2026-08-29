@@ -39,6 +39,11 @@ from cloud_encode_slots import (
     encode_slot_fields,
     job_needs_cloud_encode_slot,
 )
+from comparison_encode_hub import (
+    attach_shared_encode,
+    job_can_join_shared_encode,
+    release_shared_encode,
+)
 from upload_service import (
     UploadJob,
     UploadResult,
@@ -372,7 +377,23 @@ class JobManager:
             return True
 
     def _run_job(self, job_id: str, job: UploadJob) -> None:
-        needs_slot = job_needs_cloud_encode_slot(getattr(job, "publisher_host", "cloud") or "cloud")
+        shared_url = ""
+        if job_can_join_shared_encode(job):
+            try:
+                shared_url = attach_shared_encode(job, job.cancel_event)
+            except Exception as exc:
+                self._update(
+                    job_id,
+                    status=JobStatus.FAILED,
+                    error=str(exc) or "Shared comparison encode failed to start",
+                )
+                return
+            job.media_path = shared_url
+            job.refresh_ffmpeg_cmd()
+        needs_slot = (
+            job_needs_cloud_encode_slot(getattr(job, "publisher_host", "cloud") or "cloud")
+            and not shared_url
+        )
         if needs_slot:
             self._update(job_id, status=JobStatus.QUEUED)
             acquired = self._encode_slots.acquire(job_id, job.cancel_event)
@@ -514,6 +535,8 @@ class JobManager:
             )
             raise
         finally:
+            if shared_url:
+                release_shared_encode(job)
             if needs_slot:
                 self._encode_slots.release(job_id)
             # Status is already COMPLETED/FAILED so the UI flips playbackGate→ended

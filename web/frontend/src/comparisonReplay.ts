@@ -59,15 +59,26 @@ export function uniquePublishSeriesCount(rows: ComparisonLastRow[]): number {
   ).length;
 }
 
-export function visibleMoqError(_row: ComparisonLastRow, hud: ComparisonHud = {}): string {
+export function visibleMoqError(row: ComparisonLastRow, hud: ComparisonHud = {}): string {
   const subscribeRejected = (hud.playaLines || []).some((line) => isSubscribeRejectedLog(line));
+  const announced = row.moqx_publish_namespace_success >= 1;
+  const painted = row.playback_frames_rendered > 0;
+  // Comparison 31: playa SUBSCRIBE 0x10 + 10s watchdog, then last-row
+  // ns=1 (relay announce) with 0 paint. That is not "never announced"
+  // and not a one-shot catalog miss.
+  if (announced && !painted && subscribeRejected) {
+    const ns = (hud.namespace || "").trim();
+    return ns
+      ? `MoQ announced namespace ${ns} after SUBSCRIBE 0x10 — the catalog watchdog expired before the relay had it. This is not a one-shot catalog miss.`
+      : "MoQ announced the namespace after SUBSCRIBE 0x10 — the catalog watchdog expired before the relay had it. This is not a one-shot catalog miss.";
+  }
   return noMediaFailMessage({
     catalogReady: hud.catalogReady ?? false,
     namespace: hud.namespace,
     jobStatus: hud.jobStatus,
     jobError: hud.jobError,
-    previewReady: hud.previewReady,
-    subscribeRejected,
+    previewReady: hud.previewReady ?? (announced && !subscribeRejected),
+    subscribeRejected: subscribeRejected && !announced,
   });
 }
 

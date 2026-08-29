@@ -181,6 +181,13 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         pub_stop = body.index("self._stop_moq_publisher")
         self.assertLess(stop, pub_stop)
 
+    def test_live_catalog_tail_is_long_enough_without_admin_scrape(self) -> None:
+        body = (ROOT / "src" / "upload_service.py").read_text()
+        self.assertIn("_MOQ_PUBLISHER_LOG_TAIL = 40", body)
+        self.assertIn("def _moq_publisher_logs(", body)
+        self.assertIn("pub_ready_log = self._moq_publisher_logs(", body)
+        self.assertIn("wt_log = self._moq_publisher_logs(", body)
+
     def test_playback_gate_subscribes_moq_before_announce(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()
         self.assertIn('protocol === "webrtc" && !browser', text)

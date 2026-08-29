@@ -1818,7 +1818,12 @@ function App() {
         }),
       }));
       setComparisonLegs(legs);
-      pushToast(`Started comparison — ${startEndpoints.length} streams`, "info");
+      pushToast(
+        startEndpoints.length > 1
+          ? `Started comparison — ${startEndpoints.length} streams (one shared encode, copy remux per dest).`
+          : `Started comparison — ${startEndpoints.length} streams`,
+        "info",
+      );
 
       const finish = () => {
         if (comparisonFinishedRef.current) {
