@@ -113,3 +113,4 @@ fi
 for script in "$ROOT"/web/frontend/scripts/unit-*.mjs; do
   node "$script"
 done
+node --test "$ROOT/tools/openmoq-recorder/record-policy.test.mjs"

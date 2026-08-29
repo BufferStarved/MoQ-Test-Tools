@@ -63,13 +63,13 @@ set(MOQ5_BRIDGE_DEFS
   MOQ5_HAVE_SIZED_SENDER_CFG_INIT=$<BOOL:${MOQ5_HAVE_SIZED_SENDER_CFG_INIT}>
   MOQ5_HAVE_PUBLISH_TRACKS=$<BOOL:${MOQ5_HAVE_PUBLISH_TRACKS}>)
 
-add_library(fmp4_moq STATIC fmp4_moq_bridge.c)
-target_include_directories(fmp4_moq PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(fmp4_moq PUBLIC moq::service)
-target_compile_definitions(fmp4_moq PRIVATE ${MOQ5_BRIDGE_DEFS})
-
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
+
+add_library(fmp4_moq STATIC fmp4_moq_bridge.c)
+target_include_directories(fmp4_moq PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(fmp4_moq PUBLIC moq::service Threads::Threads)
+target_compile_definitions(fmp4_moq PRIVATE ${MOQ5_BRIDGE_DEFS})
 
 add_executable(moq5-fmp4-publish main.c)
 target_link_libraries(moq5-fmp4-publish PRIVATE fmp4_moq Threads::Threads)

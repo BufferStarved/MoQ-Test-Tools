@@ -40,6 +40,7 @@ class RecorderTrackTests(unittest.TestCase):
         assert cmd is not None
         joined = " ".join(cmd)
         self.assertIn("record.mjs:/app/tools/openmoq-recorder/record.mjs:ro", joined)
+        self.assertIn("record-policy.mjs:/app/tools/openmoq-recorder/record-policy.mjs:ro", joined)
         self.assertIn("MOQ_RELAY_CERT_SHA256=abc", joined)
         self.assertIn("--track video", joined)
         self.assertNotIn("--track vide_1", joined)

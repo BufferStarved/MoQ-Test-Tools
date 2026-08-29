@@ -814,12 +814,13 @@ def is_live_media_source(media_path: str) -> bool:
     ) or is_device_browser_source(media_path) or is_obs_openmoq_source(media_path)
 
 
+SHARED_ENCODE_QUERY = "shared_encode=1"
+
+
 def is_brokered_webcam_udp(media_path: str) -> bool:
     """Local publisher already encoded this hop (webcam broker → loopback MPEG-TS)."""
-    return (media_path or "").strip().lower().startswith("udp://")
-
-
-SHARED_ENCODE_QUERY = "shared_encode=1"
+    value = (media_path or "").strip().lower()
+    return value.startswith("udp://") and SHARED_ENCODE_QUERY not in value
 
 
 def is_shared_encode_udp(media_path: str) -> bool:
@@ -925,7 +926,7 @@ def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = No
     if is_live_media_source(media_path):
         # Copy remux must keep the broker's DTS. wallclock+genpts+igndts on a
         # second encode made catch-up bursts look like timeline holes.
-        if is_brokered_webcam_udp(media_path):
+        if is_shared_encode_udp(media_path) or is_brokered_webcam_udp(media_path):
             # Copy → fMP4 needs SPS (width/height) before write_header.
             # 32k / analyzeduration 0 sees "Video: h264, none" and the mp4
             # muxer exits 234: "dimensions not set". Broker GOP is 1s with

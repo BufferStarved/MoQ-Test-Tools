@@ -22,6 +22,7 @@ from destinations import DestinationProfile  # noqa: E402
 from moq_publish import (  # noqa: E402
     SHARED_ENCODE_QUERY,
     build_ffmpeg_moq_cmd,
+    is_brokered_webcam_udp,
     is_shared_encode_udp,
 )
 from upload_service import UploadJob  # noqa: E402
@@ -51,6 +52,7 @@ class SharedEncodeUrlTests(unittest.TestCase):
         url = shared_encode_reader_url(41234)
         self.assertTrue(is_shared_encode_udp(url))
         self.assertIn(SHARED_ENCODE_QUERY, url)
+        self.assertFalse(is_brokered_webcam_udp(url))
         self.assertFalse(is_shared_encode_udp("udp://127.0.0.1:19001?fifo_size=1000000"))
         self.assertFalse(is_shared_encode_udp("/opt/moq-test-tools/uploads/bbb.mp4"))
 
@@ -175,6 +177,8 @@ class CopyRemuxTests(unittest.TestCase):
             cmd = build_ffmpeg_moq_cmd(url, progress_path="pipe:1", duration_sec=20)
         self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
         self.assertNotIn("libx264", cmd)
+        self.assertEqual(cmd[cmd.index("-probesize") + 1], "2M")
+        self.assertEqual(cmd[cmd.index("-analyzeduration") + 1], "2000000")
 
 
 if __name__ == "__main__":

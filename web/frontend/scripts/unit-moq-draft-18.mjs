@@ -24,6 +24,10 @@ const recorder = fs.readFileSync(
 );
 assert.match(recorder, /protocols: \['moqt-18'\]/);
 assert.match(recorder, /new MoqtConnection\(18\)/);
+assert.match(recorder, /record-policy\.mjs/);
+assert.match(recorder, /reconnect on 0x10 \/ §11\.1/);
+assert.doesNotMatch(recorder, /no objects for 5s; resubscribing/);
+assert.doesNotMatch(recorder, /filter: \{ type: 'LargestObject' \}/);
 
 const ingest = fs.readFileSync(path.join(root, "ingestEndpoints.ts"), "utf8");
 assert.match(ingest, /protocol === "moq"\s*\n\s*\? \(`\$\{prefix\}_moq_relay_d18`/);

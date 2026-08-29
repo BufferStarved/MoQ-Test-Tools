@@ -10,8 +10,11 @@
  * Media path:
  *   - Browser LOC publish advertises track `video`
  *   - Cloud openmoq-publisher advertises CMAF `vide_1`
- * Subscribe tries both. Writing a CMAF init before knowing which track
- * landed is what made browser VMAF fail with "Unknown track: vide_1".
+ * One SUBSCRIBE per session. 0x10 / §11.1 alias reuse reconnects instead
+ * of retrying on the same connection (Linode :14433 recorded 0 bytes).
+ * CMAF uses AbsoluteStart and prefers catalog initDataList over a baked
+ * init. Writing a CMAF init before knowing which track landed is what
+ * made browser VMAF fail with "Unknown track: vide_1".
  */
 
 import { createWriteStream } from 'node:fs';
@@ -22,6 +25,21 @@ import { readLengthPrefixedBytes, readVarint } from '@moqt/transport';
 import { resolveCertSha256 } from './cert.mjs';
 import { nodeSessionToWebTransportLike } from './wt-adapter.mjs';
 import { OPENMOQ_VIDEO_INIT_B64 } from './openmoq-init.mjs';
+import {
+  CATALOG_TRACK,
+  CMAF_VIDEO_TRACK,
+  catalogInitB64,
+  isAliasReuseError,
+  isLocTrack,
+  isRetryableSubscribeError,
+  nextTrackForReconnect,
+  orderedTrackNames,
+  parseCatalogObject,
+  reconnectBackoffMs,
+  shouldResubscribeAfterSilence,
+  subscribeFilterForTrack,
+  wantsCatalogSubscribe,
+} from './record-policy.mjs';
 
 const VIDEO_CONFIG_ID = 0x0d;
 const ANNEX_B_START = new Uint8Array([0, 0, 0, 1]);
@@ -84,7 +102,7 @@ function parseArgs(argv) {
     outputPath,
     insecure,
     durationSec,
-    tracks: tracks.length ? tracks : ['video', 'vide_1'],
+    tracks: tracks.length ? tracks : [CMAF_VIDEO_TRACK, 'video'],
   };
 }
 
@@ -92,20 +110,6 @@ function namespaceParts(namespace) {
   return namespace.split('/').filter((part) => part.length > 0);
 }
 
-function isRetryableSubscribeError(err) {
-  const msg = String(err?.message ?? err).toLowerCase();
-  return (
-    msg.includes('no such namespace')
-    || msg.includes('no such track')
-    || msg.includes('unknown track')
-    || msg.includes('upstream subscribe failed')
-    || msg.includes('publisher not ready')
-  );
-}
-
-function isLocTrack(trackName) {
-  return trackName === 'video' || trackName === 'audio';
-}
 
 function isBenignStreamReset(err) {
   const msg = String(err?.message ?? err);
@@ -319,32 +323,78 @@ async function connectRelay(relayUrl, { insecure }) {
   };
 }
 
-async function subscribeVideoWhenReady(conn, nsParts, trackNames, deadlineMs, onObjectForTrack) {
+async function subscribeTrackOnce(conn, nsParts, trackName, onObject) {
+  const sub = await conn.subscribeTrack(
+    nsParts.map((part) => te.encode(part)),
+    te.encode(trackName),
+    {
+      onObject,
+      filter: subscribeFilterForTrack(trackName),
+    },
+  );
+  log(`subscribed track=${trackName} filter=${subscribeFilterForTrack(trackName).type}`);
+  return sub;
+}
+
+/**
+ * One SUBSCRIBE generation per session. A 0x10 / unknown-track miss
+ * must reconnect — retrying here reuses the alias (§11.1).
+ */
+async function subscribeVideoOnce(conn, nsParts, trackNames, onObjectForTrack) {
   let lastError;
-  while (Date.now() < deadlineMs) {
-    for (const trackName of trackNames) {
-      try {
-        const sub = await conn.subscribeTrack(
-          nsParts.map((part) => te.encode(part)),
-          te.encode(trackName),
-          {
-            onObject: onObjectForTrack(trackName),
-            filter: { type: 'LargestObject' },
-          },
-        );
-        log(`subscribed track=${trackName}`);
-        return { sub, trackName };
-      } catch (err) {
-        lastError = err;
-        if (!isRetryableSubscribeError(err)) {
-          throw err;
-        }
-        log(`track=${trackName} not ready (${err.message}); trying next`);
+  for (const trackName of orderedTrackNames(trackNames)) {
+    try {
+      const sub = await subscribeTrackOnce(
+        conn,
+        nsParts,
+        trackName,
+        onObjectForTrack(trackName),
+      );
+      return { sub, trackName };
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableSubscribeError(err) && !isAliasReuseError(err)) {
+        throw err;
       }
+      log(`track=${trackName} not ready (${err.message}); reconnect required (§11.1)`);
+      throw err;
     }
-    await sleep(500);
   }
   throw lastError ?? new Error(`timeout waiting for tracks ${trackNames.join(',')}`);
+}
+
+async function fetchCatalogInit(conn, nsParts, trackName, deadlineMs) {
+  if (Date.now() >= deadlineMs) {
+    return "";
+  }
+  let catalog = null;
+  let sub = null;
+  try {
+    sub = await subscribeTrackOnce(conn, nsParts, CATALOG_TRACK, (obj) => {
+      if (obj.kind !== "data" || !obj.payload || obj.payload.length === 0) {
+        return;
+      }
+      catalog = parseCatalogObject(obj.payload) || catalog;
+    });
+    const until = Math.min(deadlineMs, Date.now() + 4000);
+    while (!catalog && Date.now() < until) {
+      await sleep(100);
+    }
+  } catch (err) {
+    if (isRetryableSubscribeError(err) || isAliasReuseError(err)) {
+      log(`catalog not ready (${err.message}); reconnect required`);
+      throw err;
+    }
+    log(`catalog subscribe skipped: ${err.message || err}`);
+    return "";
+  } finally {
+    await sub?.unsubscribe().catch(() => { /* catalog object is retained */ });
+  }
+  const b64 = catalogInitB64(catalog, trackName);
+  if (b64) {
+    log(`catalog initDataList for ${trackName} (${b64.length} b64)`);
+  }
+  return b64;
 }
 
 async function recordVideoTrack(conn, nsParts, trackNames, out, deadlineMs) {
@@ -397,31 +447,31 @@ async function recordVideoTrack(conn, nsParts, trackNames, out, deadlineMs) {
     };
   }
 
-  async function subscribeOnce() {
-    const { sub, trackName } = await subscribeVideoWhenReady(
-      conn,
-      nsParts,
-      trackNames,
-      deadlineMs,
-      onObjectForTrack,
-    );
-    currentSub = sub;
-    currentTrack = trackName;
-    loc = isLocTrack(trackName);
-    return sub;
+  let catalogInit = "";
+  if (wantsCatalogSubscribe(trackNames)) {
+    catalogInit = await fetchCatalogInit(conn, nsParts, CMAF_VIDEO_TRACK, deadlineMs);
   }
 
-  await subscribeOnce();
+  const { sub, trackName } = await subscribeVideoOnce(
+    conn,
+    nsParts,
+    trackNames,
+    onObjectForTrack,
+  );
+  currentSub = sub;
+  currentTrack = trackName;
+  loc = isLocTrack(trackName);
 
   if (!loc) {
-    const initBytes = decodeInitData(OPENMOQ_VIDEO_INIT_B64);
+    const initBytes = decodeInitData(catalogInit || OPENMOQ_VIDEO_INIT_B64);
     if (!initBytes.length) {
       throw new Error('missing openmoq video init segment');
     }
     await new Promise((resolve, reject) => {
       out.write(Buffer.from(initBytes), (err) => (err ? reject(err) : resolve()));
     });
-    log(`wrote init segment (${initBytes.length} bytes) track=${currentTrack}`);
+    log(`wrote init segment (${initBytes.length} bytes) track=${currentTrack}`
+      + (catalogInit ? " source=catalog" : " source=fallback"));
   } else {
     log(`loc annex-b recording track=${currentTrack}`);
   }
@@ -433,17 +483,8 @@ async function recordVideoTrack(conn, nsParts, trackNames, out, deadlineMs) {
   try {
     while (Date.now() < deadlineMs) {
       await sleep(250);
-      if (Date.now() - lastObjectAt < 5000 || Date.now() >= deadlineMs - 500) {
-        continue;
-      }
-      log('no objects for 5s; resubscribing');
-      await currentSub?.unsubscribe().catch(() => { /* best effort */ });
-      currentSub = null;
-      try {
-        await subscribeOnce();
-        lastObjectAt = Date.now();
-      } catch (err) {
-        log(`resubscribe failed: ${err.message || err}`);
+      if (shouldResubscribeAfterSilence()) {
+        throw new Error('same-session resubscribe is disabled (§11.1)');
       }
     }
   } finally {
@@ -468,28 +509,50 @@ async function main() {
 
   const totalSec = durationSec > 0 ? durationSec : 90;
   const deadlineMs = Date.now() + totalSec * 1000;
+  const mediaTracks = orderedTrackNames(tracks.filter((name) => name !== CATALOG_TRACK));
+  log(`trying tracks=${mediaTracks.join(',')} (reconnect on 0x10 / §11.1)`);
 
-  const client = await connectRelay(relayUrl, { insecure });
   const out = createWriteStream(outputPath, { flags: 'w' });
+  let lastError;
+  let attempt = 0;
+  let sessionTracks = mediaTracks.slice(0, 1);
   try {
-    log(`trying tracks=${tracks.join(',')}`);
-    const result = await recordVideoTrack(
-      client.conn,
-      nsParts,
-      tracks,
-      out,
-      deadlineMs,
-    );
-
-    if (result.fragments === 0 || result.bytesWritten === 0) {
-      throw new Error('no media fragments received from relay');
+    while (Date.now() < deadlineMs) {
+      const client = await connectRelay(relayUrl, { insecure });
+      try {
+        const result = await recordVideoTrack(
+          client.conn,
+          nsParts,
+          sessionTracks,
+          out,
+          deadlineMs,
+        );
+        if (result.fragments === 0 || result.bytesWritten === 0) {
+          throw new Error('no media fragments received from relay');
+        }
+        log(`output ready: ${outputPath}`);
+        return 0;
+      } catch (err) {
+        lastError = err;
+        if (!isRetryableSubscribeError(err) && !isAliasReuseError(err)) {
+          throw err;
+        }
+        const next = nextTrackForReconnect(mediaTracks, sessionTracks[0], err);
+        sessionTracks = next ? [next] : mediaTracks.slice(0, 1);
+        const waitMs = reconnectBackoffMs(attempt);
+        attempt += 1;
+        log(`session ${attempt} missed (${err.message}); next=${sessionTracks[0]} reconnect in ${waitMs}ms`);
+        if (Date.now() + waitMs >= deadlineMs) {
+          break;
+        }
+        await sleep(waitMs);
+      } finally {
+        await client.close();
+      }
     }
-
-    log(`output ready: ${outputPath}`);
-    return 0;
+    throw lastError ?? new Error('no media fragments received from relay');
   } finally {
     await new Promise((resolve) => out.end(resolve));
-    await client.close();
   }
 }
 

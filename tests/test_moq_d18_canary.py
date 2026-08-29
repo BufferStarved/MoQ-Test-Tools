@@ -108,6 +108,7 @@ class Draft18CanaryPresetTests(unittest.TestCase):
         # First live catalog must wait for moov; attach-at-CONNECT wrote
         # `{tracks:[]}` and playa FETCH one-shotted the empty object.
         self.assertIn("waiting for ftyp+moov before sender attach", bridge)
+        self.assertIn("starting WebTransport CONNECT (before moov)", bridge)
         self.assertIn("attaching sender after CMAF init", bridge)
         self.assertIn("ensure_sender_attached", bridge)
         self.assertIn("activate_tracks", bridge)

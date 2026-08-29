@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,12 @@ struct fmp4_moq_bridge {
     int duration_sec;
     time_t deadline;
     int session_live;
+    pthread_t connect_th;
+    int connect_started;
+    int connect_done;
+    moq_result_t connect_rc;
+    pthread_mutex_t connect_mu;
+    pthread_cond_t connect_cv;
 };
 
 int buf_reserve(byte_buf_t *b, size_t need)
@@ -1085,17 +1092,10 @@ void init_sender_cfg(moq_media_sender_cfg_t *cfg, moq_bytes_t *namespace_parts,
  * `{tracks:[]}` and a one-shot Joining FETCH never sees vide_1. Delay
  * endpoint+sender until init is parsed, then add_track immediately so
  * the first live catalog already has vide/soun + init. */
-static int ensure_sender_attached(fmp4_moq_bridge_t *b)
+static void *endpoint_connect_main(void *arg)
 {
-    if (b->tx) {
-        return 0;
-    }
-    if (b->urlbuf[0] == '\0') {
-        fprintf(stderr, "endpoint connect failed: %d\n", (int)MOQ_ERR_INVAL);
-        return -1;
-    }
-
-    /* Test hook: hold attach so lavfi/webcam bitrate can fill the OS pipe
+    fmp4_moq_bridge_t *b = arg;
+    /* Test hook: hold CONNECT so lavfi/webcam bitrate can fill the OS pipe
      * unless main.c is already draining stdin on another thread. */
     const char *delay_raw = getenv("MOQ5_CONNECT_DELAY_MS");
     if (delay_raw && delay_raw[0]) {
@@ -1112,15 +1112,72 @@ static int ensure_sender_attached(fmp4_moq_bridge_t *b)
     ec.url.len = strlen(b->urlbuf);
     ec.insecure_skip_verify = b->insecure_skip_verify != 0;
 
-    moq_result_t rc = moq_endpoint_connect(&ec, &b->ep);
+    moq_endpoint_t *ep = NULL;
+    moq_result_t rc = moq_endpoint_connect(&ec, &ep);
+    pthread_mutex_lock(&b->connect_mu);
+    b->ep = ep;
+    b->connect_rc = rc;
+    b->connect_done = 1;
+    pthread_cond_broadcast(&b->connect_cv);
+    pthread_mutex_unlock(&b->connect_mu);
     if (rc != MOQ_OK) {
         fprintf(stderr, "endpoint connect failed: %d\n", (int)rc);
+    }
+    return NULL;
+}
+
+static int start_endpoint_connect(fmp4_moq_bridge_t *b)
+{
+    if (b->connect_started) {
+        return 0;
+    }
+    if (b->urlbuf[0] == '\0') {
+        fprintf(stderr, "endpoint connect failed: %d\n", (int)MOQ_ERR_INVAL);
+        return -1;
+    }
+    b->connect_rc = MOQ_ERR_INVAL;
+    if (pthread_create(&b->connect_th, NULL, endpoint_connect_main, b) != 0) {
+        fprintf(stderr, "endpoint connect thread failed; connecting inline\n");
+        endpoint_connect_main(b);
+        return b->connect_rc == MOQ_OK ? 0 : -1;
+    }
+    b->connect_started = 1;
+    fprintf(stderr, "starting WebTransport CONNECT (before moov)\n");
+    return 0;
+}
+
+static int wait_endpoint_connected(fmp4_moq_bridge_t *b)
+{
+    if (!b->connect_started && !b->connect_done) {
+        if (start_endpoint_connect(b) != 0) {
+            return -1;
+        }
+    }
+    pthread_mutex_lock(&b->connect_mu);
+    while (!b->connect_done) {
+        pthread_cond_wait(&b->connect_cv, &b->connect_mu);
+    }
+    moq_result_t rc = b->connect_rc;
+    pthread_mutex_unlock(&b->connect_mu);
+    if (rc != MOQ_OK || b->ep == NULL) {
+        fprintf(stderr, "endpoint connect failed: %d\n", (int)rc);
+        return -1;
+    }
+    return 0;
+}
+
+static int ensure_sender_attached(fmp4_moq_bridge_t *b)
+{
+    if (b->tx) {
+        return 0;
+    }
+    if (wait_endpoint_connected(b) != 0) {
         return -1;
     }
 
     moq_media_sender_cfg_t scfg;
     init_sender_cfg(&scfg, b->ns_parts, b->ns_count);
-    rc = moq_media_sender_attach(b->ep, &scfg, &b->tx);
+    moq_result_t rc = moq_media_sender_attach(b->ep, &scfg, &b->tx);
     if (rc != MOQ_OK) {
         fprintf(stderr, "sender attach failed: %d\n", (int)rc);
         moq_endpoint_stop(b->ep);
@@ -1330,9 +1387,16 @@ fmp4_moq_bridge_t *fmp4_moq_connect(const char *url, const char *namespace_,
     }
     parser_reset_header(&b->parser);
 
-    /* Do not attach the sender here. libmoq live-writes `{tracks:[]}` on
-     * the first hook tick if no vide/soun tracks exist yet. CONNECT +
-     * add_track happen in activate_tracks() after moov. */
+    /* Handshake now; attach still waits for moov so the first live catalog
+     * has vide/soun instead of `{tracks:[]}`. */
+    pthread_mutex_init(&b->connect_mu, NULL);
+    pthread_cond_init(&b->connect_cv, NULL);
+    if (start_endpoint_connect(b) != 0) {
+        pthread_cond_destroy(&b->connect_cv);
+        pthread_mutex_destroy(&b->connect_mu);
+        free(b);
+        return NULL;
+    }
     fprintf(stderr, "waiting for ftyp+moov before sender attach\n");
     return b;
 }
@@ -1421,6 +1485,12 @@ int fmp4_moq_close(fmp4_moq_bridge_t *b)
         }
     }
 
+    if (b->connect_started) {
+        pthread_join(b->connect_th, NULL);
+        b->connect_started = 0;
+    }
+    pthread_cond_destroy(&b->connect_cv);
+    pthread_mutex_destroy(&b->connect_mu);
     if (b->tx) {
         moq_media_sender_destroy(b->tx);
         b->tx = NULL;

@@ -34,6 +34,11 @@ class SourceProtocolMatrixTests(unittest.TestCase):
         for media in ("dummy.mp4", "bbb.mp4", "/tmp/clip.mp4", "device:webcam"):
             self.assertFalse(is_brokered_webcam_udp(media), media)
         self.assertTrue(is_brokered_webcam_udp("udp://127.0.0.1:50123?fifo_size=1000000"))
+        self.assertFalse(
+            is_brokered_webcam_udp(
+                "udp://127.0.0.1:41234?fifo_size=1000000&overrun_nonfatal=1&shared_encode=1"
+            )
+        )
 
     def test_moq_segmentation_uses_solo_gop_on_file_and_cloud(self):
         solo = moq_group_duration_ms(400, brokered=False)

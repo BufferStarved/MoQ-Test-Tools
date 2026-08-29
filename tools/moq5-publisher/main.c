@@ -6,11 +6,11 @@
  *     +frag_keyframe+empty_moov+default_base_moof+separate_moof \
  *     -f mp4 pipe:1 | moq5-fmp4-publish <url> <namespace>
  *
- * CONNECT/sender attach waits until moov so the first live catalog has
- * vide/soun. That handshake must not stop reading stdin: a realtime
- * webcam fill of the ~64KiB OS pipe becomes EIO/SIGPIPE (bench-43cf3725).
- * A dedicated reader thread drains stdin into a 16MiB queue while feed()
- * blocks on WebTransport CONNECT.
+ * CONNECT starts immediately so the handshake overlaps remux probe.
+ * Sender attach still waits until moov so the first live catalog has
+ * vide/soun. Handshake must not stop reading stdin: a realtime webcam
+ * fill of the ~64KiB OS pipe becomes EIO/SIGPIPE (bench-43cf3725).
+ * A dedicated reader thread drains stdin into a 16MiB queue.
  *
  * Usage:
  *   moq5-fmp4-publish <url> <namespace> [--insecure-skip-verify] [--duration SEC]
