@@ -33,10 +33,21 @@ assert.match(src("comparisonReplay.test.ts"), /ca7bbb62/);
 const replay = src("comparisonReplay.ts");
 assert.match(replay, /moqx_publish_namespace_success >= 1/);
 assert.match(replay, /catalog watchdog expired/);
+assert.match(replay, /classifyMoqEndVerdict/);
+assert.match(replay, /inferCatalogReady/);
+assert.match(replay, /comparisonLegTone/);
 assert.match(src("comparisonReplay.test.ts"), /COMPARISON_31/);
+assert.match(src("comparisonReplay.test.ts"), /visibleLeg\(/);
+assert.match(
+  src("comparisonReplay.test.ts"),
+  /Encode-only success is a player failure/,
+);
 
 const app = src("App.tsx");
 assert.match(app, /humanizeJobError\(leg\.job\.error,\s*\{\s*protocol:/);
+assert.match(app, /comparisonLegTone/);
+assert.match(app, /outputStatusLabel/);
+assert.match(src("TopSummaryStrip.tsx"), /comparisonLegTone/);
 assert.match(app, /one shared encode, copy remux per dest/);
 assert.match(py("src/cloud_encode_slots.py"), /DEFAULT_MAX_CONCURRENT_CLOUD_ENCODES = 4/);
 assert.match(py("src/comparison_encode_hub.py"), /SHARED_ENCODE_QUERY/);

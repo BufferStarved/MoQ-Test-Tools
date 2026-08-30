@@ -7,12 +7,14 @@
 
 import { uniqueDownloadStreams } from "./downloadStreams.ts";
 import {
+  classifyMoqEndVerdict,
   humanizeJobError,
   isSubscribeRejectedLog,
   noMediaFailMessage,
   shouldFailNoMediaWatchdog,
   MOQ_CATALOG_REFRESH_WAIT_MS,
 } from "./moqCmafPlayback.ts";
+import { locPaintedOk } from "./moqLocPlayback.ts";
 import { classifyHlsEndVerdict } from "./hlsPlayback.ts";
 import { mpegTsMayMarkPlaybackOk, mpegTsPaintedOk } from "./mpegTsPlayback.ts";
 import { classifyWhepEndVerdict } from "./webrtcPlayback.ts";
@@ -25,6 +27,7 @@ export type ComparisonLastRow = {
   playback_frames_rendered: number;
   playback_video_time_sec: number;
   playback_ttff_ms: number;
+  playback_bitrate_bps?: number;
   moqx_publish_namespace_success: number;
 };
 
@@ -59,10 +62,106 @@ export function uniquePublishSeriesCount(rows: ComparisonLastRow[]): number {
   ).length;
 }
 
+/** Catalog-ready from HUD, or from playa lines when the HUD omitted the flag. */
+export function inferCatalogReady(hud: ComparisonHud = {}): boolean {
+  if (hud.catalogReady === true) {
+    return true;
+  }
+  return (hud.playaLines || []).some(
+    (line) => /catalog received/i.test(line) || /ready levels=\d+/i.test(line),
+  );
+}
+
+export function moqRowPainted(row: ComparisonLastRow, hud: ComparisonHud = {}): boolean {
+  return locPaintedOk({
+    framesRendered: row.playback_frames_rendered,
+    bitrateBps: row.playback_bitrate_bps ?? 0,
+    subscribeRejected: (hud.playaLines || []).some((line) => isSubscribeRejectedLog(line)),
+  });
+}
+
+export type ComparisonTone = "ok" | "warn" | "bad" | "idle";
+
+/** Tile / summary tone. preview_ready and job=completed are not paint. */
+export function comparisonLegTone(input: {
+  protocol?: string;
+  jobStatus?: string;
+  previewReady?: boolean;
+  framesRendered?: number;
+  bitrateBps?: number;
+  subscribeRejected?: boolean;
+  running?: boolean;
+}): ComparisonTone {
+  const protocol = (input.protocol || "").toLowerCase();
+  const status = (input.jobStatus || "").toLowerCase();
+  if (!status) {
+    return input.running ? "warn" : "idle";
+  }
+  if (status === "failed") {
+    return "bad";
+  }
+  if (status === "queued" || status === "pending") {
+    return "warn";
+  }
+  if (protocol === "moq") {
+    const painted = locPaintedOk({
+      framesRendered: input.framesRendered,
+      bitrateBps: input.bitrateBps,
+      subscribeRejected: input.subscribeRejected,
+    });
+    if (status === "completed") {
+      return painted ? "ok" : "bad";
+    }
+    if (status === "running") {
+      return painted ? "ok" : "warn";
+    }
+    return "idle";
+  }
+  if (status === "completed") {
+    return "ok";
+  }
+  if (status === "running") {
+    return input.previewReady === false ? "warn" : "ok";
+  }
+  return "idle";
+}
+
+export function comparisonLegStatusLabel(input: {
+  protocol?: string;
+  jobStatus?: string;
+  previewReady?: boolean;
+  framesRendered?: number;
+  bitrateBps?: number;
+  subscribeRejected?: boolean;
+}): string {
+  const protocol = (input.protocol || "").toLowerCase();
+  const status = (input.jobStatus || "").toLowerCase();
+  if (protocol === "moq") {
+    const painted = locPaintedOk({
+      framesRendered: input.framesRendered,
+      bitrateBps: input.bitrateBps,
+      subscribeRejected: input.subscribeRejected,
+    });
+    if ((status === "completed" || status === "failed") && !painted) {
+      return "Failed";
+    }
+    if (status === "running" && !painted) {
+      return input.previewReady === false ? "buffering" : "no paint";
+    }
+  }
+  if (status === "queued") {
+    return "queued";
+  }
+  if (status === "running" && input.previewReady === false) {
+    return "buffering";
+  }
+  return input.jobStatus || "";
+}
+
 export function visibleMoqError(row: ComparisonLastRow, hud: ComparisonHud = {}): string {
   const subscribeRejected = (hud.playaLines || []).some((line) => isSubscribeRejectedLog(line));
   const announced = row.moqx_publish_namespace_success >= 1;
-  const painted = row.playback_frames_rendered > 0;
+  const painted = moqRowPainted(row, hud);
   // Comparison 31: playa SUBSCRIBE 0x10 + 10s watchdog, then last-row
   // ns=1 (relay announce) with 0 paint. That is not "never announced"
   // and not a one-shot catalog miss.
@@ -73,7 +172,7 @@ export function visibleMoqError(row: ComparisonLastRow, hud: ComparisonHud = {})
       : "MoQ announced the namespace after SUBSCRIBE 0x10 — the catalog watchdog expired before the relay had it. This is not a one-shot catalog miss.";
   }
   return noMediaFailMessage({
-    catalogReady: hud.catalogReady ?? false,
+    catalogReady: inferCatalogReady(hud),
     namespace: hud.namespace,
     jobStatus: hud.jobStatus,
     jobError: hud.jobError,
@@ -85,8 +184,35 @@ export function visibleMoqError(row: ComparisonLastRow, hud: ComparisonHud = {})
 export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): VisibleLeg {
   const protocol = (row.protocol || "").toLowerCase();
   if (protocol === "moq") {
-    const error = visibleMoqError(row, hud);
-    return { stream: row.stream, protocol, error, status: "Failed" };
+    const subscribeRejected = (hud.playaLines || []).some((line) => isSubscribeRejectedLog(line));
+    const painted = moqRowPainted(row, hud);
+    if (!painted) {
+      return {
+        stream: row.stream,
+        protocol,
+        error: visibleMoqError(row, hud),
+        status: "Failed",
+      };
+    }
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: row.playback_frames_rendered,
+      videoTimeSec: row.playback_video_time_sec,
+      catalogReady: inferCatalogReady(hud),
+      encodeDurationSec: hud.encodeDurationSec,
+      encodeElapsedSec: hud.encodeElapsedSec,
+      jobStatus: hud.jobStatus,
+      jobError: hud.jobError,
+      previewReady: hud.previewReady,
+      subscribeRejected,
+      bitrateBps: row.playback_bitrate_bps,
+    });
+    return {
+      stream: row.stream,
+      protocol,
+      error: verdict.error,
+      status: verdict.ok ? verdict.status : "Failed",
+    };
   }
   if (protocol === "rtmp" || protocol === "srt" || protocol === "webrtc") {
     if (hud.jobError) {
@@ -152,7 +278,7 @@ export function moqWatchdogFailsWhileEncodeRunning(
   return shouldFailNoMediaWatchdog({
     jobStatus: hud.jobStatus || "running",
     previewReady: hud.previewReady,
-    catalogReady: hud.catalogReady ?? false,
+    catalogReady: inferCatalogReady(hud),
     subscribeRejected,
     liveMs: MOQ_CATALOG_REFRESH_WAIT_MS + 1,
     deadlineMs: 15_000,

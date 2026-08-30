@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classifyMoqEndVerdict } from "./moqCmafPlayback.ts";
 import {
+  comparisonLegStatusLabel,
+  comparisonLegTone,
+  inferCatalogReady,
   moqWatchdogFailsWhileEncodeRunning,
   moqxNeverAnnounced,
   uniquePublishSeriesCount,
@@ -278,31 +281,56 @@ describe("comparison 31 replay", () => {
 });
 
 describe("ca7bbb62 browser LOC HUD replay", () => {
+  const linodeRow: ComparisonLastRow = {
+    stream: "Stream 1 (MoQ)",
+    protocol: "moq",
+    endpoint: "https://45-79-177-85.sslip.io:14433/moq-relay?namespace=bench-5376a8fa&draft=18",
+    encode_frames_total: 900,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 1,
+  };
+  const linodeHud = {
+    playaLines: [
+      "ready levels=1 tracks=video audio=0",
+      "Catalog received (bootstrap): 1 tracks",
+      "[catalog-bootstrap] unknown PUBLISH_DONE status 0xffffffff — treated as retriable",
+      "FAIL MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
+    ],
+    jobStatus: "completed",
+    previewReady: true,
+    namespace: "bench-5376a8fa",
+  };
+
   it("Linode catalog-ready / 0 frames is a player failure", () => {
-    const error = visibleMoqError(
-      {
-        stream: "Stream 1 (MoQ)",
-        protocol: "moq",
-        endpoint: "https://45-79-177-85.sslip.io:14433/moq-relay?namespace=bench-5376a8fa&draft=18",
-        encode_frames_total: 900,
-        playback_frames_rendered: 0,
-        playback_video_time_sec: 0,
-        playback_ttff_ms: 0,
-        moqx_publish_namespace_success: 1,
-      },
-      {
-        playaLines: [
-          "ready levels=1 tracks=video audio=0",
-          "Catalog received (bootstrap): 1 tracks",
-          "[catalog-bootstrap] unknown PUBLISH_DONE status 0xffffffff — treated as retriable",
-          "FAIL MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
-        ],
-        catalogReady: true,
-        jobStatus: "completed",
-        namespace: "bench-5376a8fa",
-      },
+    assert.equal(inferCatalogReady(linodeHud), true);
+    const error = visibleMoqError(linodeRow, linodeHud);
+    assert.equal(
+      error,
+      "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
     );
-    assert.match(error, /catalog loaded but no video/i);
+    const leg = visibleLeg(linodeRow, linodeHud);
+    assert.equal(leg.status, "Failed");
+    assert.equal(leg.error, error);
+    assert.equal(
+      comparisonLegTone({
+        protocol: "moq",
+        jobStatus: "completed",
+        previewReady: true,
+        framesRendered: 0,
+      }),
+      "bad",
+    );
+    assert.equal(
+      comparisonLegStatusLabel({
+        protocol: "moq",
+        jobStatus: "completed",
+        previewReady: true,
+        framesRendered: 0,
+      }),
+      "Failed",
+    );
     assert.doesNotMatch(error, /Playback OK/i);
   });
 
@@ -318,6 +346,26 @@ describe("ca7bbb62 browser LOC HUD replay", () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.error ?? "", /catalog track empty/i);
     assert.notEqual(verdict.status, "Playback OK");
+    const leg = visibleLeg(
+      {
+        stream: "Stream 1 (MoQ)",
+        protocol: "moq",
+        endpoint: "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=bench-c8c32da0&draft=18",
+        encode_frames_total: 900,
+        playback_frames_rendered: 0,
+        playback_video_time_sec: 0,
+        playback_ttff_ms: 0,
+        moqx_publish_namespace_success: 1,
+      },
+      {
+        playaLines: ["catalog track empty and its subscription ended"],
+        jobStatus: "completed",
+        previewReady: true,
+        namespace: "bench-c8c32da0",
+      },
+    );
+    assert.equal(leg.status, "Failed");
+    assert.notEqual(leg.status, "Playback OK");
   });
 
   it("GCP East leftover rendered=1 after 0x10 is not Encode ended", () => {
@@ -335,6 +383,31 @@ describe("ca7bbb62 browser LOC HUD replay", () => {
     assert.equal(verdict.ok, false);
     assert.notEqual(verdict.status, "Encode ended");
     assert.notEqual(verdict.status, "Playback OK");
+    const leg = visibleLeg(
+      {
+        stream: "Stream 1 (MoQ)",
+        protocol: "moq",
+        endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=bench-a1238082&draft=18",
+        encode_frames_total: 900,
+        playback_frames_rendered: 1,
+        playback_video_time_sec: 0.03,
+        playback_ttff_ms: 40,
+        playback_bitrate_bps: 0,
+        moqx_publish_namespace_success: 1,
+      },
+      {
+        playaLines: [
+          "subscribe_0x10_keepalive (playa warn: no such namespace)",
+          "loc_frames_frozen_1",
+        ],
+        jobStatus: "completed",
+        previewReady: true,
+        catalogReady: false,
+      },
+    );
+    assert.equal(leg.status, "Failed");
+    assert.notEqual(leg.status, "Encode ended");
+    assert.notEqual(leg.status, "Playback OK");
   });
 });
 

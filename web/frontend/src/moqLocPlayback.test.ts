@@ -16,6 +16,7 @@ describe("locPaintedOk", () => {
       false,
     );
     assert.equal(locPaintedOk({ framesRendered: 12, bitrateBps: 0 }), true);
+    assert.equal(locPaintedOk({ framesRendered: 1, bitrateBps: 0 }), false);
     assert.equal(locPaintedOk({ framesRendered: 1, bitrateBps: 800_000 }), true);
   });
 });

@@ -24,7 +24,8 @@ export function locPaintedOk(options: {
   if (frames <= 0) {
     return false;
   }
-  if (frames === 1 && (options.bitrateBps ?? 0) <= 0 && options.subscribeRejected) {
+  // One leftover playa frame with no bitrate is not paint — 0x10 optional.
+  if (frames === 1 && (options.bitrateBps ?? 0) <= 0) {
     return false;
   }
   return true;

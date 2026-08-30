@@ -228,9 +228,9 @@ export function moqHasRenderedMedia(options: {
   subscribeRejected?: boolean;
 }): boolean {
   const frames = options.framesRendered ?? 0;
-  // ca7bbb62 East: leftover rendered=1 + bitrate 0 + 0x10 is not paint.
-  if (frames === 1 && (options.bitrateBps ?? 0) <= 0 && options.subscribeRejected) {
-    return Boolean(options.firstFrame && (options.videoTimeSec ?? 0) > 0.25);
+  // ca7bbb62 East: leftover rendered=1 + bitrate 0 is not paint.
+  if (frames === 1 && (options.bitrateBps ?? 0) <= 0 && (options.videoTimeSec ?? 0) <= 0.25) {
+    return false;
   }
   return Boolean(
     options.firstFrame ||

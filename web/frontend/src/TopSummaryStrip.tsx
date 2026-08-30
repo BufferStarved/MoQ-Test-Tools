@@ -1,3 +1,4 @@
+import { comparisonLegStatusLabel, comparisonLegTone } from "./comparisonReplay";
 import { liveGlanceMetrics, type ComparisonVerdict } from "./comparisonVerdict";
 import { assignStreamColors, protocolColor, protocolLabel } from "./protocolTheme";
 import type { UploadJob, UploadSample } from "./types";
@@ -18,30 +19,24 @@ interface TopSummaryStripProps {
   running?: boolean;
 }
 
-function statusTone(job: UploadJob): "ok" | "warn" | "bad" | "idle" {
-  if (job.status === "failed") {
-    return "bad";
-  }
-  if (job.status === "completed") {
-    return "ok";
-  }
-  if (job.status === "queued" || job.status === "pending") {
-    return "warn";
-  }
-  if (job.status === "running") {
-    return job.preview_ready === false ? "warn" : "ok";
-  }
-  return "idle";
+function statusTone(leg: SummaryLeg): "ok" | "warn" | "bad" | "idle" {
+  return comparisonLegTone({
+    protocol: leg.protocol,
+    jobStatus: leg.job.status,
+    previewReady: leg.job.preview_ready,
+    framesRendered: Number(leg.latestSample?.playback_frames_rendered ?? 0),
+    bitrateBps: Number(leg.latestSample?.playback_bitrate_bps ?? 0),
+  });
 }
 
-function statusLabel(job: UploadJob): string {
-  if (job.status === "queued") {
-    return "queued";
-  }
-  if (job.status === "running" && job.preview_ready === false) {
-    return "buffering";
-  }
-  return job.status;
+function statusLabel(leg: SummaryLeg): string {
+  return comparisonLegStatusLabel({
+    protocol: leg.protocol,
+    jobStatus: leg.job.status,
+    previewReady: leg.job.preview_ready,
+    framesRendered: Number(leg.latestSample?.playback_frames_rendered ?? 0),
+    bitrateBps: Number(leg.latestSample?.playback_bitrate_bps ?? 0),
+  });
 }
 
 export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSummaryStripProps) {
@@ -83,7 +78,7 @@ export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSu
             })),
           ).map((color, index) => {
             const leg = legs[index];
-            const tone = statusTone(leg.job);
+            const tone = statusTone(leg);
             const glances = liveGlanceMetrics(leg.latestSample);
             return (
               <div
@@ -93,7 +88,7 @@ export function TopSummaryStrip({ legs, verdict = null, running = false }: TopSu
               >
                 <span className="top-summary-dot" />
                 <span className="top-summary-protocol">{protocolLabel(leg.protocol)}</span>
-                <span className="top-summary-status">{statusLabel(leg.job)}</span>
+                <span className="top-summary-status">{statusLabel(leg)}</span>
                 {glances.map((glance) => (
                   <span key={glance.label} className="top-summary-metric">
                     {glance.label} {glance.value}

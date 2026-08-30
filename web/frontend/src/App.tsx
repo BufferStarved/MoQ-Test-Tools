@@ -19,6 +19,7 @@ import {
   type FeatureFlags,
 } from "./api";
 import { downloadCombinedCsv, downloadCombinedJson } from "./combinedDownload";
+import { comparisonLegStatusLabel, comparisonLegTone } from "./comparisonReplay";
 import { uniqueDownloadStreams } from "./downloadStreams";
 import { ComparisonCharts } from "./ComparisonCharts";
 import { EndpointSection, playerShortLabel } from "./EndpointSection";
@@ -282,19 +283,24 @@ function outputStatusTone(
   if (!leg) {
     return running ? "warn" : "idle";
   }
-  if (leg.job.status === "failed") {
-    return "bad";
-  }
-  if (leg.job.status === "completed") {
-    return "ok";
-  }
-  if (leg.job.status === "queued" || leg.job.status === "pending") {
-    return "warn";
-  }
-  if (leg.job.status === "running") {
-    return leg.job.preview_ready === false ? "warn" : "ok";
-  }
-  return "idle";
+  return comparisonLegTone({
+    protocol: leg.protocol,
+    jobStatus: leg.job.status,
+    previewReady: leg.job.preview_ready,
+    framesRendered: Number(leg.latestSample?.playback_frames_rendered ?? 0),
+    bitrateBps: Number(leg.latestSample?.playback_bitrate_bps ?? 0),
+    running,
+  });
+}
+
+function outputStatusLabel(leg: ComparisonLegState): string {
+  return comparisonLegStatusLabel({
+    protocol: leg.protocol,
+    jobStatus: leg.job.status,
+    previewReady: leg.job.preview_ready,
+    framesRendered: Number(leg.latestSample?.playback_frames_rendered ?? 0),
+    bitrateBps: Number(leg.latestSample?.playback_bitrate_bps ?? 0),
+  });
 }
 
 function isEncodeFinished(job: UploadJob): boolean {
@@ -2763,7 +2769,11 @@ function App() {
                         <>
                           <div className="status-row">
                             <span>Status</span>
-                            <strong className={`pill ${leg.job.status}`}>{leg.job.status}</strong>
+                            <strong
+                              className={`pill ${outputStatusLabel(leg) === "Failed" ? "failed" : leg.job.status}`}
+                            >
+                              {outputStatusLabel(leg)}
+                            </strong>
                           </div>
                           {liveRtt != null && Number.isFinite(liveRtt) && liveRtt > 0 ? (
                             <div className="status-row">
