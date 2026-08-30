@@ -19,6 +19,7 @@ import {
   locCatalogLargestLocation,
   locCatalogSubscribeParameters,
   locKeyframeVideoConfig,
+  locIdrReplayGroup,
   locNextMediaGroup,
   locSubscriberLargestLocation,
   locVideoFetchEndLocation,
@@ -333,9 +334,12 @@ async function bindPublisherSession(args: {
     if (closed || !lastIdr) {
       return;
     }
-    videoGroupId = locNextMediaGroup(videoGroupId, haveVideoGroup);
-    haveVideoGroup = true;
-    if (!(await openVideoSubgroup(sub, videoGroupId))) {
+    // Live pump already opened this alias — do not remap the GOP.
+    if (sub.objectId > 0n || sub.streamId !== null) {
+      return;
+    }
+    const groupId = locIdrReplayGroup(lastIdr.groupId);
+    if (!(await openVideoSubgroup(sub, groupId))) {
       return;
     }
     try {
@@ -344,14 +348,8 @@ async function bindPublisherSession(args: {
     } catch (err) {
       console.warn("browser MoQ send last IDR", err);
       sub.streamId = null;
-      return;
     }
-    // Close this one-object GOP. Live P-frames must not share the cached IDR group.
-    const done = sub.streamId;
-    sub.streamId = null;
-    if (done != null) {
-      void connection.closeSubgroup(done).catch(() => undefined);
-    }
+    // Keep the subgroup open so same-GOP P-frames attach on this alias.
   }
 
   async function serveVideoFetch(requestId: bigint): Promise<void> {

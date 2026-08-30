@@ -185,6 +185,15 @@ export function locNextMediaGroup(current: bigint, haveGroup: boolean): bigint {
 }
 
 /**
+ * Cached IDR must land on the group SUBSCRIBE_OK advertised.
+ * 4869f0c called locNextMediaGroup() here: LargestObject {X,0} on the
+ * wire, objects on {X+1} — moqx never attached (9e0a507e rendered=0).
+ */
+export function locIdrReplayGroup(advertisedGroupId: bigint): bigint {
+  return advertisedGroupId;
+}
+
+/**
  * avcC on every IDR. Playa configures WebCodecs from LOC VideoConfig, not
  * from an injected catalog initData (9958d69). Missing description = 0 frames.
  */

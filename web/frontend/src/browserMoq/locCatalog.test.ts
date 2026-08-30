@@ -17,6 +17,7 @@ import {
   locCatalogSubscribeParameters,
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
+  locIdrReplayGroup,
   locNextMediaGroup,
   locSubscriberLargestLocation,
   locVideoFetchEndLocation,
@@ -220,6 +221,16 @@ describe("locNextMediaGroup", () => {
     assert.equal(locNextMediaGroup(0n, true), 1n);
     assert.equal(locNextMediaGroup(4n, true), 5n);
     assert.ok(locNextMediaGroup(0n, false) < 0xffffffffn);
+  });
+});
+
+describe("locIdrReplayGroup", () => {
+  it("replays the advertised GOP, not the next one (9e0a507e)", () => {
+    assert.equal(locIdrReplayGroup(5n), 5n);
+    assert.equal(locIdrReplayGroup(0n), 0n);
+    assert.notEqual(locIdrReplayGroup(5n), locNextMediaGroup(5n, true));
+    const advertised = locVideoSubscribeParameters({ group: 5n, object: 0n });
+    assert.equal(advertised.parameters?.size, 1);
   });
 });
 

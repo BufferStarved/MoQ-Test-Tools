@@ -23,6 +23,11 @@ assert.match(publisher, /waitPublishOk/);
 assert.match(publisher, /serveVideoFetch/);
 assert.match(publisher, /sendLastIdrToSubscriber/);
 assert.match(publisher, /locNextMediaGroup/);
+assert.match(publisher, /locIdrReplayGroup\(lastIdr\.groupId\)/);
+assert.doesNotMatch(
+  publisher,
+  /videoGroupId = locNextMediaGroup\(videoGroupId, haveVideoGroup\);\s*haveVideoGroup = true;\s*if \(!\(await openVideoSubgroup\(sub, videoGroupId\)\)\)/,
+);
 assert.doesNotMatch(publisher, /videoGroupId = BigInt\(Date\.now\(\)\)/);
 assert.doesNotMatch(publisher, /deltaEncoded: true/);
 assert.doesNotMatch(

@@ -30,11 +30,14 @@ assert.match(locCatalog, /LARGEST_OBJECT/);
 assert.match(src("browserMoq/moq5Service.ts"), /serveCatalogFetch/);
 assert.match(src("browserMoq/moq5Service.ts"), /serveVideoFetch/);
 assert.match(src("browserMoq/moq5Service.ts"), /sendLastIdrToSubscriber/);
+assert.match(src("browserMoq/moq5Service.ts"), /locIdrReplayGroup\(lastIdr\.groupId\)/);
 assert.match(src("browserMoq/locCatalog.ts"), /locVideoFetchShouldServe/);
 assert.match(src("browserMoq/locCatalog.ts"), /locSubscriberLargestLocation/);
+assert.match(src("browserMoq/locCatalog.ts"), /locIdrReplayGroup/);
 assert.match(src("players/MoqPlayer.tsx"), /post-catalog/);
 assert.match(src("comparisonReplay.test.ts"), /ca7bbb62/);
 assert.match(src("comparisonReplay.test.ts"), /8aeaa2e4/);
+assert.match(src("comparisonReplay.test.ts"), /9e0a507e/);
 
 const replay = src("comparisonReplay.ts");
 assert.match(replay, /moqx_publish_namespace_success >= 1/);
