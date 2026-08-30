@@ -206,6 +206,50 @@ export function nextLocPublishTimestampUs(encoderTimestampUs: number, lastPublis
   return lastPublishUs + 33_333;
 }
 
+/**
+ * Replayed IDR must keep the encoder CaptureTimestamp.
+ * Date.now()*1000 (~1.7e15) then live stamps (~33ms) made VideoDecoder
+ * see a backwards PTS and never emit (89cf102 rendered=0).
+ */
+export function locReplayCaptureTimestampUs(originalUs: number): number {
+  return originalUs;
+}
+
+export interface LocVideoObjectInit {
+  captureTimestamp: bigint;
+  videoFrameMarking: {
+    independent: boolean;
+    discardable: boolean;
+    baseLayerSync: boolean;
+    startOfFrame: boolean;
+    endOfFrame: boolean;
+    temporalId: number;
+  };
+  videoConfig?: Uint8Array;
+}
+
+/** LOC headers playa feeds toVideoChunkInit + VideoDecoder.configure. */
+export function locVideoObjectInit(args: {
+  captureTimestampUs: number;
+  isKeyframe: boolean;
+  description?: Uint8Array;
+  lastDescription?: Uint8Array;
+}): LocVideoObjectInit {
+  const videoConfig = locKeyframeVideoConfig(args.description, args.lastDescription);
+  return {
+    captureTimestamp: BigInt(Math.round(args.captureTimestampUs)),
+    videoFrameMarking: {
+      independent: args.isKeyframe,
+      discardable: !args.isKeyframe,
+      baseLayerSync: false,
+      startOfFrame: true,
+      endOfFrame: true,
+      temporalId: 0,
+    },
+    ...(videoConfig ? { videoConfig } : {}),
+  };
+}
+
 export function locKeyframeVideoConfig(
   description: Uint8Array | undefined,
   lastDescription: Uint8Array | undefined,

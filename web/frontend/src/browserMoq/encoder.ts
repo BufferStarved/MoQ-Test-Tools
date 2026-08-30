@@ -1,4 +1,4 @@
-import { avcChunkIsSyncPoint, normalizeLocVideoAccessUnit } from "./h264AnnexB";
+import { avcChunkHasIdr, normalizeLocVideoAccessUnit } from "./h264AnnexB";
 import { BROWSER_LOC_VIDEO_CODEC, nextLocPublishTimestampUs } from "./locCatalog";
 
 export interface BrowserEncodeSample {
@@ -164,7 +164,10 @@ export function createBrowserVideoEncoder(
           if (description) {
             lastAvcC = description;
           }
-          const isKeyframe = chunk.type === "key" || avcChunkIsSyncPoint(data);
+          // Playa isAcceptableSyncPoint requires NAL type 5. chunk.type==="key"
+          // and SPS-only sync points marked independent=true, then the IDR
+          // gate dropped every frame (89cf102 decoder=ok frame=-).
+          const isKeyframe = avcChunkHasIdr(data);
           if (isKeyframe) {
             lastIdrAt = performance.now();
             awaitingIdr = false;

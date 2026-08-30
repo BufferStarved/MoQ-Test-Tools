@@ -67,21 +67,31 @@ export function avcCParameterSetsToAnnexB(avcC: Uint8Array): Uint8Array {
  * group and Playa's FETCH/subscribe died with the first GOP (~9s).
  */
 export function avcChunkIsSyncPoint(payload: Uint8Array): boolean {
+  return avcAccessUnitHasNal(payload, (nalType) => nalType === 5 || nalType === 7);
+}
+
+/**
+ * True only when the access unit contains an IDR slice (NAL type 5).
+ * SPS (type 7) is a sync hint, not independently decodable after we strip
+ * parameter sets into avcC — playa's isAcceptableSyncPoint requires IDR.
+ */
+export function avcChunkHasIdr(payload: Uint8Array): boolean {
+  return avcAccessUnitHasNal(payload, (nalType) => nalType === 5);
+}
+
+function avcAccessUnitHasNal(payload: Uint8Array, want: (nalType: number) => boolean): boolean {
   if (payload.byteLength < 5) {
     return false;
   }
-  // Prefer a full AVCC walk. `[0, 0, 0, len]` is a normal short length prefix
-  // and must not be mistaken for an Annex-B start code — that hid IDRs under
-  // 256 bytes and would have missed the first hardware keyframe.
-  const avcc = avccHasIdrOrSps(payload);
+  const avcc = avccHasMatchingNal(payload, want);
   if (avcc !== null) {
     return avcc;
   }
-  return annexBHasIdrOrSps(payload);
+  return annexBHasMatchingNal(payload, want);
 }
 
 /** `true`/`false` when the buffer is a complete AVCC AU; `null` if it is not. */
-function avccHasIdrOrSps(payload: Uint8Array): boolean | null {
+function avccHasMatchingNal(payload: Uint8Array, want: (nalType: number) => boolean): boolean | null {
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   let offset = 0;
   let nals = 0;
@@ -96,7 +106,7 @@ function avccHasIdrOrSps(payload: Uint8Array): boolean | null {
     if (nalType === 0) {
       return null;
     }
-    if (nalType === 5 || nalType === 7) {
+    if (want(nalType)) {
       found = true;
     }
     offset += length;
@@ -108,7 +118,7 @@ function avccHasIdrOrSps(payload: Uint8Array): boolean | null {
   return found;
 }
 
-function annexBHasIdrOrSps(payload: Uint8Array): boolean {
+function annexBHasMatchingNal(payload: Uint8Array, want: (nalType: number) => boolean): boolean {
   let i = 0;
   while (i + 4 < payload.byteLength) {
     if (payload[i] !== 0 || payload[i + 1] !== 0) {
@@ -126,7 +136,7 @@ function annexBHasIdrOrSps(payload: Uint8Array): boolean {
       continue;
     }
     const nalType = payload[nalStart]! & 0x1f;
-    if (nalType === 5 || nalType === 7) {
+    if (want(nalType)) {
       return true;
     }
     if (nalType !== 6 && nalType !== 8 && nalType !== 9) {
@@ -328,6 +338,34 @@ export function normalizeLocVideoAccessUnit(
     : nals;
   const data = sampleNals.length > 0 ? nalsToAvcc(sampleNals) : payload;
   return haveAvcC ? { data, description: avcC } : { data };
+}
+
+/**
+ * Publisher payload vs playa VideoDecoder.configure({ description: avcC }).
+ * avc1 requires 4-byte AVCC samples and out-of-band SPS/PPS (1f61f56d).
+ */
+export function locVideoSampleAgreesWithAvcC(
+  payload: Uint8Array,
+  description: Uint8Array | undefined,
+): { ok: boolean; reason?: string } {
+  if (!isAvcCRecord(description)) {
+    return { ok: false, reason: "missing avcC description" };
+  }
+  if ((description![4]! & 0x03) !== 3) {
+    return { ok: false, reason: "avcC lengthSizeMinusOne is not 3" };
+  }
+  const nals = collectAvccNals(payload);
+  if (!nals) {
+    return { ok: false, reason: "payload is not 4-byte length-prefixed AVCC" };
+  }
+  const types = nals.map((unit) => (unit[0] ?? 0) & 0x1f);
+  if (types.includes(7) || types.includes(8)) {
+    return { ok: false, reason: "in-band SPS/PPS with avcC description" };
+  }
+  if (!types.includes(1) && !types.includes(5)) {
+    return { ok: false, reason: "no VCL NAL" };
+  }
+  return { ok: true };
 }
 
 /** Length-prefixed access unit → Annex-B (4-byte big-endian lengths). */

@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   avcCWithFourByteLengths,
+  avcChunkHasIdr,
   avcChunkIsSyncPoint,
   buildAvcC,
   collectAvcNals,
   isAvcCRecord,
+  locVideoSampleAgreesWithAvcC,
   normalizeLocVideoAccessUnit,
 } from "./h264AnnexB.ts";
 
@@ -100,5 +102,22 @@ describe("normalizeLocVideoAccessUnit", () => {
     const normalized = normalizeLocVideoAccessUnit(avcc([sps, pps, idr]), avcC);
     const types = collectAvcNals(normalized.data).map((unit) => (unit[0] ?? 0) & 0x1f);
     assert.deepEqual(types, [5]);
+    assert.equal(locVideoSampleAgreesWithAvcC(normalized.data, normalized.description).ok, true);
+  });
+
+  it("rejects in-band SPS/PPS against avcC (1f61f56d)", () => {
+    const avcC = buildAvcC(sps, pps);
+    const mixed = avcc([sps, pps, idr]);
+    assert.equal(locVideoSampleAgreesWithAvcC(mixed, avcC).ok, false);
+  });
+});
+
+describe("avcChunkHasIdr", () => {
+  it("does not treat SPS-only as a playa keyframe", () => {
+    const spsOnly = avcc([new Uint8Array([0x67, 0x42, 0xc0])]);
+    assert.equal(avcChunkIsSyncPoint(spsOnly), true);
+    assert.equal(avcChunkHasIdr(spsOnly), false);
+    assert.equal(avcChunkHasIdr(avcc([new Uint8Array([0x65, 0x88])])), true);
+    assert.equal(avcChunkHasIdr(avcc([new Uint8Array([0x41, 0x9a])])), false);
   });
 });

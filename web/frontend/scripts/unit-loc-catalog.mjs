@@ -47,10 +47,37 @@ assert.match(
   /nextLocPublishTimestampUs/,
 );
 assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/locCatalog.ts"), "utf8"),
+  /locReplayCaptureTimestampUs/,
+);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/locCatalog.ts"), "utf8"),
+  /locVideoObjectInit/,
+);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/h264AnnexB.ts"), "utf8"),
+  /avcChunkHasIdr/,
+);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/encoder.ts"), "utf8"),
+  /avcChunkHasIdr\(data\)/,
+);
+assert.doesNotMatch(
+  fs.readFileSync(path.join(root, "browserMoq/moq5Service.ts"), "utf8"),
+  /captureTimestampUs:\s*Date\.now\(\)\s*\*\s*1000/,
+);
+assert.match(
+  fs.readFileSync(
+    path.join(root, "../vendor/moq-playa/packages/browser/src/webcodecs-video-decoder.ts"),
+    "utf8",
+  ),
+  /VideoDecoder\.decode skipped/,
+);
+assert.match(
   fs.readFileSync(path.join(root, "browserMoq/h264AnnexB.ts"), "utf8"),
   /avcCWithFourByteLengths/,
 );
-assert.match(publisher, /const videoConfig = locKeyframeVideoConfig/);
+assert.match(publisher, /locVideoObjectInit/);
 assert.doesNotMatch(
   publisher,
   /\.\.\.\(chunk\.isKeyframe[\s\S]{0,80}videoConfig/,

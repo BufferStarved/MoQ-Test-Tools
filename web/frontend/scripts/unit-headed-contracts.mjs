@@ -45,6 +45,10 @@ assert.match(src("comparisonReplay.test.ts"), /8aeaa2e4/);
 assert.match(src("comparisonReplay.test.ts"), /9e0a507e/);
 assert.match(src("comparisonReplay.test.ts"), /b2969493/);
 assert.match(src("comparisonReplay.test.ts"), /1f61f56d/);
+assert.match(src("browserMoq/locPublish.test.ts"), /89cf102/);
+assert.match(src("browserMoq/locPublish.test.ts"), /toVideoChunkInit/);
+assert.match(src("browserMoq/moq5Service.ts"), /locReplayCaptureTimestampUs/);
+assert.match(src("browserMoq/moq5Service.ts"), /locVideoObjectInit/);
 assert.match(src("players/MoqPlayer.tsx"), /startLocCanvasRenderer/);
 assert.match(src("moqLocPlayback.ts"), /startLocCanvasRenderer/);
 assert.match(

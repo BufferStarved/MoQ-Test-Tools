@@ -18,6 +18,7 @@ import {
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
   locIdrReplayGroup,
+  locReplayCaptureTimestampUs,
   nextLocPublishTimestampUs,
   locNextMediaGroup,
   locSubscriberLargestLocation,
@@ -260,5 +261,16 @@ describe("nextLocPublishTimestampUs", () => {
     assert.equal(nextLocPublishTimestampUs(1_000_000, 1_000_000), 1_033_333);
     assert.equal(nextLocPublishTimestampUs(999_000, 1_000_000), 1_033_333);
     assert.equal(nextLocPublishTimestampUs(Number.NaN, 0), 33_333);
+  });
+});
+
+describe("locReplayCaptureTimestampUs", () => {
+  it("keeps the encoder PTS instead of Date.now() (89cf102)", () => {
+    const original = 66_666;
+    const replayed = locReplayCaptureTimestampUs(original);
+    assert.equal(replayed, original);
+    assert.ok(replayed < 1_000_000_000);
+    const live = nextLocPublishTimestampUs(99_999, replayed);
+    assert.ok(live > replayed);
   });
 });

@@ -18,8 +18,9 @@ import {
   locCatalogFetchShouldServe,
   locCatalogLargestLocation,
   locCatalogSubscribeParameters,
-  locKeyframeVideoConfig,
   locIdrReplayGroup,
+  locReplayCaptureTimestampUs,
+  locVideoObjectInit,
   locNextMediaGroup,
   locSubscriberLargestLocation,
   locVideoFetchEndLocation,
@@ -153,7 +154,12 @@ async function bindPublisherSession(args: {
   let audioGroupId = 0n;
   let haveAudioGroup = false;
   let lastDescription: Uint8Array | undefined;
-  let lastIdr: { data: Uint8Array; extensions: Uint8Array; groupId: bigint } | null = null;
+  let lastIdr: {
+    data: Uint8Array;
+    extensions: Uint8Array;
+    groupId: bigint;
+    captureTimestampUs: number;
+  } | null = null;
   let closed = false;
   let videoWrite: Promise<void> = Promise.resolve();
   const pendingVideo: BrowserVideoChunk[] = [];
@@ -286,20 +292,13 @@ async function bindPublisherSession(args: {
     if (chunk.description && (descriptionChanged || !lastDescription)) {
       lastDescription = chunk.description;
     }
-    const videoConfig = locKeyframeVideoConfig(chunk.description, lastDescription);
     return encodeLocHeaders(
-      {
-        captureTimestamp: BigInt(Math.round(chunk.captureTimestampUs || Date.now() * 1000)),
-        videoFrameMarking: {
-          independent: chunk.isKeyframe,
-          discardable: !chunk.isKeyframe,
-          baseLayerSync: false,
-          startOfFrame: true,
-          endOfFrame: true,
-          temporalId: 0,
-        },
-        ...(videoConfig ? { videoConfig } : {}),
-      },
+      locVideoObjectInit({
+        captureTimestampUs: chunk.captureTimestampUs,
+        isKeyframe: chunk.isKeyframe,
+        description: chunk.description,
+        lastDescription,
+      }),
       browserLocHeaderOptions(draft),
     ) ?? new Uint8Array();
   }
@@ -333,8 +332,8 @@ async function bindPublisherSession(args: {
     lastIdr.extensions = encodeVideoExtensions({
       data: lastIdr.data,
       isKeyframe: true,
-      timestampUs: 0,
-      captureTimestampUs: Date.now() * 1000,
+      timestampUs: lastIdr.captureTimestampUs,
+      captureTimestampUs: locReplayCaptureTimestampUs(lastIdr.captureTimestampUs),
       description: lastDescription,
     });
   }
@@ -390,7 +389,12 @@ async function bindPublisherSession(args: {
     }
     const extensions = encodeVideoExtensions(chunk);
     if (chunk.isKeyframe) {
-      lastIdr = { data: chunk.data, extensions, groupId: videoGroupId };
+      lastIdr = {
+        data: chunk.data,
+        extensions,
+        groupId: videoGroupId,
+        captureTimestampUs: chunk.captureTimestampUs,
+      };
     }
     for (const sub of videoSubscribers) {
       if (chunk.isKeyframe) {

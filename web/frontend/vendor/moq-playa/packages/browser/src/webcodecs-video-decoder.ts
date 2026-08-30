@@ -206,7 +206,12 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
    * @see draft-ietf-moq-loc-01 §2 (LOC payload = EncodedVideoChunk.data)
    */
   decode(chunk: VideoChunkInit, renderTimeUs: number): void {
-    if (!this.lastCodec || !this.decoder || this.decoder.state !== 'configured') return;
+    if (!this.lastCodec || !this.decoder || this.decoder.state !== 'configured') {
+      // Silent return was 89cf102: catalog-ready, decoder=ok, frame=-.
+      throw new Error(
+        `VideoDecoder.decode skipped: decoder=${this.decoder?.state ?? 'none'} codec=${this.lastCodec || 'none'}`,
+      );
+    }
 
     // Backpressure: if decoder queue is full, reset and wait for the
     // next keyframe. Continuing would break the reference chain — later
@@ -219,7 +224,12 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
 
     // Codec-specific chunk preparation (format conversion, sanitization)
     const prepared = this.strategy.prepareChunkData(chunk.data, this.lastDescription);
-    if (!prepared) return;
+    if (!prepared) {
+      if (chunk.type === 'key' && this.lastCodec.startsWith('avc')) {
+        throw new Error('VideoDecoder dropped key chunk (no VCL after sanitize)');
+      }
+      return;
+    }
     const { data, droppedReason } = prepared;
 
     // Track observed chunk
@@ -241,6 +251,11 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
     if (this.awaitingKeyframe) {
       if (!this.strategy.isAcceptableSyncPoint(data, chunk.type, this.lastDescription)) {
         if (this.debug) console.debug('[WebCodecsVideoDecoder] Awaiting keyframe, dropping chunk type=%s', chunk.type);
+        if (chunk.type === 'key' && this.lastCodec.startsWith('avc')) {
+          throw new Error(
+            `VideoDecoder rejected key chunk as sync point (${this.lastObservedChunkSummary})`,
+          );
+        }
         return;
       }
       this.awaitingKeyframe = false;
