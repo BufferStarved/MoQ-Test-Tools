@@ -42,6 +42,11 @@ assert.match(
   fs.readFileSync(path.join(root, "browserMoq/encoder.ts"), "utf8"),
   /normalizeLocVideoAccessUnit\(rawData/,
 );
+assert.match(publisher, /const videoConfig = locKeyframeVideoConfig/);
+assert.doesNotMatch(
+  publisher,
+  /\.\.\.\(chunk\.isKeyframe[\s\S]{0,80}videoConfig/,
+);
 assert.doesNotMatch(publisher, /deltaEncoded: true/);
 assert.doesNotMatch(
   publisher,

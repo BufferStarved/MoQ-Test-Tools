@@ -243,4 +243,9 @@ describe("locKeyframeVideoConfig", () => {
     assert.equal(locKeyframeVideoConfig(new Uint8Array(), last), last);
     assert.equal(locKeyframeVideoConfig(undefined, undefined), undefined);
   });
+
+  it("still returns last avcC for a delta so mid-GOP join can configure (0ea3b335)", () => {
+    const last = new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1]);
+    assert.equal(locKeyframeVideoConfig(undefined, last), last);
+  });
 });

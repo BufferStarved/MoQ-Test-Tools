@@ -286,6 +286,7 @@ async function bindPublisherSession(args: {
     if (chunk.description && (descriptionChanged || !lastDescription)) {
       lastDescription = chunk.description;
     }
+    const videoConfig = locKeyframeVideoConfig(chunk.description, lastDescription);
     return encodeLocHeaders(
       {
         captureTimestamp: BigInt(Math.round(chunk.captureTimestampUs || Date.now() * 1000)),
@@ -297,12 +298,7 @@ async function bindPublisherSession(args: {
           endOfFrame: true,
           temporalId: 0,
         },
-        ...(chunk.isKeyframe
-          ? (() => {
-              const videoConfig = locKeyframeVideoConfig(chunk.description, lastDescription);
-              return videoConfig ? { videoConfig } : {};
-            })()
-          : {}),
+        ...(videoConfig ? { videoConfig } : {}),
       },
       browserLocHeaderOptions(draft),
     ) ?? new Uint8Array();

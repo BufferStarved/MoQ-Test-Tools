@@ -45,6 +45,7 @@ assert.match(src("comparisonReplay.test.ts"), /8aeaa2e4/);
 assert.match(src("comparisonReplay.test.ts"), /9e0a507e/);
 assert.match(src("comparisonReplay.test.ts"), /b2969493/);
 assert.match(src("browserMoq/h264AnnexB.ts"), /normalizeLocVideoAccessUnit/);
+assert.match(src("browserMoq/h264AnnexB.ts"), /nalsToAvcc/);
 assert.match(src("browserMoq/encoder.ts"), /normalizeLocVideoAccessUnit/);
 assert.match(
   src("browserMoq/encoder.ts"),

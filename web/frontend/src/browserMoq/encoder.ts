@@ -188,24 +188,7 @@ export function createBrowserVideoEncoder(
       // Hardware often ignores keyFrame after the first IDR, leaving one
       // open MoQ group. Prefer software so GOP boundaries actually exist.
       let acceleration: HardwareAcceleration = "no-preference";
-      let avcFormat: "avc" | "annexb" = "avc";
-      try {
-        const annexb = await VideoEncoder.isConfigSupported({
-          codec,
-          width,
-          height,
-          bitrate: 2_500_000,
-          framerate: 30,
-          latencyMode: "realtime",
-          avc: { format: "annexb" },
-          hardwareAcceleration: "prefer-software",
-        });
-        if (annexb.supported) {
-          avcFormat = "annexb";
-        }
-      } catch {
-        // keep avc (length-prefixed); normalizeLocVideoAccessUnit converts
-      }
+      const avcFormat: "avc" | "annexb" = "avc";
       try {
         const soft = await VideoEncoder.isConfigSupported({
           codec,

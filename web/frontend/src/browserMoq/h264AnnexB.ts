@@ -272,18 +272,28 @@ export function buildAvcC(sps: Uint8Array, pps: Uint8Array): Uint8Array {
   return out;
 }
 
-function nalsToAnnexB(nals: Uint8Array[]): Uint8Array {
-  return concat(nals.filter((unit) => unit.byteLength > 0).map((unit) => nal(unit)));
+function nalsToAvcc(nals: Uint8Array[]): Uint8Array {
+  const parts = nals.filter((unit) => unit.byteLength > 0);
+  const out = new Uint8Array(parts.reduce((sum, unit) => sum + 4 + unit.byteLength, 0));
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  for (const unit of parts) {
+    view.setUint32(offset, unit.byteLength);
+    offset += 4;
+    out.set(unit, offset);
+    offset += unit.byteLength;
+  }
+  return out;
 }
 
 /**
  * Browser LOC access unit for playa WebCodecs.
  *
- * Catalog configure is empty (no fake initData) so VideoDecoder starts in
- * Annex-B mode. avcC samples without in-band SPS never emit a frame
- * (b2969493: decoder=1627, frame=-). Emit Annex-B and put SPS/PPS on
- * every IDR. Keep a real avcC in `description` so LOC VideoConfig can
- * reconfigure playa without a catalog lie.
+ * Catalog has codec but no initData. Empty VideoDecoder.configure puts
+ * Chrome in Annex-B mode (b2969493 decoder=ok frame=-). Skip that and
+ * emit length-prefixed avcC samples plus a real avcC in `description`
+ * so LOC VideoConfig and EncodedVideoChunk.data agree. Prepend SPS/PPS
+ * on IDRs so a mid-GOP join still has parameter sets in-band.
  */
 export function normalizeLocVideoAccessUnit(
   payload: Uint8Array,
@@ -309,7 +319,7 @@ export function normalizeLocVideoAccessUnit(
     out.push(pps);
   }
   out.push(...nals);
-  const data = out.length > 0 ? nalsToAnnexB(out) : payload;
+  const data = out.length > 0 ? nalsToAvcc(out) : payload;
   return avcC ? { data, description: avcC } : { data };
 }
 

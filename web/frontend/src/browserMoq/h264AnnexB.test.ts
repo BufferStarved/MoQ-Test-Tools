@@ -69,7 +69,7 @@ describe("normalizeLocVideoAccessUnit", () => {
     assert.equal((nals[0]?.[0] ?? 0) & 0x1f, 7);
     assert.equal((nals[1]?.[0] ?? 0) & 0x1f, 8);
     assert.equal((nals[2]?.[0] ?? 0) & 0x1f, 5);
-    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, 1]);
+    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, sps.byteLength]);
   });
 
   it("synthesizes avcC from in-band Annex-B SPS/PPS when description is missing", () => {
@@ -82,7 +82,7 @@ describe("normalizeLocVideoAccessUnit", () => {
     assert.ok(normalized.description);
     assert.equal(normalized.description[1], 0x4d);
     assert.equal(normalized.description[3], 0x28);
-    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, 1]);
+    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, sps.byteLength]);
   });
 
   it("does not duplicate SPS already in the access unit", () => {

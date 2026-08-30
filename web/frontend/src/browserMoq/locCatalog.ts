@@ -194,10 +194,9 @@ export function locIdrReplayGroup(advertisedGroupId: bigint): bigint {
 }
 
 /**
- * avcC on every IDR. Playa configures WebCodecs from LOC VideoConfig, not
- * from an injected catalog initData (9958d69). Encoder also emits Annex-B
- * with in-band SPS/PPS so an empty catalog configure cannot starve
- * VideoDecoder (b2969493: objects + decoder, frame=-).
+ * avcC on every video object (not just IDRs). Playa skips empty catalog
+ * configure; without VideoConfig the decoder stays IDLE and drops the
+ * mid-GOP join (0ea3b335 objects + catalog-ready, rendered=0).
  */
 export function locKeyframeVideoConfig(
   description: Uint8Array | undefined,
