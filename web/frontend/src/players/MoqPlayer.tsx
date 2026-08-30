@@ -901,7 +901,11 @@ export default function MoqPlayer({
               info(msg: string, ...args: unknown[]) {
                 try {
                   const line = formatPlayaLog(msg, args);
-                  if (/catalog|bootstrap|SUBSCRIBE|FETCH|joining|legacy/i.test(line)) {
+                  if (
+                    /catalog|bootstrap|SUBSCRIBE|FETCH|joining|legacy|\[OBJ\]|decoder|videoConfig|configure/i.test(
+                      line,
+                    )
+                  ) {
                     pushDiag(`playa ${line.slice(0, 180)}`);
                   }
                 } catch {
@@ -1222,7 +1226,10 @@ export default function MoqPlayer({
             );
           } else if (stats.bitrate > 0 && !statsZeroLogged) {
             statsZeroLogged = true;
-            pushDiag(`stats bitrate=${stats.bitrate} latency=${stats.latencyMs} rendered=0`);
+            const ttff = breakdown
+              ? ` firstObject=${breakdown.firstObjectReceivedMs ?? "-"} decoder=${breakdown.decoderConfiguredMs ?? "-"} frame=${breakdown.firstFrameRenderedMs ?? "-"}`
+              : "";
+            pushDiag(`stats bitrate=${stats.bitrate} latency=${stats.latencyMs} rendered=0${ttff}`);
           }
         });
 

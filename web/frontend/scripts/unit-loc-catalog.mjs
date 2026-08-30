@@ -24,6 +24,11 @@ assert.match(publisher, /serveVideoFetch/);
 assert.match(publisher, /sendLastIdrToSubscriber/);
 assert.match(publisher, /locNextMediaGroup/);
 assert.match(publisher, /locIdrReplayGroup\(lastIdr\.groupId\)/);
+assert.match(publisher, /locSubscriberLargestLocation\(videoGroupId, subscriber\.objectId\)/);
+assert.doesNotMatch(
+  publisher,
+  /const largest = lastIdr\s*\n\s*\? \{ group: lastIdr\.groupId/,
+);
 assert.doesNotMatch(
   publisher,
   /videoGroupId = locNextMediaGroup\(videoGroupId, haveVideoGroup\);\s*haveVideoGroup = true;\s*if \(!\(await openVideoSubgroup\(sub, videoGroupId\)\)\)/,

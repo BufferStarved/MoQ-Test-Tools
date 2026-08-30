@@ -330,6 +330,19 @@ async function bindPublisherSession(args: {
     }
   }
 
+  function refreshLastIdrExtensions(): void {
+    if (!lastIdr) {
+      return;
+    }
+    lastIdr.extensions = encodeVideoExtensions({
+      data: lastIdr.data,
+      isKeyframe: true,
+      timestampUs: 0,
+      captureTimestampUs: Date.now() * 1000,
+      description: lastDescription,
+    });
+  }
+
   async function sendLastIdrToSubscriber(sub: VideoSubscriber): Promise<void> {
     if (closed || !lastIdr) {
       return;
@@ -338,6 +351,7 @@ async function bindPublisherSession(args: {
     if (sub.objectId > 0n || sub.streamId !== null) {
       return;
     }
+    refreshLastIdrExtensions();
     const groupId = locIdrReplayGroup(lastIdr.groupId);
     if (!(await openVideoSubgroup(sub, groupId))) {
       return;
@@ -461,6 +475,7 @@ async function bindPublisherSession(args: {
     }
     if (chunk.description) {
       lastDescription = chunk.description;
+      refreshLastIdrExtensions();
     }
     if (videoSubscribers.length === 0) {
       if (chunk.isKeyframe) {
@@ -509,9 +524,9 @@ async function bindPublisherSession(args: {
         objectId: 0n,
       };
       videoSubscribers.push(subscriber);
-      const largest = lastIdr
-        ? { group: lastIdr.groupId, object: 0n }
-        : locSubscriberLargestLocation(videoGroupId, 0n);
+      // Do not advertise lastIdr.groupId before THIS alias has sent —
+      // that phantom LargestObject was a gap (5f146ea4 first_media=82, paint=0).
+      const largest = locSubscriberLargestLocation(videoGroupId, subscriber.objectId);
       void connection
         .acceptSubscribe(requestId, alias, locVideoSubscribeParameters(largest))
         .then(async () => {

@@ -31,6 +31,11 @@ assert.match(src("browserMoq/moq5Service.ts"), /serveCatalogFetch/);
 assert.match(src("browserMoq/moq5Service.ts"), /serveVideoFetch/);
 assert.match(src("browserMoq/moq5Service.ts"), /sendLastIdrToSubscriber/);
 assert.match(src("browserMoq/moq5Service.ts"), /locIdrReplayGroup\(lastIdr\.groupId\)/);
+assert.match(
+  src("browserMoq/moq5Service.ts"),
+  /locSubscriberLargestLocation\(videoGroupId, subscriber\.objectId\)/,
+);
+assert.match(src("players/MoqPlayer.tsx"), /decoderConfiguredMs/);
 assert.match(src("browserMoq/locCatalog.ts"), /locVideoFetchShouldServe/);
 assert.match(src("browserMoq/locCatalog.ts"), /locSubscriberLargestLocation/);
 assert.match(src("browserMoq/locCatalog.ts"), /locIdrReplayGroup/);

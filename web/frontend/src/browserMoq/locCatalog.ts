@@ -155,8 +155,8 @@ export function locVideoFetchEndLocation(groupId: bigint): {
 
 /**
  * SUBSCRIBE_OK LARGEST_OBJECT for a subscriber that has actually sent.
- * A phantom {Date.now(), 0} was 8aeaa2e4: LargestObject waited past a
- * location that never existed on this alias (and overflowed uint32 on moqx).
+ * A phantom {Date.now(), 0} was 8aeaa2e4. Advertising lastIdr.groupId
+ * before this alias wrote was 5f146ea4: first_media gap, paint 0.
  */
 export function locSubscriberLargestLocation(
   groupId: bigint,
