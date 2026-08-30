@@ -74,8 +74,14 @@ const replay = src("comparisonReplay.ts");
 assert.match(replay, /moqx_publish_namespace_success >= 1/);
 assert.match(replay, /catalog watchdog expired/);
 assert.match(replay, /classifyMoqEndVerdict/);
+assert.match(replay, /classifyWhepEndVerdict/);
+assert.match(replay, /runStopped: hud.runStopped/);
 assert.match(replay, /inferCatalogReady/);
 assert.match(replay, /comparisonLegTone/);
+assert.match(src("comparisonReplay.test.ts"), /24\.7s-of-36s stall/);
+assert.match(src("webrtcPlayback.ts"), /isGracefulMoqEncodeOver/);
+assert.match(src("webrtcPlayback.ts"), /elapsed - vt >= 15/);
+assert.match(src("players/WhepPlayer.tsx"), /jobStatus: jobStatusRef.current/);
 assert.match(src("comparisonReplay.test.ts"), /COMPARISON_31/);
 assert.match(src("comparisonReplay.test.ts"), /visibleLeg\(/);
 assert.match(

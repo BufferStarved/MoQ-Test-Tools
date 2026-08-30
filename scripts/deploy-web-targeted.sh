@@ -131,7 +131,10 @@ done
 
 # Recorder JS is bind-mounted into openmoq-recorder:latest. Missing
 # record-policy.mjs makes Linode :14433 ingest record 0 bytes after §11.1.
-remote "mkdir -p $INSTALL_ROOT/tools/openmoq-recorder $INSTALL_ROOT/tools/moq5-publisher $INSTALL_ROOT/ingest_agent"
+# The docker wrapper must mount it too — recording_service falls back to
+# that script when `docker` is not on the agent PATH, and the baked image
+# never COPY'd the file.
+remote "mkdir -p $INSTALL_ROOT/tools/openmoq-recorder/bin $INSTALL_ROOT/tools/moq5-publisher $INSTALL_ROOT/ingest_agent"
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
   "$STAGE/tools/openmoq-recorder/record.mjs" \
   "$STAGE/tools/openmoq-recorder/record-policy.mjs" \
@@ -139,6 +142,9 @@ rsync -az -e "ssh ${SSH_OPTS[*]}" \
   "$STAGE/tools/openmoq-recorder/openmoq-init.mjs" \
   "$STAGE/tools/openmoq-recorder/wt-adapter.mjs" \
   "$WEB_IP:$INSTALL_ROOT/tools/openmoq-recorder/"
+rsync -az -e "ssh ${SSH_OPTS[*]}" \
+  "$STAGE/tools/openmoq-recorder/bin/openmoq-fmp4-record-docker" \
+  "$WEB_IP:$INSTALL_ROOT/tools/openmoq-recorder/bin/"
 
 rsync -az --exclude '__pycache__' --exclude '*.pyc' \
   -e "ssh ${SSH_OPTS[*]}" \

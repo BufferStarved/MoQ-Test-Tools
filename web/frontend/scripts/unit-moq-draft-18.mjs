@@ -26,6 +26,19 @@ assert.match(recorder, /protocols: \['moqt-18'\]/);
 assert.match(recorder, /new MoqtConnection\(18\)/);
 assert.match(recorder, /record-policy\.mjs/);
 assert.match(recorder, /reconnect on 0x10 \/ §11\.1/);
+const recorderDir = path.resolve(root, "../../../tools/openmoq-recorder");
+assert.match(
+  fs.readFileSync(path.join(recorderDir, "Dockerfile"), "utf8"),
+  /record-policy\.mjs/,
+);
+assert.match(
+  fs.readFileSync(path.join(recorderDir, "bin/openmoq-fmp4-record-docker"), "utf8"),
+  /record-policy\.mjs:\/app\/tools\/openmoq-recorder\/record-policy\.mjs:ro/,
+);
+assert.match(
+  fs.readFileSync(path.resolve(root, "../../../scripts/deploy-web-targeted.sh"), "utf8"),
+  /openmoq-fmp4-record-docker/,
+);
 assert.doesNotMatch(recorder, /no objects for 5s; resubscribing/);
 assert.doesNotMatch(recorder, /filter: \{ type: 'LargestObject' \}/);
 

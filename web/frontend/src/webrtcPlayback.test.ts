@@ -67,6 +67,20 @@ describe("classifyWhepEndVerdict", () => {
     assert.match(verdict.error ?? "", /stalled at 24\.6s of a 62s encode/);
     assert.doesNotMatch(verdict.error ?? "", /300s/);
   });
+
+  it("does not call Stop after paint a stall against leftover planned duration", () => {
+    const verdict = classifyWhepEndVerdict({
+      framesRendered: 900,
+      videoTimeSec: 24.7,
+      encodeDurationSec: 36,
+      encodeElapsedSec: 36,
+      runStopped: true,
+      jobStatus: "completed",
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+    assert.equal(verdict.status, "Playback OK");
+  });
 });
 
 describe("whepPlaybackBufferSec", () => {

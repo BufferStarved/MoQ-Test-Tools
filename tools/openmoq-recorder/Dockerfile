@@ -27,6 +27,7 @@ COPY web/frontend/vendor/moq-playa/packages/webtransport/dist \
 
 COPY tools/openmoq-recorder/package.json \
      tools/openmoq-recorder/record.mjs \
+     tools/openmoq-recorder/record-policy.mjs \
      tools/openmoq-recorder/cert.mjs \
      tools/openmoq-recorder/wt-adapter.mjs \
      tools/openmoq-recorder/openmoq-init.mjs \

@@ -51,6 +51,7 @@ function classifyWhepEndVerdict({
   encodeDurationSec = 0,
   encodeElapsedSec = 0,
   runStopped = false,
+  jobStatus = "",
 } = {}) {
   const played = whepHasRenderedMedia({ framesRendered });
   const duration = encodeDurationForEndVerdict({
@@ -61,6 +62,18 @@ function classifyWhepEndVerdict({
   const vt = videoTimeSec;
   const covered = duration > 0 && vt >= duration * 0.8;
   if (played && covered) return { ok: true, status: "Playback OK", error: null };
+  const encodeOver = played && (runStopped || jobStatus === "completed");
+  if (encodeOver) {
+    const elapsed = encodeElapsedSec;
+    if (elapsed > 0 && vt < elapsed * 0.8 && elapsed - vt >= 15) {
+      return {
+        ok: false,
+        status: "Failed (see diagnostics)",
+        error: `WebRTC playback stalled at ${vt.toFixed(1)}s of a ${duration}s encode.`,
+      };
+    }
+    return { ok: true, status: "Playback OK", error: null };
+  }
   if (played && !covered && duration > 0) {
     return {
       ok: false,
@@ -128,6 +141,17 @@ const freezeStopped = classifyWhepEndVerdict({
 assert.equal(freezeStopped.ok, false);
 assert.match(freezeStopped.error, /stalled at 24\.6s of a 62s encode/);
 assert.doesNotMatch(freezeStopped.error, /300s/);
+
+const stopAfterPaint = classifyWhepEndVerdict({
+  framesRendered: 900,
+  videoTimeSec: 24.7,
+  encodeDurationSec: 36,
+  encodeElapsedSec: 36,
+  runStopped: true,
+  jobStatus: "completed",
+});
+assert.equal(stopAfterPaint.ok, true, "Stop after 900 paints is not a 24.7s-of-36s stall");
+assert.equal(stopAfterPaint.error, null);
 
 assert.match(whepPlayer, /whepPlaybackBufferSec/);
 assert.match(whepPlayer, /jitterBufferMs/);

@@ -41,6 +41,7 @@ export type ComparisonHud = {
   mpegTsLastReason?: string | null;
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
+  runStopped?: boolean;
 };
 
 export type VisibleLeg = {
@@ -230,6 +231,8 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
       videoTimeSec: row.playback_video_time_sec,
       encodeDurationSec: hud.encodeDurationSec,
       encodeElapsedSec: hud.encodeElapsedSec,
+      runStopped: hud.runStopped,
+      jobStatus: hud.jobStatus,
     });
     return {
       stream: row.stream,

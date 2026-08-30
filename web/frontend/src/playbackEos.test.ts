@@ -107,4 +107,18 @@ describe("isGracefulWhepDisconnect", () => {
       false,
     );
   });
+
+  it("treats operator Stop after paint as graceful even when currentTime lags", () => {
+    assert.equal(
+      isGracefulWhepDisconnect({
+        playedOk: true,
+        iceState: "closed",
+        runStopped: true,
+        videoTimeSec: 24.7,
+        encodeDurationSec: 36,
+        encodeElapsedSec: 36,
+      }),
+      true,
+    );
+  });
 });

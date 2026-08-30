@@ -103,6 +103,9 @@ export function isGracefulWhepDisconnect(options: {
   if (state !== "failed" && state !== "disconnected" && state !== "closed") {
     return false;
   }
+  if (options.runStopped) {
+    return true;
+  }
   return playedMostOfEncode(options);
 }
 

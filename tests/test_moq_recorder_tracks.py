@@ -41,6 +41,11 @@ class RecorderTrackTests(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertIn("record.mjs:/app/tools/openmoq-recorder/record.mjs:ro", joined)
         self.assertIn("record-policy.mjs:/app/tools/openmoq-recorder/record-policy.mjs:ro", joined)
+        wrapper = (ROOT / "tools/openmoq-recorder/bin/openmoq-fmp4-record-docker").read_text()
+        self.assertIn(
+            "record-policy.mjs:/app/tools/openmoq-recorder/record-policy.mjs:ro",
+            wrapper,
+        )
         self.assertIn("MOQ_RELAY_CERT_SHA256=abc", joined)
         self.assertIn("--track video", joined)
         self.assertNotIn("--track vide_1", joined)

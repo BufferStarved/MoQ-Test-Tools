@@ -31,6 +31,7 @@ fi
 run+=(
   -v "$OUTPUT_DIR:/out"
   -v "$RECORDER_DIR/record.mjs:/app/tools/openmoq-recorder/record.mjs:ro"
+  -v "$RECORDER_DIR/record-policy.mjs:/app/tools/openmoq-recorder/record-policy.mjs:ro"
   -v "$RECORDER_DIR/cert.mjs:/app/tools/openmoq-recorder/cert.mjs:ro"
   "$IMAGE" "$RELAY_URL" "$NAMESPACE" "/out/$OUTPUT_BASE"
 )

@@ -179,6 +179,28 @@ describe("comparison 30 replay", () => {
     assert.match(stall.error ?? "", /stalled at 18.8s of a 26s encode/i);
   });
 
+  it("does not call Stop after 900 paints a 24.7s-of-36s stall", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 3 (WebRTC)",
+      protocol: "webrtc",
+      endpoint: "http://34.9.217.178:8889/benchmark/whip",
+      encode_frames_total: 1080,
+      playback_frames_rendered: 900,
+      playback_video_time_sec: 24.7,
+      playback_ttff_ms: 1200,
+      moqx_publish_namespace_success: 0,
+    };
+    const leg = visibleLeg(row, {
+      encodeDurationSec: 36,
+      encodeElapsedSec: 36,
+      runStopped: true,
+      jobStatus: "completed",
+    });
+    assert.equal(leg.status, "Playback OK");
+    assert.equal(leg.error, null);
+    assert.doesNotMatch(leg.error ?? "", /stalled at 24\.7s of a 36s encode/i);
+  });
+
   it("does not call SRT with zero paint Playback OK", () => {
     const srt = visibleLeg(COMPARISON_30[1], {
       mpegTsLastReason: "manifest unreachable",

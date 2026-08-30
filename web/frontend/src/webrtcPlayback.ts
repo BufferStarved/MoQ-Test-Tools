@@ -5,6 +5,7 @@
  * frames, encode lag 20s+, no UI error).
  */
 
+import { isGracefulMoqEncodeOver } from "./playbackEos.ts";
 import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
 
 export function whepHasRenderedMedia(options: {
@@ -47,10 +48,40 @@ export function classifyWhepEndVerdict(options: {
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
   runStopped?: boolean;
+  jobStatus?: string;
 }): WhepEndVerdict {
   const played = whepHasRenderedMedia(options);
   const covered = playbackCoveredEncode(options);
   if (played && covered) {
+    return { ok: true, status: "Playback OK", error: null };
+  }
+  // Stop / encode-over after paint is not a stall. WHEP currentTime lags
+  // the encode (live glass + player detach on Stop); leftover planned
+  // duration_sec is the 24.7s-of-36s lie. A real freeze is playhead stuck
+  // far behind the encode that actually ran.
+  if (
+    played &&
+    isGracefulMoqEncodeOver({
+      playedOk: true,
+      jobStatus: options.jobStatus,
+      runStopped: options.runStopped,
+    })
+  ) {
+    const elapsed = options.encodeElapsedSec ?? 0;
+    const vt = options.videoTimeSec ?? 0;
+    if (elapsed > 0 && vt < elapsed * 0.8 && elapsed - vt >= 15) {
+      return {
+        ok: false,
+        status: "Failed (see diagnostics)",
+        error: stallAgainstEncodeMessage({
+          protocolLabel: "WebRTC",
+          videoTimeSec: options.videoTimeSec,
+          encodeDurationSec: options.encodeDurationSec,
+          encodeElapsedSec: options.encodeElapsedSec,
+          runStopped: options.runStopped,
+        }),
+      };
+    }
     return { ok: true, status: "Playback OK", error: null };
   }
   if (played && !covered) {

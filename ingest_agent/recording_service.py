@@ -95,9 +95,9 @@ def _docker_record_cmd(
         f"{output_path.parent}:/out",
         "-v",
         f"{record_js}:/app/tools/openmoq-recorder/record.mjs:ro",
+        "-v",
+        f"{policy_js}:/app/tools/openmoq-recorder/record-policy.mjs:ro",
     ]
-    if policy_js.is_file():
-        cmd.extend(["-v", f"{policy_js}:/app/tools/openmoq-recorder/record-policy.mjs:ro"])
     # Only inject a pin when this job supplied one for leftover :4433.
     # Public :14433 must not inherit a hostname-map hash (Let's Encrypt).
     pin = cert_sha256.strip()
