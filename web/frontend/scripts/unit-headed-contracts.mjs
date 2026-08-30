@@ -43,6 +43,20 @@ assert.match(src("players/MoqPlayer.tsx"), /post-catalog/);
 assert.match(src("comparisonReplay.test.ts"), /ca7bbb62/);
 assert.match(src("comparisonReplay.test.ts"), /8aeaa2e4/);
 assert.match(src("comparisonReplay.test.ts"), /9e0a507e/);
+assert.match(src("comparisonReplay.test.ts"), /b2969493/);
+assert.match(src("browserMoq/h264AnnexB.ts"), /normalizeLocVideoAccessUnit/);
+assert.match(src("browserMoq/encoder.ts"), /normalizeLocVideoAccessUnit/);
+assert.match(
+  src("browserMoq/encoder.ts"),
+  /avc:\s*\{\s*format:\s*avcFormat\s*\}/,
+);
+assert.doesNotMatch(
+  fs.readFileSync(
+    path.join(root, "vendor/moq-playa/packages/player/src/player-pipeline.ts"),
+    "utf8",
+  ),
+  /new Uint8Array\(0\);\s*\n\s*pipelines\.videoPipeline\.configure/,
+);
 
 const replay = src("comparisonReplay.ts");
 assert.match(replay, /moqx_publish_namespace_success >= 1/);

@@ -185,7 +185,11 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
     }
 
     this.createDecoder();
-    this.applyConfig();
+    // H.264 without avcC is Annex-B mode. Do not apply an empty
+    // description — that was catalog-ready / rendered=0 (b2969493).
+    if (!this.strategy.usesDescription || this.lastDescription) {
+      this.applyConfig();
+    }
     if (codecChanged) {
       this.checkConfigSupport();
     }
@@ -384,6 +388,7 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
 
   private applyConfig(): void {
     if (!this.decoder || !this.lastCodec) return;
+    if (this.strategy.usesDescription && !this.lastDescription) return;
     this.decoder.configure(this.buildConfig());
   }
 

@@ -34,6 +34,14 @@ assert.doesNotMatch(
   /videoGroupId = locNextMediaGroup\(videoGroupId, haveVideoGroup\);\s*haveVideoGroup = true;\s*if \(!\(await openVideoSubgroup\(sub, videoGroupId\)\)\)/,
 );
 assert.doesNotMatch(publisher, /videoGroupId = BigInt\(Date\.now\(\)\)/);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/h264AnnexB.ts"), "utf8"),
+  /normalizeLocVideoAccessUnit/,
+);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/encoder.ts"), "utf8"),
+  /normalizeLocVideoAccessUnit\(rawData/,
+);
 assert.doesNotMatch(publisher, /deltaEncoded: true/);
 assert.doesNotMatch(
   publisher,

@@ -1,4 +1,4 @@
-import { avcChunkIsSyncPoint } from "./h264AnnexB";
+import { avcChunkIsSyncPoint, normalizeLocVideoAccessUnit } from "./h264AnnexB";
 import { BROWSER_LOC_VIDEO_CODEC } from "./locCatalog";
 
 export interface BrowserEncodeSample {
@@ -95,6 +95,7 @@ export function createBrowserVideoEncoder(
   let forceKeyframe = true;
   let awaitingIdr = false;
   let lastIdrAt = 0;
+  let lastAvcC: Uint8Array | undefined;
   const settings = track.getSettings();
   const width = settings.width || 1280;
   const height = settings.height || 720;
@@ -145,16 +146,22 @@ export function createBrowserVideoEncoder(
             fps: 30,
           });
           bytesWindow += chunk.byteLength;
-          const data = new Uint8Array(chunk.byteLength);
-          chunk.copyTo(data);
-          let description: Uint8Array | undefined;
+          const rawData = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(rawData);
+          let rawDescription: Uint8Array | undefined;
           const raw = meta?.decoderConfig?.description;
           if (raw) {
             if (raw instanceof ArrayBuffer) {
-              description = new Uint8Array(raw);
+              rawDescription = new Uint8Array(raw);
             } else if (ArrayBuffer.isView(raw)) {
-              description = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+              rawDescription = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
             }
+          }
+          const normalized = normalizeLocVideoAccessUnit(rawData, rawDescription ?? lastAvcC);
+          const data = normalized.data;
+          const description = normalized.description;
+          if (description) {
+            lastAvcC = description;
           }
           const isKeyframe = chunk.type === "key" || avcChunkIsSyncPoint(data);
           if (isKeyframe) {
@@ -181,6 +188,24 @@ export function createBrowserVideoEncoder(
       // Hardware often ignores keyFrame after the first IDR, leaving one
       // open MoQ group. Prefer software so GOP boundaries actually exist.
       let acceleration: HardwareAcceleration = "no-preference";
+      let avcFormat: "avc" | "annexb" = "avc";
+      try {
+        const annexb = await VideoEncoder.isConfigSupported({
+          codec,
+          width,
+          height,
+          bitrate: 2_500_000,
+          framerate: 30,
+          latencyMode: "realtime",
+          avc: { format: "annexb" },
+          hardwareAcceleration: "prefer-software",
+        });
+        if (annexb.supported) {
+          avcFormat = "annexb";
+        }
+      } catch {
+        // keep avc (length-prefixed); normalizeLocVideoAccessUnit converts
+      }
       try {
         const soft = await VideoEncoder.isConfigSupported({
           codec,
@@ -189,7 +214,7 @@ export function createBrowserVideoEncoder(
           bitrate: 2_500_000,
           framerate: 30,
           latencyMode: "realtime",
-          avc: { format: "avc" },
+          avc: { format: avcFormat },
           hardwareAcceleration: "prefer-software",
         });
         if (soft.supported) {
@@ -205,7 +230,7 @@ export function createBrowserVideoEncoder(
         bitrate: 2_500_000,
         framerate: 30,
         latencyMode: "realtime",
-        avc: { format: "avc" },
+        avc: { format: avcFormat },
         hardwareAcceleration: acceleration,
       });
       encodeTrack = typeof track.clone === "function" ? track.clone() : track;

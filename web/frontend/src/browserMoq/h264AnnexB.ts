@@ -137,6 +137,182 @@ function annexBHasIdrOrSps(payload: Uint8Array): boolean {
   return false;
 }
 
+/** True when `bytes` is an AVCDecoderConfigurationRecord (ISO 14496-15). */
+export function isAvcCRecord(bytes: Uint8Array | undefined): boolean {
+  return Boolean(bytes && bytes.byteLength >= 7 && bytes[0] === 1);
+}
+
+function collectAvccNals(payload: Uint8Array): Uint8Array[] | null {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const nals: Uint8Array[] = [];
+  let offset = 0;
+  while (offset + 4 <= payload.byteLength) {
+    const length = view.getUint32(offset);
+    offset += 4;
+    if (length <= 0 || offset + length > payload.byteLength) {
+      return null;
+    }
+    const unit = payload.subarray(offset, offset + length);
+    if ((unit[0] ?? 0) === 0) {
+      return null;
+    }
+    nals.push(unit);
+    offset += length;
+  }
+  return offset === payload.byteLength && nals.length > 0 ? nals : null;
+}
+
+function collectAnnexBNals(payload: Uint8Array): Uint8Array[] {
+  const nals: Uint8Array[] = [];
+  let i = 0;
+  while (i + 3 < payload.byteLength) {
+    if (payload[i] !== 0 || payload[i + 1] !== 0) {
+      i += 1;
+      continue;
+    }
+    let nalStart = -1;
+    if (payload[i + 2] === 1) {
+      nalStart = i + 3;
+    } else if (payload[i + 2] === 0 && payload[i + 3] === 1) {
+      nalStart = i + 4;
+    }
+    if (nalStart < 0 || nalStart >= payload.byteLength) {
+      i += 1;
+      continue;
+    }
+    let next = nalStart;
+    while (next + 3 < payload.byteLength) {
+      if (
+        payload[next] === 0 &&
+        payload[next + 1] === 0 &&
+        (payload[next + 2] === 1 || (payload[next + 2] === 0 && payload[next + 3] === 1))
+      ) {
+        break;
+      }
+      next += 1;
+    }
+    if (next + 3 >= payload.byteLength) {
+      next = payload.byteLength;
+    }
+    nals.push(payload.subarray(nalStart, next));
+    i = next;
+  }
+  return nals;
+}
+
+/** Split an access unit into raw NAL units (AVCC or Annex-B). */
+export function collectAvcNals(payload: Uint8Array): Uint8Array[] {
+  return collectAvccNals(payload) ?? collectAnnexBNals(payload);
+}
+
+export function parseAvcCParameterSets(avcC: Uint8Array | undefined): {
+  sps: Uint8Array[];
+  pps: Uint8Array[];
+} {
+  const empty = { sps: [] as Uint8Array[], pps: [] as Uint8Array[] };
+  if (!isAvcCRecord(avcC)) {
+    return empty;
+  }
+  const view = new DataView(avcC!.buffer, avcC!.byteOffset, avcC!.byteLength);
+  let offset = 5;
+  const numSps = avcC![offset]! & 0x1f;
+  offset += 1;
+  const sps: Uint8Array[] = [];
+  for (let i = 0; i < numSps; i += 1) {
+    if (offset + 2 > avcC!.byteLength) {
+      return empty;
+    }
+    const length = view.getUint16(offset);
+    offset += 2;
+    if (offset + length > avcC!.byteLength) {
+      return empty;
+    }
+    sps.push(avcC!.subarray(offset, offset + length));
+    offset += length;
+  }
+  if (offset >= avcC!.byteLength) {
+    return { sps, pps: [] };
+  }
+  const numPps = avcC![offset]!;
+  offset += 1;
+  const pps: Uint8Array[] = [];
+  for (let i = 0; i < numPps; i += 1) {
+    if (offset + 2 > avcC!.byteLength) {
+      return { sps, pps };
+    }
+    const length = view.getUint16(offset);
+    offset += 2;
+    if (offset + length > avcC!.byteLength) {
+      return { sps, pps };
+    }
+    pps.push(avcC!.subarray(offset, offset + length));
+    offset += length;
+  }
+  return { sps, pps };
+}
+
+/** Build a 4-byte-length avcC from the first SPS/PPS. */
+export function buildAvcC(sps: Uint8Array, pps: Uint8Array): Uint8Array {
+  const out = new Uint8Array(11 + sps.byteLength + pps.byteLength);
+  out[0] = 1;
+  out[1] = sps[1] ?? 0x4d;
+  out[2] = sps[2] ?? 0x40;
+  out[3] = sps[3] ?? 0x28;
+  out[4] = 0xff;
+  out[5] = 0xe1;
+  out[6] = (sps.byteLength >> 8) & 0xff;
+  out[7] = sps.byteLength & 0xff;
+  out.set(sps, 8);
+  let offset = 8 + sps.byteLength;
+  out[offset] = 1;
+  offset += 1;
+  out[offset] = (pps.byteLength >> 8) & 0xff;
+  out[offset + 1] = pps.byteLength & 0xff;
+  out.set(pps, offset + 2);
+  return out;
+}
+
+function nalsToAnnexB(nals: Uint8Array[]): Uint8Array {
+  return concat(nals.filter((unit) => unit.byteLength > 0).map((unit) => nal(unit)));
+}
+
+/**
+ * Browser LOC access unit for playa WebCodecs.
+ *
+ * Catalog configure is empty (no fake initData) so VideoDecoder starts in
+ * Annex-B mode. avcC samples without in-band SPS never emit a frame
+ * (b2969493: decoder=1627, frame=-). Emit Annex-B and put SPS/PPS on
+ * every IDR. Keep a real avcC in `description` so LOC VideoConfig can
+ * reconfigure playa without a catalog lie.
+ */
+export function normalizeLocVideoAccessUnit(
+  payload: Uint8Array,
+  description?: Uint8Array,
+): { data: Uint8Array; description?: Uint8Array } {
+  const nals = collectAvcNals(payload);
+  const fromDesc = parseAvcCParameterSets(description);
+  const sps =
+    nals.find((unit) => ((unit[0] ?? 0) & 0x1f) === 7) ?? fromDesc.sps[0];
+  const pps =
+    nals.find((unit) => ((unit[0] ?? 0) & 0x1f) === 8) ?? fromDesc.pps[0];
+  const avcC = isAvcCRecord(description)
+    ? description
+    : sps && pps
+      ? buildAvcC(sps, pps)
+      : undefined;
+  const hasIdr = nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 5);
+  const out: Uint8Array[] = [];
+  if (hasIdr && sps && !nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 7)) {
+    out.push(sps);
+  }
+  if (hasIdr && pps && !nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 8)) {
+    out.push(pps);
+  }
+  out.push(...nals);
+  const data = out.length > 0 ? nalsToAnnexB(out) : payload;
+  return avcC ? { data, description: avcC } : { data };
+}
+
 /** Length-prefixed access unit → Annex-B (4-byte big-endian lengths). */
 export function lengthPrefixedToAnnexB(payload: Uint8Array): Uint8Array {
   if (payload.byteLength >= 4 && payload[0] === 0 && payload[1] === 0) {
