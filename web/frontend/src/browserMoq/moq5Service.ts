@@ -19,6 +19,11 @@ import {
   locCatalogLargestLocation,
   locCatalogSubscribeParameters,
   locKeyframeVideoConfig,
+  locNextMediaGroup,
+  locSubscriberLargestLocation,
+  locVideoFetchEndLocation,
+  locVideoFetchShouldServe,
+  locVideoSubscribeParameters,
   resolvePublishOkWaiter,
 } from "./locCatalog";
 import type { MoqtDraftVersion } from "./moqtVersions";
@@ -142,9 +147,12 @@ async function bindPublisherSession(args: {
   let nextAlias = 1n;
   let audioAlias = 0n;
   let audioReady = false;
-  let videoGroupId = BigInt(Date.now());
-  let audioGroupId = videoGroupId + 1_000_000n;
+  let videoGroupId = 0n;
+  let haveVideoGroup = false;
+  let audioGroupId = 0n;
+  let haveAudioGroup = false;
   let lastDescription: Uint8Array | undefined;
+  let lastIdr: { data: Uint8Array; extensions: Uint8Array; groupId: bigint } | null = null;
   let closed = false;
   let videoWrite: Promise<void> = Promise.resolve();
   const pendingVideo: BrowserVideoChunk[] = [];
@@ -268,13 +276,7 @@ async function bindPublisherSession(args: {
     await connection.closeFetchStream(sid);
   }
 
-  async function sendVideoChunk(chunk: BrowserVideoChunk): Promise<void> {
-    if (closed || videoSubscribers.length === 0) {
-      return;
-    }
-    if (chunk.isKeyframe) {
-      videoGroupId += 1n;
-    }
+  function encodeVideoExtensions(chunk: BrowserVideoChunk): Uint8Array {
     const descriptionChanged =
       Boolean(chunk.description) &&
       (!lastDescription ||
@@ -283,7 +285,7 @@ async function bindPublisherSession(args: {
     if (chunk.description && (descriptionChanged || !lastDescription)) {
       lastDescription = chunk.description;
     }
-    const extensions = encodeLocHeaders(
+    return encodeLocHeaders(
       {
         captureTimestamp: BigInt(Math.round(chunk.captureTimestampUs || Date.now() * 1000)),
         videoFrameMarking: {
@@ -302,27 +304,89 @@ async function bindPublisherSession(args: {
           : {}),
       },
       browserLocHeaderOptions(draft),
-    );
+    ) ?? new Uint8Array();
+  }
+
+  async function openVideoSubgroup(sub: VideoSubscriber, groupId: bigint): Promise<boolean> {
+    if (sub.streamId !== null) {
+      const old = sub.streamId;
+      sub.streamId = null;
+      void connection.closeSubgroup(old).catch(() => undefined);
+    }
+    sub.objectId = 0n;
+    try {
+      sub.streamId = await connection.openSubgroup(sub.alias, groupId, 0n, {
+        hasExtensions: true,
+        endOfGroup: true,
+        publisherPriority: 128,
+        ...draft18Opts(draft),
+      });
+      return true;
+    } catch (err) {
+      console.warn("browser MoQ open video subgroup", err);
+      options.onVideoSubscribed?.();
+      return false;
+    }
+  }
+
+  async function sendLastIdrToSubscriber(sub: VideoSubscriber): Promise<void> {
+    if (closed || !lastIdr) {
+      return;
+    }
+    videoGroupId = locNextMediaGroup(videoGroupId, haveVideoGroup);
+    haveVideoGroup = true;
+    if (!(await openVideoSubgroup(sub, videoGroupId))) {
+      return;
+    }
+    try {
+      await connection.sendObject(sub.streamId!, 0n, lastIdr.data, lastIdr.extensions);
+      sub.objectId = 1n;
+    } catch (err) {
+      console.warn("browser MoQ send last IDR", err);
+      sub.streamId = null;
+      return;
+    }
+    // Close this one-object GOP. Live P-frames must not share the cached IDR group.
+    const done = sub.streamId;
+    sub.streamId = null;
+    if (done != null) {
+      void connection.closeSubgroup(done).catch(() => undefined);
+    }
+  }
+
+  async function serveVideoFetch(requestId: bigint): Promise<void> {
+    if (!lastIdr) {
+      void connection.rejectFetch(requestId, 0n, "video FETCH empty until first IDR").catch(() => undefined);
+      return;
+    }
+    const groupId = lastIdr.groupId;
+    await connection.acceptFetch(requestId, { endLocation: locVideoFetchEndLocation(groupId) });
+    const sid = await connection.openFetchStream(requestId);
+    await connection.sendFetchObject(sid, {
+      groupId,
+      subgroupId: 0n,
+      objectId: 0n,
+      publisherPriority: 128,
+      payload: lastIdr.data,
+    });
+    await connection.closeFetchStream(sid);
+  }
+
+  async function sendVideoChunk(chunk: BrowserVideoChunk): Promise<void> {
+    if (closed || videoSubscribers.length === 0) {
+      return;
+    }
+    if (chunk.isKeyframe) {
+      videoGroupId = locNextMediaGroup(videoGroupId, haveVideoGroup);
+      haveVideoGroup = true;
+    }
+    const extensions = encodeVideoExtensions(chunk);
+    if (chunk.isKeyframe) {
+      lastIdr = { data: chunk.data, extensions, groupId: videoGroupId };
+    }
     for (const sub of videoSubscribers) {
       if (chunk.isKeyframe) {
-        if (sub.streamId !== null) {
-          const old = sub.streamId;
-          sub.streamId = null;
-          // Do not await — a hung close on one subscriber used to stall the
-          // shared encode write chain for every relay.
-          void connection.closeSubgroup(old).catch(() => undefined);
-        }
-        sub.objectId = 0n;
-        try {
-          sub.streamId = await connection.openSubgroup(sub.alias, videoGroupId, 0n, {
-            hasExtensions: true,
-            endOfGroup: true,
-            publisherPriority: 128,
-            ...draft18Opts(draft),
-          });
-        } catch (err) {
-          console.warn("browser MoQ open video subgroup", err);
-          options.onVideoSubscribed?.();
+        if (!(await openVideoSubgroup(sub, videoGroupId))) {
           continue;
         }
       }
@@ -447,8 +511,11 @@ async function bindPublisherSession(args: {
         objectId: 0n,
       };
       videoSubscribers.push(subscriber);
+      const largest = lastIdr
+        ? { group: lastIdr.groupId, object: 0n }
+        : locSubscriberLargestLocation(videoGroupId, 0n);
       void connection
-        .acceptSubscribe(requestId, alias)
+        .acceptSubscribe(requestId, alias, locVideoSubscribeParameters(largest))
         .then(async () => {
           // moqx drops the subscriber if beginSubgroup races SUBSCRIBE_OK
           // (`Failed to create uni stream` on bench-24c990ee/audio).
@@ -456,6 +523,9 @@ async function bindPublisherSession(args: {
           if (closed || !videoSubscribers.includes(subscriber)) {
             return;
           }
+          // 8aeaa2e4: LargestObject on an empty alias never attached later
+          // GOPs. Send the cached IDR on THIS subscribe before live deltas.
+          await sendLastIdrToSubscriber(subscriber);
           options.onVideoSubscribed?.();
           flushPendingVideo();
         })
@@ -502,13 +572,25 @@ async function bindPublisherSession(args: {
       mediaSubscribeIds,
       liveCatalogWritten: draft === 18,
     });
-    if (!serveCatalog) {
-      void connection.rejectFetch(requestId, 0n, "FETCH only served for catalog").catch(() => undefined);
+    if (serveCatalog) {
+      void serveCatalogFetch(requestId).catch((err) => {
+        console.warn("browser MoQ catalog FETCH", err);
+      });
       return;
     }
-    void serveCatalogFetch(requestId).catch((err) => {
-      console.warn("browser MoQ catalog FETCH", err);
-    });
+    if (
+      locVideoFetchShouldServe({
+        trackName: name,
+        joiningRequestId: joiningId,
+        mediaSubscribeIds,
+      })
+    ) {
+      void serveVideoFetch(requestId).catch((err) => {
+        console.warn("browser MoQ video FETCH", err);
+      });
+      return;
+    }
+    void connection.rejectFetch(requestId, 0n, "FETCH only served for catalog or video").catch(() => undefined);
   };
 
   connection.setLargestLocationProvider((requestId) => {
@@ -517,9 +599,9 @@ async function bindPublisherSession(args: {
     }
     const video = videoSubscribers.find((sub) => sub.requestId === requestId);
     if (video) {
-      return { group: videoGroupId, object: video.objectId > 0n ? video.objectId - 1n : 0n };
+      return locSubscriberLargestLocation(videoGroupId, video.objectId);
     }
-    return null;
+    return lastIdr ? { group: lastIdr.groupId, object: 0n } : null;
   });
 
   await connection.connect(transport, { maxRequestId: varint(100) });
@@ -580,7 +662,8 @@ async function bindPublisherSession(args: {
           if (closed || !audioReady) {
             return;
           }
-          audioGroupId += 1n;
+          audioGroupId = locNextMediaGroup(audioGroupId, haveAudioGroup);
+          haveAudioGroup = true;
           const extensions = encodeLocHeaders(
             { captureTimestamp: BigInt(Math.round(chunk.timestampUs)) },
             browserLocHeaderOptions(draft),

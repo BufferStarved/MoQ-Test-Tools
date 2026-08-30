@@ -969,6 +969,21 @@ export default function MoqPlayer({
         });
         playerRef.current = player;
 
+        const startDecode = (reason: string) => {
+          if (destroyed || sessionRef.current.firstFrame) {
+            return;
+          }
+          pushDiag(`play=${reason}`, true);
+          try {
+            player.play();
+          } catch {
+            // ignore
+          }
+          if (video) {
+            void video.play().catch(() => undefined);
+          }
+        };
+
         const retrySubscribe = (reason: string, delayMs: number): boolean => {
           if (destroyed || retrying || attempt >= MAX_CONNECT_ATTEMPTS) {
             return false;
@@ -1086,6 +1101,13 @@ export default function MoqPlayer({
           setIsReady(true);
           setStatus("Waiting for video…");
           armFrameTimeout("post-ready");
+          if (mediaPackaging === "loc") {
+            // Catalog-first: play() used to run before video SUBSCRIBE
+            // (8aeaa2e4 requestId=4 then rendered=0). Nudge an IDR now
+            // that subscribeToMediaTracks has been issued.
+            requestLocIdr();
+            startDecode("post-catalog");
+          }
         });
 
         player.on("playing", () => {
@@ -1351,21 +1373,11 @@ export default function MoqPlayer({
         // play() is ignored because the interval is already running.
         // Pause before first frame sends REQUEST_UPDATE forward:0 and
         // freezes the live subscribe at the relay.
-        const startDecode = (reason: string) => {
-          if (destroyed || sessionRef.current.firstFrame) {
-            return;
-          }
-          pushDiag(`play=${reason}`, true);
-          try {
-            player.play();
-          } catch {
-            // ignore
-          }
-          if (video) {
-            void video.play().catch(() => undefined);
-          }
-        };
-        startDecode("post-load");
+        // LOC: play() after catalog ready (video SUBSCRIBE issued). CMAF
+        // still starts here — catalog is one-shot AbsoluteStart.
+        if (mediaPackaging !== "loc") {
+          startDecode("post-load");
+        }
         if (mediaPackaging === "loc") {
           decodeKickTimer = window.setTimeout(() => {
             if (destroyed || sessionRef.current.firstFrame || playerRef.current !== player) {

@@ -17,6 +17,11 @@ import {
   locCatalogSubscribeParameters,
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
+  locNextMediaGroup,
+  locSubscriberLargestLocation,
+  locVideoFetchEndLocation,
+  locVideoFetchShouldServe,
+  locVideoSubscribeParameters,
   resolvePublishOkWaiter,
 } from "./locCatalog.ts";
 
@@ -182,6 +187,39 @@ describe("locCatalogFetchShouldServe", () => {
       }),
       false,
     );
+  });
+});
+
+describe("locVideoFetchShouldServe", () => {
+  it("serves standalone and joining video FETCH as video, not catalog", () => {
+    assert.equal(locVideoFetchShouldServe({ trackName: "video" }), true);
+    assert.equal(
+      locVideoFetchShouldServe({
+        joiningRequestId: 9n,
+        mediaSubscribeIds: new Set([9n]),
+      }),
+      true,
+    );
+    assert.equal(locVideoFetchShouldServe({ trackName: "catalog" }), false);
+    assert.deepEqual(locVideoFetchEndLocation(4n), { group: 4n, object: 1n });
+  });
+});
+
+describe("locSubscriberLargestLocation", () => {
+  it("does not advertise a phantom {group, 0} before this alias has sent", () => {
+    assert.equal(locSubscriberLargestLocation(1_756_543_139_000n, 0n), null);
+    assert.deepEqual(locSubscriberLargestLocation(3n, 2n), { group: 3n, object: 1n });
+    assert.equal(locVideoSubscribeParameters(null).parameters, undefined);
+    assert.equal(locVideoSubscribeParameters({ group: 3n, object: 1n }).parameters?.size, 1);
+  });
+});
+
+describe("locNextMediaGroup", () => {
+  it("starts at 0 so GOP ids stay inside uint32", () => {
+    assert.equal(locNextMediaGroup(0n, false), 0n);
+    assert.equal(locNextMediaGroup(0n, true), 1n);
+    assert.equal(locNextMediaGroup(4n, true), 5n);
+    assert.ok(locNextMediaGroup(0n, false) < 0xffffffffn);
   });
 });
 

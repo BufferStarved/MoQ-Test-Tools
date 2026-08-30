@@ -123,6 +123,68 @@ export function locCatalogFetchShouldServe(args: {
 }
 
 /**
+ * First video object. 8aeaa2e4 catalog-ready / rendered=0: playa issued
+ * SUBSCRIBE video and the publisher rejected FETCH, so LargestObject sat
+ * on an empty track. Serve the last IDR — do not send catalog JSON.
+ */
+export function locVideoFetchShouldServe(args: {
+  trackName?: string | null;
+  joiningRequestId?: bigint | null;
+  mediaSubscribeIds?: ReadonlySet<bigint>;
+}): boolean {
+  if (args.trackName === BROWSER_LOC_VIDEO_TRACK) {
+    return true;
+  }
+  if (args.trackName === BROWSER_LOC_CATALOG_TRACK || args.trackName === BROWSER_LOC_AUDIO_TRACK) {
+    return false;
+  }
+  const joiningId = args.joiningRequestId;
+  if (joiningId == null) {
+    return false;
+  }
+  return Boolean(args.mediaSubscribeIds?.has(joiningId));
+}
+
+/** Exclusive one-past for a one-object IDR group. */
+export function locVideoFetchEndLocation(groupId: bigint): {
+  group: bigint;
+  object: bigint;
+} {
+  return { group: groupId, object: 1n };
+}
+
+/**
+ * SUBSCRIBE_OK LARGEST_OBJECT for a subscriber that has actually sent.
+ * A phantom {Date.now(), 0} was 8aeaa2e4: LargestObject waited past a
+ * location that never existed on this alias (and overflowed uint32 on moqx).
+ */
+export function locSubscriberLargestLocation(
+  groupId: bigint,
+  nextObjectId: bigint,
+): { group: bigint; object: bigint } | null {
+  if (nextObjectId <= 0n) {
+    return null;
+  }
+  return { group: groupId, object: nextObjectId - 1n };
+}
+
+export function locVideoSubscribeParameters(
+  location: { group: bigint; object: bigint } | null,
+): { parameters?: Parameters } {
+  if (!location) {
+    return {};
+  }
+  return {
+    parameters: new Map([[MessageParam.LARGEST_OBJECT as bigint, [location]]]),
+  };
+}
+
+/** Sequential GOP ids. Date.now() (~1.7e12) is above uint32 and was dropped. */
+export function locNextMediaGroup(current: bigint, haveGroup: boolean): bigint {
+  return haveGroup ? current + 1n : 0n;
+}
+
+/**
  * avcC on every IDR. Playa configures WebCodecs from LOC VideoConfig, not
  * from an injected catalog initData (9958d69). Missing description = 0 frames.
  */

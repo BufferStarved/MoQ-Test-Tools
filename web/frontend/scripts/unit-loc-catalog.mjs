@@ -20,6 +20,10 @@ assert.match(publisher, /onFetch/);
 assert.match(publisher, /browserLocHeaderOptions/);
 assert.match(publisher, /BROWSER_LOC_CATALOG_GROUP/);
 assert.match(publisher, /waitPublishOk/);
+assert.match(publisher, /serveVideoFetch/);
+assert.match(publisher, /sendLastIdrToSubscriber/);
+assert.match(publisher, /locNextMediaGroup/);
+assert.doesNotMatch(publisher, /videoGroupId = BigInt\(Date\.now\(\)\)/);
 assert.doesNotMatch(publisher, /deltaEncoded: true/);
 assert.doesNotMatch(
   publisher,
