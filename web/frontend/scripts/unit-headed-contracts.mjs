@@ -20,6 +20,15 @@ const gate = fs.readFileSync(
 const moqPlayer = src("players/MoqPlayer.tsx");
 assert.match(moqPlayer, /isSubscribeRejectedLog/);
 assert.match(moqPlayer, /subscribe_0x10_keepalive \(playa warn/);
+assert.match(moqPlayer, /loc_0x10_retry/);
+assert.match(moqPlayer, /no knownTracks race/);
+assert.doesNotMatch(moqPlayer, /knownTracks:\s*browserLocKnownTracks/);
+
+const locCatalog = src("browserMoq/locCatalog.ts");
+assert.match(locCatalog, /locCatalogFetchEndLocation/);
+assert.match(locCatalog, /LARGEST_OBJECT/);
+assert.match(src("browserMoq/moq5Service.ts"), /serveCatalogFetch/);
+assert.match(src("comparisonReplay.test.ts"), /ca7bbb62/);
 
 const replay = src("comparisonReplay.ts");
 assert.match(replay, /moqx_publish_namespace_success >= 1/);

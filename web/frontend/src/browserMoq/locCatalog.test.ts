@@ -11,7 +11,10 @@ import {
   browserLocKnownTracks,
   browserLocPublishTrackNames,
   isPublishAccepted,
+  locCatalogFetchEndLocation,
   locCatalogFetchShouldServe,
+  locCatalogLargestLocation,
+  locCatalogSubscribeParameters,
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
   resolvePublishOkWaiter,
@@ -109,6 +112,16 @@ describe("resolvePublishOkWaiter", () => {
   });
 });
 
+describe("locCatalogFetch range", () => {
+  it("advertises exclusive one-past so FETCH_OK is not an empty range", () => {
+    assert.deepEqual(locCatalogLargestLocation(), { group: 0n, object: 0n });
+    assert.deepEqual(locCatalogFetchEndLocation(), { group: 0n, object: 1n });
+    assert.notDeepEqual(locCatalogFetchEndLocation(), locCatalogLargestLocation());
+    const params = locCatalogSubscribeParameters();
+    assert.equal(params.parameters.size, 1);
+  });
+});
+
 describe("locCatalogFetchShouldServe", () => {
   it("serves standalone FETCH for the catalog track", () => {
     assert.equal(locCatalogFetchShouldServe({ trackName: "catalog" }), true);
@@ -146,6 +159,26 @@ describe("locCatalogFetchShouldServe", () => {
         joiningRequestId: 3n,
         catalogSubscribeIds: new Set(),
         liveCatalogWritten: false,
+      }),
+      false,
+    );
+  });
+
+  it("does not serve a video Joining FETCH as catalog JSON", () => {
+    assert.equal(
+      locCatalogFetchShouldServe({
+        trackName: "video",
+        joiningRequestId: 3n,
+        liveCatalogWritten: true,
+      }),
+      false,
+    );
+    assert.equal(
+      locCatalogFetchShouldServe({
+        joiningRequestId: 9n,
+        catalogSubscribeIds: new Set(),
+        mediaSubscribeIds: new Set([9n]),
+        liveCatalogWritten: true,
       }),
       false,
     );

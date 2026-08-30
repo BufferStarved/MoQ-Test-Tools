@@ -224,10 +224,17 @@ export function moqHasRenderedMedia(options: {
   firstFrame?: boolean;
   framesRendered?: number;
   videoTimeSec?: number;
+  bitrateBps?: number;
+  subscribeRejected?: boolean;
 }): boolean {
+  const frames = options.framesRendered ?? 0;
+  // ca7bbb62 East: leftover rendered=1 + bitrate 0 + 0x10 is not paint.
+  if (frames === 1 && (options.bitrateBps ?? 0) <= 0 && options.subscribeRejected) {
+    return Boolean(options.firstFrame && (options.videoTimeSec ?? 0) > 0.25);
+  }
   return Boolean(
     options.firstFrame ||
-      (options.framesRendered ?? 0) > 0 ||
+      frames > 0 ||
       (options.videoTimeSec ?? 0) > 0.25,
   );
 }
@@ -540,6 +547,7 @@ export function classifyMoqEndVerdict(options: {
   jobError?: string | null;
   previewReady?: boolean;
   subscribeRejected?: boolean;
+  bitrateBps?: number;
 }): MoqEndVerdict {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail && !moqHasRenderedMedia(options)) {

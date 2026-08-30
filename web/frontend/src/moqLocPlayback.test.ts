@@ -3,10 +3,22 @@ import { describe, it } from "node:test";
 import { moqCatchUpConfig } from "./encodeProfiles.ts";
 import {
   classifyLocFrameStall,
+  locPaintedOk,
   LOC_LATE_FRAME_THRESHOLD_MS,
   locSubscribeOptions,
   resetLocPlaybackPipeline,
 } from "./moqLocPlayback.ts";
+
+describe("locPaintedOk", () => {
+  it("rejects leftover rendered=1 with 0x10 and no bitrate", () => {
+    assert.equal(
+      locPaintedOk({ framesRendered: 1, bitrateBps: 0, subscribeRejected: true }),
+      false,
+    );
+    assert.equal(locPaintedOk({ framesRendered: 12, bitrateBps: 0 }), true);
+    assert.equal(locPaintedOk({ framesRendered: 1, bitrateBps: 800_000 }), true);
+  });
+});
 
 describe("locSubscribeOptions", () => {
   it("joins live LOC with LargestObject and no current-GOP FETCH", () => {

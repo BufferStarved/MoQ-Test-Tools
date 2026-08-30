@@ -1,5 +1,7 @@
 /** LOC catalog the in-browser publisher advertises. The player FETCHes it. */
 
+import { MessageParam, type Parameters } from "@moqt/transport";
+
 export const BROWSER_LOC_CATALOG_TRACK = "catalog";
 export const BROWSER_LOC_VIDEO_TRACK = "video";
 export const BROWSER_LOC_AUDIO_TRACK = "audio";
@@ -7,6 +9,9 @@ export const BROWSER_LOC_VIDEO_CODEC = "avc1.4D4028";
 export const BROWSER_LOC_AUDIO_CODEC = "opus";
 /** Live-write group so CatalogBootstrap Joining FETCH(offset 0) hits object 0. */
 export const BROWSER_LOC_CATALOG_GROUP = 0n;
+export const BROWSER_LOC_CATALOG_OBJECT = 0n;
+/** Rewrite the live catalog so empty-wait / late JOIN can still converge. */
+export const BROWSER_LOC_CATALOG_REFRESH_MS = 2_000;
 
 /**
  * Draft-18 LOC uses vi64. The draft-16 delta flag stays on QUIC
@@ -55,22 +60,60 @@ export function resolvePublishOkWaiter<T>(
   return waiter ? { requestId: firstId, waiter } : undefined;
 }
 
+/** Snapshot advertised in SUBSCRIBE_OK so Joining FETCH can resolve. */
+export function locCatalogLargestLocation(groupId: bigint = BROWSER_LOC_CATALOG_GROUP): {
+  group: bigint;
+  object: bigint;
+} {
+  return { group: groupId, object: BROWSER_LOC_CATALOG_OBJECT };
+}
+
+/**
+ * FETCH_OK End Location is exclusive one-past (§9.16.3 / d18 §10.13).
+ * `{group:0, object:0}` is an empty range — that was catalog-ready / 0 video.
+ */
+export function locCatalogFetchEndLocation(groupId: bigint = BROWSER_LOC_CATALOG_GROUP): {
+  group: bigint;
+  object: bigint;
+} {
+  return { group: groupId, object: BROWSER_LOC_CATALOG_OBJECT + 1n };
+}
+
+/** draft-18 SUBSCRIBE_OK LARGEST_OBJECT so CatalogBootstrap can Joining FETCH. */
+export function locCatalogSubscribeParameters(groupId: bigint = BROWSER_LOC_CATALOG_GROUP): {
+  parameters: Parameters;
+} {
+  return {
+    parameters: new Map([
+      [MessageParam.LARGEST_OBJECT as bigint, [locCatalogLargestLocation(groupId)]],
+    ]),
+  };
+}
+
 /**
  * CatalogBootstrap: standalone FETCH(name=catalog) or Joining FETCH on the
  * catalog SUBSCRIBE. Live-write already put object 0/0 on the wire — serve
  * a joining FETCH that races the forwarded SUBSCRIBE instead of rejecting.
+ * Do not serve a video/audio Joining FETCH as catalog JSON.
  */
 export function locCatalogFetchShouldServe(args: {
   trackName?: string | null;
   joiningRequestId?: bigint | null;
   catalogSubscribeIds?: ReadonlySet<bigint>;
+  mediaSubscribeIds?: ReadonlySet<bigint>;
   liveCatalogWritten?: boolean;
 }): boolean {
+  if (args.trackName === BROWSER_LOC_VIDEO_TRACK || args.trackName === BROWSER_LOC_AUDIO_TRACK) {
+    return false;
+  }
   if (args.trackName === BROWSER_LOC_CATALOG_TRACK) {
     return true;
   }
   const joiningId = args.joiningRequestId;
   if (joiningId == null) {
+    return false;
+  }
+  if (args.mediaSubscribeIds?.has(joiningId)) {
     return false;
   }
   if (args.catalogSubscribeIds?.has(joiningId)) {

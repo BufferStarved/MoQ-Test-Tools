@@ -3,12 +3,13 @@ import { WebCodecsVideoDecoder } from "@moqt/browser";
 import { Player } from "@playa/player";
 import { postPlaybackSample, type PlaybackMetricsSnapshot } from "../api";
 import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
-import { BROWSER_LOC_AUDIO_TRACK, BROWSER_LOC_VIDEO_TRACK, browserLocKnownTracks } from "../browserMoq/locCatalog";
+import { BROWSER_LOC_AUDIO_TRACK, BROWSER_LOC_VIDEO_TRACK } from "../browserMoq/locCatalog";
 import { createStrictMoqtTransport } from "../browserMoq/webTransport";
 import { OPENMOQ_AUDIO_TRACK, OPENMOQ_VIDEO_TRACK } from "../moqOpenmoqCatalog";
 import { moqCatchUpConfig } from "../encodeProfiles";
 import {
   classifyLocFrameStall,
+  locPaintedOk,
   locSubscribeOptions,
   resetLocPlaybackPipeline,
 } from "../moqLocPlayback";
@@ -686,7 +687,11 @@ export default function MoqPlayer({
     let catchUpRate = 1;
 
     function locHasMedia(): boolean {
-      return sessionRef.current.framesRendered > 0;
+      return locPaintedOk({
+        framesRendered: sessionRef.current.framesRendered,
+        bitrateBps: sessionRef.current.bitrateBps,
+        subscribeRejected: subscribeRejectedRef.current,
+      });
     }
 
     function noteFirstFrame(source: string) {
@@ -763,7 +768,7 @@ export default function MoqPlayer({
       pushDiag(`relay=${relayUrl} namespace=${namespace}`, true);
       pushDiag(
         mediaPackaging === "loc"
-          ? `catalog_mode=relay catalog FETCH+subscribe then ${BROWSER_LOC_VIDEO_TRACK}${sourceHasAudio ? `+${BROWSER_LOC_AUDIO_TRACK}` : ""} (LOC knownTracks, no injected catalog) draft=${draftVersion}`
+          ? `catalog_mode=relay catalog FETCH+subscribe then ${BROWSER_LOC_VIDEO_TRACK}${sourceHasAudio ? `+${BROWSER_LOC_AUDIO_TRACK}` : ""} (LOC live catalog, no knownTracks race, no injected catalog) draft=${draftVersion}`
           : `catalog_mode=relay catalog subscribe AbsoluteStart{0,0} then ${OPENMOQ_VIDEO_TRACK}+${OPENMOQ_AUDIO_TRACK} (MSF-01 initDataList→initData, moqx one-shot) draft=${draftVersion}`,
         true,
       );
@@ -802,7 +807,7 @@ export default function MoqPlayer({
         // CMAF catalog is one-shot. After destroy(), MSE currentTime is 0 —
         // drop firstFrame so the watchdog waits for the new session instead
         // of counting vt=0 as playhead_frozen_0.00s_early_join.
-        if (mediaPackaging === "cmaf") {
+        if (mediaPackaging === "cmaf" || mediaPackaging === "loc") {
           sessionRef.current.firstFrame = false;
         }
         // Fresh subscription starts at the live edge — no leftover catch-up.
@@ -884,9 +889,9 @@ export default function MoqPlayer({
           moqtPlayerConfig: {
             // LOC: do NOT inject a catalog. Injection skipped FETCH and
             // fired ready with 0 objects (browser4 6eda8170 / 73c6e4d5).
-            // Publisher already advertises MSF `video`/`audio`. knownTracks
-            // parallel-subscribes those names while CatalogBootstrap FETCHes
-            // the live catalog. CMAF still must not inject a canned init.
+            // knownTracks pre-subscribed `video` before PUBLISH_OK (ca7bbb62
+            // Linode: catalog-ready / 0 frames). Wait for CatalogBootstrap
+            // then subscribe media. CMAF still must not inject a canned init.
             // CMAF catalog is one-shot on moqx — joining FETCH empty-waits
             // forever; explicit subscribe accepts MSF-01 via AbsoluteStart.
             catalogBootstrap: moqCatalogBootstrap(mediaPackaging),
@@ -942,10 +947,6 @@ export default function MoqPlayer({
             }),
             ...(mediaPackaging === "loc"
               ? {
-                  knownTracks: browserLocKnownTracks({
-                    includeAudio: sourceHasAudio,
-                    videoCodec: sourceVideoCodec,
-                  }),
                   // Hardware VideoDecoder can fail silently mid-stream (~9s on
                   // both relays, recv still ~2.3 Mbps). Software is slower but
                   // keeps the canvas painting for a 300s webcam run.
@@ -1260,11 +1261,14 @@ export default function MoqPlayer({
               code,
             })
           ) {
-            // 0x10 / track-not-exist: do NOT destroy. Tearing down here is how
-            // the one-shot CMAF catalog is published to nobody (CSV 2026-08-18:
-            // moqx_subscribe_error=1, subscribe_success=0, frames=0, no UI error).
             keptPublisherNotReady = true;
             subscribeRejectedRef.current = true;
+            // LOC live-write: a rejected SUBSCRIBE never sees later PUBLISH.
+            // Retry after the publisher announces (ca7bbb62 East/Central 0x10).
+            // CMAF catalog is one-shot — tearing down publishes it to nobody.
+            if (mediaPackaging === "loc" && retrySubscribe("loc_0x10_retry", 800)) {
+              return;
+            }
             pushDiag("subscribe_0x10_keepalive (waiting for namespace/catalog)", true);
             setStatus("Waiting for publisher namespace...");
             return;

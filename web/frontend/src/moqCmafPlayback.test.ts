@@ -77,6 +77,19 @@ describe("moqHasRenderedMedia", () => {
     assert.equal(moqHasRenderedMedia({ videoTimeSec: 0.3 }), true);
     assert.equal(moqHasRenderedMedia({ videoTimeSec: 0.2 }), false);
   });
+
+  it("rejects leftover rendered=1 after SUBSCRIBE 0x10 with no bitrate", () => {
+    assert.equal(
+      moqHasRenderedMedia({
+        firstFrame: true,
+        framesRendered: 1,
+        videoTimeSec: 0.03,
+        bitrateBps: 0,
+        subscribeRejected: true,
+      }),
+      false,
+    );
+  });
 });
 
 describe("shouldKeepSessionOnSubscribeError", () => {
@@ -127,6 +140,23 @@ describe("classifyMoqEndVerdict", () => {
     });
     assert.equal(verdict.ok, false);
     assert.match(verdict.error ?? "", /catalog never loaded/i);
+  });
+
+  it("does not call leftover 1 LOC frame plus 0x10 Encode ended", () => {
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: 1,
+      videoTimeSec: 0.03,
+      bitrateBps: 0,
+      subscribeRejected: true,
+      catalogReady: false,
+      encodeDurationSec: 30,
+      encodeElapsedSec: 30,
+      jobStatus: "completed",
+    });
+    assert.equal(verdict.ok, false);
+    assert.notEqual(verdict.status, "Encode ended");
+    assert.notEqual(verdict.status, "Playback OK");
   });
 
   it("is a visible failure when catalog arrived but MSE never painted", () => {

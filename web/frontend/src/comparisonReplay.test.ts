@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { classifyMoqEndVerdict } from "./moqCmafPlayback.ts";
 import {
   moqWatchdogFailsWhileEncodeRunning,
   moqxNeverAnnounced,
@@ -273,6 +274,67 @@ describe("comparison 31 replay", () => {
       assert.notEqual(leg.status, "Playback OK");
       assert.match(leg.error ?? "", /manifest never loaded|never painted/i);
     }
+  });
+});
+
+describe("ca7bbb62 browser LOC HUD replay", () => {
+  it("Linode catalog-ready / 0 frames is a player failure", () => {
+    const error = visibleMoqError(
+      {
+        stream: "Stream 1 (MoQ)",
+        protocol: "moq",
+        endpoint: "https://45-79-177-85.sslip.io:14433/moq-relay?namespace=bench-5376a8fa&draft=18",
+        encode_frames_total: 900,
+        playback_frames_rendered: 0,
+        playback_video_time_sec: 0,
+        playback_ttff_ms: 0,
+        moqx_publish_namespace_success: 1,
+      },
+      {
+        playaLines: [
+          "ready levels=1 tracks=video audio=0",
+          "Catalog received (bootstrap): 1 tracks",
+          "[catalog-bootstrap] unknown PUBLISH_DONE status 0xffffffff — treated as retriable",
+          "FAIL MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
+        ],
+        catalogReady: true,
+        jobStatus: "completed",
+        namespace: "bench-5376a8fa",
+      },
+    );
+    assert.match(error, /catalog loaded but no video/i);
+    assert.doesNotMatch(error, /Playback OK/i);
+  });
+
+  it("GCP Central empty catalog + subscription ended is not Playback OK", () => {
+    const verdict = classifyMoqEndVerdict({
+      framesRendered: 0,
+      catalogReady: false,
+      encodeDurationSec: 30,
+      jobStatus: "completed",
+      lastError: "catalog track empty and its subscription ended",
+      namespace: "bench-c8c32da0",
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.error ?? "", /catalog track empty/i);
+    assert.notEqual(verdict.status, "Playback OK");
+  });
+
+  it("GCP East leftover rendered=1 after 0x10 is not Encode ended", () => {
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: 1,
+      videoTimeSec: 0.03,
+      bitrateBps: 0,
+      subscribeRejected: true,
+      catalogReady: false,
+      encodeDurationSec: 30,
+      encodeElapsedSec: 30,
+      jobStatus: "completed",
+    });
+    assert.equal(verdict.ok, false);
+    assert.notEqual(verdict.status, "Encode ended");
+    assert.notEqual(verdict.status, "Playback OK");
   });
 });
 

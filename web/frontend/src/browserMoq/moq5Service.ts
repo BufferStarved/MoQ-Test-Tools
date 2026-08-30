@@ -7,13 +7,17 @@ import type { BrowserVideoChunk } from "./encoder";
 import {
   BROWSER_LOC_AUDIO_TRACK,
   BROWSER_LOC_CATALOG_GROUP,
+  BROWSER_LOC_CATALOG_REFRESH_MS,
   BROWSER_LOC_CATALOG_TRACK,
   BROWSER_LOC_VIDEO_TRACK,
   browserLocCatalogTracks,
   browserLocHeaderOptions,
   browserLocPublishTrackNames,
   isPublishAccepted,
+  locCatalogFetchEndLocation,
   locCatalogFetchShouldServe,
+  locCatalogLargestLocation,
+  locCatalogSubscribeParameters,
   locKeyframeVideoConfig,
   resolvePublishOkWaiter,
 } from "./locCatalog";
@@ -195,9 +199,14 @@ async function bindPublisherSession(args: {
     });
   }
 
-  async function writeCatalogObject(alias: bigint): Promise<void> {
-    const catalogGroupId = BROWSER_LOC_CATALOG_GROUP;
-    const streamId = await connection.openSubgroup(alias, catalogGroupId, 0n, {
+  const catalogAliases = new Set<bigint>();
+  const catalogSubscribeIds = new Set<bigint>();
+  const mediaSubscribeIds = new Set<bigint>();
+  let catalogGroupId = BROWSER_LOC_CATALOG_GROUP;
+  let catalogRefreshTimer: number | null = null;
+
+  async function writeCatalogObject(alias: bigint, groupId = catalogGroupId): Promise<void> {
+    const streamId = await connection.openSubgroup(alias, groupId, 0n, {
       hasExtensions: false,
       endOfGroup: true,
       defaultPriority: true,
@@ -208,9 +217,55 @@ async function bindPublisherSession(args: {
     await connection.closeSubgroup(streamId);
   }
 
+  async function writeCatalogOnAliases(groupId = catalogGroupId): Promise<void> {
+    for (const alias of catalogAliases) {
+      try {
+        await writeCatalogObject(alias, groupId);
+      } catch (err) {
+        console.warn("browser MoQ catalog write", err);
+      }
+    }
+  }
+
+  function startCatalogRefresh(): void {
+    if (catalogRefreshTimer != null || closed) {
+      return;
+    }
+    catalogRefreshTimer = window.setInterval(() => {
+      if (closed || catalogAliases.size === 0) {
+        return;
+      }
+      catalogGroupId += 1n;
+      void writeCatalogOnAliases(catalogGroupId);
+    }, BROWSER_LOC_CATALOG_REFRESH_MS);
+  }
+
   async function publishCatalog(requestId: bigint, alias: bigint): Promise<void> {
-    await connection.acceptSubscribe(requestId, alias);
-    await writeCatalogObject(alias);
+    catalogAliases.add(alias);
+    await connection.acceptSubscribe(requestId, alias, locCatalogSubscribeParameters(catalogGroupId));
+    await writeCatalogObject(alias, catalogGroupId);
+  }
+
+  async function serveCatalogFetch(requestId: bigint): Promise<void> {
+    let serveGroup = catalogGroupId;
+    try {
+      const range = connection.resolveJoiningFetch(requestId);
+      serveGroup = range.startLocation.group;
+    } catch {
+      // Standalone FETCH or JOIN before SUBSCRIBE_OK saved a location.
+    }
+    // Exclusive one-past. {0,0} is an empty range (ca7bbb62 catalog-ready / 0 video).
+    const endLocation = locCatalogFetchEndLocation(serveGroup);
+    await connection.acceptFetch(requestId, { endLocation });
+    const sid = await connection.openFetchStream(requestId);
+    await connection.sendFetchObject(sid, {
+      groupId: serveGroup,
+      subgroupId: 0n,
+      objectId: 0n,
+      publisherPriority: 128,
+      payload: catalogPayload,
+    });
+    await connection.closeFetchStream(sid);
   }
 
   async function sendVideoChunk(chunk: BrowserVideoChunk): Promise<void> {
@@ -384,6 +439,7 @@ async function bindPublisherSession(args: {
       return;
     }
     if (name === BROWSER_LOC_VIDEO_TRACK) {
+      mediaSubscribeIds.add(requestId);
       const subscriber: VideoSubscriber = {
         requestId,
         alias,
@@ -410,6 +466,7 @@ async function bindPublisherSession(args: {
       return;
     }
     if (name === BROWSER_LOC_AUDIO_TRACK && options.includeAudio) {
+      mediaSubscribeIds.add(requestId);
       audioAlias = alias;
       void connection
         .acceptSubscribe(requestId, alias)
@@ -431,7 +488,6 @@ async function bindPublisherSession(args: {
     dropVideoSubscriber(requestId);
   };
 
-  const catalogSubscribeIds = new Set<bigint>();
   connection.onFetch = (requestId, fetchMsg) => {
     const standalone = fetchMsg.fetch.fetchType === 0x1 ? fetchMsg.fetch : null;
     const name = standalone ? decodeTrackName(standalone.trackName) : null;
@@ -443,28 +499,28 @@ async function bindPublisherSession(args: {
       trackName: name,
       joiningRequestId: joiningId,
       catalogSubscribeIds,
+      mediaSubscribeIds,
       liveCatalogWritten: draft === 18,
     });
     if (!serveCatalog) {
       void connection.rejectFetch(requestId, 0n, "FETCH only served for catalog").catch(() => undefined);
       return;
     }
-    void (async () => {
-      await connection.acceptFetch(requestId, { endLocation: { group: 0n, object: 0n } });
-      const sid = await connection.openFetchStream(requestId);
-      await connection.sendFetchObject(sid, {
-        groupId: BROWSER_LOC_CATALOG_GROUP,
-        subgroupId: 0n,
-        objectId: 0n,
-        publisherPriority: 128,
-        payload: catalogPayload,
-      });
-      await connection.sendFetchEndOfRange(sid, true, 0n, 1n);
-      await connection.closeFetchStream(sid);
-    })().catch((err) => {
+    void serveCatalogFetch(requestId).catch((err) => {
       console.warn("browser MoQ catalog FETCH", err);
     });
   };
+
+  connection.setLargestLocationProvider((requestId) => {
+    if (catalogSubscribeIds.has(requestId)) {
+      return locCatalogLargestLocation(catalogGroupId);
+    }
+    const video = videoSubscribers.find((sub) => sub.requestId === requestId);
+    if (video) {
+      return { group: videoGroupId, object: video.objectId > 0n ? video.objectId - 1n : 0n };
+    }
+    return null;
+  });
 
   await connection.connect(transport, { maxRequestId: varint(100) });
   if (connection.draftVersion !== draft) {
@@ -486,11 +542,13 @@ async function bindPublisherSession(args: {
       const requestId = await connection.publish(ns, encoder.encode(trackName), alias);
       await waitPublishOk(requestId);
       if (trackName === BROWSER_LOC_CATALOG_TRACK) {
+        catalogAliases.add(alias);
         try {
-          await writeCatalogObject(alias);
+          await writeCatalogObject(alias, catalogGroupId);
         } catch (err) {
           console.warn("browser MoQ live catalog", err);
         }
+        startCatalogRefresh();
       } else if (trackName === BROWSER_LOC_VIDEO_TRACK) {
         videoSubscribers.push({
           requestId,
@@ -542,6 +600,10 @@ async function bindPublisherSession(args: {
     },
     close() {
       closed = true;
+      if (catalogRefreshTimer != null) {
+        window.clearInterval(catalogRefreshTimer);
+        catalogRefreshTimer = null;
+      }
       try {
         void connection.close();
       } catch {

@@ -11,6 +11,25 @@
 export const LOC_LATE_FRAME_THRESHOLD_MS = 30_000;
 export const LOC_MAX_SESSION_RESTARTS = 3;
 
+/**
+ * One leftover playa frame with 0x10 and bitrate 0 is not paint
+ * (ca7bbb62 GCP East `rendered=1` then loc_frames_frozen_1).
+ */
+export function locPaintedOk(options: {
+  framesRendered?: number;
+  bitrateBps?: number;
+  subscribeRejected?: boolean;
+}): boolean {
+  const frames = options.framesRendered ?? 0;
+  if (frames <= 0) {
+    return false;
+  }
+  if (frames === 1 && (options.bitrateBps ?? 0) <= 0 && options.subscribeRejected) {
+    return false;
+  }
+  return true;
+}
+
 export function locSubscribeOptions(): {
   subscriptionFilter: { type: "LargestObject" };
   warmStartCurrentGroup: false;
