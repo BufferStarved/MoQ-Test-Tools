@@ -22,6 +22,28 @@ def encoder_capture_path(temp_dir: str, protocol: str) -> str:
     return os.path.join(temp_dir, encoder_capture_filename(protocol))
 
 
+def vmaf_reference_filename(protocol: str = "", job_id: str = "") -> str:
+    """Per-dest VMAF path so shared-encode remuxes do not collide.
+
+    A comparison hub fans one x264 to four remuxes. Each remux used to write
+    ``vmaf_reference.ts`` in its temp dir; a retry (RTMP early ingest drop)
+    then hit ffmpeg's overwrite prompt and exited 239. Suffix by protocol
+    and job so two dests — or a retry — cannot share one file.
+    """
+    proto = "".join(ch for ch in (protocol or "").strip().lower() if ch.isalnum())
+    token = "".join(ch for ch in (job_id or "").strip().lower() if ch.isalnum())[:8]
+    parts = ["vmaf_reference"]
+    if proto:
+        parts.append(proto)
+    if token:
+        parts.append(token)
+    return f"{'_'.join(parts)}.ts"
+
+
+def vmaf_reference_path(temp_dir: str, protocol: str = "", job_id: str = "") -> str:
+    return os.path.join(temp_dir, vmaf_reference_filename(protocol, job_id))
+
+
 def build_tee_output_args(protocol: str, network_url: str, capture_path: str) -> List[str]:
     """Build ffmpeg tee muxer args that write to network + local capture file."""
     if protocol in {"srt", "hls", "dash", "http"}:

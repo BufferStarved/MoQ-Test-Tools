@@ -9,6 +9,7 @@ cannot be muxed into MPEG-TS).
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -40,8 +41,11 @@ class WebcamVmafReferenceTests(unittest.TestCase):
             duration_sec=60,
         )
         cmd = job._build_ffmpeg_cmd(capture_path="/tmp/moq-bench-x/encoder_capture.ts")
-        self.assertTrue(job.vmaf_reference_capture_path.endswith("vmaf_reference.ts"))
+        self.assertIn("vmaf_reference", os.path.basename(job.vmaf_reference_capture_path))
+        self.assertTrue(job.vmaf_reference_capture_path.endswith(".ts"))
+        self.assertIn("srt", os.path.basename(job.vmaf_reference_capture_path))
         self.assertIn(job.vmaf_reference_capture_path, cmd)
+        self.assertEqual(cmd[1], "-y")
         # Reference output is a stream copy appended after the tee output.
         ref_index = cmd.index(job.vmaf_reference_capture_path)
         self.assertEqual(cmd[ref_index - 2 : ref_index], ["-f", "mpegts"])
@@ -91,6 +95,7 @@ class WebcamVmafReferenceTests(unittest.TestCase):
             vmaf_reference_path="/tmp/moq-bench-x/vmaf_reference.ts",
         )
         self.assertIn("/tmp/moq-bench-x/vmaf_reference.ts", cmd)
+        self.assertEqual(cmd[1], "-y")
         # Primary fMP4 pipe output must still precede the reference output.
         self.assertLess(cmd.index("pipe:1"), cmd.index("/tmp/moq-bench-x/vmaf_reference.ts"))
 
@@ -101,6 +106,35 @@ class WebcamVmafReferenceTests(unittest.TestCase):
             duration_sec=60,
         )
         self.assertEqual(cmd[-1], "pipe:1")
+        self.assertEqual(cmd[1], "-y")
+
+    @patch("upload_service.find_ffmpeg", return_value="ffmpeg")
+    def test_shared_encode_dests_get_unique_vmaf_paths(self, _ffmpeg):
+        url = "udp://127.0.0.1:41945?fifo_size=1000000&overrun_nonfatal=1&shared_encode=1"
+        rtmp = UploadJob(
+            job_id="rtmp-aaaa",
+            media_path=url,
+            destination=DestinationProfile(
+                protocol="rtmp",
+                url="rtmp://35.222.33.58:1935/live/benchmark",
+                preset_id="moq_zixi_rtmp",
+                ingest_provider="zixi",
+            ),
+            duration_sec=60,
+        )
+        srt = UploadJob(
+            job_id="srt-bbbb",
+            media_path=url,
+            destination=_mediamtx_srt_dest(),
+            duration_sec=60,
+        )
+        rtmp_cmd = rtmp._build_ffmpeg_cmd(capture_path="/tmp/shared/encoder_capture.flv")
+        srt_cmd = srt._build_ffmpeg_cmd(capture_path="/tmp/shared/encoder_capture.ts")
+        self.assertNotEqual(rtmp.vmaf_reference_capture_path, srt.vmaf_reference_capture_path)
+        self.assertIn("rtmp", os.path.basename(rtmp.vmaf_reference_capture_path))
+        self.assertIn("srt", os.path.basename(srt.vmaf_reference_capture_path))
+        self.assertEqual(rtmp_cmd[1], "-y")
+        self.assertEqual(srt_cmd[1], "-y")
 
 
 if __name__ == "__main__":

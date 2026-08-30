@@ -166,6 +166,36 @@ class FfmpegFailureMessageTests(unittest.TestCase):
         self.assertIn("245", message)
         self.assertNotIn("closed publisher pipe", message)
 
+    def test_vmaf_overwrite_239_is_not_rtmp_ingest_close(self) -> None:
+        from upload_service import ingest_session_retry_kind, looks_like_vmaf_overwrite
+
+        process = MagicMock()
+        process.returncode = 239
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"File '/tmp/moq-bench-jj0cwj6i/vmaf_reference.ts' already exists. "
+            b"Overwrite? [y/N] Not overwriting - exiting\n"
+            b"Error opening output file /tmp/moq-bench-jj0cwj6i/vmaf_reference.ts.\n"
+            b"Error opening output files: File exists.\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertTrue(looks_like_vmaf_overwrite(message))
+        self.assertIn("overwrite prompt", message)
+        self.assertIn("not an ingest close", message)
+        self.assertNotIn("The ingest closed", message)
+        self.assertNotIn("closed publisher pipe", message)
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=1.2,
+                remaining_sec=73.8,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+                error=message,
+            )
+        )
+
     def test_moq_closed_pipe_keeps_cmaf_hint(self) -> None:
         process = MagicMock()
         process.returncode = 224

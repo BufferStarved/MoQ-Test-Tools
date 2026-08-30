@@ -585,6 +585,117 @@ describe("ca7bbb62 central leftover", () => {
   });
 });
 
+describe("5dc53e8 BBB four-leg HUD", () => {
+  it("does not call WebRTC Stop/detach at 54.0s of a 75s encode a mid-clip stall", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 3 (WebRTC)",
+      protocol: "webrtc",
+      endpoint: "http://34.9.217.178:8889/benchmark/whip",
+      encode_frames_total: 2250,
+      playback_frames_rendered: 1600,
+      playback_video_time_sec: 54.0,
+      playback_ttff_ms: 1200,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      encodeDurationSec: 75,
+      encodeElapsedSec: 75,
+      runStopped: true,
+    });
+    assert.equal(shown.status, "Playback OK");
+    assert.equal(shown.error, null);
+    assert.doesNotMatch(shown.error ?? "", /stalled at 54/i);
+  });
+});
+
+describe("BBB comparison Zixi RTMP 239 overwrite", () => {
+  it("does not dress vmaf_reference File exists as an ingest close or MoQ pipe", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 4 (RTMP)",
+      protocol: "rtmp",
+      endpoint: "rtmp://35.222.33.58:1935/live/benchmark",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobError:
+        "ffmpeg exited with code 239: File '/tmp/moq-bench-jj0cwj6i/vmaf_reference.ts' already exists. Overwrite? [y/N] Not overwriting - exiting. Error opening output files: File exists.",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /already exists/i);
+    assert.match(shown.error ?? "", /overwrite prompt/i);
+    assert.match(shown.error ?? "", /not an ingest close/i);
+    assert.doesNotMatch(shown.error ?? "", /The ingest closed/i);
+    assert.doesNotMatch(shown.error ?? "", /CMAF/i);
+  });
+});
+
+describe("BBB comparison Zixi :7777 probe timeout", () => {
+  it("fails closed on HTTP-TS timeout and does not say Playback OK", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT)",
+      protocol: "srt",
+      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 1800,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const timeout =
+      "HTTP-TS probe timed out — 35.222.33.58:7777 did not respond (origin may be frozen). This is not playback OK.";
+    const srt = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: timeout,
+    });
+    assert.equal(srt.status, "Failed");
+    assert.match(srt.error ?? "", /35\.222\.33\.58:7777/);
+    assert.match(srt.error ?? "", /timed out|frozen/i);
+    assert.doesNotMatch(srt.status, /Playback OK/i);
+  });
+});
+
+describe("BBB file MoQ shared-hub never-announce", () => {
+  it("0x10 + catalog_timeout_skipped encode_running is never-announce, not Playback OK", () => {
+    const moq: ComparisonLastRow = {
+      stream: "Stream 1 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+      encode_frames_total: 2400,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    assert.equal(moqxNeverAnnounced(moq), true);
+    const hud = {
+      playaLines: [
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "catalog_timeout_skipped encode_running",
+        "Watchdog timeout: catalog_received after 10000ms",
+      ],
+      jobStatus: "running",
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-bbb-file",
+      encodeDurationSec: 75,
+      encodeElapsedSec: 115,
+    };
+    const error = visibleMoqError(moq, hud);
+    assert.match(error, /never announced namespace bench-bbb-file/i);
+    assert.match(error, /SUBSCRIBE 0x10/i);
+    assert.doesNotMatch(error, /catalog object never reached/i);
+    assert.doesNotMatch(error, /Playback OK/i);
+    const leg = visibleLeg(moq, hud);
+    assert.equal(leg.status, "Failed");
+    assert.notEqual(leg.status, "Playback OK");
+  });
+});
+
 describe("custom 4-way bench-aef84d9a replay", () => {
   it("does not call completed + 0x10 + 0 paint a catalog miss", () => {
     const moq: ComparisonLastRow = {

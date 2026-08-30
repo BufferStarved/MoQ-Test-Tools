@@ -69,7 +69,7 @@ export function classifyWhepEndVerdict(options: {
   ) {
     const elapsed = options.encodeElapsedSec ?? 0;
     const vt = options.videoTimeSec ?? 0;
-    if (elapsed > 0 && vt < elapsed * 0.8 && elapsed - vt >= 15) {
+    if (elapsed > 0 && vt < elapsed * 0.7 && elapsed - vt >= 15) {
       return {
         ok: false,
         status: "Failed (see diagnostics)",

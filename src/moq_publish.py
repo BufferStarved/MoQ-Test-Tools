@@ -1023,6 +1023,7 @@ def build_ffmpeg_moq_cmd(
         audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
     return [
         find_ffmpeg(),
+        "-y",
         *build_ffmpeg_input_args(media_path, duration_sec=duration_sec),
         "-map",
         "0:v:0",

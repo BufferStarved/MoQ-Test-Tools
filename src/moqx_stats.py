@@ -98,10 +98,17 @@ class MoqxStatsPoller:
         self._baseline: MoqxBaseline | None = None
 
         explicit = os.environ.get("MOQX_ADMIN_URL", "").rstrip("/")
+        wanted_port = admin_port_for_endpoint(endpoint_url)
         if explicit:
-            self._metrics_url = f"{explicit}/metrics"
-            self._enabled = True
-            return
+            explicit_port = urlparse(explicit).port
+            # Leftover draft-16 admin is :8000. A :14433 job that scrapes it
+            # watches the other container and reports a false never-announce.
+            if explicit_port not in (None, wanted_port):
+                explicit = ""
+            else:
+                self._metrics_url = f"{explicit}/metrics"
+                self._enabled = True
+                return
 
         base = admin_base_url_for_endpoint(endpoint_url)
         if not base:

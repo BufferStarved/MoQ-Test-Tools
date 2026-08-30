@@ -145,6 +145,22 @@ class MoqxStatsPollerTests(unittest.TestCase):
             "http://45.79.177.85:18000",
         )
 
+    def test_admin_url_override_cannot_scrape_leftover_8000_for_14433(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"MOQX_ADMIN_URL": "http://34.28.164.90:8000"},
+            clear=False,
+        ):
+            leftover = MoqxStatsPoller(
+                "https://34-28-164-90.sslip.io:4433/moq-relay?namespace=benchmark"
+            )
+            self.assertEqual(leftover._metrics_url, "http://34.28.164.90:8000/metrics")
+            canary = MoqxStatsPoller(
+                "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=bench-d18"
+            )
+            self.assertEqual(canary._metrics_url, "http://34.138.137.211:18000/metrics")
+            self.assertNotIn(":8000", canary._metrics_url)
+
     def test_disabled_poller_returns_zero(self):
         with patch.dict("os.environ", {}, clear=False):
             poller = MoqxStatsPoller("not-a-url")

@@ -81,6 +81,20 @@ describe("classifyWhepEndVerdict", () => {
     assert.equal(verdict.error, null);
     assert.equal(verdict.status, "Playback OK");
   });
+
+  it("does not call Stop/detach at 54s of a 75s encode a mid-clip stall", () => {
+    const verdict = classifyWhepEndVerdict({
+      framesRendered: 1600,
+      videoTimeSec: 54.0,
+      encodeDurationSec: 75,
+      encodeElapsedSec: 75,
+      runStopped: true,
+      jobStatus: "completed",
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+    assert.doesNotMatch(verdict.status, /Failed/i);
+  });
 });
 
 describe("whepPlaybackBufferSec", () => {

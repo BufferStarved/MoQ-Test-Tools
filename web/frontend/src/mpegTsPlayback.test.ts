@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import {
   classifyMpegTsEndVerdict,
   mpegTsMayMarkPlaybackOk,
+  mpegTsOriginHost,
   mpegTsPaintedOk,
+  mpegTsProbeFailReason,
 } from "./mpegTsPlayback.ts";
 
 describe("mpegTsPaintedOk", () => {
@@ -29,6 +31,37 @@ describe("mpegTsMayMarkPlaybackOk", () => {
       }),
       false,
     );
+    assert.equal(
+      mpegTsMayMarkPlaybackOk({
+        paintedOk: true,
+        lastReason:
+          "HTTP-TS probe timed out — 35.222.33.58:7777 did not respond (origin may be frozen). This is not playback OK.",
+      }),
+      false,
+    );
+  });
+});
+
+describe("mpegTsProbeFailReason", () => {
+  it("names a :7777 signal timeout as a frozen origin, not manifest unreachable", () => {
+    const reason = mpegTsProbeFailReason({
+      fetchError: "signal timed out",
+      originHost: mpegTsOriginHost("http://35.222.33.58:7777/benchmark.ts"),
+    });
+    assert.match(reason, /35\.222\.33\.58:7777/);
+    assert.match(reason, /timed out/i);
+    assert.match(reason, /frozen/i);
+    assert.doesNotMatch(reason, /manifest unreachable/i);
+    assert.equal(mpegTsOriginHost("/api/playback/fetch?url=" + encodeURIComponent("http://35.222.33.58:7777/SRT%20Test%20EC.ts")), "35.222.33.58:7777");
+  });
+
+  it("names a proxied 504 as the same frozen-origin timeout", () => {
+    const reason = mpegTsProbeFailReason({
+      httpStatus: 504,
+      originHost: "35.222.33.58:7777",
+    });
+    assert.match(reason, /timed out/i);
+    assert.match(reason, /35\.222\.33\.58:7777/);
   });
 });
 

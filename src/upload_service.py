@@ -115,6 +115,7 @@ from encoder_capture import (
     encoder_capture_path,
     fanout_stdout,
     start_moq_capture_tee,
+    vmaf_reference_path,
 )
 from quality_metrics import (
     build_quality_payload,
@@ -206,6 +207,16 @@ _MID_RUN_MAX_RETRIES = 2
 _MID_RUN_MIN_REMAINING_SEC = 3.0
 
 
+def looks_like_vmaf_overwrite(text: str) -> bool:
+    """ffmpeg overwrite prompt / File exists — not an ingest close."""
+    t = (text or "").lower()
+    if "not overwriting" in t or "already exists" in t:
+        return True
+    if "file exists" in t and ("output" in t or "vmaf_reference" in t):
+        return True
+    return False
+
+
 def ingest_session_retry_kind(
     *,
     protocol: str,
@@ -218,6 +229,8 @@ def ingest_session_retry_kind(
 ) -> Optional[str]:
     """``early`` (reset job clock) | ``mid`` (keep clock) | None."""
     if cancelled or "SIGTERM" in (error or ""):
+        return None
+    if looks_like_vmaf_overwrite(error):
         return None
     if (protocol or "").strip().lower() not in _INGEST_SESSION_RETRY_PROTOCOLS:
         return None
@@ -453,8 +466,10 @@ class UploadJob:
             and is_live_media_source(self.media_path)
             and not is_device_webcam_source(self.media_path)
         ):
-            self.vmaf_reference_capture_path = os.path.join(
-                os.path.dirname(capture_path), "vmaf_reference.ts"
+            self.vmaf_reference_capture_path = vmaf_reference_path(
+                os.path.dirname(capture_path),
+                protocol=self.destination.protocol,
+                job_id=self.job_id,
             )
             reference_args = [
                 "-map",
@@ -467,6 +482,7 @@ class UploadJob:
             ]
         return [
             find_ffmpeg(),
+            "-y",
             *build_ffmpeg_input_args(self.media_path, duration_sec=self.duration_sec),
             *self._video_args(),
             *audio_args,
@@ -2558,7 +2574,11 @@ class UploadService:
             and is_live_media_source(job.media_path)
             and not is_device_webcam_source(job.media_path)
         ):
-            job.vmaf_reference_capture_path = os.path.join(temp_dir, "vmaf_reference.ts")
+            job.vmaf_reference_capture_path = vmaf_reference_path(
+                temp_dir,
+                protocol="moq",
+                job_id=job.job_id,
+            )
         ffmpeg_cmd = build_ffmpeg_moq_cmd(
             job.media_path,
             progress_path=progress_path,
@@ -3465,6 +3485,12 @@ class UploadService:
         detail = ffmpeg_stderr_useful_detail(stderr) or "unknown error"
         message = f"ffmpeg exited with code {process.returncode}: {detail}"
         proto = (protocol or "").lower()
+        if looks_like_vmaf_overwrite(stderr) or looks_like_vmaf_overwrite(detail):
+            return (
+                f"ffmpeg exited with code {process.returncode}: VMAF reference "
+                "already exists (overwrite prompt). This is not an ingest close "
+                "or a MoQ publisher pipe."
+            )
         if "Input/output error" in stderr and (
             "avfoundation" in stderr.lower() or "v4l2" in stderr.lower()
         ):

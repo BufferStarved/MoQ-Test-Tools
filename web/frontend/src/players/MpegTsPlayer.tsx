@@ -25,7 +25,9 @@ import { playerErrorForFailedJob } from "../moqCmafPlayback";
 import {
   classifyMpegTsEndVerdict,
   mpegTsMayMarkPlaybackOk,
+  mpegTsOriginHost,
   mpegTsPaintedOk,
+  mpegTsProbeFailReason,
 } from "../mpegTsPlayback";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 import { GoLiveButton } from "../GoLiveButton";
@@ -501,21 +503,26 @@ export default function MpegTsPlayer({
         pushDiag("connect_probe=skipped (preview_ready already confirmed)");
       } else {
         pushDiag(`connect_probe=start proxied=${proxied}`);
+        let probeError = "";
         const probe = await fetch(proxied, {
           cache: "no-store",
           signal: AbortSignal.timeout(4000),
         }).catch((err: unknown) => {
-          pushDiag(`connect_probe_fetch_error=${err instanceof Error ? err.message : String(err)}`);
+          probeError = err instanceof Error ? err.message : String(err);
+          pushDiag(`connect_probe_fetch_error=${probeError}`);
           return null;
         });
         if (destroyed) {
           return;
         }
         if (!probe || !probe.ok || !probe.body) {
-          pushDiag(`connect_probe=fail http=${probe ? probe.status : "n/a"}`);
-          scheduleReconnect(
-            probe ? `HTTP ${probe.status}` : "manifest unreachable",
-          );
+          const reason = mpegTsProbeFailReason({
+            httpStatus: probe ? probe.status : null,
+            fetchError: probeError,
+            originHost: mpegTsOriginHost(url),
+          });
+          pushDiag(`connect_probe=fail http=${probe ? probe.status : "n/a"} reason=${reason}`);
+          scheduleReconnect(reason);
           return;
         }
         const reader = probe.body.getReader();

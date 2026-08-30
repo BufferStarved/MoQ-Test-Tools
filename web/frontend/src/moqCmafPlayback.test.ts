@@ -366,6 +366,17 @@ describe("humanizeJobError protocol", () => {
     assert.match(shown, /245/);
     assert.doesNotMatch(shown, /publisher pipe/i);
   });
+
+  it("does not dress VMAF overwrite 239 as an RTMP ingest close", () => {
+    const raw =
+      "ffmpeg exited with code 239: File '/tmp/moq-bench-jj0cwj6i/vmaf_reference.ts' already exists. Overwrite? [y/N] Not overwriting - exiting | Error opening output files: File exists.";
+    const shown = humanizeJobError(raw, { protocol: "rtmp" }) ?? "";
+    assert.match(shown, /already exists/i);
+    assert.match(shown, /overwrite prompt/i);
+    assert.match(shown, /not an ingest close/i);
+    assert.doesNotMatch(shown, /The ingest closed/i);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
+  });
 });
 
 describe("shouldFailNoMediaWatchdog", () => {

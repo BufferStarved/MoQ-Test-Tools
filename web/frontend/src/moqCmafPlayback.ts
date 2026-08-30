@@ -293,7 +293,10 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("openmoq-plugin") ||
     text.includes("rtmp publish failed") ||
     text.includes("whip publish failed") ||
-    text.includes("srt publish failed")
+    text.includes("srt publish failed") ||
+    text.includes("already exists") ||
+    text.includes("not overwriting") ||
+    text.includes("file exists")
   );
 }
 
@@ -350,6 +353,11 @@ export function humanizeJobError(
     ].join(" ");
   }
   const ffmpegCode = raw.match(/ffmpeg(?: exited with code)?\s+(\d+)/i)?.[1];
+  if (/already exists|not overwriting|file exists/i.test(raw)) {
+    return ffmpegCode
+      ? `ffmpeg ${ffmpegCode}: VMAF reference already exists (overwrite prompt). This is not an ingest close or a MoQ publisher pipe.`
+      : "VMAF reference already exists (overwrite prompt). This is not an ingest close or a MoQ publisher pipe.";
+  }
   if (kind === "rtmp") {
     return ffmpegCode
       ? `RTMP publish failed (ffmpeg ${ffmpegCode}). The ingest closed the connection — this is not a MoQ publisher pipe.`
