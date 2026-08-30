@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  avcCWithFourByteLengths,
   avcChunkIsSyncPoint,
   buildAvcC,
   collectAvcNals,
@@ -54,22 +55,30 @@ describe("avcChunkIsSyncPoint", () => {
   });
 });
 
+describe("avcCWithFourByteLengths", () => {
+  it("rewrites lengthSizeMinusOne so 4-byte AVCC samples match", () => {
+    const raw = new Uint8Array([1, 0x4d, 0x40, 0x28, 0xfd, 0xe1, 0x00]);
+    const fixed = avcCWithFourByteLengths(raw);
+    assert.equal(fixed[4], 0xff);
+    assert.notEqual(fixed, raw);
+  });
+});
+
 describe("normalizeLocVideoAccessUnit", () => {
   const sps = new Uint8Array([0x67, 0x4d, 0x40, 0x28, 0x9a]);
   const pps = new Uint8Array([0x68, 0xce, 0x38, 0x80]);
   const idr = new Uint8Array([0x65, 0x88, 0x84, 0xff]);
 
-  it("builds avcC and prepends SPS/PPS onto an avcC IDR (b2969493)", () => {
+  it("keeps SPS/PPS in avcC only — avc1 samples are VCL (1f61f56d)", () => {
     const avcC = buildAvcC(sps, pps);
     assert.equal(isAvcCRecord(avcC), true);
     const normalized = normalizeLocVideoAccessUnit(avcc([idr]), avcC);
     assert.ok(normalized.description);
     assert.equal(isAvcCRecord(normalized.description), true);
     const nals = collectAvcNals(normalized.data);
-    assert.equal((nals[0]?.[0] ?? 0) & 0x1f, 7);
-    assert.equal((nals[1]?.[0] ?? 0) & 0x1f, 8);
-    assert.equal((nals[2]?.[0] ?? 0) & 0x1f, 5);
-    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, sps.byteLength]);
+    assert.equal(nals.length, 1);
+    assert.equal((nals[0]?.[0] ?? 0) & 0x1f, 5);
+    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, idr.byteLength]);
   });
 
   it("synthesizes avcC from in-band Annex-B SPS/PPS when description is missing", () => {
@@ -82,13 +91,14 @@ describe("normalizeLocVideoAccessUnit", () => {
     assert.ok(normalized.description);
     assert.equal(normalized.description[1], 0x4d);
     assert.equal(normalized.description[3], 0x28);
-    assert.deepEqual([...normalized.data.subarray(0, 4)], [0, 0, 0, sps.byteLength]);
+    const types = collectAvcNals(normalized.data).map((unit) => (unit[0] ?? 0) & 0x1f);
+    assert.deepEqual(types, [5]);
   });
 
-  it("does not duplicate SPS already in the access unit", () => {
+  it("strips in-band SPS/PPS from an avc1 access unit when description exists", () => {
     const avcC = buildAvcC(sps, pps);
     const normalized = normalizeLocVideoAccessUnit(avcc([sps, pps, idr]), avcC);
     const types = collectAvcNals(normalized.data).map((unit) => (unit[0] ?? 0) & 0x1f);
-    assert.deepEqual(types, [7, 8, 5]);
+    assert.deepEqual(types, [5]);
   });
 });

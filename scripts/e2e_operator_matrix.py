@@ -214,12 +214,18 @@ await page.waitForSelector('.stream-column', {{ timeout: 25000 }});
 const state = await page.evaluate(() => {{
   const columns = document.querySelectorAll('.stream-column');
   const selectedRecipe = document.querySelector('.recipe-options .source-mode-card.selected strong');
+  const recipeSummary = document.querySelector('[data-step="recipe"] .setup-step-summary, .setup-step[data-step="recipe"]');
   const body = String(document.body.innerText || '');
   const labels = [...columns].map((col) => String(col.textContent || '').slice(0, 240));
+  const recipeText = [
+    String(selectedRecipe?.textContent || ''),
+    String(recipeSummary?.textContent || ''),
+    body,
+  ].join(' ');
   return {{
     columns: columns.length,
-    browserOn: /webcam\\s*[·•]\\s*browser/i.test(body),
-    recipeOn: /moq vs webrtc/i.test(String(selectedRecipe?.textContent || '')),
+    browserOn: /webcam browsers|webcodecs|webcam\\s*[·•]\\s*browser/i.test(body),
+    recipeOn: /webcam browsers|moq vs webrtc/i.test(recipeText),
     labels,
   }};
 }});

@@ -1,5 +1,5 @@
 import { avcChunkIsSyncPoint, normalizeLocVideoAccessUnit } from "./h264AnnexB";
-import { BROWSER_LOC_VIDEO_CODEC } from "./locCatalog";
+import { BROWSER_LOC_VIDEO_CODEC, nextLocPublishTimestampUs } from "./locCatalog";
 
 export interface BrowserEncodeSample {
   elapsedSec: number;
@@ -96,6 +96,7 @@ export function createBrowserVideoEncoder(
   let awaitingIdr = false;
   let lastIdrAt = 0;
   let lastAvcC: Uint8Array | undefined;
+  let lastPublishTimestampUs = 0;
   const settings = track.getSettings();
   const width = settings.width || 1280;
   const height = settings.height || 720;
@@ -173,11 +174,17 @@ export function createBrowserVideoEncoder(
             awaitingIdr =
               awaitingIdr || frameCount <= 1 || frameCount % KEYFRAME_INTERVAL === 0;
           }
+          pendingCaptureUs.shift();
+          // EncodedVideoChunk.timestamp is the LOC CaptureTimestamp. Date.now()
+          // is 1ms and collides when the encoder drains a burst — VideoDecoder
+          // then submits equal/backwards timestamps and never emits.
+          const publishTs = nextLocPublishTimestampUs(Number(chunk.timestamp), lastPublishTimestampUs);
+          lastPublishTimestampUs = publishTs;
           onChunk({
             data,
             isKeyframe,
-            timestampUs: chunk.timestamp,
-            captureTimestampUs: pendingCaptureUs.shift() ?? Math.round(Date.now() * 1000),
+            timestampUs: publishTs,
+            captureTimestampUs: publishTs,
             description,
           });
         },

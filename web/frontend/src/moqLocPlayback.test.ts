@@ -7,6 +7,7 @@ import {
   LOC_LATE_FRAME_THRESHOLD_MS,
   locSubscribeOptions,
   resetLocPlaybackPipeline,
+  startLocCanvasRenderer,
 } from "./moqLocPlayback.ts";
 
 describe("locPaintedOk", () => {
@@ -134,6 +135,26 @@ describe("classifyLocFrameStall", () => {
 
   it("does not count a freeze while a reconnect is in flight", () => {
     assert.equal(classifyLocFrameStall({ ...base, nowMs: 10_000, retrying: true }), "ok");
+  });
+});
+
+describe("startLocCanvasRenderer", () => {
+  it("starts the canvas after play() already threw PLAYING→PLAYING (1f61f56d)", () => {
+    const calls: string[] = [];
+    const player = {
+      play: () => {
+        calls.push("play");
+        throw new Error("Invalid state transition: playing → playing");
+      },
+      renderer: { start: () => calls.push("renderer") },
+    };
+    assert.equal(startLocCanvasRenderer(player), true);
+    assert.deepEqual(calls, ["play", "renderer"]);
+  });
+
+  it("returns false until createRenderer has run", () => {
+    assert.equal(startLocCanvasRenderer({ play: () => undefined }), false);
+    assert.equal(startLocCanvasRenderer(null), false);
   });
 });
 

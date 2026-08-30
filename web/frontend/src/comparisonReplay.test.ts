@@ -448,6 +448,43 @@ describe("b2969493 browser LOC HUD replay", () => {
   });
 });
 
+describe("1f61f56d browser LOC HUD replay", () => {
+  it("avcC objects + catalog-ready + frame=- is still a player failure", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 1 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=bench-1f61f56d&draft=18",
+      encode_frames_total: 900,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 1,
+    };
+    const hud = {
+      playaLines: [
+        "catalog_mode=relay catalog FETCH+subscribe then video (LOC live catalog, no knownTracks race, no injected catalog) draft=18",
+        "ready levels=1 tracks=video audio=0",
+        "play=post-catalog",
+        "playa [OBJ] video \"video\" group=53 obj=0 alias=4 8222B",
+        "stats bitrate=590000 latency=0 rendered=0 firstObject=2100 decoder=2200 frame=-",
+        "FAIL MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
+      ],
+      jobStatus: "running",
+      previewReady: true,
+      namespace: "bench-1f61f56d",
+    };
+    assert.equal(inferCatalogReady(hud), true);
+    const error = visibleMoqError(row, hud);
+    assert.equal(
+      error,
+      "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.",
+    );
+    const leg = visibleLeg(row, hud);
+    assert.equal(leg.status, "Failed");
+    assert.doesNotMatch(error, /Playback OK/i);
+  });
+});
+
 describe("ca7bbb62 central leftover", () => {
   it("GCP Central empty catalog + subscription ended is not Playback OK", () => {
     const verdict = classifyMoqEndVerdict({

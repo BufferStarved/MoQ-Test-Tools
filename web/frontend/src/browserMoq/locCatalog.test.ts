@@ -18,6 +18,7 @@ import {
   locCatalogTrackShouldEnd,
   locKeyframeVideoConfig,
   locIdrReplayGroup,
+  nextLocPublishTimestampUs,
   locNextMediaGroup,
   locSubscriberLargestLocation,
   locVideoFetchEndLocation,
@@ -247,5 +248,17 @@ describe("locKeyframeVideoConfig", () => {
   it("still returns last avcC for a delta so mid-GOP join can configure (0ea3b335)", () => {
     const last = new Uint8Array([1, 0x4d, 0x40, 0x28, 0xff, 0xe1]);
     assert.equal(locKeyframeVideoConfig(undefined, last), last);
+  });
+});
+
+describe("nextLocPublishTimestampUs", () => {
+  it("keeps a rising encoder timestamp", () => {
+    assert.equal(nextLocPublishTimestampUs(66_666, 33_333), 66_666);
+  });
+
+  it("steps 33ms when stamps collide (1f61f56d)", () => {
+    assert.equal(nextLocPublishTimestampUs(1_000_000, 1_000_000), 1_033_333);
+    assert.equal(nextLocPublishTimestampUs(999_000, 1_000_000), 1_033_333);
+    assert.equal(nextLocPublishTimestampUs(Number.NaN, 0), 33_333);
   });
 });

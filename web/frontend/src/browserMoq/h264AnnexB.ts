@@ -251,6 +251,19 @@ export function parseAvcCParameterSets(avcC: Uint8Array | undefined): {
   return { sps, pps };
 }
 
+/** Force lengthSizeMinusOne=3 so samples we write as 4-byte AVCC match. */
+export function avcCWithFourByteLengths(avcC: Uint8Array): Uint8Array {
+  if (!isAvcCRecord(avcC)) {
+    return avcC;
+  }
+  if ((avcC[4]! & 0x03) === 3) {
+    return avcC;
+  }
+  const copy = avcC.slice();
+  copy[4] = 0xff;
+  return copy;
+}
+
 /** Build a 4-byte-length avcC from the first SPS/PPS. */
 export function buildAvcC(sps: Uint8Array, pps: Uint8Array): Uint8Array {
   const out = new Uint8Array(11 + sps.byteLength + pps.byteLength);
@@ -289,11 +302,9 @@ function nalsToAvcc(nals: Uint8Array[]): Uint8Array {
 /**
  * Browser LOC access unit for playa WebCodecs.
  *
- * Catalog has codec but no initData. Empty VideoDecoder.configure puts
- * Chrome in Annex-B mode (b2969493 decoder=ok frame=-). Skip that and
- * emit length-prefixed avcC samples plus a real avcC in `description`
- * so LOC VideoConfig and EncodedVideoChunk.data agree. Prepend SPS/PPS
- * on IDRs so a mid-GOP join still has parameter sets in-band.
+ * avc1 + VideoConfig.description is AVCC out-of-band. In-band SPS/PPS on
+ * that path left VideoDecoder configured with no output (1f61f56d). Keep
+ * parameter sets in `description` only; samples are VCL (and SEI/AUD).
  */
 export function normalizeLocVideoAccessUnit(
   payload: Uint8Array,
@@ -305,22 +316,18 @@ export function normalizeLocVideoAccessUnit(
     nals.find((unit) => ((unit[0] ?? 0) & 0x1f) === 7) ?? fromDesc.sps[0];
   const pps =
     nals.find((unit) => ((unit[0] ?? 0) & 0x1f) === 8) ?? fromDesc.pps[0];
-  const avcC = isAvcCRecord(description)
-    ? description
-    : sps && pps
-      ? buildAvcC(sps, pps)
-      : undefined;
-  const hasIdr = nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 5);
-  const out: Uint8Array[] = [];
-  if (hasIdr && sps && !nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 7)) {
-    out.push(sps);
-  }
-  if (hasIdr && pps && !nals.some((unit) => ((unit[0] ?? 0) & 0x1f) === 8)) {
-    out.push(pps);
-  }
-  out.push(...nals);
-  const data = out.length > 0 ? nalsToAvcc(out) : payload;
-  return avcC ? { data, description: avcC } : { data };
+  const avcC = avcCWithFourByteLengths(
+    isAvcCRecord(description) ? description! : sps && pps ? buildAvcC(sps, pps) : new Uint8Array(),
+  );
+  const haveAvcC = isAvcCRecord(avcC);
+  const sampleNals = haveAvcC
+    ? nals.filter((unit) => {
+        const nalType = (unit[0] ?? 0) & 0x1f;
+        return nalType !== 7 && nalType !== 8;
+      })
+    : nals;
+  const data = sampleNals.length > 0 ? nalsToAvcc(sampleNals) : payload;
+  return haveAvcC ? { data, description: avcC } : { data };
 }
 
 /** Length-prefixed access unit → Annex-B (4-byte big-endian lengths). */

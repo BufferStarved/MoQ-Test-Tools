@@ -44,6 +44,13 @@ assert.match(src("comparisonReplay.test.ts"), /ca7bbb62/);
 assert.match(src("comparisonReplay.test.ts"), /8aeaa2e4/);
 assert.match(src("comparisonReplay.test.ts"), /9e0a507e/);
 assert.match(src("comparisonReplay.test.ts"), /b2969493/);
+assert.match(src("comparisonReplay.test.ts"), /1f61f56d/);
+assert.match(src("players/MoqPlayer.tsx"), /startLocCanvasRenderer/);
+assert.match(src("moqLocPlayback.ts"), /startLocCanvasRenderer/);
+assert.match(
+  fs.readFileSync(path.join(root, "vendor/moq-playa/packages/playa/src/player.ts"), "utf8"),
+  /already playing/,
+);
 assert.match(src("browserMoq/h264AnnexB.ts"), /normalizeLocVideoAccessUnit/);
 assert.match(src("browserMoq/h264AnnexB.ts"), /nalsToAvcc/);
 assert.match(src("browserMoq/encoder.ts"), /normalizeLocVideoAccessUnit/);

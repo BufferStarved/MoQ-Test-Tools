@@ -198,6 +198,14 @@ export function locIdrReplayGroup(advertisedGroupId: bigint): bigint {
  * configure; without VideoConfig the decoder stays IDLE and drops the
  * mid-GOP join (0ea3b335 objects + catalog-ready, rendered=0).
  */
+/** Strictly increasing CaptureTimestamp so VideoDecoder does not stall. */
+export function nextLocPublishTimestampUs(encoderTimestampUs: number, lastPublishUs: number): number {
+  if (Number.isFinite(encoderTimestampUs) && encoderTimestampUs > lastPublishUs) {
+    return encoderTimestampUs;
+  }
+  return lastPublishUs + 33_333;
+}
+
 export function locKeyframeVideoConfig(
   description: Uint8Array | undefined,
   lastDescription: Uint8Array | undefined,

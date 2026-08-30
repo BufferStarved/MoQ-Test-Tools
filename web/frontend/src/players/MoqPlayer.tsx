@@ -12,6 +12,7 @@ import {
   locPaintedOk,
   locSubscribeOptions,
   resetLocPlaybackPipeline,
+  startLocCanvasRenderer,
 } from "../moqLocPlayback";
 import { requestLocIdr } from "../browserMoq/locIdrNudge";
 import {
@@ -978,11 +979,7 @@ export default function MoqPlayer({
             return;
           }
           pushDiag(`play=${reason}`, true);
-          try {
-            player.play();
-          } catch {
-            // ignore
-          }
+          startLocCanvasRenderer(player);
           if (video) {
             void video.play().catch(() => undefined);
           }
@@ -1393,11 +1390,7 @@ export default function MoqPlayer({
             // Play again only — pause+play used to send REQUEST_UPDATE forward:0
             // and freeze the live objects at the relay.
             pushDiag("decode_kick=play", true);
-            try {
-              player.play();
-            } catch {
-              // ignore
-            }
+            startLocCanvasRenderer(player);
           }, 700);
         }
         const kickPlay = () => {
@@ -1742,7 +1735,7 @@ export default function MoqPlayer({
       return;
     }
     userPausedRef.current = false;
-    player.play();
+    startLocCanvasRenderer(player);
     setIsPlaying(true);
     setStatus("Playing");
   }

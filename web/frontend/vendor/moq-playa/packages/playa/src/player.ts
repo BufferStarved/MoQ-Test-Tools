@@ -307,7 +307,14 @@ export class Player {
     if (this.options.audioActivation !== 'gesture') {
       this.ensureAudioContext();
     }
-    this.engine.play();
+    // catalog_received fires before createRenderer. A second play() used
+    // to throw PLAYING→PLAYING and skip renderer.start() — decoded frames
+    // sat in CanvasRenderer with no rAF loop (rendered=0).
+    try {
+      this.engine.play();
+    } catch {
+      // already playing
+    }
     this.renderer?.start();
     this.timeCtrl?.start();
     this.startStatsTimer();
@@ -532,6 +539,9 @@ export class Player {
         createAudioDecoder: () => new WebCodecsAudioDecoder(),
         createRenderer: () => {
           this.renderer = new CanvasRenderer(this.canvas!, { clock: this.audioClock });
+          if (this._state === 'playing') {
+            this.renderer.start();
+          }
           return this.renderer;
         },
         createAudioOutput: () => {

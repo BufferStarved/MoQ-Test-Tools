@@ -52,9 +52,31 @@ export const LOC_MAX_DECODER_RESETS = 2;
  * pause()+play() is forbidden here — pause sends FORWARD=0 and freezes the
  * live subscribe at the relay.
  */
-export function resetLocPlaybackPipeline(player: {
-  play?: () => void;
-} | null | undefined): boolean {
+/**
+ * playa emits catalog_received before createPipelines, so the first play()
+ * sees renderer=null. A second play() then throws PLAYING→PLAYING and
+ * never reaches renderer.start() — VideoDecoder can emit into a queue
+ * that never rAF-ticks (1f61f56d group 53 / rendered=0).
+ */
+export function startLocCanvasRenderer(player: object | null | undefined): boolean {
+  if (!player) {
+    return false;
+  }
+  const loc = player as { play?: () => void; renderer?: { start?: () => void } };
+  try {
+    loc.play?.();
+  } catch {
+    // already PLAYING — still start the renderer created after catalog_received
+  }
+  const renderer = loc.renderer;
+  if (typeof renderer?.start !== "function") {
+    return false;
+  }
+  renderer.start();
+  return true;
+}
+
+export function resetLocPlaybackPipeline(player: object | null | undefined): boolean {
   if (!player) {
     return false;
   }
@@ -67,11 +89,7 @@ export function resetLocPlaybackPipeline(player: {
   }
   engine.videoPipeline.reset();
   engine.syncController?.reset?.();
-  try {
-    player.play?.();
-  } catch {
-    // already playing
-  }
+  startLocCanvasRenderer(player);
   return true;
 }
 

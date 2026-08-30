@@ -42,6 +42,14 @@ assert.match(
   fs.readFileSync(path.join(root, "browserMoq/encoder.ts"), "utf8"),
   /normalizeLocVideoAccessUnit\(rawData/,
 );
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/locCatalog.ts"), "utf8"),
+  /nextLocPublishTimestampUs/,
+);
+assert.match(
+  fs.readFileSync(path.join(root, "browserMoq/h264AnnexB.ts"), "utf8"),
+  /avcCWithFourByteLengths/,
+);
 assert.match(publisher, /const videoConfig = locKeyframeVideoConfig/);
 assert.doesNotMatch(
   publisher,
