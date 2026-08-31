@@ -63,6 +63,33 @@ class PublisherProtocolTests(unittest.TestCase):
             restored.destination.url,
             "srt://34.9.217.178:8890?mode=caller&streamid=publish:benchmark",
         )
+        self.assertIn("publish:benchmark", restored.destination.url)
+        self.assertNotIn("SRT Test", restored.destination.url)
+        self.assertNotIn("SRT%20Test", restored.destination.url)
+
+    def test_helper_zixi_srt_roundtrip_attaches_streamid(self) -> None:
+        dest = DestinationProfile(
+            protocol="srt",
+            url="srt://35.222.33.58:10080?mode=caller&latency=200000",
+            label="Zixi Central",
+            preset_id="moq_zixi_gcp",
+        )
+        payload = destination_to_dict(dest)
+        self.assertIn("streamid=", payload["url"])
+        self.assertIn("SRT%20Test", payload["url"])
+        self.assertIn("m=publish", payload["url"])
+        restored = destination_from_dict(payload)
+        self.assertIn("streamid=", restored.url)
+        self.assertIn("SRT%20Test", restored.url)
+        from_dict = destination_from_dict(
+            {
+                "protocol": "srt",
+                "url": "srt://35.222.33.58:10080?mode=caller&latency=200000",
+                "preset_id": "moq_zixi_gcp",
+            }
+        )
+        self.assertIn("streamid=", from_dict.url)
+        self.assertIn("SRT%20Test", from_dict.url)
 
     def test_destination_moq_target_roundtrip(self) -> None:
         dest = DestinationProfile(

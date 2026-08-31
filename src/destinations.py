@@ -16,7 +16,7 @@ from cloud_placement import (
     merge_placement,
     placement_from_ingest_provider,
 )
-from moq_publish import MoqPublishTarget, parse_moq_publish_url
+from moq_publish import MoqPublishTarget, ensure_zixi_srt_streamid, parse_moq_publish_url
 
 CENTRAL_WEB_INGEST_AGENT = "http://34.9.217.178:8090"
 # MoQ recorder lives on the web ingest agent. Do not fall back to the Zixi
@@ -180,10 +180,13 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
         id="moq_zixi_gcp",
         name="Zixi Broadcaster gcp-us-central1",
         protocol="srt",
-        url="srt://35.222.33.58:10080?mode=caller&latency=200000",
+        url=ensure_zixi_srt_streamid(
+            "srt://35.222.33.58:10080?mode=caller&latency=200000"
+        ),
         notes=(
             "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
-            "upload adds streamid=#!::r=SRT Test,m=publish automatically. "
+            "the SRT URL includes streamid=#!::r=SRT Test,m=publish so helper and "
+            "Advanced publish hit that input (not a later upload-only rewrite). "
             "Browser playback uses error-concealed 'SRT Test EC' "
             "(primary Fast HLS packager wedges after first connect). "
             "HLS: playback.m3u8?stream=SRT%20Test%20EC. "
@@ -469,7 +472,11 @@ def _build_stack_presets(host: EncodeHost) -> List[ServicePreset]:
             id=f"moq_zixi_{slug}",
             name=f"Zixi · {host.label}",
             protocol="srt",
-            url=f"srt://{zixi_ip}:10080?mode=caller&latency=200000" if zixi_ok else "",
+            url=(
+                ensure_zixi_srt_streamid(f"srt://{zixi_ip}:10080?mode=caller&latency=200000")
+                if zixi_ok
+                else ""
+            ),
             notes=(
                 f"Managed Zixi SRT ingest on {host.label} ({region}). Stream ID 'SRT Test'; "
                 f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."

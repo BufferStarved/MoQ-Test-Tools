@@ -79,6 +79,7 @@ from moq_publish import (
     is_device_webcam_source,
     is_live_media_source,
     mediamtx_loopback_publish_url,
+    ensure_zixi_srt_streamid,
     with_srt_stream_id,
     zixi_http_push_stream_id_for_preset,
     zixi_rtmp_stream_id_for_preset,
@@ -544,7 +545,9 @@ class UploadJob:
         ) or zixi_rtmp_stream_id_for_preset(self.destination.preset_id)
 
     def _resolved_srt_destination_url(self) -> str:
-        url = self.destination.url
+        url = ensure_zixi_srt_streamid(
+            self.destination.url, self.destination.preset_id
+        )
         stream_id = self.managed_zixi_stream_id()
         if stream_id:
             url = with_srt_stream_id(url, stream_id)

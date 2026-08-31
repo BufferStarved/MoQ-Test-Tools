@@ -27,6 +27,7 @@ describe("local publisher help never shares an operator camera", () => {
       "dev-local-publisher",
       "sess-visitor-1",
     );
+    assert.match(cmd, /MOQ_PUBLISHER_INSECURE=1/);
     assert.match(cmd, /LOCAL_PUBLISHER_API=https:\/\/moq\.sean-mccarthy\.net/);
     assert.match(cmd, /LOCAL_PUBLISHER_SESSION=sess-visitor-1/);
     assert.match(cmd, /bash -c /);
@@ -38,6 +39,7 @@ describe("local publisher help never shares an operator camera", () => {
 
   it("keeps the localhost one-liner", () => {
     const cmd = localPublisherAgentOneLiner("http://127.0.0.1:8000");
+    assert.match(cmd, /MOQ_PUBLISHER_INSECURE=1/);
     assert.match(cmd, /LOCAL_PUBLISHER_API=http:\/\/127\.0\.0\.1:8000/);
     assert.match(cmd, /bash -c /);
     assert.doesNotMatch(cmd, /sean-mccarthy/);

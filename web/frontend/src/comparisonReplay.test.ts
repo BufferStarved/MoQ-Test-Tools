@@ -815,6 +815,30 @@ describe("helper laptop SRT idle before encode frames", () => {
   });
 });
 
+describe("helper laptop SRT idle after webcam encode frames", () => {
+  it("fails closed on idle HTTP-TS even when the helper already encoded 90 frames", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT) · gcp/us-central1",
+      protocol: "srt",
+      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 90,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const idle =
+      "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.";
+    const shown = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: idle,
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /sent no media/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+});
+
 describe("helper laptop MoQ WT never connected", () => {
   it("keeps 0x10 as a publisher CONNECT miss, not a catalog miss", () => {
     const moq: ComparisonLastRow = {

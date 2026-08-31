@@ -39,22 +39,31 @@ describe("mpegTsShouldWaitForEncode", () => {
     );
   });
 
-  it("does not exhaust reconnects on idle HTTP-TS before encode frames", () => {
+  it("does not exhaust reconnects on idle HTTP-TS while the job is still running", () => {
+    const idle =
+      "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.";
     assert.equal(
       mpegTsMayExhaustReconnects({
         encodeFramesTotal: 0,
         jobStatus: "running",
-        lastReason:
-          "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.",
+        lastReason: idle,
+      }),
+      false,
+    );
+    // Webcam helper frames ≠ Zixi packets. Holding reconnects is required.
+    assert.equal(
+      mpegTsMayExhaustReconnects({
+        encodeFramesTotal: 90,
+        jobStatus: "running",
+        lastReason: idle,
       }),
       false,
     );
     assert.equal(
       mpegTsMayExhaustReconnects({
         encodeFramesTotal: 90,
-        jobStatus: "running",
-        lastReason:
-          "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.",
+        jobStatus: "completed",
+        lastReason: idle,
       }),
       true,
     );

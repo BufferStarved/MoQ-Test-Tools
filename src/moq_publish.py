@@ -281,6 +281,39 @@ def zixi_srt_streamid_value(stream_id: str) -> str:
     return f"#!::r={stream_id},m=publish"
 
 
+_ZIXI_SRT_HOSTS = frozenset({"35.222.33.58", "35.196.215.179", "45.33.68.151"})
+
+
+def looks_like_zixi_srt_url(url: str) -> bool:
+    """True for managed Zixi SRT caller URLs (port 10080 or known Broadcaster IPs)."""
+    try:
+        parsed = urlparse((url or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme != "srt":
+        return False
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or 0
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    return port == 10080 or host in _ZIXI_SRT_HOSTS
+
+
+def ensure_zixi_srt_streamid(url: str, preset_id: str = "") -> str:
+    """Attach ``streamid=#!::r=SRT Test,m=publish`` when the URL omitted it.
+
+    MediaMTX presets already embed ``streamid=publish:benchmark``. Zixi presets
+    used to omit it and rely on UploadService — the Advanced panel and any
+    helper path that published ``destination.url`` raw never reached ``SRT Test``.
+    """
+    stream_id = zixi_srt_stream_id_for_preset(preset_id)
+    if not stream_id and looks_like_zixi_srt_url(url):
+        stream_id = "SRT Test"
+    if not stream_id:
+        return url
+    return with_srt_stream_id(url, stream_id)
+
+
 def with_srt_stream_id(url: str, stream_id: str) -> str:
     """Attach Zixi stream ID to an srt:// URL (required when Verify Stream ID is enabled)."""
     parsed = urlparse(url.strip())

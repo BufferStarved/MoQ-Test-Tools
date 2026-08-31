@@ -16,16 +16,18 @@ export function mpegTsPaintedOk(options: {
   );
 }
 
+/**
+ * Webcam helper encodes frames on the laptop (UDP broker) before Zixi
+ * :7777 has packets. encode_frames_total > 0 is not "origin has media".
+ * Idle HTTP-TS while the job is still running/queued/pending must hold
+ * reconnects — otherwise MAX_RECONNECTS burns and the tile goes Failed.
+ */
 export function mpegTsIdleWhileEncodePending(options: {
   encodeFramesTotal?: number | null;
   jobStatus?: string;
   lastReason?: string | null;
 }): boolean {
-  const frames = options.encodeFramesTotal ?? 0;
   const status = (options.jobStatus || "").toLowerCase();
-  if (frames > 0) {
-    return false;
-  }
   if (status !== "running" && status !== "queued" && status !== "pending") {
     return false;
   }

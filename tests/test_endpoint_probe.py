@@ -70,5 +70,36 @@ class RtmpStreamIdTests(unittest.TestCase):
         )
 
 
+class ZixiSrtStreamIdTests(unittest.TestCase):
+    def test_ensure_zixi_srt_streamid_on_bare_url_and_localhost(self) -> None:
+        from destinations import PRESET_BY_ID
+        from moq_publish import ensure_zixi_srt_streamid
+
+        attached = ensure_zixi_srt_streamid(
+            "srt://35.222.33.58:10080?mode=caller&latency=200000"
+        )
+        self.assertIn("streamid=", attached)
+        self.assertIn("SRT%20Test", attached)
+        self.assertEqual(
+            attached,
+            "srt://35.222.33.58:10080?mode=caller&latency=200000&streamid=#!::r=SRT%20Test,m=publish",
+        )
+
+        local = ensure_zixi_srt_streamid(
+            "srt://127.0.0.1:10080?mode=caller&latency=200000"
+        )
+        self.assertNotIn("streamid=", local)
+
+        mediamtx = (
+            "srt://34.9.217.178:8890?mode=caller&latency=200000&streamid=publish:benchmark"
+        )
+        self.assertEqual(ensure_zixi_srt_streamid(mediamtx), mediamtx)
+        self.assertIn("publish:benchmark", ensure_zixi_srt_streamid(mediamtx))
+
+        preset_url = PRESET_BY_ID["moq_zixi_gcp"].url
+        self.assertIn("streamid=", preset_url)
+        self.assertIn("SRT%20Test", preset_url)
+
+
 if __name__ == "__main__":
     unittest.main()

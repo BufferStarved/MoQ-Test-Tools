@@ -41,6 +41,7 @@ export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR:$ROOT_DIR/web/api${PYTHONPATH:+:$PYTH
 _CALLER_API="${LOCAL_PUBLISHER_API:-}"
 _CALLER_SESSION="${LOCAL_PUBLISHER_SESSION:-}"
 _CALLER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-}"
+_CALLER_INSECURE="${MOQ_PUBLISHER_INSECURE:-}"
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -52,8 +53,12 @@ fi
 [[ -n "$_CALLER_API" ]] && export LOCAL_PUBLISHER_API="$_CALLER_API"
 [[ -n "$_CALLER_SESSION" ]] && export LOCAL_PUBLISHER_SESSION="$_CALLER_SESSION"
 [[ -n "$_CALLER_TOKEN" ]] && export LOCAL_PUBLISHER_TOKEN="$_CALLER_TOKEN"
+[[ -n "$_CALLER_INSECURE" ]] && export MOQ_PUBLISHER_INSECURE="$_CALLER_INSECURE"
 export LOCAL_PUBLISHER_API="${LOCAL_PUBLISHER_API:-http://127.0.0.1:8000}"
 export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
+# sslip.io :14433 needs skip-verify. Leftover .env must not drop it; the
+# one-liner (MOQ_PUBLISHER_INSECURE=1) still wins via _CALLER_INSECURE.
+export MOQ_PUBLISHER_INSECURE="${MOQ_PUBLISHER_INSECURE:-1}"
 
 # Must succeed: installs/upgrades a WHIP-capable ffmpeg and writes FFMPEG.
 if ! bash "$ROOT_DIR/scripts/ensure-publisher-tools.sh"; then

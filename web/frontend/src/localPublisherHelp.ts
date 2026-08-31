@@ -92,7 +92,7 @@ export function localPublisherAgentOneLiner(
     if (!session.trim()) {
       return "";
     }
-    return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_SESSION=${session.trim()} ${localPublisherLaunchSuffix(api)}`;
+    return `MOQ_PUBLISHER_INSECURE=1 LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_SESSION=${session.trim()} ${localPublisherLaunchSuffix(api)}`;
   }
-  return `LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_TOKEN=${token} ${localPublisherLaunchSuffix(api)}`;
+  return `MOQ_PUBLISHER_INSECURE=1 LOCAL_PUBLISHER_API=${api} LOCAL_PUBLISHER_TOKEN=${token} ${localPublisherLaunchSuffix(api)}`;
 }

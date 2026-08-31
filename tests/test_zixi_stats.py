@@ -67,10 +67,16 @@ class ZixiStatsTests(unittest.TestCase):
         self.assertEqual(ZixiStatsPoller._stream_id_from_url(url), "benchmark")
 
     def test_gcp_srt_preset_url_defaults_input_id(self):
-        # Public preset omits streamid; poller must still resolve Zixi input "SRT Test".
+        # Poller must still resolve Zixi input "SRT Test" from both bare and
+        # streamid URLs (the public preset now embeds streamid).
         url = "srt://35.222.33.58:10080?mode=caller&latency=200000"
         poller = ZixiStatsPoller(url)
         self.assertEqual(poller._input_id, "SRT Test")
+        with_id = (
+            "srt://35.222.33.58:10080?mode=caller&latency=200000"
+            "&streamid=#!::r=SRT%20Test,m=publish"
+        )
+        self.assertEqual(ZixiStatsPoller(with_id)._input_id, "SRT Test")
 
     def test_east_srt_preset_url_defaults_input_id(self):
         url = "srt://35.196.215.179:10080?mode=caller&latency=200000"

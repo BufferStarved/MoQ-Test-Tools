@@ -129,8 +129,12 @@ assert.match(src("StreamPlayer.tsx"), /encodeFramesTotal=\{encodeFramesTotal\}/)
 assert.match(src("App.tsx"), /encode_frames_total/);
 assert.match(src("mpegTsPlayback.ts"), /mpegTsShouldWaitForEncode/);
 assert.match(src("comparisonReplay.test.ts"), /helper laptop SRT idle before encode frames/);
+assert.match(src("comparisonReplay.test.ts"), /helper laptop SRT idle after webcam encode frames/);
 assert.match(src("comparisonReplay.test.ts"), /helper laptop MoQ WT never connected/);
 assert.match(py("src/publisher_protocol.py"), /moq_insecure_tls_for_endpoint/);
+assert.match(py("src/publisher_protocol.py"), /ensure_zixi_srt_streamid/);
+assert.match(src("localPublisherHelp.ts"), /MOQ_PUBLISHER_INSECURE=1/);
+assert.match(py("scripts/run-local-publisher.sh"), /_CALLER_INSECURE/);
 assert.match(py("src/moq_publish.py"), /moq_insecure_tls_for_endpoint/);
 assert.match(py("web/api/job_manager.py"), /Helper SRT shares exclusive/);
 assert.match(

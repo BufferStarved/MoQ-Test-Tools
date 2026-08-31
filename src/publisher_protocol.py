@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from destinations import DestinationProfile
 from moq_publish import (
     MoqPublishTarget,
+    ensure_zixi_srt_streamid,
     infer_moq_draft_from_url,
     moq_insecure_tls_for_endpoint,
 )
@@ -23,7 +24,7 @@ PROTOCOL_VERSION = 1
 def destination_to_dict(destination: DestinationProfile) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "protocol": destination.protocol,
-        "url": destination.url,
+        "url": ensure_zixi_srt_streamid(destination.url, destination.preset_id),
         "label": destination.label,
         "preset_id": destination.preset_id,
         "ingest_provider": destination.ingest_provider,
@@ -56,11 +57,12 @@ def destination_from_dict(data: Dict[str, Any]) -> DestinationProfile:
                 endpoint, bool(moq_raw.get("insecure_tls"))
             ),
         )
+    preset_id = str(data.get("preset_id") or "")
     return DestinationProfile(
         protocol=str(data.get("protocol") or ""),
-        url=str(data.get("url") or ""),
+        url=ensure_zixi_srt_streamid(str(data.get("url") or ""), preset_id),
         label=str(data.get("label") or ""),
-        preset_id=str(data.get("preset_id") or ""),
+        preset_id=preset_id,
         ingest_provider=str(data.get("ingest_provider") or ""),
         cloud_provider=str(data.get("cloud_provider") or ""),
         cloud_region=str(data.get("cloud_region") or ""),
