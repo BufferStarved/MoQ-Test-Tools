@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from moq_publish import (  # noqa: E402
     MoqPublishTarget,
+    build_moq5_publisher_cmd,
     build_openmoq_publisher_cmd,
     publisher_exit_error,
     publisher_webtransport_connected,
@@ -31,6 +32,28 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         self.assertFalse(should_pace_moq_publisher("device:webcam"))
         self.assertFalse(
             should_pace_moq_publisher("udp://127.0.0.1:19001?fifo_size=1000000")
+        )
+
+    def test_moq5_cmd_skips_tls_verify_for_sslip_even_if_flag_false(self) -> None:
+        cmd = build_moq5_publisher_cmd(
+            "/opt/moq5-fmp4-publish",
+            MoqPublishTarget(
+                endpoint="https://34-28-164-90.sslip.io:14433/moq-relay",
+                namespace="bench-helper",
+                insecure_tls=False,
+            ),
+            duration_sec=60,
+        )
+        self.assertIn("--insecure-skip-verify", cmd)
+        self.assertEqual(cmd[1], "https://34-28-164-90.sslip.io:14433/moq-relay")
+
+    def test_connect_log_before_moov_counts_as_webtransport(self) -> None:
+        self.assertTrue(
+            publisher_webtransport_connected(
+                "starting WebTransport CONNECT (before moov)\n"
+                "connection_id=moq5-wt ns=bench-helper\n"
+                "webtransport connected (sender attach still waits for moov)\n"
+            )
         )
 
     def test_publisher_cmd_omits_paced_and_keeps_catalog_forward(self) -> None:

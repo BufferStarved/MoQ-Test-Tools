@@ -435,6 +435,10 @@ class JobManager:
             if job.publisher_host == "browser":
                 result = self._run_browser_publisher_job(job_id, job)
             elif job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
+                if job.destination.protocol == "srt" and job.managed_zixi_stream_id():
+                    # Helper SRT shares exclusive "SRT Test". Clear leftover
+                    # cloud dummy.mp4 so this laptop publish is the first client.
+                    self._service._reset_zixi_srt_input_if_managed(job)
                 result = publisher_hub.run_remote(
                     job,
                     on_sample=on_sample,

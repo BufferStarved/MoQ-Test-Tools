@@ -10,7 +10,11 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
 from destinations import DestinationProfile
-from moq_publish import MoqPublishTarget
+from moq_publish import (
+    MoqPublishTarget,
+    infer_moq_draft_from_url,
+    moq_insecure_tls_for_endpoint,
+)
 from upload_service import UploadJob, UploadResult, UploadSample
 
 PROTOCOL_VERSION = 1
@@ -36,13 +40,21 @@ def destination_from_dict(data: Dict[str, Any]) -> DestinationProfile:
     moq_raw = data.get("moq_target")
     moq_target = None
     if isinstance(moq_raw, dict) and moq_raw.get("endpoint"):
+        endpoint = str(moq_raw.get("endpoint") or "")
+        draft_raw = moq_raw.get("draft")
+        if draft_raw in (None, ""):
+            draft = infer_moq_draft_from_url(endpoint)
+        else:
+            draft = int(draft_raw)
         moq_target = MoqPublishTarget(
-            endpoint=str(moq_raw.get("endpoint") or ""),
+            endpoint=endpoint,
             namespace=str(moq_raw.get("namespace") or "benchmark"),
             transport=str(moq_raw.get("transport") or "webtransport"),
-            draft=int(moq_raw.get("draft") or 16),
+            draft=draft,
             forward=int(moq_raw.get("forward") or 1),
-            insecure_tls=bool(moq_raw.get("insecure_tls") or False),
+            insecure_tls=moq_insecure_tls_for_endpoint(
+                endpoint, bool(moq_raw.get("insecure_tls"))
+            ),
         )
     return DestinationProfile(
         protocol=str(data.get("protocol") or ""),

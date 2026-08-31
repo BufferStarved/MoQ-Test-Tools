@@ -16,6 +16,49 @@ export function mpegTsPaintedOk(options: {
   );
 }
 
+export function mpegTsIdleWhileEncodePending(options: {
+  encodeFramesTotal?: number | null;
+  jobStatus?: string;
+  lastReason?: string | null;
+}): boolean {
+  const frames = options.encodeFramesTotal ?? 0;
+  const status = (options.jobStatus || "").toLowerCase();
+  if (frames > 0) {
+    return false;
+  }
+  if (status !== "running" && status !== "queued" && status !== "pending") {
+    return false;
+  }
+  return /sent no media|idle HTTP-TS|unbounded stream/i.test(options.lastReason || "");
+}
+
+/** Helper SRT: do not probe :7777 until ffmpeg has actually produced frames. */
+export function mpegTsShouldWaitForEncode(options: {
+  encodeFramesTotal?: number | null;
+  previewReady?: boolean;
+  skipConnectProbe?: boolean;
+  jobStatus?: string;
+}): boolean {
+  if (options.skipConnectProbe || options.previewReady) {
+    return false;
+  }
+  const frames = options.encodeFramesTotal ?? 0;
+  const status = (options.jobStatus || "").toLowerCase();
+  if (status === "running" || status === "queued" || status === "pending") {
+    return frames <= 0;
+  }
+  return false;
+}
+
+/** Idle 200+0-byte probes must not burn the reconnect budget before encode. */
+export function mpegTsMayExhaustReconnects(options: {
+  encodeFramesTotal?: number | null;
+  jobStatus?: string;
+  lastReason?: string | null;
+}): boolean {
+  return !mpegTsIdleWhileEncodePending(options);
+}
+
 export function mpegTsMayMarkPlaybackOk(options: {
   paintedOk: boolean;
   lastReason?: string | null;

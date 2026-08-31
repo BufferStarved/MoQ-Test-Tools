@@ -7,9 +7,59 @@ import {
   mpegTsIdleOriginReason,
   mpegTsMayMarkPlaybackOk,
   mpegTsOriginHost,
+  mpegTsMayExhaustReconnects,
   mpegTsPaintedOk,
   mpegTsProbeFailReason,
+  mpegTsShouldWaitForEncode,
 } from "./mpegTsPlayback.ts";
+
+describe("mpegTsShouldWaitForEncode", () => {
+  it("holds the HTTP-TS probe until helper encode frames exist", () => {
+    assert.equal(
+      mpegTsShouldWaitForEncode({
+        encodeFramesTotal: 0,
+        jobStatus: "running",
+      }),
+      true,
+    );
+    assert.equal(
+      mpegTsShouldWaitForEncode({
+        encodeFramesTotal: 12,
+        jobStatus: "running",
+      }),
+      false,
+    );
+    assert.equal(
+      mpegTsShouldWaitForEncode({
+        encodeFramesTotal: 0,
+        previewReady: true,
+        jobStatus: "running",
+      }),
+      false,
+    );
+  });
+
+  it("does not exhaust reconnects on idle HTTP-TS before encode frames", () => {
+    assert.equal(
+      mpegTsMayExhaustReconnects({
+        encodeFramesTotal: 0,
+        jobStatus: "running",
+        lastReason:
+          "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.",
+      }),
+      false,
+    );
+    assert.equal(
+      mpegTsMayExhaustReconnects({
+        encodeFramesTotal: 90,
+        jobStatus: "running",
+        lastReason:
+          "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.",
+      }),
+      true,
+    );
+  });
+});
 
 describe("mpegTsPaintedOk", () => {
   it("rejects TTFF without a frame (comparison 29 Playback OK lie)", () => {

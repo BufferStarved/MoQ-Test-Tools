@@ -25,10 +25,12 @@ import { playerErrorForFailedJob } from "../moqCmafPlayback";
 import {
   classifyMpegTsEndVerdict,
   mpegTsFetchIdleSignal,
+  mpegTsMayExhaustReconnects,
   mpegTsMayMarkPlaybackOk,
   mpegTsOriginHost,
   mpegTsPaintedOk,
   mpegTsProbeFailReason,
+  mpegTsShouldWaitForEncode,
 } from "../mpegTsPlayback";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
 import { GoLiveButton } from "../GoLiveButton";
@@ -54,6 +56,8 @@ interface MpegTsPlayerProps {
   jobStatus?: string;
   jobError?: string | null;
   protocol?: string | null;
+  /** Helper SRT: wait to probe HTTP-TS until ffmpeg has produced frames. */
+  encodeFramesTotal?: number;
   waitingForEncodeSlot?: boolean;
   encodeQueueAhead?: number;
   benchmarkLoading?: boolean;
@@ -87,6 +91,7 @@ export default function MpegTsPlayer({
   jobStatus,
   jobError = null,
   protocol = null,
+  encodeFramesTotal = 0,
   waitingForEncodeSlot = false,
   encodeQueueAhead = 0,
   benchmarkLoading = false,
@@ -135,6 +140,10 @@ export default function MpegTsPlayer({
   jobErrorRef.current = jobError;
   const protocolRef = useRef(protocol);
   protocolRef.current = protocol;
+  const encodeFramesRef = useRef(encodeFramesTotal);
+  encodeFramesRef.current = encodeFramesTotal;
+  const skipConnectProbeRef = useRef(skipConnectProbe);
+  skipConnectProbeRef.current = skipConnectProbe;
   const waitingSlotRef = useRef(waitingForEncodeSlot);
   waitingSlotRef.current = waitingForEncodeSlot;
   const encodeQueueRef = useRef(encodeQueueAhead);
@@ -436,6 +445,21 @@ export default function MpegTsPlayer({
         return;
       }
       pushDiag(`reconnect_reason=${reason}`);
+      if (
+        !mpegTsMayExhaustReconnects({
+          encodeFramesTotal: encodeFramesRef.current,
+          jobStatus: jobStatusRef.current,
+          lastReason: reason,
+        })
+      ) {
+        pushDiag(`reconnect_hold encode_frames=${encodeFramesRef.current} reason=${reason}`);
+        setStatus("Waiting for encode…");
+        clearReconnect();
+        reconnectTimer = window.setTimeout(() => {
+          void start();
+        }, RECONNECT_DELAY_MS);
+        return;
+      }
       if (reconnects >= MAX_RECONNECTS) {
         if (mpegTsMayMarkPlaybackOk({ paintedOk: playedOk, lastReason: reason })) {
           markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`, reason);
@@ -534,8 +558,23 @@ export default function MpegTsPlayer({
       // with 0 bytes. mpegts.js treats that as a live stream and burns out
       // with "error -1". Require real TS sync bytes before attaching.
       const proxied = proxiedPlaybackUrl(url);
+      if (
+        mpegTsShouldWaitForEncode({
+          encodeFramesTotal: encodeFramesRef.current,
+          skipConnectProbe: skipConnectProbeRef.current,
+          jobStatus: jobStatusRef.current,
+        })
+      ) {
+        pushDiag(`connect_probe=wait_encode_frames frames=${encodeFramesRef.current}`);
+        setStatus("Waiting for encode…");
+        clearReconnect();
+        reconnectTimer = window.setTimeout(() => {
+          void start();
+        }, 400);
+        return;
+      }
       // Backend preview_ready already validated sync bytes — skip duplicate probe.
-      if (skipConnectProbe) {
+      if (skipConnectProbeRef.current) {
         pushDiag("connect_probe=skipped (preview_ready already confirmed)");
       } else {
         pushDiag(`connect_probe=start proxied=${proxied}`);

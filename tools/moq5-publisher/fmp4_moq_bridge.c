@@ -1122,6 +1122,12 @@ static void *endpoint_connect_main(void *arg)
     pthread_mutex_unlock(&b->connect_mu);
     if (rc != MOQ_OK) {
         fprintf(stderr, "endpoint connect failed: %d\n", (int)rc);
+    } else {
+        /* Orchestrator treats connection_id= as a live WT session. Print it
+         * at CONNECT, not only after moov attach — helper finalize used to
+         * say "never connected" when attach had not run yet. */
+        fprintf(stderr, "connection_id=moq5-wt ns=%s\n", b->nsbuf);
+        fprintf(stderr, "webtransport connected (sender attach still waits for moov)\n");
     }
     return NULL;
 }

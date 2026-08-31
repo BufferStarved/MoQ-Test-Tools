@@ -788,6 +788,66 @@ describe("headed East Zixi SRT 3c0a875f remount-then-stall", () => {
   });
 });
 
+describe("helper laptop SRT idle before encode frames", () => {
+  it("fails closed on Zixi Central idle HTTP-TS without calling Playback OK", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT) · gcp/us-central1",
+      protocol: "srt",
+      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const idle =
+      "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.";
+    const shown = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: idle,
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /35\.222\.33\.58:7777/);
+    assert.match(shown.error ?? "", /answered HTTP 200/i);
+    assert.match(shown.error ?? "", /sent no media/i);
+    assert.doesNotMatch(shown.error ?? "", /frozen/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+});
+
+describe("helper laptop MoQ WT never connected", () => {
+  it("keeps 0x10 as a publisher CONNECT miss, not a catalog miss", () => {
+    const moq: ComparisonLastRow = {
+      stream: "Stream 1 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+      encode_frames_total: 240,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const jobError =
+      "The publisher ran but did not connect to the relay (WebTransport session never connected; no connection_id). relay=https://34-28-164-90.sslip.io:14433/moq-relay binary=/Users/sean/Developer/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish draft=18.";
+    const shown = visibleLeg(moq, {
+      playaLines: [
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "catalog pending",
+      ],
+      jobStatus: "failed",
+      jobError,
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-helper",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /did not connect to the relay/i);
+    assert.match(shown.error ?? "", /not a player/i);
+    assert.doesNotMatch(shown.error ?? "", /one-shot catalog miss/i);
+    assert.doesNotMatch(shown.error ?? "", /catalog object never reached/i);
+  });
+});
+
 describe("custom 4-way bench-aef84d9a replay", () => {
   it("does not call completed + 0x10 + 0 paint a catalog miss", () => {
     const moq: ComparisonLastRow = {

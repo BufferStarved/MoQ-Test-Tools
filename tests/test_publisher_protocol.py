@@ -84,6 +84,42 @@ class PublisherProtocolTests(unittest.TestCase):
         self.assertEqual(restored.moq_target.endpoint, "https://example.sslip.io/moq")
         self.assertTrue(restored.moq_target.insecure_tls)
 
+    def test_helper_sslip_draft18_recovers_insecure_and_draft(self) -> None:
+        """Laptop agent must not default draft=16 or drop --insecure-skip-verify."""
+        restored = destination_from_dict(
+            {
+                "protocol": "moq",
+                "url": "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+                "preset_id": "moq_gcp_relay_d18",
+                "moq_target": {
+                    "endpoint": "https://34-28-164-90.sslip.io:14433/moq-relay",
+                    "namespace": "bench-helper",
+                    "transport": "webtransport",
+                    "forward": 1,
+                },
+            }
+        )
+        self.assertIsNotNone(restored.moq_target)
+        assert restored.moq_target is not None
+        self.assertEqual(restored.moq_target.draft, 18)
+        self.assertTrue(restored.moq_target.insecure_tls)
+
+    def test_helper_explicit_insecure_false_still_skips_sslip_verify(self) -> None:
+        restored = destination_from_dict(
+            {
+                "protocol": "moq",
+                "url": "https://66-228-49-113.sslip.io:14433/moq-relay?draft=18",
+                "moq_target": {
+                    "endpoint": "https://66-228-49-113.sslip.io:14433/moq-relay",
+                    "namespace": "benchmark",
+                    "draft": 18,
+                    "insecure_tls": False,
+                },
+            }
+        )
+        assert restored.moq_target is not None
+        self.assertTrue(restored.moq_target.insecure_tls)
+
     def test_sample_and_result_roundtrip(self) -> None:
         sample = UploadSample(
             elapsed_sec=3,

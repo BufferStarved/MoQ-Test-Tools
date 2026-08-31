@@ -672,6 +672,20 @@ def find_openmoq_publisher() -> Optional[str]:
     return None
 
 
+def moq_insecure_tls_for_endpoint(endpoint: str, requested: bool = False) -> bool:
+    """sslip.io relays use public names with private certs — always skip verify.
+
+    Helper jobs reconstruct ``MoqPublishTarget`` from JSON. A missing or
+    false ``insecure_tls`` used to omit ``--insecure-skip-verify`` and
+    WebTransport never connected from the laptop even though cloud encode
+    (which goes through parse_moq_publish_url) succeeded.
+    """
+    if requested:
+        return True
+    host = (urlparse((endpoint or "").strip()).hostname or "").lower()
+    return host.endswith(".sslip.io") or os.environ.get("MOQ_PUBLISHER_INSECURE", "") == "1"
+
+
 def infer_moq_draft_from_url(url: str) -> int:
     """Draft for a URL that omitted ``?draft=``.
 
@@ -753,8 +767,7 @@ def parse_moq_publish_url(url: str) -> MoqPublishTarget:
     except ValueError as exc:
         raise ValueError(f"Invalid MOQ forward query parameter: {forward_raw}") from exc
 
-    hostname = (parsed.hostname or "").lower()
-    insecure_tls = hostname.endswith(".sslip.io") or os.environ.get("MOQ_PUBLISHER_INSECURE", "") == "1"
+    insecure_tls = moq_insecure_tls_for_endpoint(endpoint)
 
     return MoqPublishTarget(
         endpoint=endpoint,
@@ -1070,7 +1083,11 @@ def build_moq5_publisher_cmd(
         publisher_bin,
         target.endpoint,
         target.namespace,
-        *(["--insecure-skip-verify"] if target.insecure_tls else []),
+        *(
+            ["--insecure-skip-verify"]
+            if moq_insecure_tls_for_endpoint(target.endpoint, target.insecure_tls)
+            else []
+        ),
         "--duration",
         str(duration_sec),
     ]
@@ -1250,7 +1267,11 @@ def build_openmoq_publisher_cmd(
         "--timeout",
         str(timeout_sec),
         "--publish-catalog",
-        *(["--insecure"] if target.insecure_tls else []),
+        *(
+            ["--insecure"]
+            if moq_insecure_tls_for_endpoint(target.endpoint, target.insecure_tls)
+            else []
+        ),
     ]
     if paced:
         cmd.append("--paced")

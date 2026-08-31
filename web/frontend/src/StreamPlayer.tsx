@@ -43,6 +43,7 @@ interface StreamPlayerProps {
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
   jobError?: string | null;
+  encodeFramesTotal?: number;
   waitingForEncodeSlot?: boolean;
   encodeQueueAhead?: number;
   previewReady?: boolean;
@@ -105,6 +106,7 @@ export function StreamPlayer({
   onPlaybackSample,
   jobStatus,
   jobError = null,
+  encodeFramesTotal = 0,
   waitingForEncodeSlot = false,
   encodeQueueAhead = 0,
   previewReady,
@@ -288,6 +290,7 @@ export function StreamPlayer({
               jobStatus={jobStatus}
               jobError={jobError}
               protocol={protocol}
+              encodeFramesTotal={encodeFramesTotal}
               waitingForEncodeSlot={waitingForEncodeSlot}
               encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}

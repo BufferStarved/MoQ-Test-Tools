@@ -2696,6 +2696,7 @@ function App() {
                         }}
                         jobStatus={leg?.job.status}
                         jobError={leg?.job.error}
+                        encodeFramesTotal={leg?.latestSample?.encode_frames_total ?? 0}
                         waitingForEncodeSlot={Boolean(leg?.job.waiting_for_encode_slot)}
                         encodeQueueAhead={leg?.job.encode_queue_ahead ?? 0}
                         previewReady={leg?.job.preview_ready}
