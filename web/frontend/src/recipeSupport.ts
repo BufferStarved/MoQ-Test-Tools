@@ -230,14 +230,19 @@ export function destinationsForProtocol(
   protocol: string,
   ctx: RecipeContext,
   occupiedCollisionKeys: ReadonlySet<string>,
+  options: { includeOccupied?: boolean } = {},
 ) {
   const preferredRole =
     protocol === "rtmp" ? "zixi" : protocol === "moq" ? "moq_relay" : "mediamtx";
   const hostRank = (id: string) => encodeHostRank(cloudHostFromIngest(id));
+  const includeOccupied = options.includeOccupied === true;
   return ingestEndpointsForProtocol(protocol, ctx.presets)
     .filter((item) => {
       if (!ingestFitsRecipe(item.id, protocol, ctx)) {
         return false;
+      }
+      if (includeOccupied) {
+        return true;
       }
       const key = ingestCollisionKey(item.id, protocol);
       return !(key && occupiedCollisionKeys.has(key));

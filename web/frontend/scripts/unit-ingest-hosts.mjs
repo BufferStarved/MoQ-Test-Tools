@@ -39,6 +39,10 @@ assert.match(destModel, /Not deployed/);
 assert.match(destGrid, /unavailableDestLabel/);
 assert.match(endpoint, /DestinationGrid/);
 assert.match(destGrid, /disabled=\{disabled \|\| \(!item\.available/);
+assert.match(destGrid, /optionForHostCell/);
+assert.match(destGrid, /gridIngestRoles/);
+assert.match(destGrid, /pickDestForHost/);
+assert.match(destModel, /In use by another output|in use/);
 assert.doesNotMatch(ingest, /label: "OpenMOQ · GCP us-central1"/);
 
 const unit = spawnSync(

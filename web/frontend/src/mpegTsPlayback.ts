@@ -16,6 +16,11 @@ export function mpegTsPaintedOk(options: {
   );
 }
 
+function mpegTsJobStillRunning(jobStatus?: string): boolean {
+  const status = (jobStatus || "").toLowerCase();
+  return status === "running" || status === "queued" || status === "pending";
+}
+
 /**
  * Webcam helper encodes frames on the laptop (UDP broker) before Zixi
  * :7777 has packets. encode_frames_total > 0 is not "origin has media".
@@ -27,11 +32,28 @@ export function mpegTsIdleWhileEncodePending(options: {
   jobStatus?: string;
   lastReason?: string | null;
 }): boolean {
-  const status = (options.jobStatus || "").toLowerCase();
-  if (status !== "running" && status !== "queued" && status !== "pending") {
+  if (!mpegTsJobStillRunning(options.jobStatus)) {
     return false;
   }
   return /sent no media|idle HTTP-TS|unbounded stream/i.test(options.lastReason || "");
+}
+
+/**
+ * Zixi SRT Test EC HTTP-TS 404s until the EC packager is mounted (first
+ * packet). That is the same reconnect-budget trap as idle 200+0: do not
+ * fatal while the helper job is still running.
+ */
+export function mpegTsHoldReconnectsWhileJobRunning(options: {
+  encodeFramesTotal?: number | null;
+  jobStatus?: string;
+  lastReason?: string | null;
+}): boolean {
+  if (!mpegTsJobStillRunning(options.jobStatus)) {
+    return false;
+  }
+  return /sent no media|idle HTTP-TS|unbounded stream|HTTP 404/i.test(
+    options.lastReason || "",
+  );
 }
 
 /** Helper SRT: do not probe :7777 until ffmpeg has actually produced frames. */
@@ -52,13 +74,13 @@ export function mpegTsShouldWaitForEncode(options: {
   return false;
 }
 
-/** Idle 200+0-byte probes must not burn the reconnect budget before encode. */
+/** Idle 200+0 and SRT Test EC 404 must not burn reconnects while the job runs. */
 export function mpegTsMayExhaustReconnects(options: {
   encodeFramesTotal?: number | null;
   jobStatus?: string;
   lastReason?: string | null;
 }): boolean {
-  return !mpegTsIdleWhileEncodePending(options);
+  return !mpegTsHoldReconnectsWhileJobRunning(options);
 }
 
 export function mpegTsMayMarkPlaybackOk(options: {

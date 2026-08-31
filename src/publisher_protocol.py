@@ -42,9 +42,10 @@ def destination_from_dict(data: Dict[str, Any]) -> DestinationProfile:
     moq_target = None
     if isinstance(moq_raw, dict) and moq_raw.get("endpoint"):
         endpoint = str(moq_raw.get("endpoint") or "")
+        dest_url = str(data.get("url") or "")
         draft_raw = moq_raw.get("draft")
         if draft_raw in (None, ""):
-            draft = infer_moq_draft_from_url(endpoint)
+            draft = infer_moq_draft_from_url(endpoint or dest_url)
         else:
             draft = int(draft_raw)
         moq_target = MoqPublishTarget(
@@ -53,8 +54,9 @@ def destination_from_dict(data: Dict[str, Any]) -> DestinationProfile:
             transport=str(moq_raw.get("transport") or "webtransport"),
             draft=draft,
             forward=int(moq_raw.get("forward") or 1),
-            insecure_tls=moq_insecure_tls_for_endpoint(
-                endpoint, bool(moq_raw.get("insecure_tls"))
+            insecure_tls=bool(
+                moq_insecure_tls_for_endpoint(endpoint, bool(moq_raw.get("insecure_tls")))
+                or moq_insecure_tls_for_endpoint(dest_url)
             ),
         )
     preset_id = str(data.get("preset_id") or "")

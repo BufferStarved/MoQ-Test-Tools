@@ -839,6 +839,40 @@ describe("helper laptop SRT idle after webcam encode frames", () => {
   });
 });
 
+describe("helper laptop SRT Test EC HTTP 404", () => {
+  it("fails closed on Zixi Central EC 404 without calling Playback OK", () => {
+    const hudLines = [
+      "connect_probe=start proxied=/api/playback/fetch?url=http%3A%2F%2F35.222.33.58%3A7777%2FSRT%2520Test%2520EC.ts",
+      "connect_probe=fail http=404 reason=HTTP 404",
+      "fatal=HTTP 404",
+      "manifest=http://35.222.33.58:7777/SRT%20Test%20EC.ts",
+    ];
+    const lastReason =
+      hudLines.find((line) => line.startsWith("connect_probe=fail"))?.replace(/^.*reason=/, "") ??
+      "HTTP 404";
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT) · gcp/us-central1",
+      protocol: "srt",
+      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT%20Test,m=publish",
+      encode_frames_total: 12,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: lastReason,
+    });
+    assert.equal(lastReason, "HTTP 404");
+    assert.match(hudLines.join("\n"), /SRT%2520Test%2520EC/);
+    assert.match(hudLines.join("\n"), /SRT%20Test%20EC/);
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /HTTP 404/);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+});
+
 describe("helper laptop MoQ WT never connected", () => {
   it("keeps 0x10 as a publisher CONNECT miss, not a catalog miss", () => {
     const moq: ComparisonLastRow = {
@@ -869,6 +903,37 @@ describe("helper laptop MoQ WT never connected", () => {
     assert.match(shown.error ?? "", /not a player/i);
     assert.doesNotMatch(shown.error ?? "", /one-shot catalog miss/i);
     assert.doesNotMatch(shown.error ?? "", /catalog object never reached/i);
+  });
+
+  it("keeps East :14433 0x10 as a publisher CONNECT miss", () => {
+    const moq: ComparisonLastRow = {
+      stream: "Stream 1 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+      encode_frames_total: 240,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const jobError =
+      "The publisher ran but did not connect to the relay (WebTransport session never connected; no connection_id). relay=https://34-138-137-211.sslip.io:14433/moq-relay binary=/Users/sean/Developer/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish draft=18.";
+    const shown = visibleLeg(moq, {
+      playaLines: [
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "catalog pending",
+      ],
+      jobStatus: "failed",
+      jobError,
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-helper",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /did not connect to the relay/i);
+    assert.match(shown.error ?? "", /not a player/i);
+    assert.match(shown.error ?? "", /34-138-137-211/);
+    assert.doesNotMatch(shown.error ?? "", /one-shot catalog miss/i);
   });
 });
 

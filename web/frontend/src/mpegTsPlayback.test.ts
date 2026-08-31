@@ -7,6 +7,7 @@ import {
   mpegTsIdleOriginReason,
   mpegTsMayMarkPlaybackOk,
   mpegTsOriginHost,
+  mpegTsHoldReconnectsWhileJobRunning,
   mpegTsMayExhaustReconnects,
   mpegTsPaintedOk,
   mpegTsProbeFailReason,
@@ -64,6 +65,33 @@ describe("mpegTsShouldWaitForEncode", () => {
         encodeFramesTotal: 90,
         jobStatus: "completed",
         lastReason: idle,
+      }),
+      true,
+    );
+  });
+
+  it("does not exhaust reconnects on SRT Test EC HTTP 404 while the job is running", () => {
+    assert.equal(
+      mpegTsHoldReconnectsWhileJobRunning({
+        encodeFramesTotal: 12,
+        jobStatus: "running",
+        lastReason: "HTTP 404",
+      }),
+      true,
+    );
+    assert.equal(
+      mpegTsMayExhaustReconnects({
+        encodeFramesTotal: 12,
+        jobStatus: "running",
+        lastReason: "HTTP 404",
+      }),
+      false,
+    );
+    assert.equal(
+      mpegTsMayExhaustReconnects({
+        encodeFramesTotal: 12,
+        jobStatus: "completed",
+        lastReason: "HTTP 404",
       }),
       true,
     );

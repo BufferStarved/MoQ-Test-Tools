@@ -22,6 +22,8 @@ assert.match(appSrc, /canAddRecipeOutput/);
 assert.match(appSrc, /Boolean\(startTitle\)/);
 assert.match(appSrc, /recipeBlockReason/);
 assert.match(endpointSrc, /destinationsForProtocol/);
+assert.match(endpointSrc, /includeOccupied:\s*true/);
+assert.match(endpointSrc, /occupiedCollisionKeys=\{occupiedCollisionKeys\}/);
 assert.match(endpointSrc, /lockProtocol/);
 assert.match(destGridSrc, /data-testid="output-destination"/);
 assert.match(endpointSrc, /selectablePlaybackModes/);

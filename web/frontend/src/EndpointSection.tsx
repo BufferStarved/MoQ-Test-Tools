@@ -139,6 +139,7 @@ export function EndpointSection({
     endpoint.protocol,
     recipeContext,
     occupiedCollisionKeys,
+    { includeOccupied: true },
   ).filter((item) => !hideCustomDestinations || !isCustomIngestEndpoint(item.id));
   const isCustom = isCustomIngestEndpoint(endpoint.ingestEndpointId);
   const showMoq = showMoqUrlFields(endpoint.playbackMode, endpoint.protocol, endpoint.ingestEndpointId);
@@ -237,6 +238,8 @@ export function EndpointSection({
             : (hostOptions[0]?.id ?? endpoint.ingestEndpointId)
         }
         hostOptions={hostOptions}
+        protocol={endpoint.protocol}
+        occupiedCollisionKeys={occupiedCollisionKeys}
         disabled={controlsLocked}
         hideCustom={hideCustomDestinations}
         onSelect={(ingestEndpointId) => {

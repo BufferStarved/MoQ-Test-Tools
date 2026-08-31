@@ -453,7 +453,7 @@ export default function MpegTsPlayer({
         })
       ) {
         pushDiag(`reconnect_hold encode_frames=${encodeFramesRef.current} reason=${reason}`);
-        setStatus("Waiting for encode…");
+        setStatus(/HTTP 404/i.test(reason) ? "Waiting for origin…" : "Waiting for encode…");
         clearReconnect();
         reconnectTimer = window.setTimeout(() => {
           void start();

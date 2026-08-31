@@ -1,8 +1,18 @@
 import { useState } from "react";
-import { preferredOptionForHost, softwareLabel, unavailableDestLabel } from "./destinationGridModel";
+import {
+  gridIngestRoles,
+  optionForHostCell,
+  pickDestForHost,
+  pickDestForRole,
+  roleLabel,
+  softwareLabel,
+  unavailableDestLabel,
+} from "./destinationGridModel";
 import {
   ENCODE_HOSTS,
   cloudHostFromIngest,
+  ingestCollisionKey,
+  ingestRole,
   isCustomIngestEndpoint,
   type CloudEncodeHostId,
   type IngestEndpointOption,
@@ -29,6 +39,8 @@ interface DestinationGridProps {
   outputIndex: number;
   selectedId: string;
   hostOptions: IngestEndpointOption[];
+  protocol?: string;
+  occupiedCollisionKeys?: ReadonlySet<string>;
   disabled?: boolean;
   hideCustom?: boolean;
   onSelect: (ingestEndpointId: string) => void;
@@ -38,6 +50,8 @@ export function DestinationGrid({
   outputIndex,
   selectedId,
   hostOptions,
+  protocol = "",
+  occupiedCollisionKeys = new Set(),
   disabled = false,
   hideCustom = false,
   onSelect,
@@ -45,20 +59,26 @@ export function DestinationGrid({
   const selectedHost = isCustomIngestEndpoint(selectedId)
     ? null
     : cloudHostFromIngest(selectedId);
+  const occupied = (ingestEndpointId: string) => {
+    const key = ingestCollisionKey(ingestEndpointId, protocol);
+    return Boolean(key && occupiedCollisionKeys.has(key));
+  };
   const westHasLive = ENCODE_HOSTS.some(
     (host) =>
-      host.region === "west" && Boolean(preferredOptionForHost(host.id, hostOptions)?.available),
+      host.region === "west" &&
+      hostOptions.some(
+        (item) =>
+          !isCustomIngestEndpoint(item.id) &&
+          cloudHostFromIngest(item.id) === host.id &&
+          item.available,
+      ),
   );
   const westSelected = Boolean(selectedHost && selectedHost.endsWith("_west"));
   const [showWest, setShowWest] = useState(westSelected);
   const showWestCol = westHasLive || westSelected || showWest;
   const visibleRegions = REGIONS.filter((region) => region !== "west" || showWestCol);
-
-  const hostOptionsOnSelected = selectedHost
-    ? hostOptions.filter(
-        (item) => !isCustomIngestEndpoint(item.id) && cloudHostFromIngest(item.id) === selectedHost,
-      )
-    : [];
+  const ingestRoles = gridIngestRoles(hostOptions);
+  const selectedRole = ingestRole(selectedId);
 
   return (
     <div className="destination-grid-wrap" data-testid="output-destination">
@@ -80,7 +100,9 @@ export function DestinationGrid({
             key={provider}
             provider={provider}
             selectedHost={selectedHost}
+            selectedId={selectedId}
             hostOptions={hostOptions}
+            occupied={occupied}
             disabled={disabled}
             regions={visibleRegions}
             onSelect={onSelect}
@@ -98,21 +120,34 @@ export function DestinationGrid({
           </button>
         ) : null}
       </div>
-      {hostOptionsOnSelected.length > 1 ? (
+      {ingestRoles.length > 1 ? (
         <div className="destination-role-alts" role="group" aria-label="Ingest software">
-          {hostOptionsOnSelected.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`destination-role-chip${item.id === selectedId ? " selected" : ""}`}
-              disabled={disabled || (!item.available && item.id !== selectedId)}
-              onClick={() => onSelect(item.id)}
-            >
-              {item.available
-                ? softwareLabel(item.id)
-                : unavailableDestLabel(item.detail, softwareLabel(item.id))}
-            </button>
-          ))}
+          {ingestRoles.map((role) => {
+            const item =
+              hostOptions.find((opt) => ingestRole(opt.id) === role && opt.available) ??
+              hostOptions.find((opt) => ingestRole(opt.id) === role);
+            if (!item) {
+              return null;
+            }
+            const freeId = pickDestForRole(role, hostOptions, occupied, selectedHost);
+            const selected = selectedRole === role;
+            return (
+              <button
+                key={role}
+                type="button"
+                data-testid={`dest-role-${role}`}
+                className={`destination-role-chip${selected ? " selected" : ""}`}
+                disabled={disabled || (!item.available && item.id !== selectedId) || (!freeId && !selected)}
+                onClick={() => {
+                  if (freeId) {
+                    onSelect(freeId);
+                  }
+                }}
+              >
+                {roleLabel(role)}
+              </button>
+            );
+          })}
         </div>
       ) : null}
       {!hideCustom ? (
@@ -139,18 +174,23 @@ export function DestinationGrid({
 function DestinationProviderRow({
   provider,
   selectedHost,
+  selectedId,
   hostOptions,
+  occupied,
   disabled,
   regions,
   onSelect,
 }: {
   provider: (typeof PROVIDERS)[number];
   selectedHost: CloudEncodeHostId | null;
+  selectedId: string;
   hostOptions: IngestEndpointOption[];
+  occupied: (ingestEndpointId: string) => boolean;
   disabled: boolean;
   regions: readonly (typeof REGIONS)[number][];
   onSelect: (ingestEndpointId: string) => void;
 }) {
+  const preferredRole = ingestRole(selectedId);
   return (
     <>
       <div className="destination-grid-rowhead">{PROVIDER_LABEL[provider]}</div>
@@ -159,23 +199,27 @@ function DestinationProviderRow({
         if (!host) {
           return <div key={`${provider}-${region}`} className="destination-cell empty" />;
         }
-        const option = preferredOptionForHost(host.id, hostOptions);
+        const option = optionForHostCell(host.id, hostOptions, preferredRole, occupied);
         const selected = selectedHost === host.id;
-        const available = Boolean(option?.available);
-        const liveId = option?.id;
+        const taken = Boolean(option && occupied(option.id));
+        const available = Boolean(option?.available) && !taken;
+        const liveId = pickDestForHost(host.id, hostOptions, selectedId, occupied);
+        const inUse = taken && !selected;
         return (
           <button
             key={host.id}
             type="button"
             role="gridcell"
             data-testid={`dest-cell-${host.id}`}
-            className={`destination-cell${selected ? " selected" : ""}${available ? "" : " unavailable"}`}
-            disabled={disabled || !liveId || (!available && !selected)}
+            className={`destination-cell${selected ? " selected" : ""}${available || selected ? "" : " unavailable"}`}
+            disabled={disabled || (!liveId && !selected) || (inUse && !liveId)}
             title={
               option
-                ? available
-                  ? `${host.label} · ${softwareLabel(option.id)}`
-                  : `${host.label} — ${unavailableDestLabel(option.detail)}`
+                ? inUse
+                  ? `${host.label} — ${unavailableDestLabel("In use by another output")}`
+                  : available
+                    ? `${host.label} · ${softwareLabel(option.id)}`
+                    : `${host.label} — ${unavailableDestLabel(option.detail)}`
                 : `${host.label} — Not available for this protocol`
             }
             aria-pressed={selected}
@@ -185,11 +229,13 @@ function DestinationProviderRow({
               }
             }}
           >
-            <strong>{liveId ? softwareLabel(liveId) : "—"}</strong>
+            <strong>{option ? softwareLabel(option.id) : "—"}</strong>
             <span>
-              {available
-                ? host.subtitle
-                : unavailableDestLabel(option?.detail)}
+              {inUse
+                ? unavailableDestLabel("In use by another output")
+                : available
+                  ? host.subtitle
+                  : unavailableDestLabel(option?.detail)}
             </span>
           </button>
         );

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from destinations import DestinationProfile  # noqa: E402
-from moq_publish import MoqPublishTarget  # noqa: E402
+from moq_publish import MoqPublishTarget, build_moq5_publisher_cmd  # noqa: E402
 from publisher_protocol import (  # noqa: E402
     PROTOCOL_VERSION,
     destination_from_dict,
@@ -146,6 +146,34 @@ class PublisherProtocolTests(unittest.TestCase):
         )
         assert restored.moq_target is not None
         self.assertTrue(restored.moq_target.insecure_tls)
+
+    def test_helper_east_sslip_cmd_includes_insecure_skip_verify(self) -> None:
+        """GCP East :14433 helper reconstruction must keep skip-verify on argv."""
+        restored = destination_from_dict(
+            {
+                "protocol": "moq",
+                "url": "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+                "preset_id": "moq_gcp_east_relay_d18",
+                "moq_target": {
+                    "endpoint": "https://34-138-137-211.sslip.io:14433/moq-relay",
+                    "namespace": "bench-helper",
+                    "transport": "webtransport",
+                    "draft": 18,
+                    "insecure_tls": False,
+                },
+            }
+        )
+        self.assertIsNotNone(restored.moq_target)
+        assert restored.moq_target is not None
+        self.assertEqual(restored.moq_target.draft, 18)
+        self.assertTrue(restored.moq_target.insecure_tls)
+        cmd = build_moq5_publisher_cmd(
+            "/Users/sean/Developer/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish",
+            restored.moq_target,
+            duration_sec=60,
+        )
+        self.assertIn("--insecure-skip-verify", cmd)
+        self.assertEqual(cmd[1], "https://34-138-137-211.sslip.io:14433/moq-relay")
 
     def test_sample_and_result_roundtrip(self) -> None:
         sample = UploadSample(
