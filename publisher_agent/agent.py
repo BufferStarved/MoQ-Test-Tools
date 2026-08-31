@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -46,6 +47,21 @@ from moq_publish import (  # noqa: E402
 )
 
 logger = logging.getLogger("publisher-agent")
+
+
+def _helper_git_sha() -> str:
+    env_sha = (os.environ.get("MOQ_HELPER_GIT_SHA") or "").strip()
+    if env_sha:
+        return env_sha
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT_DIR,
+            text=True,
+            timeout=2,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 class PublisherAgent:
@@ -91,6 +107,7 @@ class PublisherAgent:
             "hostname": self.hostname,
             "platform": sys.platform,
             "repo_root": str(ROOT_DIR),
+            "git_sha": _helper_git_sha(),
             "deps": [
                 {
                     "name": d.name,

@@ -597,26 +597,73 @@ h1 {
   font-size: 0.78rem;
 }
 
-.destination-role-alts {
+.destination-gateway {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 14px;
+  padding: 10px 10px 12px;
+  border: 1px solid var(--surface-border-strong);
+  border-radius: 12px;
+  background: var(--surface);
 }
 
-.destination-role-chip {
-  border: 1px solid var(--surface-border);
-  background: var(--surface);
+.destination-gateway-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.destination-gateway-hint {
+  font-size: 0.78rem;
   color: var(--text-soft);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 0.76rem;
+  line-height: 1.35;
+  margin: 0 0 6px;
+}
+
+.destination-gateway-seg {
+  display: flex;
+  width: 100%;
+  border: 1px solid var(--surface-border-strong);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+
+.destination-gateway-seg button {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.2;
+  border: 0;
+  border-right: 1px solid var(--surface-border-strong);
+  background: transparent;
+  color: var(--text-soft);
   cursor: pointer;
 }
 
-.destination-role-chip.selected {
-  border-color: var(--accent-border);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+.destination-gateway-seg button:last-child {
+  border-right: 0;
+}
+
+.destination-gateway-seg button:hover:not(:disabled):not(.selected) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.destination-gateway-seg button.selected {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.destination-gateway-seg button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .destination-custom-cell {

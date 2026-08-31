@@ -138,6 +138,13 @@ assert.match(src("comparisonReplay.test.ts"), /helper laptop MoQ WT never connec
 assert.match(src("comparisonReplay.test.ts"), /34-138-137-211\.sslip\.io:14433/);
 assert.match(src("DestinationGrid.test.ts"), /gcp_east_zixi/);
 assert.match(src("DestinationGrid.test.ts"), /linode_zixi/);
+assert.match(src("DestinationGrid.tsx"), /destination-gateway/);
+assert.match(src("DestinationGrid.tsx"), /Ingest gateway/);
+assert.match(src("playbackUrls.ts"), /zixiSrtPlayStreamId/);
+assert.match(src("playbackUrls.ts"), /protocol === "rtmp" \? "mpegts" : "hls"/);
+assert.match(py("publisher_agent/webcam_broker.py"), /JOIN_WINDOW_SEC = 8/);
+assert.match(py("web/api/publisher_hub.py"), /_stale_helper_error/);
+assert.match(py("scripts/run-local-publisher.sh"), /MOQ_HELPER_GIT_SHA/);
 assert.match(src("destinationGridModel.ts"), /optionForHostCell/);
 assert.match(py("src/publisher_protocol.py"), /moq_insecure_tls_for_endpoint/);
 assert.match(py("src/publisher_protocol.py"), /ensure_zixi_srt_streamid/);

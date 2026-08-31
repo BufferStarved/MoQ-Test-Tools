@@ -59,6 +59,11 @@ export LOCAL_PUBLISHER_TOKEN="${LOCAL_PUBLISHER_TOKEN:-dev-local-publisher}"
 # sslip.io :14433 needs skip-verify. Leftover .env must not drop it; the
 # one-liner (MOQ_PUBLISHER_INSECURE=1) still wins via _CALLER_INSECURE.
 export MOQ_PUBLISHER_INSECURE="${MOQ_PUBLISHER_INSECURE:-1}"
+MOQ_HELPER_GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+export MOQ_HELPER_GIT_SHA
+if [[ -n "$MOQ_HELPER_GIT_SHA" ]]; then
+  echo "Laptop helper SHA $MOQ_HELPER_GIT_SHA (restart this after git pull; SPA refresh is not enough)."
+fi
 
 # Must succeed: installs/upgrades a WHIP-capable ffmpeg and writes FFMPEG.
 if ! bash "$ROOT_DIR/scripts/ensure-publisher-tools.sh"; then

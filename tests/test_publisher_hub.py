@@ -269,6 +269,23 @@ class PublisherHubTests(unittest.TestCase):
         thread.join(timeout=2)
         loop.close()
 
+    def test_run_remote_rejects_stale_helper_in_prod(self) -> None:
+        async def _run() -> None:
+            sess = self.hub.mint_session().session_id
+            conn = await self.hub.register(MagicMock(), "stale", session_id=sess)
+            conn.capabilities = {"ready": True, "git_sha": "deadbeef"}
+            job = _job("job-stale")
+            job.publisher_session = sess
+            with patch.dict(os.environ, {"MOQ_ENV": "prod", "LOCAL_PUBLISHER_ENABLED": "1"}, clear=False):
+                with patch("build_info.read_build_sha", return_value="cafebabe"):
+                    result = self.hub.run_remote(job)
+            self.assertFalse(result.success)
+            self.assertIn("deadbeef", result.error or "")
+            self.assertIn("cafebabe", result.error or "")
+            self.assertIn("SPA refresh", result.error or "")
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()

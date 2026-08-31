@@ -47,9 +47,8 @@ CASES = [
         "id": "zixi_srt_hls",
         "preset_id": "moq_zixi_gcp",
         "playback": "hls",
-        # Primary ``SRT Test`` Fast HLS packager wedges; EC is the live path.
-        # MPEG-TS is the site fallback if Fast HLS is unrecoverable.
-        "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test%20EC",
+        # Primary ``SRT Test`` Fast HLS. EC HTTP-TS and EC HLS 404 on :7777.
+        "url": "http://35.222.33.58:7777/playback.m3u8?stream=SRT%20Test",
         "expect_preview": True,
         "metric_keys": ("net_send_mbps", "encoded_bitrate_kbps"),
         "fallback_playback": "mpegts",
@@ -183,10 +182,10 @@ EAST_CASES = [
         "requires_webtransport": True,
     },
     {
-        "id": "east_zixi_srt_mpegts",
+        "id": "east_zixi_srt_hls",
         "preset_id": "moq_zixi_gcp_east",
-        "playback": "mpegts",
-        "url": f"http://{EAST_ZIXI}:7777/SRT%20Test%20EC.ts",
+        "playback": "hls",
+        "url": f"http://{EAST_ZIXI}:7777/playback.m3u8?stream=SRT%20Test",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },
@@ -221,10 +220,10 @@ LINODE_WEB = os.environ.get("LINODE_WEB_IP", "66.175.213.81")
 LINODE_RELAY = os.environ.get("LINODE_RELAY_DOMAIN", "45-79-177-85.sslip.io")
 LINODE_CASES = [
     {
-        "id": "linode_zixi_srt_mpegts",
+        "id": "linode_zixi_srt_hls",
         "preset_id": "moq_zixi_linode",
-        "playback": "mpegts",
-        "url": f"http://{LINODE_ZIXI}:7777/SRT%20Test%20EC.ts",
+        "playback": "hls",
+        "url": f"http://{LINODE_ZIXI}:7777/playback.m3u8?stream=SRT%20Test",
         "expect_preview": True,
         "metric_keys": ("encoded_bitrate_kbps", "net_send_mbps"),
     },

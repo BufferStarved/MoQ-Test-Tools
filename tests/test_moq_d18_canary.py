@@ -316,6 +316,21 @@ class Draft18CanaryPresetTests(unittest.TestCase):
         self.assertIn(":14433", spawn)
         self.assertIn("/tmp/moq5-fmp4-publish", spawn)
 
+    def test_connect_failure_names_stale_helper_when_skip_verify_off(self) -> None:
+        msg = describe_moq_connect_failure(
+            endpoint="https://34-138-137-211.sslip.io:14433/moq-relay",
+            backend="moq5",
+            binary="/tmp/moq5-fmp4-publish",
+            draft=18,
+            skip_verify=False,
+            helper_sha="abc1234",
+        )
+        self.assertIn("insecure-skip-verify=off", msg)
+        self.assertIn("helper_sha=abc1234", msg)
+        self.assertIn("git pull", msg)
+        self.assertIn("SPA refresh", msg)
+        self.assertIn("not a player or catalog problem", msg)
+
     def test_file_source_probe_script_stays_off_camera_and_prod(self) -> None:
         script = (ROOT / "scripts" / "probe_d18_publish.py").read_text()
         self.assertIn("dummy.mp4", script)

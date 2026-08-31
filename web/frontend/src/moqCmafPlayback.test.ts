@@ -277,6 +277,15 @@ describe("noMediaFailMessage", () => {
     assert.doesNotMatch(message, /publisher never started/i);
   });
 
+  it("does not nest did-not-connect when the job error already says so", () => {
+    const raw =
+      "The publisher ran but did not connect to the relay (WebTransport session never connected; no connection_id). relay=https://34-138-137-211.sslip.io:14433/moq-relay draft=18. This is not a player or catalog problem.";
+    const shown = humanizeJobError(raw, { protocol: "moq" }) ?? "";
+    assert.match(shown, /did not connect to the relay/i);
+    assert.match(shown, /not a player/i);
+    assert.doesNotMatch(shown, /connect to the relay \(The publisher ran/);
+  });
+
   it("names a one-shot catalog miss when ingest already announced", () => {
     const message = noMediaFailMessage({
       catalogReady: false,

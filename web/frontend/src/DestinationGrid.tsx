@@ -82,7 +82,45 @@ export function DestinationGrid({
 
   return (
     <div className="destination-grid-wrap" data-testid="output-destination">
-      <span className="field-label-with-icon destination-grid-label">Destination</span>
+      {ingestRoles.length > 1 ? (
+        <div className="destination-gateway" role="radiogroup" aria-label="Ingest gateway">
+          <span className="destination-gateway-label">Ingest gateway</span>
+          <span className="destination-gateway-hint">
+            Zixi Broadcaster or MediaMTX — this is the ingest, not the region.
+          </span>
+          <div className="destination-gateway-seg">
+            {ingestRoles.map((role) => {
+              const item =
+                hostOptions.find((opt) => ingestRole(opt.id) === role && opt.available) ??
+                hostOptions.find((opt) => ingestRole(opt.id) === role);
+              if (!item) {
+                return null;
+              }
+              const freeId = pickDestForRole(role, hostOptions, occupied, selectedHost);
+              const selected = selectedRole === role;
+              return (
+                <button
+                  key={role}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`dest-role-${role}`}
+                  className={selected ? "selected" : ""}
+                  disabled={disabled || (!item.available && item.id !== selectedId) || (!freeId && !selected)}
+                  onClick={() => {
+                    if (freeId) {
+                      onSelect(freeId);
+                    }
+                  }}
+                >
+                  {roleLabel(role)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      <span className="field-label-with-icon destination-grid-label">Region</span>
       <div
         className="destination-grid"
         role="grid"
@@ -120,36 +158,6 @@ export function DestinationGrid({
           </button>
         ) : null}
       </div>
-      {ingestRoles.length > 1 ? (
-        <div className="destination-role-alts" role="group" aria-label="Ingest software">
-          {ingestRoles.map((role) => {
-            const item =
-              hostOptions.find((opt) => ingestRole(opt.id) === role && opt.available) ??
-              hostOptions.find((opt) => ingestRole(opt.id) === role);
-            if (!item) {
-              return null;
-            }
-            const freeId = pickDestForRole(role, hostOptions, occupied, selectedHost);
-            const selected = selectedRole === role;
-            return (
-              <button
-                key={role}
-                type="button"
-                data-testid={`dest-role-${role}`}
-                className={`destination-role-chip${selected ? " selected" : ""}`}
-                disabled={disabled || (!item.available && item.id !== selectedId) || (!freeId && !selected)}
-                onClick={() => {
-                  if (freeId) {
-                    onSelect(freeId);
-                  }
-                }}
-              >
-                {roleLabel(role)}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
       {!hideCustom ? (
         <button
           type="button"

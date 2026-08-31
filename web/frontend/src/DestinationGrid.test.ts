@@ -6,6 +6,7 @@ import {
   pickDestForHost,
   pickDestForRole,
   preferredOptionForHost,
+  roleLabel,
   softwareLabel,
   unavailableDestLabel,
 } from "./destinationGridModel.ts";
@@ -105,6 +106,12 @@ describe("SRT Zixi dest grid vs MediaMTX preferred sort", () => {
     assert.equal(pickDestForHost("linode_east", dests, "gcp_east_zixi", free), "linode_zixi");
     assert.equal(pickDestForRole("zixi", dests, free, "gcp_east"), "gcp_east_zixi");
     assert.deepEqual(gridIngestRoles(dests).sort(), ["mediamtx", "zixi"].sort());
+  });
+
+  it("exposes Zixi and MediaMTX as named ingest-gateway roles", () => {
+    assert.deepEqual(gridIngestRoles(dests).sort(), ["mediamtx", "zixi"].sort());
+    assert.equal(roleLabel("zixi"), "Zixi");
+    assert.equal(roleLabel("mediamtx"), "MediaMTX");
   });
 
   it("labels East MediaMTX when ingest is MediaMTX", () => {

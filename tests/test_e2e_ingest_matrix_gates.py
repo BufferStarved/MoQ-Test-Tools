@@ -119,13 +119,14 @@ class E2eIngestMatrixGateTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(note, "skip_moq")
 
-    def test_zixi_srt_playback_uses_error_concealed_stream(self) -> None:
-        central = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_mpegts")
-        east = next(item for item in self.mod.EAST_CASES if item["id"] == "east_zixi_srt_mpegts")
-        linode = next(item for item in self.mod.LINODE_CASES if item["id"] == "linode_zixi_srt_mpegts")
+    def test_zixi_srt_playback_uses_primary_srt_test_hls(self) -> None:
+        central = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_hls")
+        east = next(item for item in self.mod.EAST_CASES if item["id"] == "east_zixi_srt_hls")
+        linode = next(item for item in self.mod.LINODE_CASES if item["id"] == "linode_zixi_srt_hls")
         for case in (central, east, linode):
-            self.assertIn("SRT%20Test%20EC", case["url"], case["id"])
-            self.assertNotIn("SRT%20Test.ts", case["url"], case["id"])
+            self.assertIn("stream=SRT%20Test", case["url"], case["id"])
+            self.assertNotIn("EC", case["url"], case["id"])
+            self.assertEqual(case["playback"], "hls", case["id"])
 
     def test_live_srt_hls_is_not_skipped(self) -> None:
         case = next(item for item in self.mod.CASES if item["id"] == "zixi_srt_hls")

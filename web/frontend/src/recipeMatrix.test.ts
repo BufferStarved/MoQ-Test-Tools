@@ -204,7 +204,8 @@ describe("every prod dest × playback mode", () => {
           assert.match(target.url, /:8888\/benchmark\/index\.m3u8/);
         }
         if (ingest.endsWith("_zixi") && protocol === "srt") {
-          assert.match(target.url, /SRT%20Test%20EC/);
+          assert.match(target.url, /SRT%20Test/);
+          assert.doesNotMatch(target.url, /SRT%20Test%20EC/);
         }
       }
     }
@@ -222,8 +223,9 @@ describe("every prod dest × playback mode", () => {
       endpointUrl: "srt://35.196.215.179:10080?mode=caller",
       ingestEndpointId: "custom",
     });
-    assert.equal(east.engine, "mpegts");
-    assert.match(east.url, /SRT%20Test%20EC/);
+    assert.equal(east.engine, "hls");
+    assert.match(east.url, /SRT%20Test/);
+    assert.doesNotMatch(east.url, /SRT%20Test%20EC/);
   });
 });
 

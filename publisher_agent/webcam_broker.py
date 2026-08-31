@@ -76,7 +76,7 @@ logger = logging.getLogger("publisher-agent.webcam-broker")
 # same-host dev loop needs. This window batches them into a single physical
 # camera open before the shared capture starts; late arrivals (after the
 # window closes) fall back to opening the device themselves, same as today.
-JOIN_WINDOW_SEC = 1.0
+JOIN_WINDOW_SEC = 8.0
 # How long to wait, after starting ffmpeg, for it to prove it didn't die
 # immediately (bad device index, camera permission denied, device busy).
 # 2026-08-06 incident: a tee-muxer misconfiguration killed the master ~1.0s

@@ -34,6 +34,7 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
     return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
+    if (protocol === "srt") return mode === "hls";
     return mode === "hls" || mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
@@ -74,7 +75,7 @@ function defaultPlaybackModeForProtocol(protocol, ingestEndpointId = "") {
   if (protocol === "hls") return "mpegts";
   if (isMediaMtxManaged(ingestEndpointId)) return "ll-hls";
   if (isZixiManagedIngest(ingestEndpointId)) {
-    return "mpegts";
+    return protocol === "rtmp" ? "mpegts" : "hls";
   }
   if (protocol === "dash") return "hls";
   return "hls";
@@ -97,8 +98,8 @@ assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_east_mediamtx"), "ll-hls
 assert.equal(defaultPlaybackModeForProtocol("srt", "linode_mediamtx"), "ll-hls");
 assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "mpegts");
 assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_east_zixi"), "mpegts");
-assert.equal(defaultPlaybackModeForProtocol("srt", "linode_zixi"), "mpegts");
-assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_zixi"), "mpegts");
+assert.equal(defaultPlaybackModeForProtocol("srt", "linode_zixi"), "hls");
+assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_zixi"), "hls");
 assert.equal(defaultPlaybackModeForProtocol("moq", "gcp_moq_relay"), "moq");
 assert.equal(defaultPlaybackModeForProtocol("webrtc", "gcp_mediamtx"), "whep");
 assert.equal(defaultPlaybackModeForProtocol("srt", "custom"), "hls");
@@ -124,7 +125,7 @@ assert.equal(
 );
 assert.equal(
   playbackModeLabelForSelection("hls", "srt", "gcp_zixi"),
-  "HLS (hls.js)",
+  "HLS (hls.js) (recommended)",
 );
 
 // Legacy Auto is not selectable
@@ -142,11 +143,13 @@ for (const ingest of ["gcp_zixi", "gcp_east_zixi", "linode_zixi"]) {
   }
   assert.equal(isPlaybackModeCompatible("hls", "rtmp", ingest), true, ingest);
   assert.equal(isPlaybackModeCompatible("hls", "srt", ingest), true, ingest);
-  assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), true, ingest);
+  assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), false, ingest);
+  assert.equal(isPlaybackModeCompatible("mpegts", "rtmp", ingest), true, ingest);
   assert.equal(resolvedPlaybackMode("hls", "srt", ingest), "hls", ingest);
+  assert.equal(resolvedPlaybackMode("mpegts", "srt", ingest), "hls", ingest);
   assert.equal(playbackModeBlockedReason("hls", "srt", ingest), undefined, ingest);
   assert.equal(playbackModeBlockedReason("hls", "rtmp", ingest), undefined, ingest);
-  assert.deepEqual(playbackModesForSelection("srt", ingest), ["hls", "mpegts"]);
+  assert.deepEqual(playbackModesForSelection("srt", ingest), ["hls"]);
   assert.deepEqual(playbackModesForSelection("rtmp", ingest), ["hls", "mpegts"]);
 }
 

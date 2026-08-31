@@ -396,7 +396,10 @@ export function humanizeJobError(
     return `The publisher never started (${first}). This is not a player or catalog problem.`;
   }
   if (/webtransport session never connected|no connection_id|did not connect to the relay/i.test(raw)) {
-    return `The publisher ran but did not connect to the relay (${first}). This is not a player or catalog problem.`;
+    if (/not a player or catalog problem/i.test(raw)) {
+      return first;
+    }
+    return `${first} This is not a player or catalog problem.`;
   }
   if (/never announced namespace|catalog is not live/i.test(raw)) {
     return first;

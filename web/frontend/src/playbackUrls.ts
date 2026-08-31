@@ -12,13 +12,12 @@ const DEFAULT_MOQ_NAMESPACE = "benchmark";
 /** GCP Zixi SRT push input stream ID (see infra/zixi/GCP-ZIXI-RUNBOOK.md). */
 const GCP_ZIXI_SRT_STREAM_ID = "SRT Test";
 /**
- * Browser playback stream for managed Zixi SRT. The primary ``SRT Test``
- * Fast HLS packager wedges after the first connection (TARGETDURATION balloons,
- * media sequence freezes — reproduced 2026-07-22), and primary HTTP-TS is
- * intermittent. Error-concealed ``SRT Test EC`` stays live for HLS + MPEG-TS;
- * jobs also set ``zixi_playback_stream_id`` to this.
+ * Error-concealed derivative. Probed 2026-08-31 on Central / East / Linode:
+ * ``SRT Test EC.ts`` and ``playback.m3u8?stream=SRT Test EC`` are HTTP 404.
+ * Primary ``SRT Test`` Fast HLS is the origin that exists. Do not map
+ * playback onto EC until :7777 actually serves it.
  */
-const GCP_ZIXI_SRT_PLAYBACK_STREAM_ID = "SRT Test EC";
+const GCP_ZIXI_SRT_EC_STREAM_ID = "SRT Test EC";
 /** Zixi caller listen. MediaMTX SRT is :8890. */
 const ZIXI_SRT_PORT = "10080";
 const KNOWN_ZIXI_HOSTS = new Set(["35.222.33.58", "35.196.215.179", "45.33.68.151"]);
@@ -115,13 +114,15 @@ export function isPlaybackModeCompatible(
     );
   }
 
-  // Zixi Broadcaster: Fast HLS + MPEG-TS only for in-app playback.
+  // Zixi Broadcaster: Fast HLS for SRT; HTTP-TS only for RTMP ``benchmark.ts``.
   // - DASH per-input MPD is not served (player would silently fall back to HLS).
   // - WHEP is a MediaMTX endpoint shape, not available on Zixi :7777/:4444.
   // - Zixi WebRTC UI cannot be iframed (frame-ancestors 'self').
-  // - Primary ``SRT Test`` Fast HLS wedges; jobs play error-concealed
-  //   ``SRT Test EC`` (see zixiPlaybackStreamId). HLS is offered again.
+  // - ``SRT Test EC`` and ``SRT Test.ts`` 404 / empty-reply on every live :7777.
   if (zixi) {
+    if (protocol === "srt") {
+      return mode === "hls";
+    }
     return mode === "hls" || mode === "mpegts";
   }
 
@@ -152,11 +153,11 @@ export function defaultPlaybackModeForProtocol(
   if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
-  // HTTP-TS (mpegts.js) stays the default Zixi player — faster join than
-  // Fast HLS. HLS is selectable and uses the EC stream when jobs set
-  // zixi_playback_stream_id (primary ``SRT Test`` packager still wedges).
+  // Zixi SRT: Fast HLS on ``SRT Test`` (EC and SRT Test HTTP-TS 404 / empty
+  // reply on every live Broadcaster). Zixi RTMP still uses HTTP-TS
+  // ``benchmark.ts``, which is the path that actually answers 200.
   if (isZixiManagedIngest(ingest) || looksLikeZixiPublish(endpointUrl)) {
-    return "mpegts";
+    return protocol === "rtmp" ? "mpegts" : "hls";
   }
   // Custom / retired DASH ingest still plays as browser HLS when a packager exists.
   if (protocol === "dash") {
@@ -388,6 +389,14 @@ export function looksLikeZixiPublish(endpointUrl?: string): boolean {
   return url.startsWith("rtmp://") && /:1935\/live\//.test(url);
 }
 
+function zixiSrtPlayStreamId(raw: string): string {
+  const id = raw.trim();
+  if (!id || id === GCP_ZIXI_SRT_EC_STREAM_ID || id.endsWith(" EC")) {
+    return GCP_ZIXI_SRT_STREAM_ID;
+  }
+  return id;
+}
+
 function parseStreamId(
   endpointUrl: string,
   protocol: string,
@@ -395,26 +404,14 @@ function parseStreamId(
   zixiStreamId?: string,
   zixiPlaybackStreamId?: string,
 ): string {
-  // For playback (not diagnostics/recipe), prefer the error-concealed
-  // derived stream when Zixi concealment is configured — it holds a
-  // continuous timeline across SRT reconnects so Fast HLS never stalls.
-  // Falls back to the raw job stream id (e.g. "SRT Test"), then the preset
-  // URL's own streamid.
-  if (protocol === "srt" && zixiPlaybackStreamId?.trim()) {
-    return zixiPlaybackStreamId.trim();
-  }
-  // Pre-job / recipe: prefer EC over wedged primary for gcp_zixi SRT.
   const zixiPublish =
     isZixiManagedIngest(ingestEndpointId ?? "") || looksLikeZixiPublish(endpointUrl);
-  if (protocol === "srt" && zixiPublish && !zixiStreamId?.trim()) {
-    return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
+  if (protocol === "srt" && zixiPublish) {
+    return zixiSrtPlayStreamId(
+      zixiPlaybackStreamId || zixiStreamId || GCP_ZIXI_SRT_STREAM_ID,
+    );
   }
   if (protocol === "srt" && zixiStreamId?.trim()) {
-    // Publish id may be "SRT Test"; map to EC for playback unless caller
-    // already passed an explicit playback id above.
-    if (zixiPublish && zixiStreamId.trim() === GCP_ZIXI_SRT_STREAM_ID) {
-      return GCP_ZIXI_SRT_PLAYBACK_STREAM_ID;
-    }
     return zixiStreamId.trim();
   }
   if (!endpointUrl.trim()) {

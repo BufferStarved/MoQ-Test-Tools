@@ -119,6 +119,7 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
     return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
+    if (protocol === "srt") return mode === "hls";
     return mode === "hls" || mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
@@ -220,9 +221,7 @@ assert.ok(chromeIllegal.length > chromeLegal.length, "most combos must be illega
 for (const row of [
   ["dummy", "srt", "gcp_mediamtx", "ll-hls"],
   ["dummy", "srt", "gcp_mediamtx", "mpegts"],
-  ["dummy", "srt", "gcp_zixi", "mpegts"],
   ["dummy", "srt", "gcp_zixi", "hls"],
-  ["dummy", "srt", "gcp_east_zixi", "mpegts"],
   ["dummy", "srt", "gcp_east_zixi", "hls"],
   ["dummy", "rtmp", "linode_zixi", "hls"],
   ["dummy", "rtmp", "gcp_mediamtx", "whep"],
@@ -243,6 +242,8 @@ for (const row of [
   ["dummy", "srt", "gcp_moq_relay", "moq"],
   ["dummy", "webrtc", "gcp_east_zixi", "whep"],
   ["dummy", "moq", "gcp_mediamtx", "moq"],
+  ["dummy", "srt", "gcp_zixi", "mpegts"],
+  ["dummy", "srt", "gcp_east_zixi", "mpegts"],
   ["dummy", "hls", "gcp_east_zixi", "mpegts"],
   ["dummy", "dash", "custom", "hls"],
   ["dummy", "srt", "aws_east_zixi", "mpegts"],
@@ -370,7 +371,7 @@ function defaultPlaybackModeForProtocol(protocol, ingest) {
   if (protocol === "webrtc") return "whep";
   if (protocol === "hls") return "mpegts";
   if (ingestRole(ingest) === "mediamtx") return "ll-hls";
-  if (ingestRole(ingest) === "zixi") return "mpegts";
+  if (ingestRole(ingest) === "zixi") return protocol === "rtmp" ? "mpegts" : "hls";
   if (protocol === "dash") return "hls";
   return "hls";
 }
@@ -476,7 +477,7 @@ for (const [from, to, ingest, want] of [
   ["webrtc", "srt", "gcp_mediamtx", "ll-hls"],
   ["webrtc", "rtmp", "gcp_mediamtx", "ll-hls"],
   ["srt", "rtmp", "gcp_zixi", "mpegts"],
-  ["rtmp", "srt", "linode_zixi", "mpegts"],
+  ["rtmp", "srt", "linode_zixi", "hls"],
 ]) {
   const leg = {
     protocol: from,

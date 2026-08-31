@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import WebSocket
@@ -157,6 +158,7 @@ class PublisherHub:
                     "obs_websocket": bool((agent.capabilities or {}).get("obs_websocket")),
                     "obs_plugin": bool((agent.capabilities or {}).get("obs_plugin")),
                     "obs_detail": (agent.capabilities or {}).get("obs_detail") or "",
+                    "git_sha": (agent.capabilities or {}).get("git_sha") or "",
                     "connected_at": agent.connected_at,
                     "active_jobs": len(agent.pending),
                 }
@@ -217,6 +219,33 @@ class PublisherHub:
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to send job_cancel to %s", agent.agent_id, exc_info=True)
         return sent
+
+    def _stale_helper_error(self, agent: AgentConnection) -> str:
+        """Prod jobs fail closed when the laptop helper predates this site SHA."""
+        if not _is_prod_env():
+            return ""
+        got = str((agent.capabilities or {}).get("git_sha") or "").strip()
+        try:
+            from build_info import read_build_sha
+        except ImportError:
+            return ""
+        expected = (read_build_sha(Path(__file__).resolve().parents[2]) or "").strip()
+
+        def _short(raw: str) -> str:
+            return raw.replace("-dev", "").replace("-dirty", "").split("-")[0][:12]
+
+        exp_s, got_s = _short(expected), _short(got)
+        if not exp_s:
+            return ""
+        if got_s and got_s == exp_s:
+            return ""
+        got_label = got_s or "unknown (pre-SHA helper)"
+        return (
+            f"Laptop helper is on git {got_label} but this site is {exp_s}. "
+            "git pull in the moq-test-tools checkout and restart the helper one-liner "
+            "(a SPA refresh does not reload laptop Python). Helper MoQ CONNECT and "
+            "Zixi SRT playback stay broken until the helper matches the site."
+        )
 
     def pick_agent(
         self,
@@ -371,6 +400,9 @@ class PublisherHub:
                     "In another terminal run: ./scripts/run-local-publisher.sh"
                 ),
             )
+        stale = self._stale_helper_error(agent)
+        if stale:
+            return UploadResult(success=False, error=stale)
         if not job.job_id:
             job.job_id = str(uuid.uuid4())
 

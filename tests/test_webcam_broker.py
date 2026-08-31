@@ -20,6 +20,11 @@ from publisher_agent.webcam_broker import (  # noqa: E402
     PREFERRED_LANDSCAPE_VIDEO_SIZE,
     WebcamBroker,
 )
+import publisher_agent.webcam_broker as _webcam_broker_mod  # noqa: E402
+
+# Production join window is 8s (hosted API jitter). Tests only need a beat
+# so concurrent acquires still land in one session.
+_webcam_broker_mod.JOIN_WINDOW_SEC = 0.25
 from destinations import DestinationProfile  # noqa: E402
 from upload_service import UploadJob  # noqa: E402
 

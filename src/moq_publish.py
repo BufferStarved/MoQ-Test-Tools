@@ -741,9 +741,21 @@ def describe_moq_connect_failure(
     backend: str,
     binary: str,
     draft: int,
+    skip_verify: bool | None = None,
+    helper_sha: str = "",
 ) -> str:
     """Job error when the publisher process ran but WT never connected."""
     loc = f"relay={endpoint} binary={binary or backend} draft={draft}"
+    if skip_verify is False:
+        loc += " insecure-skip-verify=off"
+    elif skip_verify:
+        loc += " insecure-skip-verify=on"
+    if helper_sha:
+        loc += f" helper_sha={helper_sha}"
+    stale = (
+        " git pull in the moq-test-tools checkout and restart the laptop helper "
+        "one-liner (a SPA refresh does not reload laptop Python)."
+    )
     if ":4433" in (endpoint or ""):
         if backend == "moq5" or "moq5-fmp4-publish" in (binary or ""):
             return (
@@ -760,9 +772,13 @@ def describe_moq_connect_failure(
             "openmoq-publisher never got a WebTransport session on prod :4433 "
             "(draft-16 only). This is not a player or catalog problem."
         )
+    hint = ""
+    if skip_verify is False:
+        hint = stale
     return (
         "The publisher ran but did not connect to the relay "
         f"(WebTransport session never connected; no connection_id). {loc}."
+        f"{hint} This is not a player or catalog problem."
     )
 
 

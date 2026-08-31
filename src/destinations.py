@@ -187,10 +187,10 @@ _SERVICE_PRESETS_RAW: List[ServicePreset] = [
             "Managed Zixi SRT ingest on GCP. Zixi input stream ID is 'SRT Test'; "
             "the SRT URL includes streamid=#!::r=SRT Test,m=publish so helper and "
             "Advanced publish hit that input (not a later upload-only rewrite). "
-            "Browser playback uses error-concealed 'SRT Test EC' "
-            "(primary Fast HLS packager wedges after first connect). "
-            "HLS: playback.m3u8?stream=SRT%20Test%20EC. "
-            "HTTP-TS: http://35.222.33.58:7777/SRT%20Test%20EC.ts. "
+            "Browser playback is Fast HLS on 'SRT Test' "
+            "(playback.m3u8?stream=SRT%20Test). "
+            "HTTP-TS 'SRT Test EC.ts' and 'SRT Test.ts' 404 / empty-reply on :7777; "
+            "do not point the player at them. "
             "Publishes apply monotonic -output_ts_offset. "
             "Upload transcodes to H.264 Main yuv420p for browser playback."
         ),
@@ -479,7 +479,7 @@ def _build_stack_presets(host: EncodeHost) -> List[ServicePreset]:
             ),
             notes=(
                 f"Managed Zixi SRT ingest on {host.label} ({region}). Stream ID 'SRT Test'; "
-                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test%20EC."
+                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test."
                 if zixi_ok
                 else "Not deployed"
             ),

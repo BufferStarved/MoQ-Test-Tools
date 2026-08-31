@@ -1577,9 +1577,7 @@ class UploadService:
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return None
-        # Watch the same error-concealed stream the browser plays (when
-        # available) so our own preview-ready gating / heal detection can't
-        # disagree with what's actually on screen.
+        # Watch the same Fast HLS stream the browser plays.
         playback_stream_id = job.zixi_playback_stream_id or stream_id
         return zixi_hls_playback_url(playback_stream_id, endpoint_url=job.destination.url)
 
@@ -1589,8 +1587,8 @@ class UploadService:
         if job.destination.protocol in {"hls", "dash"}:
             return zixi_http_push_stream_id_for_preset(job.destination.preset_id) or "benchmark"
         if job.destination.protocol in {"rtmp", "srt"}:
-            # Prefer the playback stream (EC for SRT when available) so mpegts.js
-            # and Fast HLS gate on the same media the browser will pull.
+            # Prefer the playback stream so mpegts.js / Fast HLS gate on the
+            # same media the browser will pull (SRT Test HLS, not EC).
             stream_id = (job.zixi_playback_stream_id or job.managed_zixi_stream_id() or "").strip()
             return stream_id or None
         return None
@@ -3184,6 +3182,11 @@ class UploadService:
                     backend=publisher_backend,
                     binary=publisher_bin,
                     draft=target.draft,
+                    skip_verify=(
+                        "--insecure-skip-verify" in publisher_cmd
+                        or "--insecure" in publisher_cmd
+                    ),
+                    helper_sha=os.environ.get("MOQ_HELPER_GIT_SHA", ""),
                 )
             else:
                 finalized.error = moq_publish_missing_error(

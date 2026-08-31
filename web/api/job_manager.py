@@ -141,9 +141,8 @@ class UploadJobRecord:
     preset_id: str = ""
     moq_namespace: Optional[str] = None
     zixi_stream_id: Optional[str] = None
-    # HLS playback target — the error-concealed derived stream when available,
-    # so the browser never sees the reused-packager stall Zixi diagnosed.
-    # Falls back to zixi_stream_id itself when concealment isn't set up.
+    # HLS playback target. ``SRT Test EC`` 404s on every live :7777, so this
+    # is the source stream id ('SRT Test'), not the error-concealed derivative.
     zixi_playback_stream_id: Optional[str] = None
     preview_ready: bool = True
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -252,18 +251,14 @@ class JobManager:
             zixi_stream_id = zixi_srt_stream_id_for_preset(preset_id)
             if zixi_stream_id:
                 from zixi_error_concealment import ensure_error_concealed_stream
-
-                # Best-effort: fall back to the raw stream (today's behavior,
-                # still correct via -output_ts_offset + heal) if Zixi's API is
-                # unreachable or concealment isn't configured.
                 from zixi_stats import zixi_api_base_for_endpoint
 
-                zixi_playback_stream_id = (
-                    ensure_error_concealed_stream(
-                        zixi_stream_id,
-                        base_url=zixi_api_base_for_endpoint(job.destination.url),
-                    )
-                    or zixi_stream_id
+                # Player uses the source id. ``SRT Test EC`` 404s on every
+                # live :7777 (HTTP-TS and Fast HLS, probed 2026-08-31).
+                zixi_playback_stream_id = zixi_stream_id
+                ensure_error_concealed_stream(
+                    zixi_stream_id,
+                    base_url=zixi_api_base_for_endpoint(job.destination.url),
                 )
         elif job.destination.protocol == "rtmp":
             from moq_publish import (
