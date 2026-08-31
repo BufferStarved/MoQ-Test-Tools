@@ -24,6 +24,7 @@ import { isGracefulMpegTsEos } from "../playbackEos";
 import { playerErrorForFailedJob } from "../moqCmafPlayback";
 import {
   classifyMpegTsEndVerdict,
+  mpegTsFetchIdleSignal,
   mpegTsMayMarkPlaybackOk,
   mpegTsOriginHost,
   mpegTsPaintedOk,
@@ -102,10 +103,13 @@ export default function MpegTsPlayer({
   const sessionRef = useRef({
     maxVideoTime: 0,
     videoTimeOrigin: null as number | null,
+    playheadCarrySec: 0,
     ttffMs: 0,
     liveStartedAtMs: 0,
     errorCount: 0,
     firstPaintAtMs: 0,
+    maxFramesRendered: 0,
+    maxVideoWidth: 0,
   });
   const rebufferRef = useRef(new RebufferTracker());
   const goLiveRef = useRef({ atSec: 0, e2eMs: 0 });
@@ -127,6 +131,14 @@ export default function MpegTsPlayer({
   };
   const jobStatusRef = useRef(jobStatus);
   jobStatusRef.current = jobStatus;
+  const jobErrorRef = useRef(jobError);
+  jobErrorRef.current = jobError;
+  const protocolRef = useRef(protocol);
+  protocolRef.current = protocol;
+  const waitingSlotRef = useRef(waitingForEncodeSlot);
+  waitingSlotRef.current = waitingForEncodeSlot;
+  const encodeQueueRef = useRef(encodeQueueAhead);
+  encodeQueueRef.current = encodeQueueAhead;
   const loadingRef = useRef(benchmarkLoading);
   loadingRef.current = benchmarkLoading;
   const encodeDurationRef = useRef(encodeDurationSec);
@@ -144,10 +156,11 @@ export default function MpegTsPlayer({
         // Encode-anchored HTTP-TS: keep origin 0 unless the timeline is clearly
         // shifted by a managed Zixi -output_ts_offset (same rule as Fast HLS).
         session.videoTimeOrigin = raw > OFFSET_REBASE_THRESHOLD_SEC ? raw : 0;
+      } else {
+        return session.playheadCarrySec;
       }
-      return 0;
     }
-    return Math.max(0, raw - session.videoTimeOrigin);
+    return session.playheadCarrySec + Math.max(0, raw - (session.videoTimeOrigin ?? 0));
   }
 
   /**
@@ -208,14 +221,32 @@ export default function MpegTsPlayer({
     return startupPhasesRef.current;
   }
 
+  function latchSessionPaint(framesRendered = 0, videoWidth = 0) {
+    const session = sessionRef.current;
+    session.maxFramesRendered = Math.max(session.maxFramesRendered, framesRendered);
+    session.maxVideoWidth = Math.max(session.maxVideoWidth, videoWidth);
+  }
+
+  function sessionPaintedOk(video?: HTMLVideoElement | null) {
+    const frames = readVideoFrameStats(video ?? videoRef.current);
+    latchSessionPaint(frames.framesRendered, video?.videoWidth ?? videoRef.current?.videoWidth ?? 0);
+    const session = sessionRef.current;
+    return mpegTsPaintedOk({
+      ttffMs: session.ttffMs,
+      framesRendered: Math.max(frames.framesRendered, session.maxFramesRendered),
+      videoWidth: Math.max(video?.videoWidth ?? 0, session.maxVideoWidth),
+    });
+  }
+
   const getPlaybackSnapshot = useCallback(
     (): PlaybackMetricsSnapshot => {
       const frames = readVideoFrameStats(videoRef.current);
+      latchSessionPaint(frames.framesRendered, videoRef.current?.videoWidth ?? 0);
       persistJobRebuffer(jobId, rebufferRef.current);
       return {
-        playback_stats_events: frames.framesRendered > 0 ? 1 : 0,
+        playback_stats_events: frames.framesRendered > 0 || sessionRef.current.maxFramesRendered > 0 ? 1 : 0,
         playback_stall_count: rebufferRef.current.stallCount,
-        playback_frames_rendered: frames.framesRendered,
+        playback_frames_rendered: Math.max(frames.framesRendered, sessionRef.current.maxFramesRendered),
         playback_frames_dropped: frames.framesDropped,
         playback_bitrate_bps: 0,
         playback_ttff_ms: sessionRef.current.ttffMs,
@@ -251,20 +282,19 @@ export default function MpegTsPlayer({
     }
 
     if (playbackGate !== "live") {
-      const jobFail = playerErrorForFailedJob({ jobStatus, jobError, protocol });
+      const jobFail = playerErrorForFailedJob({
+        jobStatus: jobStatusRef.current,
+        jobError: jobErrorRef.current,
+        protocol: protocolRef.current,
+      });
       if (jobFail) {
         setError(jobFail);
         setStatus("Failed (see diagnostics)");
         return;
       }
       if (playbackGate === "ended") {
-        const frames = readVideoFrameStats(video);
         const verdict = classifyMpegTsEndVerdict({
-          paintedOk: mpegTsPaintedOk({
-            ttffMs: sessionRef.current.ttffMs,
-            framesRendered: frames.framesRendered,
-            videoWidth: video.videoWidth ?? 0,
-          }),
+          paintedOk: sessionPaintedOk(video),
           lastReason: lastErrorRef.current,
           videoTimeSec: sessionRef.current.maxVideoTime,
           encodeDurationSec: encodeDurationRef.current,
@@ -287,9 +317,9 @@ export default function MpegTsPlayer({
         playbackGate === "waiting"
           ? waitingPlayerStatus({
               engine: "other",
-              jobStatus,
-              waitingForEncodeSlot,
-              encodeQueueAhead,
+              jobStatus: jobStatusRef.current,
+              waitingForEncodeSlot: waitingSlotRef.current,
+              encodeQueueAhead: encodeQueueRef.current,
             })
           : playbackGateLabel(playbackGate, "other"),
       );
@@ -308,10 +338,13 @@ export default function MpegTsPlayer({
     sessionRef.current = {
       maxVideoTime: 0,
       videoTimeOrigin: null,
+      playheadCarrySec: 0,
       ttffMs: 0,
       liveStartedAtMs: Date.now(),
       errorCount: 0,
       firstPaintAtMs: 0,
+      maxFramesRendered: 0,
+      maxVideoWidth: 0,
     };
     lastE2eRef.current = undefined;
     startupPhasesRef.current = { ...EMPTY_STARTUP_PHASES };
@@ -360,14 +393,7 @@ export default function MpegTsPlayer({
       encodeDurationSec: encodeDurationRef.current,
     });
 
-    const paintedOk = () => {
-      const frames = readVideoFrameStats(video);
-      return mpegTsPaintedOk({
-        ttffMs: sessionRef.current.ttffMs,
-        framesRendered: frames.framesRendered,
-        videoWidth: video?.videoWidth ?? 0,
-      });
-    };
+    const paintedOk = () => sessionPaintedOk(video);
 
     const failPlayback = (reason: string) => {
       const message = `MPEG-TS playback stopped (${reason}). Refresh or restart the publish.`;
@@ -432,6 +458,8 @@ export default function MpegTsPlayer({
       if (destroyed || !video) {
         return;
       }
+      const frames = readVideoFrameStats(video);
+      latchSessionPaint(frames.framesRendered, video.videoWidth ?? 0);
       const relative = sessionRelativeVideoTime(video);
       if (relative > 0.05) {
         sessionRef.current.maxVideoTime = Math.max(sessionRef.current.maxVideoTime, relative);
@@ -469,6 +497,14 @@ export default function MpegTsPlayer({
         sessionRef.current.ttffMs = 0;
         sessionRef.current.firstPaintAtMs = 0;
         sessionRef.current.videoTimeOrigin = null;
+        sessionRef.current.playheadCarrySec = 0;
+        sessionRef.current.maxFramesRendered = 0;
+        sessionRef.current.maxVideoWidth = 0;
+      } else {
+        // Live HTTP-TS remount starts a new currentTime timeline. Keep the
+        // painted seconds so cover is not reset to "max of two short clocks".
+        sessionRef.current.playheadCarrySec = sessionRef.current.maxVideoTime;
+        sessionRef.current.videoTimeOrigin = null;
       }
       setError(null);
       setStatus(reconnects > 0 ? "Reconnecting…" : "Connecting…");
@@ -504,9 +540,12 @@ export default function MpegTsPlayer({
       } else {
         pushDiag(`connect_probe=start proxied=${proxied}`);
         let probeError = "";
+        // 8s so /api/playback/fetch can return 504-idle (headers, no body)
+        // or 504-host-down (connect timeout ~5s) instead of collapsing both
+        // to AbortSignal "signal timed out".
         const probe = await fetch(proxied, {
           cache: "no-store",
-          signal: AbortSignal.timeout(4000),
+          signal: AbortSignal.timeout(8000),
         }).catch((err: unknown) => {
           probeError = err instanceof Error ? err.message : String(err);
           pushDiag(`connect_probe_fetch_error=${probeError}`);
@@ -516,10 +555,28 @@ export default function MpegTsPlayer({
           return;
         }
         if (!probe || !probe.ok || !probe.body) {
+          let detail = "";
+          if (probe) {
+            try {
+              const payload = (await probe.clone().json()) as { detail?: unknown };
+              detail = typeof payload.detail === "string" ? payload.detail : "";
+            } catch {
+              /* ignore non-JSON 504 bodies */
+            }
+          }
+          const idle = mpegTsFetchIdleSignal({
+            httpStatus: probe ? probe.status : null,
+            upstreamStatusHeader: probe?.headers.get("X-Playback-Upstream-Status"),
+            firstByteHeader: probe?.headers.get("X-Playback-First-Byte"),
+            detail,
+          });
           const reason = mpegTsProbeFailReason({
             httpStatus: probe ? probe.status : null,
             fetchError: probeError,
             originHost: mpegTsOriginHost(url),
+            upstreamStatus: idle.upstreamStatus,
+            firstByteTimeout: idle.firstByteTimeout,
+            headersReceived: idle.firstByteTimeout || idle.upstreamStatus != null,
           });
           pushDiag(`connect_probe=fail http=${probe ? probe.status : "n/a"} reason=${reason}`);
           scheduleReconnect(reason);
@@ -529,13 +586,17 @@ export default function MpegTsPlayer({
         let bytes = 0;
         let sync = false;
         const deadline = Date.now() + 3000;
-        while (Date.now() < deadline && bytes < 188 * 8) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value?.length) {
-            bytes += value.length;
-            if (value[0] === 0x47) sync = true;
+        try {
+          while (Date.now() < deadline && bytes < 188 * 8) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value?.length) {
+              bytes += value.length;
+              if (value[0] === 0x47) sync = true;
+            }
           }
+        } catch {
+          /* abort / closed mid-body — treat whatever we got */
         }
         try {
           await reader.cancel();
@@ -549,7 +610,13 @@ export default function MpegTsPlayer({
         if (bytes < 188 || !sync) {
           scheduleReconnect(
             bytes === 0
-              ? "empty HTTP-TS (input offline?)"
+              ? mpegTsProbeFailReason({
+                  httpStatus: probe.status,
+                  originHost: mpegTsOriginHost(url),
+                  headersReceived: true,
+                  bytesReceived: 0,
+                  upstreamStatus: probe.status,
+                })
               : `short HTTP-TS (${bytes}B)`,
           );
           return;
@@ -667,16 +734,7 @@ export default function MpegTsPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [
-    url,
-    playbackGate,
-    jobId,
-    jobStatus,
-    jobError,
-    protocol,
-    waitingForEncodeSlot,
-    encodeQueueAhead,
-  ]);
+  }, [url, playbackGate, jobId]);
 
   return (
     <div className="player-surface">

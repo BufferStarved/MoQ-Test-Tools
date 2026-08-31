@@ -367,6 +367,16 @@ describe("humanizeJobError protocol", () => {
     assert.doesNotMatch(shown, /publisher pipe/i);
   });
 
+  it("does not dress RTMP ffmpeg 251 as an ingest close", () => {
+    const raw =
+      "RTMP publish failed (ffmpeg 251). The ingest closed the connection — this is not a MoQ publisher pipe.";
+    const shown = humanizeJobError(raw, { protocol: "rtmp" }) ?? "";
+    assert.match(shown, /already holds this stream key/i);
+    assert.match(shown, /ffmpeg 251/);
+    assert.doesNotMatch(shown, /The ingest closed/i);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
+  });
+
   it("does not dress VMAF overwrite 239 as an RTMP ingest close", () => {
     const raw =
       "ffmpeg exited with code 239: File '/tmp/moq-bench-jj0cwj6i/vmaf_reference.ts' already exists. Overwrite? [y/N] Not overwriting - exiting | Error opening output files: File exists.";

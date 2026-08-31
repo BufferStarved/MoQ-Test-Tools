@@ -1352,6 +1352,59 @@ def _rewrite_mpd_manifest(manifest_url: str, content: bytes) -> bytes:
 # browser-side symptom was stutter on all legs and wedged fragment loading.
 _playback_client: Optional[httpx.AsyncClient] = None
 
+# Zixi live HTTP-TS answers 200 then hangs: Content-Length is INT64_MAX
+# (or omitted) and the body never starts. Distinct from connect/host-down.
+_ZIXI_UNBOUNDED_CONTENT_LENGTH = 2**63 - 1
+_HTTP_TS_FIRST_BYTE_SEC = 2.5
+PLAYBACK_FETCH_TIMED_OUT = "Playback fetch timed out"
+
+
+def _content_length_is_unbounded(value: Optional[str]) -> bool:
+    if value is None or str(value).strip() == "":
+        return True
+    try:
+        length = int(str(value).strip())
+    except ValueError:
+        return True
+    return length >= _ZIXI_UNBOUNDED_CONTENT_LENGTH
+
+
+def is_live_http_ts(path: str, headers) -> bool:
+    """Continuous HTTP-TS (Zixi named outputs), not finite HLS .ts segments."""
+    content_type = (headers.get("Content-Type") if headers is not None else "") or ""
+    lowered = content_type.lower()
+    path_l = (path or "").lower()
+    looks_ts = (
+        "mp2t" in lowered
+        or "mpegts" in lowered
+        or "mpeg2ts" in lowered
+        or path_l.endswith(".ts")
+    )
+    if not looks_ts:
+        return False
+    return _content_length_is_unbounded(
+        headers.get("Content-Length") if headers is not None else None
+    )
+
+
+def playback_fetch_idle_detail(upstream_status: int) -> str:
+    return f"Playback fetch: origin answered HTTP {upstream_status} but sent no media"
+
+
+def playback_fetch_idle_response(upstream_status: int) -> Response:
+    """504 the player can tell from host-down 504 (no X-Playback-First-Byte)."""
+    return Response(
+        status_code=504,
+        content=json.dumps({"detail": playback_fetch_idle_detail(upstream_status)}),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Playback-Upstream-Status": str(upstream_status),
+            "X-Playback-First-Byte": "idle",
+        },
+    )
+
 
 def _get_playback_client() -> httpx.AsyncClient:
     global _playback_client
@@ -1474,7 +1527,7 @@ async def playback_fetch(url: str, request: Request):
         try:
             upstream = await client.get(safe_url, timeout=manifest_timeout)
         except httpx.TimeoutException as exc:
-            raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
+            raise HTTPException(status_code=504, detail=PLAYBACK_FETCH_TIMED_OUT) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
         if upstream.status_code >= 400:
@@ -1512,7 +1565,7 @@ async def playback_fetch(url: str, request: Request):
     try:
         upstream = await client.send(upstream_request, stream=True)
     except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Playback fetch timed out") from exc
+        raise HTTPException(status_code=504, detail=PLAYBACK_FETCH_TIMED_OUT) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
     if upstream.status_code >= 400:
@@ -1539,6 +1592,34 @@ async def playback_fetch(url: str, request: Request):
             content = _rewrite_m3u8_manifest(url, content)
             media_type = "application/vnd.apple.mpegurl"
         return Response(content=content, media_type=media_type, headers=no_store)
+
+    # Live HTTP-TS: origin may send 200 + INT64_MAX / no Content-Length and
+    # then never emit a TS byte. Peek the first chunk so the player sees
+    # "answered but idle" instead of collapsing to host-down "signal timed out".
+    if is_live_http_ts(parsed.path or "", upstream.headers):
+        body_iter = upstream.aiter_bytes(64 * 1024)
+        try:
+            first = await asyncio.wait_for(body_iter.__anext__(), timeout=_HTTP_TS_FIRST_BYTE_SEC)
+        except StopAsyncIteration:
+            first = b""
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            await upstream.aclose()
+            return playback_fetch_idle_response(upstream.status_code)
+        if not first:
+            await upstream.aclose()
+            return playback_fetch_idle_response(upstream.status_code)
+
+        async def iter_first_then_rest():
+            try:
+                yield first
+                async for chunk in body_iter:
+                    yield chunk
+            except httpx.HTTPError:
+                pass
+            finally:
+                await upstream.aclose()
+
+        return StreamingResponse(iter_first_then_rest(), media_type=media_type, headers=no_store)
 
     async def iter_chunks():
         try:

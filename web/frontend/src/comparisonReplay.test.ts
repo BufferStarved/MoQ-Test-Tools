@@ -634,18 +634,69 @@ describe("BBB comparison Zixi RTMP 239 overwrite", () => {
   });
 });
 
-describe("BBB comparison Zixi :7777 probe timeout", () => {
-  it("fails closed on HTTP-TS timeout and does not say Playback OK", () => {
+describe("comparison 32 Zixi occupied RTMP 251", () => {
+  it("does not dress ffmpeg 251 as ingest close after a standing canary held benchmark", () => {
     const row: ComparisonLastRow = {
-      stream: "Stream 2 (SRT)",
-      protocol: "srt",
-      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
-      encode_frames_total: 1800,
+      stream: "Stream 4 (RTMP) · gcp/us-central1",
+      protocol: "rtmp",
+      endpoint: "rtmp://35.222.33.58:1935/live/benchmark",
+      encode_frames_total: 0,
       playback_frames_rendered: 0,
       playback_video_time_sec: 0,
       playback_ttff_ms: 0,
       moqx_publish_namespace_success: 0,
     };
+    const shown = visibleLeg(row, {
+      jobStatus: "failed",
+      jobError:
+        "RTMP publish failed (ffmpeg 251). The ingest closed the connection — this is not a MoQ publisher pipe.",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /already holds this stream key/i);
+    assert.doesNotMatch(shown.error ?? "", /The ingest closed/i);
+  });
+});
+
+describe("comparison 32 Linode Zixi SRT idle HTTP-TS", () => {
+  it("fails closed on 45.33.68.151:7777 HTTP 200 + 0 TS bytes, not frozen host", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 5 (SRT) · linode/us-east",
+      protocol: "srt",
+      endpoint: "srt://45.33.68.151:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const idle =
+      "HTTP-TS origin 45.33.68.151:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.";
+    const shown = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: idle,
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /45\.33\.68\.151:7777/);
+    assert.match(shown.error ?? "", /answered HTTP 200/i);
+    assert.match(shown.error ?? "", /sent no media/i);
+    assert.doesNotMatch(shown.error ?? "", /frozen/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+});
+
+describe("BBB comparison Zixi :7777 probe timeout", () => {
+  const row: ComparisonLastRow = {
+    stream: "Stream 2 (SRT)",
+    protocol: "srt",
+    endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+    encode_frames_total: 1800,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 0,
+  };
+
+  it("fails closed on HTTP-TS host-down timeout and does not say Playback OK", () => {
     const timeout =
       "HTTP-TS probe timed out — 35.222.33.58:7777 did not respond (origin may be frozen). This is not playback OK.";
     const srt = visibleLeg(row, {
@@ -654,7 +705,23 @@ describe("BBB comparison Zixi :7777 probe timeout", () => {
     });
     assert.equal(srt.status, "Failed");
     assert.match(srt.error ?? "", /35\.222\.33\.58:7777/);
-    assert.match(srt.error ?? "", /timed out|frozen/i);
+    assert.match(srt.error ?? "", /did not respond/i);
+    assert.match(srt.error ?? "", /frozen/i);
+    assert.doesNotMatch(srt.status, /Playback OK/i);
+  });
+
+  it("fails closed on HTTP 200 + 0 TS bytes as idle live HTTP-TS, not host-down", () => {
+    const idle =
+      "HTTP-TS origin 35.222.33.58:7777 answered HTTP 200 but sent no media (live HTTP-TS idle, or advertised an unbounded stream with no packets). This is not playback OK.";
+    const srt = visibleLeg(row, {
+      jobStatus: "running",
+      mpegTsLastReason: idle,
+    });
+    assert.equal(srt.status, "Failed");
+    assert.match(srt.error ?? "", /answered HTTP 200/i);
+    assert.match(srt.error ?? "", /sent no media/i);
+    assert.doesNotMatch(srt.error ?? "", /did not respond/i);
+    assert.doesNotMatch(srt.error ?? "", /frozen/i);
     assert.doesNotMatch(srt.status, /Playback OK/i);
   });
 });
@@ -693,6 +760,31 @@ describe("BBB file MoQ shared-hub never-announce", () => {
     const leg = visibleLeg(moq, hud);
     assert.equal(leg.status, "Failed");
     assert.notEqual(leg.status, "Playback OK");
+  });
+});
+
+describe("headed East Zixi SRT 3c0a875f remount-then-stall", () => {
+  it("does not say MPEG-TS never painted after 1067 paints / 35.4s of a 60s encode", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 3 (SRT) · gcp/us-east1",
+      protocol: "srt",
+      endpoint: "srt://35.196.215.179:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 1800,
+      playback_frames_rendered: 1067,
+      playback_video_time_sec: 35.391846,
+      playback_ttff_ms: 4002,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      mpegTsLastReason: "MPEG-TS never painted. Encode-only is not playback.",
+      encodeDurationSec: 60,
+      encodeElapsedSec: 59,
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /stalled at 35\.4s of a 60s encode/i);
+    assert.doesNotMatch(shown.error ?? "", /never painted/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
   });
 });
 

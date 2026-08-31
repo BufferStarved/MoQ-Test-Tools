@@ -196,6 +196,29 @@ class FfmpegFailureMessageTests(unittest.TestCase):
             )
         )
 
+    def test_rtmp_251_occupied_key_is_not_ingest_close(self) -> None:
+        from upload_service import ingest_session_retry_kind, looks_like_occupied_rtmp_input
+
+        process = MagicMock()
+        process.returncode = 251
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = b"Conversion failed!\n"
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertTrue(looks_like_occupied_rtmp_input(message, 251))
+        self.assertIn("already holds this stream key", message)
+        self.assertNotIn("The ingest closed", message)
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=1.1,
+                remaining_sec=57.0,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+                error=message,
+            )
+        )
+
     def test_moq_closed_pipe_keeps_cmaf_hint(self) -> None:
         process = MagicMock()
         process.returncode = 224

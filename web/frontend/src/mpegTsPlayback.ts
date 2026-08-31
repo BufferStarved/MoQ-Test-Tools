@@ -20,7 +20,11 @@ export function mpegTsMayMarkPlaybackOk(options: {
   paintedOk: boolean;
   lastReason?: string | null;
 }): boolean {
-  if (/manifest unreachable|HTTP |timed out|origin may be frozen/i.test(options.lastReason || "")) {
+  if (
+    /manifest unreachable|HTTP |timed out|origin may be frozen|sent no media|idle HTTP-TS/i.test(
+      options.lastReason || "",
+    )
+  ) {
     return false;
   }
   return options.paintedOk;
@@ -42,23 +46,88 @@ export function mpegTsOriginHost(playbackUrl: string): string {
   }
 }
 
+/** Host-down / no HTTP status. Origin never answered. */
+export function mpegTsFrozenOriginReason(host: string): string {
+  return (
+    `HTTP-TS probe timed out — ${host} did not respond ` +
+    `(origin may be frozen). This is not playback OK.`
+  );
+}
+
+/**
+ * Headers arrived (HTTP 200 or equivalent) but the body never started.
+ * Zixi live HTTP-TS does this when the named output is idle: 200 +
+ * INT64_MAX Content-Length or no Content-Length, then 0 TS bytes.
+ */
+export function mpegTsIdleOriginReason(host: string, httpStatus = 200): string {
+  return (
+    `HTTP-TS origin ${host} answered HTTP ${httpStatus} but sent no media ` +
+    `(live HTTP-TS idle, or advertised an unbounded stream with no packets). ` +
+    `This is not playback OK.`
+  );
+}
+
+/** Decode /api/playback/fetch idle vs host-down signaling. */
+export function mpegTsFetchIdleSignal(options: {
+  httpStatus?: number | null;
+  upstreamStatusHeader?: string | null;
+  firstByteHeader?: string | null;
+  detail?: string | null;
+}): { upstreamStatus: number | null; firstByteTimeout: boolean } {
+  const raw = Number(options.upstreamStatusHeader || "");
+  const fromHeader = Number.isFinite(raw) && raw > 0 ? raw : null;
+  const idleHeader = (options.firstByteHeader || "").trim().toLowerCase() === "idle";
+  const detail = options.detail || "";
+  const fromDetail = /answered HTTP (\d+) but sent no media/i.exec(detail);
+  if (idleHeader || fromDetail) {
+    return {
+      upstreamStatus: fromHeader ?? (fromDetail ? Number(fromDetail[1]) : 200),
+      firstByteTimeout: true,
+    };
+  }
+  if (fromHeader) {
+    return { upstreamStatus: fromHeader, firstByteTimeout: false };
+  }
+  return { upstreamStatus: null, firstByteTimeout: false };
+}
+
 /** Honest connect_probe failure — do not call a timeout "manifest unreachable". */
 export function mpegTsProbeFailReason(options: {
   httpStatus?: number | null;
   fetchError?: string | null;
   originHost?: string;
+  upstreamStatus?: number | null;
+  firstByteTimeout?: boolean;
+  headersReceived?: boolean;
+  bytesReceived?: number | null;
 }): string {
   const err = (options.fetchError || "").toLowerCase();
   const host = (options.originHost || "").trim() || "the HTTP-TS origin";
-  if (
+  const timedOut =
     options.httpStatus === 504 ||
+    options.firstByteTimeout === true ||
     /timeout|timed out|aborted/.test(err) ||
-    /playback fetch timed out/i.test(err)
-  ) {
-    return (
-      `HTTP-TS probe timed out — ${host} did not respond ` +
-      `(origin may be frozen). This is not playback OK.`
-    );
+    /playback fetch timed out/i.test(err);
+  const answeredStatus =
+    options.upstreamStatus && options.upstreamStatus >= 200
+      ? options.upstreamStatus
+      : options.httpStatus === 200
+        ? 200
+        : null;
+  const originAnswered =
+    options.firstByteTimeout === true ||
+    options.headersReceived === true ||
+    answeredStatus != null ||
+    (options.bytesReceived === 0 && options.httpStatus === 200);
+  const noMedia =
+    options.firstByteTimeout === true ||
+    options.bytesReceived === 0 ||
+    (originAnswered && timedOut);
+  if (originAnswered && noMedia) {
+    return mpegTsIdleOriginReason(host, answeredStatus ?? 200);
+  }
+  if (timedOut) {
+    return mpegTsFrozenOriginReason(host);
   }
   if (options.httpStatus) {
     return `HTTP ${options.httpStatus}`;

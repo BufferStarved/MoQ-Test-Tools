@@ -16,7 +16,7 @@ import {
 } from "./moqCmafPlayback.ts";
 import { locPaintedOk } from "./moqLocPlayback.ts";
 import { classifyHlsEndVerdict } from "./hlsPlayback.ts";
-import { mpegTsMayMarkPlaybackOk, mpegTsPaintedOk } from "./mpegTsPlayback.ts";
+import { classifyMpegTsEndVerdict, mpegTsPaintedOk } from "./mpegTsPlayback.ts";
 import { classifyWhepEndVerdict } from "./webrtcPlayback.ts";
 
 export type ComparisonLastRow = {
@@ -247,15 +247,19 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
         ttffMs: row.playback_ttff_ms,
         framesRendered: row.playback_frames_rendered,
       });
-      const ok = mpegTsMayMarkPlaybackOk({
+      const verdict = classifyMpegTsEndVerdict({
         paintedOk: painted,
         lastReason: hud.mpegTsLastReason,
+        videoTimeSec: row.playback_video_time_sec,
+        encodeDurationSec: hud.encodeDurationSec,
+        encodeElapsedSec: hud.encodeElapsedSec,
+        runStopped: hud.runStopped,
       });
       return {
         stream: row.stream,
         protocol,
-        error: ok ? null : hud.mpegTsLastReason || "MPEG-TS never painted",
-        status: ok ? "Playback OK" : "Failed",
+        error: verdict.error,
+        status: verdict.status,
       };
     }
     const verdict = classifyHlsEndVerdict({

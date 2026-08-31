@@ -43,6 +43,7 @@ export PYTHONPATH="$ROOT/src:$ROOT/web/api${PYTHONPATH:+:$PYTHONPATH}"
   tests.test_moqx_stats \
   tests.test_zixi_stats \
   tests.test_http_ts_put_gate \
+  tests.test_playback_fetch_idle \
   tests.test_e2e_ingest_matrix_gates \
   tests.test_avfoundation_modes \
   tests.test_device_webcam \

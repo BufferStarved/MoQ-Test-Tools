@@ -217,6 +217,23 @@ def looks_like_vmaf_overwrite(text: str) -> bool:
     return False
 
 
+def looks_like_occupied_rtmp_input(text: str, returncode: int | None = None) -> bool:
+    """Second RTMP publisher to the same Zixi/MediaMTX key — not a mid-stream close.
+
+    ffmpeg 251 on RTMP is the usual reject when ``live/benchmark`` already has a
+    push (standing canary or another comparison dest). Camera 251 still has
+    avfoundation / v4l2 / selected-framerate in the log.
+    """
+    t = (text or "").lower()
+    if "avfoundation" in t or "v4l2" in t or "selected framerate" in t:
+        return False
+    if returncode == 251:
+        return True
+    if "ffmpeg 251" in t or "code 251" in t:
+        return True
+    return False
+
+
 def ingest_session_retry_kind(
     *,
     protocol: str,
@@ -231,6 +248,8 @@ def ingest_session_retry_kind(
     if cancelled or "SIGTERM" in (error or ""):
         return None
     if looks_like_vmaf_overwrite(error):
+        return None
+    if looks_like_occupied_rtmp_input(error):
         return None
     if (protocol or "").strip().lower() not in _INGEST_SESSION_RETRY_PROTOCOLS:
         return None
@@ -3490,6 +3509,14 @@ class UploadService:
                 f"ffmpeg exited with code {process.returncode}: VMAF reference "
                 "already exists (overwrite prompt). This is not an ingest close "
                 "or a MoQ publisher pipe."
+            )
+        if proto == "rtmp" and looks_like_occupied_rtmp_input(
+            f"{stderr}\n{detail}", process.returncode
+        ):
+            return (
+                f"RTMP publish failed (ffmpeg {process.returncode}). "
+                "Another publisher already holds this stream key. "
+                "This is not an ingest close mid-stream."
             )
         if "Input/output error" in stderr and (
             "avfoundation" in stderr.lower() or "v4l2" in stderr.lower()

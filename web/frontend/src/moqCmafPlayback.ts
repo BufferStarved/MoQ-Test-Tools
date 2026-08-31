@@ -358,6 +358,13 @@ export function humanizeJobError(
       ? `ffmpeg ${ffmpegCode}: VMAF reference already exists (overwrite prompt). This is not an ingest close or a MoQ publisher pipe.`
       : "VMAF reference already exists (overwrite prompt). This is not an ingest close or a MoQ publisher pipe.";
   }
+  if (
+    kind === "rtmp" &&
+    (ffmpegCode === "251" || /ffmpeg 251|code 251/i.test(raw)) &&
+    !/avfoundation|camera i\/o|selected framerate/i.test(raw)
+  ) {
+    return "RTMP publish failed (ffmpeg 251). Another publisher already holds this stream key. This is not an ingest close mid-stream.";
+  }
   if (kind === "rtmp") {
     return ffmpegCode
       ? `RTMP publish failed (ffmpeg ${ffmpegCode}). The ingest closed the connection — this is not a MoQ publisher pipe.`
