@@ -30,6 +30,7 @@ import {
   mpegTsOriginHost,
   mpegTsPaintedOk,
   mpegTsProbeFailReason,
+  mpegTsShouldSkipReconnect,
   mpegTsShouldWaitForEncode,
 } from "../mpegTsPlayback";
 import { PlayerDiagnostics } from "./PlayerDiagnostics";
@@ -400,6 +401,8 @@ export default function MpegTsPlayer({
       benchmarkLoading: loadingRef.current,
       videoTimeSec: sessionRef.current.maxVideoTime,
       encodeDurationSec: encodeDurationRef.current,
+      encodeElapsedSec: encodeElapsedRef.current,
+      runStopped: runStoppedRef.current,
     });
 
     const paintedOk = () => sessionPaintedOk(video);
@@ -437,8 +440,17 @@ export default function MpegTsPlayer({
       }
       const playedOk = paintedOk();
       if (
-        mpegTsMayMarkPlaybackOk({ paintedOk: playedOk, lastReason: reason }) &&
-        isGracefulMpegTsEos(mpegTsEosOptions(playedOk))
+        mpegTsShouldSkipReconnect({
+          paintedOk: playedOk,
+          runStopped: runStoppedRef.current,
+          jobStatus: jobStatusRef.current,
+        }) ||
+        (mpegTsMayMarkPlaybackOk({
+          paintedOk: playedOk,
+          lastReason: reason,
+          runStopped: runStoppedRef.current,
+        }) &&
+          isGracefulMpegTsEos(mpegTsEosOptions(playedOk)))
       ) {
         destroyPlayer();
         markPlaybackOk(`graceful_eos ${reason}`, reason);
@@ -461,7 +473,13 @@ export default function MpegTsPlayer({
         return;
       }
       if (reconnects >= MAX_RECONNECTS) {
-        if (mpegTsMayMarkPlaybackOk({ paintedOk: playedOk, lastReason: reason })) {
+        if (
+          mpegTsMayMarkPlaybackOk({
+            paintedOk: playedOk,
+            lastReason: reason,
+            runStopped: runStoppedRef.current,
+          })
+        ) {
           markPlaybackOk(`graceful_eos after ${reconnects} reconnects (${reason})`, reason);
           return;
         }
@@ -733,7 +751,14 @@ export default function MpegTsPlayer({
         }
         pushDiag(`mpegtsjs_error type=${type} detail=${detail} code=${info?.code ?? "n/a"}`);
         const playedOk = paintedOk();
-        if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+        if (
+          mpegTsShouldSkipReconnect({
+            paintedOk: playedOk,
+            runStopped: runStoppedRef.current,
+            jobStatus: jobStatusRef.current,
+          }) ||
+          isGracefulMpegTsEos(mpegTsEosOptions(playedOk))
+        ) {
           destroyPlayer();
           markPlaybackOk("graceful_eos mpegts_error after successful playback", detail);
           return;
@@ -746,9 +771,16 @@ export default function MpegTsPlayer({
           return;
         }
         const playedOk = paintedOk();
-        if (isGracefulMpegTsEos(mpegTsEosOptions(playedOk))) {
+        if (
+          mpegTsShouldSkipReconnect({
+            paintedOk: playedOk,
+            runStopped: runStoppedRef.current,
+            jobStatus: jobStatusRef.current,
+          }) ||
+          isGracefulMpegTsEos(mpegTsEosOptions(playedOk))
+        ) {
           destroyPlayer();
-          markPlaybackOk("loading_complete (encode ended)", "loading_complete");
+          markPlaybackOk("loading_complete (publisher session ended)", "publisher session ended");
           return;
         }
         pushDiag("loading_complete (publisher session ended)");

@@ -53,7 +53,7 @@ assert.match(presetSrc, /recipeShowsSharedProtocolPicker/);
 assert.match(presetSrc, /showEndpointPickers:\s*true/);
 assert.match(presetSrc, /lockProtocolMix:\s*true/);
 assert.match(presetSrc, /lockEndpoints:\s*false/);
-assert.match(presetSrc, /HLS playback for SRT\/RTMP/);
+assert.match(presetSrc, /MediaMTX LL-HLS for SRT/);
 assert.match(presetSrc, /Encode and ingest meters only/);
 assert.match(presetSrc, /One protocol, compared across live clouds/);
 assert.match(appSrc, /handleBenchmarkPreset/);
@@ -133,9 +133,9 @@ function recipeIssue(source, encoder, endpoints) {
 }
 
 const protocolCompare = [
-  { protocol: "srt", ingestEndpointId: "gcp_zixi", playbackMode: "hls" },
+  { protocol: "srt", ingestEndpointId: "gcp_mediamtx", playbackMode: "ll-hls" },
   { protocol: "rtmp", ingestEndpointId: "gcp_zixi", playbackMode: "hls" },
-  { protocol: "webrtc", ingestEndpointId: "gcp_mediamtx", playbackMode: "whep" },
+  { protocol: "webrtc", ingestEndpointId: "gcp_east_mediamtx", playbackMode: "whep" },
   { protocol: "moq", ingestEndpointId: "gcp_moq_relay_d18", playbackMode: "moq" },
 ];
 assert.equal(recipeIssue("dummy", "ffmpeg", protocolCompare), null, "protocol compare 4-way");

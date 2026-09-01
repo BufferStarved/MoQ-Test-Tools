@@ -27,6 +27,9 @@ export function classifyHlsEndVerdict(options: {
   runStopped?: boolean;
 }): HlsEndVerdict {
   if (hlsPaintedOk(options)) {
+    if (options.runStopped) {
+      return { ok: true, status: "Playback OK", error: null };
+    }
     if (
       (options.encodeDurationSec || options.encodeElapsedSec) &&
       !playbackCoveredEncode({

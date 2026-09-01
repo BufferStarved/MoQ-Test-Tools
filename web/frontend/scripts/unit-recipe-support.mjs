@@ -18,6 +18,7 @@ const appSrc = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
 
 assert.match(appSrc, /coerceRecipe/);
 assert.match(appSrc, /recipeIssue/);
+assert.match(appSrc, /comparisonStartTitle/);
 assert.match(appSrc, /canAddRecipeOutput/);
 assert.match(appSrc, /Boolean\(startTitle\)/);
 assert.match(appSrc, /recipeBlockReason/);

@@ -64,6 +64,10 @@ describe("9-host encode registry", () => {
       assert.ok(ingest.endsWith("_moq_relay_d18"), ingest);
       assert.equal(RECIPE_HIDDEN_INGEST_IDS.has(ingest), false);
     }
+    assert.equal(defaultIngestForProtocol("srt"), "gcp_mediamtx");
+    assert.equal(defaultIngestForProtocol("srt", "gcp_east"), "gcp_east_mediamtx");
+    assert.equal(defaultIngestForProtocol("srt", "gcp_central"), "gcp_mediamtx");
+    assert.notEqual(defaultIngestForProtocol("srt"), "gcp_zixi");
   });
 
   it("shows undeployed hosts in the picker as Not deployed, never leftover :4433", () => {

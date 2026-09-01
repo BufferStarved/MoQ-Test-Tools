@@ -19,8 +19,10 @@ function isGracefulMpegTsEos({
   benchmarkLoading,
   videoTimeSec = 0,
   encodeDurationSec = 0,
+  runStopped = false,
 }) {
   if (!playedOk) return false;
+  if (runStopped) return true;
   return (
     encodeLooksFinished({ jobStatus, benchmarkLoading }) ||
     playedMostOfClip({ videoTimeSec, encodeDurationSec })
@@ -84,6 +86,16 @@ assert.equal(isGracefulMpegTsEos({ playedOk: true, jobStatus: "completed" }), tr
 assert.equal(isGracefulMpegTsEos({ playedOk: true, jobStatus: "running", videoTimeSec: 55, encodeDurationSec: 60 }), true);
 assert.equal(isGracefulMpegTsEos({ playedOk: true, jobStatus: "running", benchmarkLoading: false, videoTimeSec: 2, encodeDurationSec: 60 }), false);
 assert.equal(isGracefulMpegTsEos({ playedOk: false, jobStatus: "completed" }), false);
+assert.equal(
+  isGracefulMpegTsEos({
+    playedOk: true,
+    runStopped: true,
+    jobStatus: "running",
+    videoTimeSec: 21.2,
+    encodeDurationSec: 81,
+  }),
+  true,
+);
 
 assert.equal(
   isGracefulMoqReset({

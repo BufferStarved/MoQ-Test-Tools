@@ -86,7 +86,12 @@ export function mpegTsMayExhaustReconnects(options: {
 export function mpegTsMayMarkPlaybackOk(options: {
   paintedOk: boolean;
   lastReason?: string | null;
+  runStopped?: boolean;
 }): boolean {
+  // Operator Stop after paint: origin 504 / idle is the encode tearing down.
+  if (options.runStopped && options.paintedOk) {
+    return true;
+  }
   if (
     /manifest unreachable|HTTP |timed out|origin may be frozen|sent no media|idle HTTP-TS|empty-reply|closed the socket with no HTTP/i.test(
       options.lastReason || "",
@@ -95,6 +100,25 @@ export function mpegTsMayMarkPlaybackOk(options: {
     return false;
   }
   return options.paintedOk;
+}
+
+/**
+ * Do not remount HTTP-TS after operator Stop or job-over once a frame painted.
+ * Post-stop 504 / empty-reply is idle origin, not a mid-clip miss.
+ */
+export function mpegTsShouldSkipReconnect(options: {
+  paintedOk: boolean;
+  runStopped?: boolean;
+  jobStatus?: string;
+}): boolean {
+  if (!options.paintedOk) {
+    return false;
+  }
+  if (options.runStopped) {
+    return true;
+  }
+  const status = (options.jobStatus || "").toLowerCase();
+  return status === "completed" || status === "failed";
 }
 
 /** Host:port from a raw HTTP-TS URL or an /api/playback/fetch proxy URL. */
@@ -243,6 +267,11 @@ export function classifyMpegTsEndVerdict(options: {
   encodeElapsedSec?: number;
   runStopped?: boolean;
 }): MpegTsEndVerdict {
+  // Stop after paint is Playback OK even when the playhead lags the unused
+  // encode cap (21s of a 71s file after the operator hit Stop).
+  if (options.paintedOk && options.runStopped) {
+    return { ok: true, status: "Playback OK", error: null };
+  }
   if (mpegTsMayMarkPlaybackOk(options)) {
     if (
       (options.encodeDurationSec || options.encodeElapsedSec) &&

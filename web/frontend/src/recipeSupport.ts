@@ -586,6 +586,26 @@ export function webcamSrtShouldUseRegionalMtx(
   return endpoints.length >= 3 || (moq >= 2 && srt >= 2);
 }
 
+/** Next unused MediaMTX SRT slot when the same-region sibling is already taken. */
+function pickFreeRegionalMtx(
+  ctx: RecipeContext,
+  used: ReadonlySet<string>,
+  oldKey: string | null,
+): IngestEndpointId | null {
+  const occupied = new Set(used);
+  if (oldKey) {
+    occupied.delete(oldKey);
+  }
+  const dests = destinationsForProtocol("srt", ctx, occupied).filter(
+    (item) =>
+      item.available &&
+      item.id.endsWith("_mediamtx") &&
+      !isCustomIngestEndpoint(item.id) &&
+      ingestAllowedForRecipe(item.id, "srt", ctx),
+  );
+  return dests[0]?.id ?? null;
+}
+
 function remapWebcamFanoutSrt(
   endpoints: EndpointConfig[],
   ctx: RecipeContext,
@@ -600,15 +620,20 @@ function remapWebcamFanoutSrt(
       return endpoint;
     }
     const sibling = siblingMediamtxIngest(endpoint.ingestEndpointId);
-    if (!sibling || !ingestAllowedForRecipe(sibling, "srt", ctx)) {
+    if (!sibling) {
       return endpoint;
     }
-    const newKey = ingestCollisionKey(sibling, "srt");
     const oldKey = ingestCollisionKey(endpoint.ingestEndpointId, "srt");
-    if (newKey && used.has(newKey) && newKey !== oldKey) {
+    const siblingKey = ingestCollisionKey(sibling, "srt");
+    const siblingOk =
+      ingestAllowedForRecipe(sibling, "srt", ctx) &&
+      !(siblingKey && used.has(siblingKey) && siblingKey !== oldKey);
+    const target = siblingOk ? sibling : pickFreeRegionalMtx(ctx, used, oldKey);
+    if (!target) {
       return endpoint;
     }
-    const playbackMode = resolvedSelectablePlaybackMode("ll-hls", "srt", sibling, ctx.caps);
+    const newKey = ingestCollisionKey(target, "srt");
+    const playbackMode = resolvedSelectablePlaybackMode("ll-hls", "srt", target, ctx.caps);
     if (oldKey) {
       used.delete(oldKey);
     }
@@ -616,13 +641,13 @@ function remapWebcamFanoutSrt(
       used.add(newKey);
     }
     changed = true;
-    return { ...endpoint, ingestEndpointId: sibling, playbackMode };
+    return { ...endpoint, ingestEndpointId: target, playbackMode };
   });
   return changed ? next : endpoints;
 }
 
 /**
- * Non-blocking Start copy: webcam fan-out mitigations and the in-tab encoder.
+ * Non-blocking Start copy: webcam fan-out mitigations.
  * 6-way is allowed (user rejected a lab-only hard-block).
  */
 export function recipeFanoutWarning(
@@ -630,12 +655,6 @@ export function recipeFanoutWarning(
   ctx: Pick<RecipeContext, "source" | "encoder">,
 ): string | null {
   const encoder = recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg");
-  if (encoder === "browser") {
-    return (
-      "Browser encoder publishes LOC (not CMAF) and audio is off. Chrome only. " +
-      "Use one or two dests (MoQ / WebRTC) — this is not the ffmpeg CMAF canary."
-    );
-  }
   if (ctx.source !== "webcam" || encoder !== "ffmpeg") {
     return null;
   }
@@ -722,4 +741,53 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
     }
   }
   return null;
+}
+
+/**
+ * Start-button title. recipeFanoutWarning is informational and must not
+ * appear here. Webcam ffmpeg/OBS still require the laptop helper.
+ */
+export function comparisonStartTitle(input: {
+  recipeIssue: string | null;
+  apiOnline: boolean;
+  endpointCount: number;
+  source: RecipeSourceId;
+  encoder: RecipeEncoderId;
+  helperConnected: boolean;
+  bbbAvailable?: boolean;
+  bbbHint?: string | null;
+  mediaPath?: string;
+  obsStartAllowed?: boolean;
+  obsWebsocketHint?: string;
+  browserCanStart?: boolean;
+}): string | undefined {
+  if (input.recipeIssue) {
+    return input.recipeIssue;
+  }
+  if (!input.apiOnline) {
+    return "API is offline.";
+  }
+  if (input.endpointCount < 1) {
+    return "Add at least one output.";
+  }
+  if (input.source === "bbb" && !input.bbbAvailable) {
+    return input.bbbHint ?? "Big Buck Bunny is not on this host yet.";
+  }
+  if (input.source === "upload" && !input.mediaPath) {
+    return "Choose a file to encode.";
+  }
+  const needsLocalHelper = input.encoder === "obs" || isLocalAgentSource(input.source);
+  if (needsLocalHelper && !input.helperConnected) {
+    return "No local publisher agent connected. Run the helper command, then retry.";
+  }
+  if (input.encoder === "obs" && input.obsStartAllowed === false) {
+    return (
+      input.obsWebsocketHint ||
+      "OBS encode needs the helper and a MoQ output. Enable Tools → WebSocket Server."
+    );
+  }
+  if (input.source === "browser_moq" && input.browserCanStart === false) {
+    return "This browser cannot publish the selected outputs yet.";
+  }
+  return undefined;
 }

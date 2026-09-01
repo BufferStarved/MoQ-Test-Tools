@@ -12,6 +12,7 @@ import {
   mpegTsMayExhaustReconnects,
   mpegTsPaintedOk,
   mpegTsProbeFailReason,
+  mpegTsShouldSkipReconnect,
   mpegTsShouldWaitForEncode,
 } from "./mpegTsPlayback.ts";
 
@@ -146,6 +147,60 @@ describe("mpegTsMayMarkPlaybackOk", () => {
       false,
     );
   });
+
+  it("treats post-stop 504 as Playback OK when a frame already painted", () => {
+    assert.equal(
+      mpegTsMayMarkPlaybackOk({
+        paintedOk: true,
+        lastReason: "HTTP 504",
+        runStopped: true,
+      }),
+      true,
+    );
+    assert.equal(
+      mpegTsMayMarkPlaybackOk({
+        paintedOk: false,
+        lastReason: "HTTP 504",
+        runStopped: true,
+      }),
+      false,
+    );
+  });
+});
+
+describe("mpegTsShouldSkipReconnect", () => {
+  it("skips remount after Stop or job-over once painted", () => {
+    assert.equal(
+      mpegTsShouldSkipReconnect({
+        paintedOk: true,
+        runStopped: true,
+        jobStatus: "running",
+      }),
+      true,
+    );
+    assert.equal(
+      mpegTsShouldSkipReconnect({
+        paintedOk: true,
+        jobStatus: "completed",
+      }),
+      true,
+    );
+    assert.equal(
+      mpegTsShouldSkipReconnect({
+        paintedOk: true,
+        jobStatus: "running",
+      }),
+      false,
+    );
+    assert.equal(
+      mpegTsShouldSkipReconnect({
+        paintedOk: false,
+        runStopped: true,
+        jobStatus: "completed",
+      }),
+      false,
+    );
+  });
 });
 
 describe("mpegTsProbeFailReason", () => {
@@ -270,5 +325,19 @@ describe("classifyMpegTsEndVerdict", () => {
     });
     assert.equal(verdict.ok, false);
     assert.match(verdict.error, /stalled at 18.8s of a 26s encode/i);
+  });
+
+  it("marks Playback OK when the operator Stops after paint", () => {
+    const verdict = classifyMpegTsEndVerdict({
+      paintedOk: true,
+      lastReason: "HTTP 504",
+      videoTimeSec: 21.2,
+      encodeDurationSec: 81,
+      encodeElapsedSec: 71,
+      runStopped: true,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.status, "Playback OK");
+    assert.equal(verdict.error, null);
   });
 });

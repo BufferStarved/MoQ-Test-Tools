@@ -90,6 +90,14 @@ assert.match(src("players/MpegTsPlayer.tsx"), /playheadCarrySec/);
 assert.match(src("players/MpegTsPlayer.tsx"), /waitingSlotRef/);
 assert.match(src("players/MpegTsPlayer.tsx"), /\}, \[url, playbackGate, jobId\]\);/)
 assert.match(replay, /runStopped: hud.runStopped/);
+assert.match(replay, /classifyHlsEndVerdict/);
+assert.match(
+  replay,
+  /classifyHlsEndVerdict\(\{[\s\S]*runStopped: hud.runStopped/,
+);
+assert.match(src("comparisonReplay.test.ts"), /publisher session ended/);
+assert.match(src("comparisonReplay.test.ts"), /HttpStatusCodeInvalid/);
+assert.match(src("comparisonReplay.test.ts"), /protocol comparison Stop after paint/);
 assert.match(replay, /inferCatalogReady/);
 assert.match(replay, /comparisonLegTone/);
 assert.match(src("comparisonReplay.test.ts"), /24\.7s-of-36s stall/);
@@ -122,6 +130,14 @@ assert.match(cmaf, /MOQ_NO_SUCH_NAMESPACE = 0x10/);
 
 const mpeg = src("players/MpegTsPlayer.tsx");
 assert.match(mpeg, /classifyMpegTsEndVerdict/);
+assert.match(mpeg, /mpegTsShouldSkipReconnect/);
+assert.match(mpeg, /runStopped: runStoppedRef.current/);
+assert.match(
+  mpeg,
+  /mpegTsMayMarkPlaybackOk\(\{[\s\S]*runStopped: runStoppedRef.current/,
+);
+assert.match(src("mpegTsPlayback.ts"), /mpegTsShouldSkipReconnect/);
+assert.match(src("playbackEos.ts"), /if \(options.runStopped\) \{\s*return true;/);
 assert.match(mpeg, /mpegTsProbeFailReason/);
 assert.match(mpeg, /mpegTsOriginHost/);
 assert.match(mpeg, /mpegTsFetchIdleSignal/);
@@ -192,6 +208,8 @@ assert.match(py("web/api/main.py"), /read=120\.0/);
 assert.match(py("src/upload_service.py"), /looks_like_flv_vtag_mismatch/);
 assert.match(src("moqCmafPlayback.ts"), /FLV vtag 27/);
 assert.match(src("recipeSupport.ts"), /export function recipeFanoutWarning/);
+assert.doesNotMatch(src("recipeSupport.ts"), /Browser encoder publishes LOC/);
+assert.doesNotMatch(src("App.tsx"), /this is not the ffmpeg CMAF canary/);
 assert.match(src("recipeSupport.ts"), /export function webcamSixWayFanout/);
 assert.match(src("recipeSupport.ts"), /export function webcamSrtShouldUseRegionalMtx/);
 assert.match(src("recipeSupport.ts"), /remapWebcamFanoutSrt/);
@@ -199,6 +217,9 @@ assert.match(src("recipeSupport.ts"), /if \(webcamSixWayFanout\(endpoints, ctx\)
 assert.match(src("ingestEndpoints.ts"), /export function siblingMediamtxIngest/);
 assert.match(src("App.tsx"), /recipeFanoutWarning/);
 assert.match(src("App.tsx"), /recipeIssue/);
+assert.match(src("recipeSupport.ts"), /export function comparisonStartTitle/);
+assert.match(src("App.tsx"), /comparisonStartTitle/);
+assert.match(src("recipeMatrix.test.ts"), /cloud-compare webcam Start gate/);
 assert.match(src("recipeMatrix.test.ts"), /recipeIssue\(six/);
 assert.match(src("recipeMatrix.test.ts"), /assert\.equal\(sixIssue, null\)/);
 assert.match(src("comparisonReplay.test.ts"), /write-block drops beat catalog-ready/);

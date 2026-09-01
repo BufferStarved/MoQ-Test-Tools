@@ -66,6 +66,7 @@ import {
   nextAddableEndpoint,
   obsMoqSupported,
   publishProtocolIdsForSource,
+  comparisonStartTitle,
   recipeFanoutWarning,
   recipeIssue,
   siblingOccupiedCollisionKeys,
@@ -2009,8 +2010,6 @@ function App() {
       return { ...sample, protocol: endpoint.protocol };
     }),
   );
-  const needsLocalHelper =
-    encoder === "obs" || isLocalAgentSource(mediaSource);
   const helperConnected =
     Boolean(features.local_publisher) && Boolean(features.local_publisher_connected);
   const obsWebsocketUp = Boolean(features.local_publisher_obs?.websocket);
@@ -2022,24 +2021,20 @@ function App() {
       ? features.local_publisher_obs?.detail?.trim() ||
         "OBS WebSocket is not connected on ws://127.0.0.1:4455. Enable Tools → WebSocket Server. Start will still dispatch the MoQ job — press Start Stream in OBS if the helper cannot reach it."
       : undefined;
-  const startTitle = recipeBlockReason
-    ? recipeBlockReason
-    : !apiOnline
-      ? "API is offline."
-      : endpoints.length < minEndpointsForSource(mediaSource)
-        ? "Add at least one output."
-        : mediaSource === "bbb" && !bbbAvailable
-          ? bbbSource?.hint ?? "Big Buck Bunny is not on this host yet."
-          : mediaSource === "upload" && !mediaPath
-            ? "Choose a file to encode."
-            : needsLocalHelper && !helperConnected
-              ? "No local publisher agent connected. Run the helper command, then retry."
-              : encoder === "obs" && !obsStartAllowed
-                ? obsWebsocketHint ||
-                  "OBS encode needs the helper and a MoQ output. Enable Tools → WebSocket Server."
-                : mediaSource === "browser_moq" && !browserSourceCanStart(endpoints)
-                  ? "This browser cannot publish the selected outputs yet."
-                  : undefined;
+  const startTitle = comparisonStartTitle({
+    recipeIssue: recipeBlockReason,
+    apiOnline,
+    endpointCount: endpoints.length,
+    source: mediaSource,
+    encoder,
+    helperConnected,
+    bbbAvailable,
+    bbbHint: bbbSource?.hint,
+    mediaPath,
+    obsStartAllowed,
+    obsWebsocketHint,
+    browserCanStart: browserSourceCanStart(endpoints),
+  });
   const startHint = startTitle || obsWebsocketHint;
   const startDisabled =
     loading ||

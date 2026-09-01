@@ -287,6 +287,7 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
       lastError: hud.hlsLastError,
       encodeDurationSec: hud.encodeDurationSec,
       encodeElapsedSec: hud.encodeElapsedSec,
+      runStopped: hud.runStopped,
     });
     return {
       stream: row.stream,

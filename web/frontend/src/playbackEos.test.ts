@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  isGracefulMpegTsEos,
   isGracefulMoqEncodeOver,
   isGracefulMoqReset,
   isGracefulWhepDisconnect,
@@ -12,6 +13,30 @@ describe("playedMostOfEncode", () => {
     assert.equal(playedMostOfEncode({ videoTimeSec: 12.4, encodeDurationSec: 60 }), false);
     assert.equal(playedMostOfEncode({ videoTimeSec: 48, encodeDurationSec: 60 }), true);
     assert.equal(playedMostOfEncode({ videoTimeSec: 12.4, encodeDurationSec: 0 }), false);
+  });
+});
+
+describe("isGracefulMpegTsEos", () => {
+  it("treats operator Stop after paint as graceful even when currentTime lags", () => {
+    assert.equal(
+      isGracefulMpegTsEos({
+        playedOk: true,
+        runStopped: true,
+        jobStatus: "running",
+        videoTimeSec: 21.2,
+        encodeDurationSec: 81,
+      }),
+      true,
+    );
+    assert.equal(
+      isGracefulMpegTsEos({
+        playedOk: true,
+        jobStatus: "running",
+        videoTimeSec: 21.2,
+        encodeDurationSec: 81,
+      }),
+      false,
+    );
   });
 });
 

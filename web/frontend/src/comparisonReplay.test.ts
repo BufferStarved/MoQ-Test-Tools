@@ -1222,3 +1222,53 @@ describe("6-way webcam bench-22cb3358 replay", () => {
     assert.doesNotMatch(raw, /catalog loaded but no video frames/i);
   });
 });
+
+describe("protocol comparison Stop after paint (Central Zixi HTTP-TS)", () => {
+  it("does not call Playback Failed after operator Stop once MPEG-TS painted", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT)",
+      protocol: "srt",
+      endpoint:
+        "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT%20Test,m=publish",
+      encode_frames_total: 2130,
+      playback_frames_rendered: 636,
+      playback_video_time_sec: 21.2,
+      playback_ttff_ms: 3008,
+      moqx_publish_namespace_success: 0,
+    };
+    const hudLines = [
+      "gate=ended",
+      "job=completed",
+      "benchmark=idle",
+      "player=Failed",
+      "connect_probe=done http=200 bytes=49152 sync=true",
+      "mpegtsjs=attached load() called",
+      "media_info video=avc1.42c028 audio=mp4a.40.2",
+      "first_frame time=0.11 ttff=3008ms size=1280x720",
+      "html_stall count=1",
+      "html_stall count=2",
+      "loading_complete (publisher session ended)",
+      "reconnect_reason=publisher session ended",
+      "connect_probe=skipped (preview_ready already confirmed)",
+      "mpegtsjs=attached load() called",
+      "mpegtsjs_error type=NetworkError detail=HttpStatusCodeInvalid code=504",
+      "fatal=MPEG-TS playback stalled at 21.2s of a 71s encode.",
+      "play_rejected=The play() request was interrupted by a call to pause().",
+      "last_error=MPEG-TS playback stalled at 21.2s of a 81s encode.",
+    ];
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      runStopped: true,
+      encodeDurationSec: 81,
+      encodeElapsedSec: 71,
+      mpegTsLastReason: "HTTP 504",
+    });
+    assert.match(hudLines.join("\n"), /publisher session ended/);
+    assert.match(hudLines.join("\n"), /HttpStatusCodeInvalid/);
+    assert.match(hudLines.join("\n"), /ttff=3008ms/);
+    assert.equal(shown.status, "Playback OK");
+    assert.equal(shown.error, null);
+    assert.doesNotMatch(shown.error ?? "", /stalled at 21\.2s/i);
+    assert.doesNotMatch(shown.status, /Failed/i);
+  });
+});

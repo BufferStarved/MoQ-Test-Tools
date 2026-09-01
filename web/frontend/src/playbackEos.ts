@@ -55,9 +55,14 @@ export function isGracefulMpegTsEos(options: {
   benchmarkLoading?: boolean;
   videoTimeSec?: number;
   encodeDurationSec?: number;
+  encodeElapsedSec?: number;
+  runStopped?: boolean;
 }): boolean {
   if (!options.playedOk) {
     return false;
+  }
+  if (options.runStopped) {
+    return true;
   }
   return encodeLooksFinished(options) || playedMostOfEncode(options);
 }

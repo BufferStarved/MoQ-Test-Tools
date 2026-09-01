@@ -102,9 +102,9 @@ export const BENCHMARK_PRESET_DEFS: BenchmarkPresetDef[] = [
   {
     id: "protocol-compare",
     label: "Protocol Comparison",
-    hint: "Compare SRT, RTMP, WebRTC and MoQ upload and playback (HLS playback for SRT/RTMP uploads)",
+    hint: "Compare SRT, RTMP, WebRTC and MoQ upload and playback (MediaMTX LL-HLS for SRT)",
     locks: ["testScope", "outputs"],
-    lockedSummary: "SRT, RTMP, WebRTC, and MoQ — HLS playback for SRT/RTMP.",
+    lockedSummary: "SRT, RTMP, WebRTC, and MoQ — MediaMTX LL-HLS for SRT.",
   },
   {
     id: "cloud-compare",
@@ -403,17 +403,19 @@ function preferredHostFromCurrent(current?: EndpointConfig[]): CloudEncodeHostId
 }
 
 /**
- * Same-cloud 4-way: SRT+RTMP on Zixi (no MediaMTX collision), WHIP on
- * MediaMTX, MoQ on :14433. Prefer the user's last cloud; never AWS.
+ * Protocol-compare 4-way: SRT on MediaMTX LL-HLS (never Central Zixi HTTP-TS),
+ * RTMP on Zixi so it does not collide with SRT/WHIP on the same MTX path,
+ * WHIP on the next free MediaMTX, MoQ on :14433. Prefer the user's last
+ * cloud; never AWS.
  */
 function preferredFourWayRole(protocol: PublishProtocolId): "zixi" | "mediamtx" | "moq_relay" {
-  if (protocol === "webrtc") {
-    return "mediamtx";
+  if (protocol === "rtmp") {
+    return "zixi";
   }
   if (protocol === "moq") {
     return "moq_relay";
   }
-  return "zixi";
+  return "mediamtx";
 }
 
 function seedProtocolOnHost(

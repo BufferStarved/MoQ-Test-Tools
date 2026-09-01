@@ -169,6 +169,20 @@ describe("applyBenchmarkPreset", () => {
     assertPublicMoq(browser.endpoints);
   });
 
+  it("cloud-compare webcam ffmpeg MoQ fans draft-18 :14433 and stays recipe-legal", () => {
+    const plan = applyBenchmarkPreset("cloud-compare", chromeCtx("webcam", { presets: WIRED_PRESETS }), nextId(), {
+      source: "webcam",
+      encoder: "ffmpeg",
+      protocol: "moq",
+    });
+    assert.equal(plan.source, "webcam");
+    assert.equal(plan.encoder, "ffmpeg");
+    assert.ok(plan.endpoints.length >= 2, String(plan.endpoints.map((item) => item.ingestEndpointId)));
+    assert.ok(plan.endpoints.every((endpoint) => endpoint.protocol === "moq"));
+    assertPublicMoq(plan.endpoints);
+    assert.equal(benchmarkPresetLegal(plan, chromeCtx("webcam", { presets: WIRED_PRESETS, encoder: "ffmpeg" })), true);
+  });
+
   it("contribution-compare is webcam upload-only and still publishes MoQ on :14433", () => {
     const plan = applyBenchmarkPreset("contribution-compare", chromeCtx("webcam"), nextId());
     assert.equal(plan.source, "webcam");
@@ -258,8 +272,13 @@ describe("applyBenchmarkPreset", () => {
       ),
       false,
     );
+    const srt = plan.endpoints.find((endpoint) => endpoint.protocol === "srt");
     const webrtc = plan.endpoints.find((endpoint) => endpoint.protocol === "webrtc");
     const moq = plan.endpoints.find((endpoint) => endpoint.protocol === "moq");
+    assert.ok(srt?.ingestEndpointId.endsWith("_mediamtx"), srt?.ingestEndpointId);
+    assert.equal(srt?.playbackMode, "ll-hls");
+    assert.notEqual(srt?.ingestEndpointId, "gcp_zixi");
+    assert.notEqual(srt?.ingestEndpointId, webrtc?.ingestEndpointId);
     assert.equal(webrtc?.playbackMode, "whep");
     assert.equal(moq?.playbackMode, "moq");
     assert.equal(benchmarkPresetLegal(plan, chromeCtx("dummy")), true);
@@ -296,10 +315,14 @@ describe("applyBenchmarkPreset", () => {
       { currentEndpoints: current },
     );
     assert.ok(plan.endpoints.length === 4, String(plan.endpoints.map((item) => item.ingestEndpointId)));
-    assert.ok(
-      plan.endpoints.every((endpoint) => endpoint.ingestEndpointId.startsWith("gcp_east_")),
-      String(plan.endpoints.map((item) => item.ingestEndpointId)),
-    );
+    const srt = plan.endpoints.find((endpoint) => endpoint.protocol === "srt");
+    const rtmp = plan.endpoints.find((endpoint) => endpoint.protocol === "rtmp");
+    const webrtc = plan.endpoints.find((endpoint) => endpoint.protocol === "webrtc");
+    assert.equal(srt?.ingestEndpointId, "gcp_east_mediamtx");
+    assert.equal(srt?.playbackMode, "ll-hls");
+    assert.equal(rtmp?.ingestEndpointId, "gcp_east_zixi");
+    assert.ok(webrtc?.ingestEndpointId.endsWith("_mediamtx"), webrtc?.ingestEndpointId);
+    assert.notEqual(webrtc?.ingestEndpointId, srt?.ingestEndpointId);
     assert.equal(
       plan.endpoints.some((endpoint) => endpoint.ingestEndpointId.startsWith("aws_")),
       false,
@@ -363,7 +386,7 @@ describe("recipe wizard locks", () => {
         ["Webcam Browsers", "Webcam & WebCodecs API protocol comparison"],
         [
           "Protocol Comparison",
-          "Compare SRT, RTMP, WebRTC and MoQ upload and playback (HLS playback for SRT/RTMP uploads)",
+          "Compare SRT, RTMP, WebRTC and MoQ upload and playback (MediaMTX LL-HLS for SRT)",
         ],
         [
           "Cloud/Edge Comparison",
@@ -385,7 +408,7 @@ describe("recipe wizard locks", () => {
     assert.equal(wizardStepVisible("protocol-compare", "outputs"), false);
     assert.equal(wizardStepVisible("protocol-compare", "source"), true);
     assert.equal(wizardStepVisible("protocol-compare", "encoder"), true);
-    assert.match(recipeLockedSummary("protocol-compare") ?? "", /HLS playback/);
+    assert.match(recipeLockedSummary("protocol-compare") ?? "", /MediaMTX LL-HLS for SRT/);
   });
 
   it("contribution-compare unlocks source and endpoint pickers; protocol mix stays locked", () => {

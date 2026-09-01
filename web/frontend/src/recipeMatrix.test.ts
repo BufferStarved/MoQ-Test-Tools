@@ -25,6 +25,7 @@ import {
   RECIPE_CHROME_CAPS,
   coerceRecipe,
   obsMoqSupported,
+  comparisonStartTitle,
   recipeFanoutWarning,
   recipeIssue,
   webcamSixWayFanout,
@@ -282,7 +283,7 @@ describe("every prod dest × playback mode", () => {
 });
 
 describe("recipeFanoutWarning", () => {
-  it("warns on webcam 2-dest 1s GOP and 6-way MTX remap, and on browser LOC", () => {
+  it("warns on webcam 2-dest 1s GOP and 6-way MTX remap", () => {
     const two = [
       {
         id: "a",
@@ -351,11 +352,156 @@ describe("recipeFanoutWarning", () => {
     assert.equal(twoCoerced[0]?.ingestEndpointId, "gcp_east_zixi");
     assert.equal(twoCoerced[0]?.playbackMode, "mpegts");
 
-    const browser = recipeFanoutWarning(two.slice(1), { source: "webcam", encoder: "browser" });
-    assert.match(browser ?? "", /LOC \(not CMAF\)/i);
-    assert.match(browser ?? "", /audio is off/i);
+    assert.equal(
+      recipeFanoutWarning(two.slice(1), { source: "webcam", encoder: "browser" }),
+      null,
+    );
 
     assert.equal(recipeFanoutWarning(two, { source: "dummy", encoder: "ffmpeg" }), null);
+  });
+
+  it("webcam SRT remap keeps unique slots when the sibling MTX is occupied", () => {
+    const collision = [
+      {
+        id: "east-zixi",
+        protocol: "srt" as const,
+        ingestEndpointId: "gcp_east_zixi",
+        endpointUrl: "",
+        vmafAvailable: false,
+        serverMetricsAvailable: false,
+        playbackMode: "mpegts" as const,
+        playbackDvr: false,
+      },
+      {
+        id: "east-mtx",
+        protocol: "srt" as const,
+        ingestEndpointId: "gcp_east_mediamtx",
+        endpointUrl: "",
+        vmafAvailable: false,
+        serverMetricsAvailable: false,
+        playbackMode: "ll-hls" as const,
+        playbackDvr: false,
+      },
+      {
+        id: "west-moq",
+        protocol: "moq" as const,
+        ingestEndpointId: "gcp_moq_relay_d18",
+        endpointUrl: "",
+        vmafAvailable: false,
+        serverMetricsAvailable: false,
+        playbackMode: "moq" as const,
+        playbackDvr: false,
+      },
+    ];
+    const coerced = coerceRecipe(collision, ctx("webcam", "ffmpeg"));
+    const eastZixi = coerced.find((item) => item.id === "east-zixi");
+    const eastMtx = coerced.find((item) => item.id === "east-mtx");
+    assert.ok(eastZixi);
+    assert.ok(eastMtx);
+    assert.notEqual(eastZixi?.ingestEndpointId, "gcp_east_mediamtx");
+    assert.equal(eastMtx?.ingestEndpointId, "gcp_east_mediamtx");
+    assert.equal(recipeIssue(coerced, ctx("webcam", "ffmpeg")), null);
+    assert.equal(
+      uniqueEndpointsByPublishSlot(coerced, ctx("webcam", "ffmpeg")).length,
+      coerced.length,
+    );
+  });
+});
+
+describe("cloud-compare webcam Start gate", () => {
+  for (const protocol of CLOUD_PROTOCOLS) {
+    it(`webcam + ffmpeg + ${protocol} is recipe-legal; Start waits only on helper`, () => {
+      const applied = applyBenchmarkPreset("cloud-compare", ctx("webcam", "ffmpeg"), nextId(), {
+        source: "webcam",
+        encoder: "ffmpeg",
+        protocol,
+      });
+      assertStartable(`cloud-compare/webcam/ffmpeg/${protocol}`, "webcam", "ffmpeg", applied);
+      const nextCtx = ctx(applied.source, applied.encoder);
+      assert.equal(recipeIssue(applied.endpoints, nextCtx), null);
+      assert.notEqual(recipeFanoutWarning(applied.endpoints, nextCtx), null);
+      assert.doesNotMatch(
+        comparisonStartTitle({
+          recipeIssue: recipeIssue(applied.endpoints, nextCtx),
+          apiOnline: true,
+          endpointCount: applied.endpoints.length,
+          source: applied.source,
+          encoder: applied.encoder,
+          helperConnected: true,
+          bbbAvailable: true,
+          mediaPath: "device:webcam",
+          browserCanStart: true,
+        }) ?? "",
+        /1s GOP|6-way|MediaMTX LL-HLS/,
+      );
+      const helperTitle = comparisonStartTitle({
+        recipeIssue: null,
+        apiOnline: true,
+        endpointCount: applied.endpoints.length,
+        source: applied.source,
+        encoder: applied.encoder,
+        helperConnected: false,
+        bbbAvailable: true,
+        mediaPath: "device:webcam",
+        browserCanStart: true,
+      });
+      assert.match(helperTitle ?? "", /local publisher agent/i);
+      assert.equal(
+        comparisonStartTitle({
+          recipeIssue: null,
+          apiOnline: true,
+          endpointCount: applied.endpoints.length,
+          source: applied.source,
+          encoder: applied.encoder,
+          helperConnected: true,
+          bbbAvailable: true,
+          mediaPath: "device:webcam",
+          browserCanStart: true,
+        }),
+        undefined,
+      );
+    });
+  }
+
+  it("cloud-playout MoQ Start is not helper-gated", () => {
+    const applied = applyBenchmarkPreset("cloud-compare", ctx("dummy", "ffmpeg"), nextId(), {
+      source: "dummy",
+      encoder: "ffmpeg",
+      protocol: "moq",
+    });
+    assert.equal(recipeIssue(applied.endpoints, ctx("dummy", "ffmpeg")), null);
+    assert.equal(
+      comparisonStartTitle({
+        recipeIssue: null,
+        apiOnline: true,
+        endpointCount: applied.endpoints.length,
+        source: "dummy",
+        encoder: "ffmpeg",
+        helperConnected: false,
+        bbbAvailable: true,
+      }),
+      undefined,
+    );
+  });
+});
+
+describe("protocol-compare SRT default (prod presets)", () => {
+  it("defaults SRT to MediaMTX LL-HLS, not Central Zixi HTTP-TS", () => {
+    const applied = applyBenchmarkPreset("protocol-compare", ctx("dummy", "ffmpeg"), nextId(), {
+      source: "dummy",
+      encoder: "ffmpeg",
+    });
+    const srt = applied.endpoints.find((item) => item.protocol === "srt");
+    const webrtc = applied.endpoints.find((item) => item.protocol === "webrtc");
+    assert.ok(srt?.ingestEndpointId.endsWith("_mediamtx"), srt?.ingestEndpointId);
+    assert.equal(srt?.playbackMode, "ll-hls");
+    assert.notEqual(srt?.ingestEndpointId, "gcp_zixi");
+    assert.notEqual(srt?.ingestEndpointId, webrtc?.ingestEndpointId);
+
+    const custom = applyBenchmarkPreset("build-your-own", ctx("dummy", "ffmpeg"), nextId());
+    const customSrt = custom.endpoints.find((item) => item.protocol === "srt");
+    assert.ok(customSrt?.ingestEndpointId.endsWith("_mediamtx"), customSrt?.ingestEndpointId);
+    assert.equal(customSrt?.playbackMode, "ll-hls");
   });
 });
 
@@ -387,9 +533,6 @@ describe("recipe matrix (prod presets)", () => {
                 encoder,
                 protocol,
               });
-              if (applied.endpoints.length === 0) {
-                return;
-              }
               assert.ok(
                 applied.endpoints.every((endpoint) => endpoint.protocol === applied.endpoints[0]?.protocol),
                 "cloud-compare mixed protocols",

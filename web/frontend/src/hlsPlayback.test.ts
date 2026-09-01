@@ -34,4 +34,17 @@ describe("classifyHlsEndVerdict", () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.error ?? "", /stalled at 18.8s of a 26s encode/i);
   });
+
+  it("marks Playback OK when the operator Stops after paint", () => {
+    const verdict = classifyHlsEndVerdict({
+      maxVideoTime: 21.2,
+      manifestParsed: true,
+      encodeDurationSec: 81,
+      encodeElapsedSec: 71,
+      runStopped: true,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.status, "Playback OK");
+    assert.equal(verdict.error, null);
+  });
 });
