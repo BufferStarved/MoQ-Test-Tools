@@ -2533,9 +2533,9 @@ class UploadService:
             server_metrics_enabled=ingest_poller.enabled,
         )
 
-    # publisher_catalog_published needs attach + track added + obj vide.
-    # A 5-line tail dropped those on Linode (no :18000 scrape) so preview
-    # stayed false while the 40-line end-of-job check passed.
+    # End-of-job print only. preview_ready / handshake must read the full
+    # log — a 40-line tail of write-block drops hid "sender ready"
+    # (bench-22cb3358: catalog published, preview_ready stayed false).
     _MOQ_PUBLISHER_LOG_TAIL = 40
 
     @staticmethod
@@ -2560,6 +2560,13 @@ class UploadService:
         return (
             f"{self._tail_file(stderr_path, max_lines=n)}\n"
             f"{self._tail_file(stdout_path, max_lines=n)}"
+        )
+
+    def _moq_publisher_logs_full(self, stderr_path: str, stdout_path: str) -> str:
+        """Announce / CONNECT proof. Do not use the 40-line tail here."""
+        return (
+            f"{self._read_file(stdout_path)}\n"
+            f"{self._read_file(stderr_path)}"
         )
 
     @staticmethod
@@ -2942,19 +2949,19 @@ class UploadService:
                 moqx_stats = moqx_poller.poll() if moqx_poller.enabled else None
                 moqx_deltas = moqx_poller.job_window_deltas() if moqx_poller.enabled else None
                 if not preview_ready_notified:
-                    pub_ready_log = self._moq_publisher_logs(
+                    pub_ready_log = self._moq_publisher_logs_full(
                         publisher_log_path, publisher_stdout_path
                     )
-                    # Local "sender ready" is not a relay announce. East
-                    # comparison 30: moqx_ns=0 the whole run while local
-                    # logs flipped preview_ready and the player called it
-                    # a one-shot miss.
-                    if moqx_poller.observing:
-                        publish_confirmed = (
-                            moqx_poller.publish_namespace_success_delta() >= 1
-                        )
-                    else:
-                        publish_confirmed = publisher_catalog_published(pub_ready_log)
+                    # Laptop helper cannot scrape relay :18000 (web-VM only).
+                    # bench-22cb3358 logged sender ready + obj vide while
+                    # moqx_ns stayed 0 and a 40-line tail hid the announce.
+                    moqx_hit = (
+                        moqx_poller.observing
+                        and moqx_poller.publish_namespace_success_delta() >= 1
+                    )
+                    publish_confirmed = moqx_hit or publisher_catalog_published(
+                        pub_ready_log
+                    )
                     if should_mark_moq_preview_ready(
                         publish_confirmed=publish_confirmed,
                         poller_enabled=moqx_poller.observing,
@@ -3011,7 +3018,7 @@ class UploadService:
                         net_loss_pct = min(100.0, (loss_delta / denom) * 100.0)
                         net_retrans_pct = min(100.0, (retrans_delta / denom) * 100.0)
 
-                wt_log = self._moq_publisher_logs(
+                wt_log = self._moq_publisher_logs_full(
                     publisher_log_path, publisher_stdout_path
                 )
                 publish_success = (

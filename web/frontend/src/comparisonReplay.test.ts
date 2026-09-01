@@ -147,7 +147,7 @@ describe("comparison 30 replay", () => {
     assert.equal(uniquePublishSeriesCount(COMPARISON_30), 4);
   });
 
-  it("treats moqx_ns=0 plus a playa 0x10 warn as never-announced, not a one-shot miss", () => {
+  it("treats preview_ready plus a playa 0x10 as a live announce the player missed", () => {
     const moq = COMPARISON_30[0];
     assert.equal(moqxNeverAnnounced(moq), true);
     const hud = {
@@ -158,8 +158,9 @@ describe("comparison 30 replay", () => {
       namespace: "bench-9f5befdb",
     };
     const error = visibleMoqError(moq, hud);
-    assert.match(error, /never announced namespace bench-9f5befdb/i);
-    assert.doesNotMatch(error, /catalog object never reached/i);
+    assert.match(error, /namespace bench-9f5befdb is live/i);
+    assert.match(error, /catalog object never reached/i);
+    assert.doesNotMatch(error, /never announced namespace bench-9f5befdb/i);
     assert.equal(moqWatchdogFailsWhileEncodeRunning(moq, hud), false);
   });
 
@@ -1056,5 +1057,50 @@ describe("custom 4-way bench-aef84d9a replay", () => {
     assert.match(error, /never announced namespace bench-aef84d9a/i);
     assert.match(error, /SUBSCRIBE 0x10/i);
     assert.doesNotMatch(error, /catalog object never reached/i);
+  });
+});
+
+describe("6-way webcam bench-22cb3358 replay", () => {
+  const moq: ComparisonLastRow = {
+    stream: "Stream 4 (MoQ East)",
+    protocol: "moq",
+    endpoint: "https://34-138-137-211.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+    encode_frames_total: 2038,
+    playback_frames_rendered: 0,
+    playback_video_time_sec: 0,
+    playback_ttff_ms: 0,
+    moqx_publish_namespace_success: 0,
+  };
+  const playaLines = [
+    "subscribe_0x10_keepalive (playa warn: no such namespace)",
+    "Catalog subscription rejected: no such namespace or track (code=0x10)",
+    "catalog_timeout_skipped encode_running",
+    "Watchdog timeout: catalog_received after 10005ms",
+    "moq_timeline=85062 video_time=0.00 (catalog pending)",
+  ];
+
+  it("does not call a live sender-ready catalog a never-announce", () => {
+    const error = visibleMoqError(moq, {
+      playaLines,
+      jobStatus: "completed",
+      previewReady: true,
+      catalogReady: false,
+      namespace: "bench-22cb3358",
+    });
+    assert.match(error, /namespace bench-22cb3358 is live/i);
+    assert.match(error, /catalog object never reached/i);
+    assert.doesNotMatch(error, /never announced namespace bench-22cb3358/i);
+  });
+
+  it("still names a true never-announce when preview_ready stayed false", () => {
+    const error = visibleMoqError(moq, {
+      playaLines,
+      jobStatus: "completed",
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-22cb3358",
+    });
+    assert.match(error, /never announced namespace bench-22cb3358/i);
+    assert.match(error, /SUBSCRIBE 0x10/i);
   });
 });

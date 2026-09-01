@@ -31,6 +31,8 @@ import {
   playaLatencyForMoqE2e,
   shouldFailNoMediaWatchdog,
   shouldKeepSessionOnSubscribeError,
+  shouldRetrySubscribeAfter0x10,
+  shouldRetrySubscribeOnPreviewReady,
   shouldSkipMoqSessionRestart,
   isTransientMoqSessionDrop,
   isSubscribeRejectedLog,
@@ -260,9 +262,29 @@ export default function MoqPlayer({
   jobStatusRef.current = jobStatus;
   const previewReadyRef = useRef(previewReady);
   previewReadyRef.current = previewReady;
+  const requestSubscribeRetryRef = useRef<(reason: string, delayMs: number) => boolean>(
+    () => false,
+  );
   const jobErrorRef = useRef(jobError);
   jobErrorRef.current = jobError;
   const subscribeRejectedRef = useRef(false);
+  const previewReadyWasRef = useRef(previewReady);
+  useEffect(() => {
+    const becameReady = previewReady === true && previewReadyWasRef.current !== true;
+    previewReadyWasRef.current = previewReady;
+    if (
+      !becameReady ||
+      !shouldRetrySubscribeOnPreviewReady({
+        previewReady: true,
+        catalogReady: sessionRef.current.catalogReady,
+        firstFrame: sessionRef.current.firstFrame,
+        subscribeRejected: subscribeRejectedRef.current,
+      })
+    ) {
+      return;
+    }
+    requestSubscribeRetryRef.current("cmaf_0x10_preview_ready", 200);
+  }, [previewReady]);
   useEffect(() => {
     const jobFail = playerErrorForFailedJob({ jobStatus, jobError });
     if (!jobFail) {
@@ -986,7 +1008,15 @@ export default function MoqPlayer({
         };
 
         const retrySubscribe = (reason: string, delayMs: number): boolean => {
-          if (destroyed || retrying || attempt >= MAX_CONNECT_ATTEMPTS) {
+          const encodeRunning = (jobStatusRef.current || "").toLowerCase() === "running";
+          // Webcam announce can take >10s (bench-22cb3358). Do not spend
+          // MAX_CONNECT_ATTEMPTS before the namespace exists.
+          if (
+            destroyed ||
+            retrying ||
+            (attempt >= MAX_CONNECT_ATTEMPTS &&
+              !(encodeRunning && subscribeRejectedRef.current))
+          ) {
             return false;
           }
           retrying = true;
@@ -1039,6 +1069,7 @@ export default function MoqPlayer({
           })();
           return true;
         };
+        requestSubscribeRetryRef.current = retrySubscribe;
 
         player.on("statechange", ({ state }) => {
           if (destroyed) {
@@ -1289,10 +1320,18 @@ export default function MoqPlayer({
           ) {
             keptPublisherNotReady = true;
             subscribeRejectedRef.current = true;
-            // LOC live-write: a rejected SUBSCRIBE never sees later PUBLISH.
-            // Retry after the publisher announces (ca7bbb62 East/Central 0x10).
-            // CMAF catalog is one-shot — tearing down publishes it to nobody.
-            if (mediaPackaging === "loc" && retrySubscribe("loc_0x10_retry", 800)) {
+            // Rejected SUBSCRIBE never sees later PUBLISH (LOC ca7bbb62,
+            // CMAF bench-22cb3358). Live-write catalog is fetchable after
+            // announce — do not sit on the refused request.
+            if (
+              shouldRetrySubscribeAfter0x10({
+                firstFrame: sessionRef.current.firstFrame,
+              }) &&
+              retrySubscribe(
+                mediaPackaging === "loc" ? "loc_0x10_retry" : "cmaf_0x10_retry",
+                800,
+              )
+            ) {
               return;
             }
             pushDiag("subscribe_0x10_keepalive (waiting for namespace/catalog)", true);
@@ -1339,6 +1378,18 @@ export default function MoqPlayer({
           // bench-b4b378b5: preview_ready flipped true (grace) while encode
           // was still live; a 4s teardown then called it a one-shot miss.
           const encodeRunning = (jobStatusRef.current || "").toLowerCase() === "running";
+          if (
+            subscribeRejectedRef.current &&
+            shouldRetrySubscribeAfter0x10({
+              firstFrame: sessionRef.current.firstFrame,
+            }) &&
+            retrySubscribe(
+              mediaPackaging === "loc" ? "loc_0x10_retry" : "cmaf_0x10_retry",
+              800,
+            )
+          ) {
+            return;
+          }
           if (keptPublisherNotReady || previewReadyRef.current === false || encodeRunning) {
             pushDiag(
               keptPublisherNotReady

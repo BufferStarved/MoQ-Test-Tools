@@ -93,6 +93,16 @@ class MoqNamespacePublishFailureTests(unittest.TestCase):
             )
         )
 
+    def test_local_sender_ready_wins_over_zero_moqx_scrape(self):
+        # bench-22cb3358: laptop cannot scrape :18000; sender ready + obj vide.
+        self.assertFalse(
+            moq_job_should_fail_without_namespace(
+                publish_confirmed=False,
+                poller_observing=True,
+                catalog_published=True,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

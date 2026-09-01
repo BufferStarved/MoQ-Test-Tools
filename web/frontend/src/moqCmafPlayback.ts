@@ -220,6 +220,33 @@ export function shouldKeepSessionOnSubscribeError(options: {
   return !options.firstFrame && isPublisherNotReadyError(options.code);
 }
 
+/**
+ * Rejected SUBSCRIBE never sees a later PUBLISH (LOC ca7bbb62, CMAF
+ * bench-22cb3358). Keep-alive on the refused request is a dead session.
+ * Live-write catalog (`publish_tracks`) is FETCH/SUBSCRIBE-able after
+ * announce — a new session is how paint recovers.
+ */
+export function shouldRetrySubscribeAfter0x10(options: {
+  firstFrame: boolean;
+}): boolean {
+  return !options.firstFrame;
+}
+
+/** preview_ready flipped after 0x10: subscribe now that the namespace exists. */
+export function shouldRetrySubscribeOnPreviewReady(options: {
+  previewReady?: boolean;
+  catalogReady?: boolean;
+  firstFrame?: boolean;
+  subscribeRejected?: boolean;
+}): boolean {
+  return (
+    options.previewReady === true &&
+    options.subscribeRejected === true &&
+    options.catalogReady !== true &&
+    options.firstFrame !== true
+  );
+}
+
 export function moqHasRenderedMedia(options: {
   firstFrame?: boolean;
   framesRendered?: number;
@@ -472,25 +499,23 @@ export function noMediaFailMessage(options: {
     return "MoQ catalog loaded but no video frames rendered. Encode-only success is a player failure.";
   }
   const ns = (options.namespace || "").trim();
-  // 0x10 means the relay never had this namespace. preview_ready grace is
-  // not a live announce — treating it as one-shot miss hid the pipe-close
-  // (bench-2c3781c5: moqx_ns=0 the whole run, then ffmpeg 224).
-  if (options.subscribeRejected) {
+  // preview_ready is sender-ready or moqx announce — not the old grace
+  // timer. 0x10 after that announce is a dead SUBSCRIBE, not "never
+  // announced" (bench-22cb3358: sender ready + obj vide, player 0x10).
+  if (options.subscribeRejected && options.previewReady !== true) {
     return ns
       ? `MoQ publisher never announced namespace ${ns} on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.`
       : "MoQ publisher never announced the namespace on the relay (SUBSCRIBE 0x10). This is not a one-shot catalog miss.";
+  }
+  if (options.previewReady === true) {
+    return ns
+      ? `MoQ namespace ${ns} is live on the relay but the catalog object never reached this player (one-shot catalog miss).`
+      : "MoQ namespace is live on the relay but the catalog object never reached this player (one-shot catalog miss).";
   }
   if (options.jobStatus === "completed" || options.jobStatus === "failed") {
     return ns
       ? `MoQ publisher never announced namespace ${ns} on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.`
       : "MoQ publisher never announced the namespace on the relay. Encode ran but the catalog is not live — this is not a player 0x10 miss.";
-  }
-  // preview_ready is now moqx announce only. If that is true and playa
-  // never saw 0x10, the catalog object itself missed this player.
-  if (options.previewReady === true) {
-    return ns
-      ? `MoQ namespace ${ns} is live on the relay but the catalog object never reached this player (one-shot catalog miss).`
-      : "MoQ namespace is live on the relay but the catalog object never reached this player (one-shot catalog miss).";
   }
   return ns
     ? `MoQ catalog never loaded on namespace ${ns}. Publisher must be live; a 0x10 subscribe miss is not OK.`

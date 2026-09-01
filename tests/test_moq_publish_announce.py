@@ -210,12 +210,12 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         self.assertNotIn("max_lines=20", stop_chunk)
         self.assertIn("_read_file(publisher_stdout_path)", stop_chunk)
 
-    def test_live_catalog_tail_is_long_enough_without_admin_scrape(self) -> None:
+    def test_live_catalog_uses_full_log_not_write_block_tail(self) -> None:
         body = (ROOT / "src" / "upload_service.py").read_text()
-        self.assertIn("_MOQ_PUBLISHER_LOG_TAIL = 40", body)
-        self.assertIn("def _moq_publisher_logs(", body)
-        self.assertIn("pub_ready_log = self._moq_publisher_logs(", body)
-        self.assertIn("wt_log = self._moq_publisher_logs(", body)
+        self.assertIn("def _moq_publisher_logs_full(", body)
+        self.assertIn("pub_ready_log = self._moq_publisher_logs_full(", body)
+        self.assertIn("wt_log = self._moq_publisher_logs_full(", body)
+        self.assertIn("moqx_hit or publisher_catalog_published", body)
 
     def test_playback_gate_subscribes_moq_before_announce(self) -> None:
         text = (ROOT / "web" / "frontend" / "src" / "playbackGate.ts").read_text()

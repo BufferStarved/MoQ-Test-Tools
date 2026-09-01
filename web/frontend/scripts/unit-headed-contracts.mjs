@@ -21,6 +21,12 @@ const moqPlayer = src("players/MoqPlayer.tsx");
 assert.match(moqPlayer, /isSubscribeRejectedLog/);
 assert.match(moqPlayer, /subscribe_0x10_keepalive \(playa warn/);
 assert.match(moqPlayer, /loc_0x10_retry/);
+assert.match(moqPlayer, /cmaf_0x10_retry/);
+assert.match(moqPlayer, /cmaf_0x10_preview_ready/);
+assert.match(moqPlayer, /shouldRetrySubscribeAfter0x10/);
+assert.match(moqPlayer, /shouldRetrySubscribeOnPreviewReady/);
+assert.match(src("moqCmafPlayback.ts"), /shouldRetrySubscribeAfter0x10/);
+assert.match(src("comparisonReplay.test.ts"), /bench-22cb3358/);
 assert.match(moqPlayer, /no knownTracks race/);
 assert.doesNotMatch(moqPlayer, /knownTracks:\s*browserLocKnownTracks/);
 
@@ -223,7 +229,8 @@ const upload = py("src/upload_service.py");
 assert.match(upload, /def _ffmpeg_failure_message\(/);
 assert.match(upload, /protocol: str = ""/);
 assert.match(upload, /proto == "moq" and \(/);
-assert.match(upload, /if moqx_poller.observing:/);
+assert.match(upload, /_moq_publisher_logs_full/);
+assert.match(upload, /moqx_hit or publisher_catalog_published/);
 
 const preview = py("src/moq_preview.py");
 assert.match(preview, /return bool\(publish_confirmed\)/);

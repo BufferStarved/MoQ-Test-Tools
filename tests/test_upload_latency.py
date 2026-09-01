@@ -65,6 +65,20 @@ class UploadLatencyTests(unittest.TestCase):
             )
         )
 
+    def test_write_block_tail_hides_sender_ready_full_log_does_not(self) -> None:
+        # bench-22cb3358: last 40 lines were only drop lines.
+        drops = "".join(
+            "write(vide_1) would block after retry; dropping fragment\n"
+            for _ in range(40)
+        )
+        self.assertFalse(publisher_catalog_published(drops))
+        full = (
+            "sender ready (namespace + catalog published)\n"
+            "obj vide wall_dt_ms=0 bytes=685264 sync=1\n"
+            + drops
+        )
+        self.assertTrue(publisher_catalog_published(full))
+
 
 if __name__ == "__main__":
     unittest.main()

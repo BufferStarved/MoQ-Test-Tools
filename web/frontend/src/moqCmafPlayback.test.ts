@@ -25,6 +25,8 @@ import {
   MOQ_CONNECTION_LOST,
   shouldFailNoMediaWatchdog,
   shouldKeepSessionOnSubscribeError,
+  shouldRetrySubscribeAfter0x10,
+  shouldRetrySubscribeOnPreviewReady,
   CMAF_LATE_FRAME_THRESHOLD_MS,
   MOQ_ALL_TRACKS_REFUSED,
   MOQ_CATALOG_REFRESH_WAIT_MS,
@@ -113,6 +115,43 @@ describe("shouldKeepSessionOnSubscribeError", () => {
   it("does not swallow a mid-play fatal", () => {
     assert.equal(
       shouldKeepSessionOnSubscribeError({ firstFrame: true, code: MOQ_SUBSCRIPTION_REFUSED }),
+      false,
+    );
+  });
+});
+
+describe("shouldRetrySubscribeAfter0x10", () => {
+  it("retries CMAF and LOC before first frame", () => {
+    assert.equal(shouldRetrySubscribeAfter0x10({ firstFrame: false }), true);
+    assert.equal(shouldRetrySubscribeAfter0x10({ firstFrame: true }), false);
+  });
+
+  it("retries when preview_ready flips after a 0x10 miss", () => {
+    assert.equal(
+      shouldRetrySubscribeOnPreviewReady({
+        previewReady: true,
+        subscribeRejected: true,
+        catalogReady: false,
+        firstFrame: false,
+      }),
+      true,
+    );
+    assert.equal(
+      shouldRetrySubscribeOnPreviewReady({
+        previewReady: false,
+        subscribeRejected: true,
+        catalogReady: false,
+        firstFrame: false,
+      }),
+      false,
+    );
+    assert.equal(
+      shouldRetrySubscribeOnPreviewReady({
+        previewReady: true,
+        subscribeRejected: true,
+        catalogReady: true,
+        firstFrame: false,
+      }),
       false,
     );
   });
@@ -298,18 +337,31 @@ describe("noMediaFailMessage", () => {
     assert.doesNotMatch(message, /0x10 subscribe miss is not OK/);
   });
 
-  it("does not call a 0x10 keepalive a one-shot miss even if preview_ready grace fired", () => {
+  it("calls 0x10 after a live announce a catalog miss, not never-announced", () => {
+    // bench-22cb3358: sender ready + obj vide, player sat on rejected SUBSCRIBE.
+    const message = noMediaFailMessage({
+      catalogReady: false,
+      namespace: "bench-22cb3358",
+      jobStatus: "completed",
+      previewReady: true,
+      subscribeRejected: true,
+    });
+    assert.match(message, /namespace bench-22cb3358 is live/i);
+    assert.match(message, /catalog object never reached this player/i);
+    assert.doesNotMatch(message, /never announced namespace bench-22cb3358/i);
+  });
+
+  it("still calls 0x10 without preview_ready a never-announce", () => {
     const message = noMediaFailMessage({
       catalogReady: false,
       namespace: "bench-2c3781c5",
       jobStatus: "running",
-      previewReady: true,
+      previewReady: false,
       subscribeRejected: true,
     });
     assert.match(message, /never announced namespace bench-2c3781c5/i);
     assert.match(message, /0x10/i);
     assert.doesNotMatch(message, /namespace bench-2c3781c5 is live/i);
-    assert.match(message, /not a one-shot catalog miss/i);
   });
 
   it("prefers a pipe-close job error while the job is still running", () => {
@@ -330,7 +382,7 @@ describe("noMediaFailMessage", () => {
     );
   });
 
-  it("does not call a playa 0x10 warn a one-shot miss when preview_ready lied", () => {
+  it("calls a 0x10 after preview_ready a catalog miss (announce was real)", () => {
     const message = noMediaFailMessage({
       catalogReady: false,
       namespace: "bench-9f5befdb",
@@ -338,9 +390,9 @@ describe("noMediaFailMessage", () => {
       previewReady: true,
       subscribeRejected: true,
     });
-    assert.match(message, /never announced namespace bench-9f5befdb/i);
-    assert.doesNotMatch(message, /catalog object never reached/i);
-    assert.doesNotMatch(message, /namespace bench-9f5befdb is live/i);
+    assert.match(message, /namespace bench-9f5befdb is live/i);
+    assert.match(message, /catalog object never reached/i);
+    assert.doesNotMatch(message, /never announced namespace bench-9f5befdb/i);
   });
 });
 

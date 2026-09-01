@@ -994,7 +994,7 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
      * returns WOULD_BLOCK with no enqueue. Dropping that is how canary
      * jobs advertised vide_1/soun_2 and then sent zero media. */
     enum { WRITE_WAIT_US = 200000 };
-    const int write_tries = moq_media_sender_is_ready(tx) ? 25 : 3;
+    const int write_tries = moq_media_sender_is_ready(tx) ? 50 : 3;
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     moq_result_t wr = MOQ_ERR_WOULD_BLOCK;
@@ -1022,8 +1022,13 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
     }
     if (wr == MOQ_ERR_WOULD_BLOCK || wr == MOQ_ERR_CLOSED) {
         moq_rcbuf_decref(payload_rc);
-        fprintf(stderr, "write(%s) would block after retry; dropping fragment\n",
-                slot->name);
+        static unsigned drop_n;
+        drop_n++;
+        if (drop_n <= 3 || (drop_n % 50) == 0) {
+            fprintf(stderr,
+                    "write(%s) would block after retry; dropping fragment (%u)\n",
+                    slot->name, drop_n);
+        }
         return 0;
     }
     if (wr != MOQ_OK) {

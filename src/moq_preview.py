@@ -42,11 +42,11 @@ def moq_job_should_fail_without_namespace(
     the only catalog proof. Encode-only without that proof is the same lie
     (bench-aef84d9a: job=completed, SUBSCRIBE 0x10, 0 paint).
     """
-    if publish_confirmed:
+    if publish_confirmed or catalog_published:
         return False
     if poller_observing:
         return True
-    return not bool(catalog_published)
+    return True
 
 
 def moq_publish_missing_error(*, namespace: str = "", observing: bool = True) -> str:

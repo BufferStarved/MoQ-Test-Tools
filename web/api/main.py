@@ -1421,9 +1421,10 @@ def _get_playback_client() -> httpx.AsyncClient:
             # optional decompression codecs being installed.
             headers={"Accept-Encoding": "identity"},
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=40),
-            # read=20s is a per-chunk-read deadline on streamed bodies, so a
-            # live TS stream stays healthy as long as bytes keep flowing.
-            timeout=httpx.Timeout(connect=5.0, read=20.0, write=20.0, pool=10.0),
+            # read is a per-chunk deadline on streamed bodies. 20s killed
+            # East HTTP-TS mid-GOP (MSE 11 then 502 at ~31s). Live TS can
+            # pause between bursts longer than one segment.
+            timeout=httpx.Timeout(connect=5.0, read=120.0, write=20.0, pool=10.0),
         )
     return _playback_client
 
