@@ -743,6 +743,7 @@ def describe_moq_connect_failure(
     draft: int,
     skip_verify: bool | None = None,
     helper_sha: str = "",
+    log_line: str = "",
 ) -> str:
     """Job error when the publisher process ran but WT never connected."""
     loc = f"relay={endpoint} binary={binary or backend} draft={draft}"
@@ -752,6 +753,9 @@ def describe_moq_connect_failure(
         loc += " insecure-skip-verify=on"
     if helper_sha:
         loc += f" helper_sha={helper_sha}"
+    detail = (log_line or "").strip()
+    if detail:
+        loc += f" {detail}"
     stale = (
         " git pull in the moq-test-tools checkout and restart the laptop helper "
         "one-liner (a SPA refresh does not reload laptop Python)."

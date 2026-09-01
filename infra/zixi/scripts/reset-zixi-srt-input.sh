@@ -93,6 +93,7 @@ params = [
     ('rec_history', '${ZIXI_REC_HISTORY}'),
     ('rec_path', ''),
     ('type', 'SRT'),
+    # Do not send host — empty host= reuses the last remote (caller).
     ('port', '${ZIXI_SRT_PORT}'),
     ('max_bitrate', '${ZIXI_SRT_MAX_BITRATE}'),
     ('pass', ''),

@@ -906,6 +906,31 @@ describe("helper laptop SRT Test EC HTTP 404", () => {
   });
 });
 
+describe("helper laptop Zixi SRT Test Fast HLS 404", () => {
+  it("fails closed when Central playback.m3u8 SRT Test never loads", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT) · gcp/us-central1",
+      protocol: "srt",
+      endpoint:
+        "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT%20Test,m=publish",
+      encode_frames_total: 900,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      hlsLastError:
+        "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+    });
+    assert.equal(shown.status, "Failed (see diagnostics)");
+    assert.match(shown.error ?? "", /HLS manifest never loaded/i);
+    assert.match(shown.error ?? "", /404/);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+});
+
 describe("helper laptop MoQ WT never connected", () => {
   it("keeps 0x10 as a publisher CONNECT miss, not a catalog miss", () => {
     const moq: ComparisonLastRow = {
@@ -968,6 +993,38 @@ describe("helper laptop MoQ WT never connected", () => {
     assert.match(shown.error ?? "", /34-138-137-211/);
     assert.match(shown.error ?? "", /git pull/i);
     assert.doesNotMatch(shown.error ?? "", /connect to the relay \(The publisher ran/);
+    assert.doesNotMatch(shown.error ?? "", /one-shot catalog miss/i);
+  });
+
+  it("keeps skip-verify=on west :14433 0x10 as a publisher CONNECT miss", () => {
+    const moq: ComparisonLastRow = {
+      stream: "Stream 1 (MoQ)",
+      protocol: "moq",
+      endpoint: "https://34-28-164-90.sslip.io:14433/moq-relay?namespace=benchmark&draft=18",
+      encode_frames_total: 240,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const jobError =
+      "The publisher ran but did not connect to the relay (WebTransport session never connected; no connection_id). relay=https://34-28-164-90.sslip.io:14433/moq-relay binary=/Users/sean/Developer/moq-test-tools/tools/moq5-publisher/bin/moq5-fmp4-publish draft=18 insecure-skip-verify=on helper_sha=7677c63. This is not a player or catalog problem.";
+    const shown = visibleLeg(moq, {
+      playaLines: [
+        "subscribe_0x10_keepalive (playa warn: no such namespace)",
+        "Catalog subscription rejected: no such namespace or track (code=0x10)",
+        "catalog pending",
+      ],
+      jobStatus: "failed",
+      jobError,
+      previewReady: false,
+      catalogReady: false,
+      namespace: "bench-helper",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /did not connect to the relay/i);
+    assert.match(shown.error ?? "", /insecure-skip-verify=on/);
+    assert.match(shown.error ?? "", /not a player/i);
     assert.doesNotMatch(shown.error ?? "", /one-shot catalog miss/i);
   });
 });

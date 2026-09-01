@@ -135,13 +135,22 @@ assert.match(src("comparisonReplay.test.ts"), /helper laptop SRT idle before enc
 assert.match(src("comparisonReplay.test.ts"), /helper laptop SRT idle after webcam encode frames/);
 assert.match(src("comparisonReplay.test.ts"), /helper laptop SRT Test EC HTTP 404/);
 assert.match(src("comparisonReplay.test.ts"), /helper laptop MoQ WT never connected/);
+assert.match(src("comparisonReplay.test.ts"), /skip-verify=on west/);
+assert.match(src("comparisonReplay.test.ts"), /helper laptop Zixi SRT Test Fast HLS 404/);
 assert.match(src("comparisonReplay.test.ts"), /34-138-137-211\.sslip\.io:14433/);
 assert.match(src("DestinationGrid.test.ts"), /gcp_east_zixi/);
 assert.match(src("DestinationGrid.test.ts"), /linode_zixi/);
+assert.match(src("DestinationGrid.test.ts"), /hides East\/Linode Zixi/);
+assert.match(src("recipeMatrix.test.ts"), /remaps a saved Fast HLS player off East Zixi/);
 assert.match(src("DestinationGrid.tsx"), /destination-gateway/);
 assert.match(src("DestinationGrid.tsx"), /Ingest gateway/);
 assert.match(src("playbackUrls.ts"), /zixiSrtPlayStreamId/);
+assert.match(src("playbackUrls.ts"), /export function zixiOriginHasFastHls/);
+assert.match(src("ingestEndpoints.ts"), /export function zixiFastHlsAvailable/);
+assert.match(src("playbackUrls.ts"), /looksLikeZixiPublish\(endpointUrl\)/);
 assert.match(src("playbackUrls.ts"), /protocol === "rtmp" \? "mpegts" : "hls"/);
+assert.match(py("src/zixi_hls_health.py"), /zixi_fast_hls_origin_available/);
+assert.match(py("src/upload_service.py"), /zixi_fast_hls_origin_available/);
 assert.match(py("publisher_agent/webcam_broker.py"), /JOIN_WINDOW_SEC = 8/);
 assert.match(py("web/api/publisher_hub.py"), /_stale_helper_error/);
 assert.match(py("scripts/run-local-publisher.sh"), /MOQ_HELPER_GIT_SHA/);
@@ -153,7 +162,12 @@ assert.match(py("tests/test_publisher_protocol.py"), /--insecure-skip-verify/);
 assert.match(src("localPublisherHelp.ts"), /MOQ_PUBLISHER_INSECURE=1/);
 assert.match(py("scripts/run-local-publisher.sh"), /_CALLER_INSECURE/);
 assert.match(py("src/moq_publish.py"), /moq_insecure_tls_for_endpoint/);
-assert.match(py("web/api/job_manager.py"), /Helper SRT shares exclusive/);
+assert.match(py("web/api/job_manager.py"), /before job=running/);
+assert.match(py("src/zixi_input_reset.py"), /Do not send host at all/);
+assert.doesNotMatch(py("src/zixi_input_reset.py"), /\("host"/);
+assert.match(py("src/upload_service.py"), /_managed_srt_lock/);
+assert.match(py("src/upload_service.py"), /wait_for_publisher_webtransport/);
+assert.match(src("players/HlsPlayer.tsx"), /MANIFEST_404_FALLBACK_POLLS/);
 assert.match(
   py("tools/moq5-publisher/fmp4_moq_bridge.c"),
   /webtransport connected \(sender attach still waits for moov\)/,
@@ -196,6 +210,8 @@ assert.doesNotMatch(hls, /setStatus\("Encode finished"\)/);
 const streamPlayer = src("StreamPlayer.tsx");
 assert.match(streamPlayer, /engine === "hls"/);
 assert.match(streamPlayer, /encodeDurationSec=\{encodeDurationSec\}/);
+assert.match(streamPlayer, /onUnrecoverableHls=/);
+assert.match(streamPlayer, /onPlaybackModeChange\("mpegts"\)/);
 
 const apiTs = src("api.ts");
 assert.doesNotMatch(apiTs, /34\.28\.164\.90:8000/);

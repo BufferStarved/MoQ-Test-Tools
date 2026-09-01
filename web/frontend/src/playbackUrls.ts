@@ -1,4 +1,4 @@
-import { ingestRole } from "./ingestEndpoints.ts";
+import { ingestRole, zixiFastHlsAvailable } from "./ingestEndpoints.ts";
 import type { PlaybackEngine, PlaybackMode, PlaybackTarget } from "./playbackTypes";
 
 const ZIXI_HTTP_PORT = 7777;
@@ -66,11 +66,24 @@ function isZixiManagedIngest(ingestEndpointId: string): boolean {
   return ingestRole(ingestEndpointId) === "zixi";
 }
 
+/** Fast HLS origin exists only on Central Broadcaster (not East/Linode ZEC). */
+export function zixiOriginHasFastHls(ingestEndpointId?: string, endpointUrl?: string): boolean {
+  if (zixiFastHlsAvailable(ingestEndpointId)) {
+    return true;
+  }
+  if (ingestEndpointId && isZixiManagedIngest(ingestEndpointId)) {
+    return false;
+  }
+  const host = parseHost(endpointUrl || "");
+  return host === "35.222.33.58";
+}
+
 /** Playback modes that can work for a given ingest protocol + host/packager. */
 export function isPlaybackModeCompatible(
   mode: PlaybackMode,
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): boolean {
   // Legacy "auto" is no longer selectable — coerce via defaultPlaybackModeForProtocol.
   if (mode === "auto") {
@@ -101,7 +114,7 @@ export function isPlaybackModeCompatible(
 
   const ingest = ingestEndpointId ?? "";
   const mediamtx = isMediaMtxManaged(ingest);
-  const zixi = isZixiManagedIngest(ingest);
+  const zixi = isZixiManagedIngest(ingest) || looksLikeZixiPublish(endpointUrl);
 
   // MediaMTX origin: native LL-HLS, LL-DASH sidecar, HLS, WHEP, and MPEG-TS remux.
   if (mediamtx) {
@@ -114,16 +127,18 @@ export function isPlaybackModeCompatible(
     );
   }
 
-  // Zixi Broadcaster: Fast HLS for SRT; HTTP-TS only for RTMP ``benchmark.ts``.
+  // Zixi: Central Broadcaster has Fast HLS + HTTP-TS. East/Linode are Edge
+  // Compute — playback.m3u8 404s even while SRT is live; HTTP-TS is the origin.
+  // Custom URLs on those IPs (or any :10080 Zixi listener) follow the same gate.
   // - DASH per-input MPD is not served (player would silently fall back to HLS).
   // - WHEP is a MediaMTX endpoint shape, not available on Zixi :7777/:4444.
   // - Zixi WebRTC UI cannot be iframed (frame-ancestors 'self').
-  // - ``SRT Test EC`` and ``SRT Test.ts`` 404 / empty-reply on every live :7777.
+  // - ``SRT Test EC`` 404s on :7777.
   if (zixi) {
-    if (protocol === "srt") {
-      return mode === "hls";
+    if (zixiOriginHasFastHls(ingest, endpointUrl)) {
+      return mode === "hls" || mode === "mpegts";
     }
-    return mode === "hls" || mode === "mpegts";
+    return mode === "mpegts";
   }
 
   // Custom / unknown host: browser-safe modes only (no packager-specific LL presets).
@@ -153,10 +168,12 @@ export function defaultPlaybackModeForProtocol(
   if (isMediaMtxManaged(ingest)) {
     return "ll-hls";
   }
-  // Zixi SRT: Fast HLS on ``SRT Test`` (EC and SRT Test HTTP-TS 404 / empty
-  // reply on every live Broadcaster). Zixi RTMP still uses HTTP-TS
-  // ``benchmark.ts``, which is the path that actually answers 200.
+  // Central Zixi SRT: Fast HLS on ``SRT Test``. East/Linode (and those IPs):
+  // HTTP-TS ``SRT Test.ts``. Zixi RTMP stays HTTP-TS ``benchmark.ts``.
   if (isZixiManagedIngest(ingest) || looksLikeZixiPublish(endpointUrl)) {
+    if (!zixiOriginHasFastHls(ingest, endpointUrl)) {
+      return "mpegts";
+    }
     return protocol === "rtmp" ? "mpegts" : "hls";
   }
   // Custom / retired DASH ingest still plays as browser HLS when a packager exists.
@@ -171,16 +188,17 @@ export function resolvedPlaybackMode(
   mode: PlaybackMode | undefined,
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): PlaybackMode {
-  if (mode && isPlaybackModeCompatible(mode, protocol, ingestEndpointId)) {
+  if (mode && isPlaybackModeCompatible(mode, protocol, ingestEndpointId, endpointUrl)) {
     return mode;
   }
-  const fallback = defaultPlaybackModeForProtocol(protocol, ingestEndpointId);
-  if (isPlaybackModeCompatible(fallback, protocol, ingestEndpointId)) {
+  const fallback = defaultPlaybackModeForProtocol(protocol, ingestEndpointId, endpointUrl);
+  if (isPlaybackModeCompatible(fallback, protocol, ingestEndpointId, endpointUrl)) {
     return fallback;
   }
   const first = PLAYBACK_MODE_OPTIONS.find((item) =>
-    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId),
+    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId, endpointUrl),
   );
   return first?.id ?? "hls";
 }
@@ -198,9 +216,10 @@ export function playbackModeBlockedReason(
 export function playbackModesForSelection(
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): typeof PLAYBACK_MODE_OPTIONS {
   return PLAYBACK_MODE_OPTIONS.filter((item) =>
-    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId),
+    isPlaybackModeCompatible(item.id, protocol, ingestEndpointId, endpointUrl),
   );
 }
 
@@ -209,6 +228,7 @@ export function playbackModeLabelForSelection(
   mode: PlaybackMode,
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): string {
   const base =
     mode === "mpegts" && ingestEndpointId && isMediaMtxManaged(ingestEndpointId)
@@ -219,7 +239,7 @@ export function playbackModeLabelForSelection(
   if (blocked) {
     return `${base} — unavailable with Zixi SRT`;
   }
-  if (mode === defaultPlaybackModeForProtocol(protocol, ingestEndpointId)) {
+  if (mode === defaultPlaybackModeForProtocol(protocol, ingestEndpointId, endpointUrl)) {
     return base.includes("(recommended)") ? base : `${base} (recommended)`;
   }
   return base;
@@ -261,18 +281,21 @@ export function playbackSelectionCopy(
   target: { engine: string; label: string; note?: string },
   protocol: string,
   ingestEndpointId?: string,
+  endpointUrl?: string,
 ): { label: string; description: string } {
   if (protocol === "moq" || mode === "moq") {
     return {
-      label: playbackModeLabelForSelection("moq", protocol, ingestEndpointId),
+      label: playbackModeLabelForSelection("moq", protocol, ingestEndpointId, endpointUrl),
       description: "MoQ ingest plays only through MoQ Playback (Playa).",
     };
   }
   const resolvedMode =
-    mode === "auto" ? defaultPlaybackModeForProtocol(protocol, ingestEndpointId) : mode;
+    mode === "auto"
+      ? defaultPlaybackModeForProtocol(protocol, ingestEndpointId, endpointUrl)
+      : mode;
   const option = PLAYBACK_MODE_OPTIONS.find((item) => item.id === resolvedMode);
   return {
-    label: playbackModeLabelForSelection(resolvedMode, protocol, ingestEndpointId),
+    label: playbackModeLabelForSelection(resolvedMode, protocol, ingestEndpointId, endpointUrl),
     description: option?.hint || target.note || "",
   };
 }

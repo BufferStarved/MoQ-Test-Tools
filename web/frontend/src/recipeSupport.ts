@@ -163,8 +163,9 @@ export function selectablePlaybackModes(
   protocol: string,
   ingestEndpointId: string,
   caps: RecipeBrowserCaps,
+  endpointUrl?: string,
 ) {
-  return playbackModesForSelection(protocol, ingestEndpointId).filter((item) =>
+  return playbackModesForSelection(protocol, ingestEndpointId, endpointUrl).filter((item) =>
     playbackModeAllowedInBrowser(item.id, caps),
   );
 }
@@ -174,15 +175,16 @@ export function resolvedSelectablePlaybackMode(
   protocol: string,
   ingestEndpointId: string,
   caps: RecipeBrowserCaps,
+  endpointUrl?: string,
 ): PlaybackMode {
-  const resolved = resolvedPlaybackMode(mode, protocol, ingestEndpointId);
+  const resolved = resolvedPlaybackMode(mode, protocol, ingestEndpointId, endpointUrl);
   if (
-    isPlaybackModeCompatible(resolved, protocol, ingestEndpointId) &&
+    isPlaybackModeCompatible(resolved, protocol, ingestEndpointId, endpointUrl) &&
     playbackModeAllowedInBrowser(resolved, caps)
   ) {
     return resolved;
   }
-  return selectablePlaybackModes(protocol, ingestEndpointId, caps)[0]?.id ?? resolved;
+  return selectablePlaybackModes(protocol, ingestEndpointId, caps, endpointUrl)[0]?.id ?? resolved;
 }
 
 function ingestFitsRecipe(
@@ -337,6 +339,7 @@ export function coerceEndpoint(
   const ingestEndpointId = currentOk
     ? endpoint.ingestEndpointId
     : pickIngest(protocol, endpoint.ingestEndpointId, ctx, occupiedCollisionKeys);
+  const playbackUrl = isCustomIngestEndpoint(ingestEndpointId) ? endpoint.endpointUrl : undefined;
   // Re-default the player when this call is what changed the protocol; a mode
   // inherited from the old protocol can still read as "compatible".
   const playbackMode = resolvedSelectablePlaybackMode(
@@ -344,6 +347,7 @@ export function coerceEndpoint(
     protocol,
     ingestEndpointId,
     ctx.caps,
+    playbackUrl,
   );
   if (
     protocol === endpoint.protocol &&
@@ -581,14 +585,18 @@ export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): st
     for (const key of keys) {
       used.add(key);
     }
+    const playUrl = isCustomIngestEndpoint(endpoint.ingestEndpointId)
+      ? endpoint.endpointUrl
+      : undefined;
     const mode = resolvedSelectablePlaybackMode(
       endpoint.playbackMode,
       endpoint.protocol,
       endpoint.ingestEndpointId,
       ctx.caps,
+      playUrl,
     );
     if (
-      !isPlaybackModeCompatible(mode, endpoint.protocol, endpoint.ingestEndpointId) ||
+      !isPlaybackModeCompatible(mode, endpoint.protocol, endpoint.ingestEndpointId, playUrl) ||
       !playbackModeAllowedInBrowser(mode, ctx.caps)
     ) {
       return "This output’s player is not supported for that destination.";

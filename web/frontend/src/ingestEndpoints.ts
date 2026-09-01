@@ -144,11 +144,16 @@ const LEGACY_HOST_ALIASES: Record<string, CloudEncodeHostId> = {
 
 export const CLOUD_ENCODE_HOST_IDS: CloudEncodeHostId[] = ENCODE_HOSTS.map((host) => host.id);
 
+/** Central Broadcaster is the only Zixi with a working Fast HLS packager. */
+export function zixiFastHlsAvailable(ingestEndpointId?: string): boolean {
+  return ingestEndpointId === "gcp_zixi";
+}
+
 const INGEST_ROLES = [
   {
     role: "zixi" as const,
     labelPrefix: "Zixi",
-    detail: "Broadcaster Fast HLS / MPEG-TS",
+    detail: "Broadcaster Fast HLS / HTTP-TS",
   },
   {
     role: "mediamtx" as const,
@@ -199,11 +204,17 @@ function presetIdsFor(
 
 const INGEST_ENDPOINT_DEFS: Omit<IngestEndpointOption, "available">[] = [
   ...ENCODE_HOSTS.flatMap((host) =>
-    INGEST_ROLES.map((role) => ({
-      id: ingestIdFor(host, role.role),
-      label: `${role.labelPrefix} · ${host.label}`,
-      detail: role.detail,
-    })),
+    INGEST_ROLES.map((role) => {
+      const id = ingestIdFor(host, role.role);
+      return {
+        id,
+        label: `${role.labelPrefix} · ${host.label}`,
+        detail:
+          role.role === "zixi" && !zixiFastHlsAvailable(id)
+            ? "HTTP-TS (mpegts.js) — Fast HLS packager not on this host"
+            : role.detail,
+      };
+    }),
   ),
   {
     id: "custom",

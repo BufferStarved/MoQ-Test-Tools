@@ -36,6 +36,8 @@ assert.match(ingestSrc, /_moq_relay_d18` as IngestEndpointId/);
 assert.match(ingestSrc, /label: "GCP Central"/);
 assert.match(ingestSrc, /label: "GCP East"/);
 assert.match(ingestSrc, /label: "Linode East"/);
+assert.match(ingestSrc, /export function zixiFastHlsAvailable/);
+assert.match(playbackSrc, /export function zixiOriginHasFastHls/);
 assert.match(ingestSrc, /labelPrefix: "OpenMOQ"/);
 assert.match(ingestSrc, /labelPrefix: "OpenMOQ draft-16"/);
 assert.match(ingestSrc, /\$\{role\.labelPrefix\} · \$\{host\.label\}/);
@@ -103,7 +105,11 @@ function ingestRole(id) {
   return null;
 }
 
-function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
+function zixiFastHlsAvailable(id) {
+  return id === "gcp_zixi";
+}
+
+function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "", endpointUrl = "") {
   if (mode === "auto") return false;
   if (protocol === "moq") return mode === "moq";
   if (mode === "moq") return false;
@@ -114,13 +120,20 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
     return mode === "whep";
   }
   const mediamtx = ingestRole(ingestEndpointId) === "mediamtx";
-  const zixi = ingestRole(ingestEndpointId) === "zixi";
+  const zixi =
+    ingestRole(ingestEndpointId) === "zixi" ||
+    /35\.196\.215\.179|45\.33\.68\.151|35\.222\.33\.58|:10080/.test(endpointUrl);
   if (mediamtx) {
     return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
-    if (protocol === "srt") return mode === "hls";
-    return mode === "hls" || mode === "mpegts";
+    if (
+      zixiFastHlsAvailable(ingestEndpointId) ||
+      (ingestRole(ingestEndpointId) !== "zixi" && endpointUrl.includes("35.222.33.58"))
+    ) {
+      return mode === "hls" || mode === "mpegts";
+    }
+    return mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
     return mode === "hls" || mode === "mpegts" || mode === "whep";
@@ -222,8 +235,9 @@ for (const row of [
   ["dummy", "srt", "gcp_mediamtx", "ll-hls"],
   ["dummy", "srt", "gcp_mediamtx", "mpegts"],
   ["dummy", "srt", "gcp_zixi", "hls"],
-  ["dummy", "srt", "gcp_east_zixi", "hls"],
-  ["dummy", "rtmp", "linode_zixi", "hls"],
+  ["dummy", "srt", "gcp_zixi", "mpegts"],
+  ["dummy", "srt", "gcp_east_zixi", "mpegts"],
+  ["dummy", "rtmp", "linode_zixi", "mpegts"],
   ["dummy", "rtmp", "gcp_mediamtx", "whep"],
   ["dummy", "webrtc", "gcp_east_mediamtx", "whep"],
   ["dummy", "webrtc", "gcp_mediamtx", "ll-hls"],
@@ -240,10 +254,10 @@ for (const row of [
 // Known-illegal
 for (const row of [
   ["dummy", "srt", "gcp_moq_relay", "moq"],
+  ["dummy", "srt", "gcp_east_zixi", "hls"],
+  ["dummy", "rtmp", "linode_zixi", "hls"],
   ["dummy", "webrtc", "gcp_east_zixi", "whep"],
   ["dummy", "moq", "gcp_mediamtx", "moq"],
-  ["dummy", "srt", "gcp_zixi", "mpegts"],
-  ["dummy", "srt", "gcp_east_zixi", "mpegts"],
   ["dummy", "hls", "gcp_east_zixi", "mpegts"],
   ["dummy", "dash", "custom", "hls"],
   ["dummy", "srt", "aws_east_zixi", "mpegts"],
@@ -273,12 +287,14 @@ assert.equal(
   "cloud dummy webrtc does not need laptop WHIP",
 );
 
-// Safari: no MoQ / MPEG-TS; Zixi SRT can still use Fast HLS; HLS on MTX is ok
+// Safari: no MoQ / MPEG-TS. Central Zixi still has Fast HLS; East/Linode do not.
 assert.equal(isLegalCombo("dummy", "moq", "gcp_moq_relay", "moq", SAFARI), false);
 assert.equal(isLegalCombo("dummy", "srt", "gcp_east_zixi", "mpegts", SAFARI), false);
-assert.equal(isLegalCombo("dummy", "srt", "gcp_east_zixi", "hls", SAFARI), true);
+assert.equal(isLegalCombo("dummy", "srt", "gcp_east_zixi", "hls", SAFARI), false);
+assert.equal(isLegalCombo("dummy", "srt", "gcp_zixi", "hls", SAFARI), true);
 assert.equal(isLegalCombo("dummy", "srt", "gcp_mediamtx", "ll-hls", SAFARI), true);
-assert.equal(isLegalCombo("dummy", "rtmp", "gcp_east_zixi", "hls", SAFARI), true);
+assert.equal(isLegalCombo("dummy", "rtmp", "gcp_east_zixi", "hls", SAFARI), false);
+assert.equal(isLegalCombo("dummy", "rtmp", "gcp_zixi", "hls", SAFARI), true);
 assert.equal(isLegalCombo("dummy", "webrtc", "gcp_mediamtx", "whep", SAFARI), true);
 assert.equal(isLegalCombo("browser_moq", "moq", "gcp_moq_relay", "moq", SAFARI), false);
 assert.equal(isLegalCombo("browser_moq", "webrtc", "gcp_mediamtx", "whep", SAFARI), true);
@@ -371,7 +387,10 @@ function defaultPlaybackModeForProtocol(protocol, ingest) {
   if (protocol === "webrtc") return "whep";
   if (protocol === "hls") return "mpegts";
   if (ingestRole(ingest) === "mediamtx") return "ll-hls";
-  if (ingestRole(ingest) === "zixi") return protocol === "rtmp" ? "mpegts" : "hls";
+  if (ingestRole(ingest) === "zixi") {
+    if (!zixiFastHlsAvailable(ingest)) return "mpegts";
+    return protocol === "rtmp" ? "mpegts" : "hls";
+  }
   if (protocol === "dash") return "hls";
   return "hls";
 }
@@ -472,12 +491,22 @@ assert.equal(
   "ingest-only edit keeps the operator's player",
 );
 
+assert.equal(
+  editEndpoint(
+    { protocol: "srt", ingestEndpointId: "gcp_zixi", playbackMode: "hls" },
+    { ingestEndpointId: "gcp_east_zixi" },
+    CHROME,
+  ).playbackMode,
+  "mpegts",
+  "Central Fast HLS cannot follow the dest to East Edge Compute",
+);
+
 // Every protocol switch lands on that protocol's own default.
 for (const [from, to, ingest, want] of [
   ["webrtc", "srt", "gcp_mediamtx", "ll-hls"],
   ["webrtc", "rtmp", "gcp_mediamtx", "ll-hls"],
   ["srt", "rtmp", "gcp_zixi", "mpegts"],
-  ["rtmp", "srt", "linode_zixi", "hls"],
+  ["rtmp", "srt", "linode_zixi", "mpegts"],
 ]) {
   const leg = {
     protocol: from,

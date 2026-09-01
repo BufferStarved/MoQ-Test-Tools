@@ -23,6 +23,7 @@ import {
 } from "./playbackUrls.ts";
 import {
   RECIPE_CHROME_CAPS,
+  coerceRecipe,
   obsMoqSupported,
   recipeIssue,
   uniqueEndpointsByPublishSlot,
@@ -211,21 +212,69 @@ describe("every prod dest × playback mode", () => {
     }
   });
 
-  it("treats East/Linode Zixi custom URLs as Zixi, not MediaMTX", () => {
-    assert.equal(looksLikeZixiPublish("srt://35.196.215.179:10080?mode=caller"), true);
-    assert.equal(looksLikeZixiPublish("srt://45.33.68.151:10080?mode=caller"), true);
+  it("treats East/Linode Zixi custom URLs as Zixi HTTP-TS, not Fast HLS", () => {
+    const eastUrl = "srt://35.196.215.179:10080?mode=caller";
+    const linodeUrl = "srt://45.33.68.151:10080?mode=caller";
+    const centralUrl = "srt://35.222.33.58:10080?mode=caller";
+    assert.equal(looksLikeZixiPublish(eastUrl), true);
+    assert.equal(looksLikeZixiPublish(linodeUrl), true);
     assert.equal(
       looksLikeZixiPublish("srt://66.175.213.81:8890?streamid=publish:benchmark"),
       false,
     );
     const east = resolvePlaybackTarget({
       protocol: "srt",
-      endpointUrl: "srt://35.196.215.179:10080?mode=caller",
+      endpointUrl: eastUrl,
       ingestEndpointId: "custom",
     });
-    assert.equal(east.engine, "hls");
-    assert.match(east.url, /SRT%20Test/);
+    assert.equal(east.engine, "mpegts");
+    assert.match(east.url, /SRT%20Test\.ts/);
     assert.doesNotMatch(east.url, /SRT%20Test%20EC/);
+    const linode = resolvePlaybackTarget({
+      protocol: "srt",
+      endpointUrl: linodeUrl,
+      ingestEndpointId: "custom",
+    });
+    assert.equal(linode.engine, "mpegts");
+    const central = resolvePlaybackTarget({
+      protocol: "srt",
+      endpointUrl: centralUrl,
+      ingestEndpointId: "custom",
+    });
+    assert.equal(central.engine, "hls");
+    assert.match(central.url, /playback\.m3u8/);
+    assert.deepEqual(
+      playbackModesForSelection("srt", "custom", eastUrl).map((item) => item.id),
+      ["mpegts"],
+    );
+    assert.deepEqual(
+      playbackModesForSelection("srt", "custom", linodeUrl).map((item) => item.id),
+      ["mpegts"],
+    );
+    assert.deepEqual(
+      playbackModesForSelection("srt", "custom", centralUrl).map((item) => item.id),
+      ["hls", "mpegts"],
+    );
+  });
+
+  it("remaps a saved Fast HLS player off East Zixi before Start", () => {
+    const coerced = coerceRecipe(
+      [
+        {
+          id: "east",
+          protocol: "srt",
+          ingestEndpointId: "gcp_east_zixi",
+          endpointUrl: "",
+          vmafAvailable: false,
+          serverMetricsAvailable: false,
+          playbackMode: "hls",
+          playbackDvr: false,
+        },
+      ],
+      ctx("dummy", "ffmpeg"),
+    );
+    assert.equal(coerced[0]?.playbackMode, "mpegts");
+    assert.equal(recipeIssue(coerced, ctx("dummy", "ffmpeg")), null);
   });
 });
 

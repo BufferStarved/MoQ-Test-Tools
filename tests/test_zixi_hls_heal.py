@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from zixi_hls_health import zixi_hls_heal_kind  # noqa: E402
+from zixi_hls_health import zixi_fast_hls_origin_available, zixi_hls_heal_kind  # noqa: E402
 
 
 class ZixiHlsHealKindTests(unittest.TestCase):
@@ -74,6 +74,30 @@ class ZixiHlsHealKindTests(unittest.TestCase):
                 stale_rolling=False,
                 stuck=False,
                 uses_ec=True,
+            )
+        )
+
+
+class ZixiFastHlsOriginTests(unittest.TestCase):
+    def test_central_broadcaster_has_fast_hls(self):
+        self.assertTrue(zixi_fast_hls_origin_available(ingest_provider="gcp_zixi"))
+        self.assertTrue(
+            zixi_fast_hls_origin_available(
+                endpoint_url="srt://35.222.33.58:10080?mode=caller"
+            )
+        )
+
+    def test_east_and_linode_edge_compute_do_not(self):
+        self.assertFalse(zixi_fast_hls_origin_available(ingest_provider="gcp_east_zixi"))
+        self.assertFalse(zixi_fast_hls_origin_available(ingest_provider="linode_zixi"))
+        self.assertFalse(
+            zixi_fast_hls_origin_available(
+                endpoint_url="srt://35.196.215.179:10080?mode=caller"
+            )
+        )
+        self.assertFalse(
+            zixi_fast_hls_origin_available(
+                endpoint_url="srt://45.33.68.151:10080?mode=caller"
             )
         )
 

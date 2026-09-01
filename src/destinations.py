@@ -479,7 +479,9 @@ def _build_stack_presets(host: EncodeHost) -> List[ServicePreset]:
             ),
             notes=(
                 f"Managed Zixi SRT ingest on {host.label} ({region}). Stream ID 'SRT Test'; "
-                f"HLS: http://{zixi_ip}:7777/playback.m3u8?stream=SRT%20Test."
+                f"browser playback is HTTP-TS (mpegts.js) at "
+                f"http://{zixi_ip}:7777/SRT%20Test.ts. Fast HLS playback.m3u8 404s "
+                f"on this host (Zixi Edge Compute, not Broadcaster)."
                 if zixi_ok
                 else "Not deployed"
             ),
@@ -494,7 +496,14 @@ def _build_stack_presets(host: EncodeHost) -> List[ServicePreset]:
             name=f"Zixi · {host.label}",
             protocol="rtmp",
             url=f"rtmp://{zixi_ip}:1935/live/benchmark" if zixi_ok else "",
-            notes=f"Managed Zixi RTMP ingest on {host.label} ({region})." if zixi_ok else "Not deployed",
+            notes=(
+                f"Managed Zixi RTMP ingest on {host.label} ({region}). "
+                f"Browser playback is HTTP-TS (mpegts.js) at "
+                f"http://{zixi_ip}:7777/benchmark.ts. Fast HLS is not available "
+                f"on this host."
+                if zixi_ok
+                else "Not deployed"
+            ),
             supports_vmaf=True,
             ingest_agent_url=zixi_agent,
             ingest_recording_dir="/opt/zixi_broadcaster-linux64",

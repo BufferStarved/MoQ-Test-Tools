@@ -66,6 +66,7 @@ from moq_publish import (
     publisher_first_object_sent,
     publisher_webtransport_connected,
     should_pace_moq_publisher,
+    wait_for_publisher_webtransport,
     MPEGTS_VIDEO_BSF,
     build_ffmpeg_input_args,
     build_ffmpeg_moq_cmd,
@@ -89,6 +90,7 @@ from moqx_stats import MoqxStatsPoller
 from path_rtt import PathRttProbe
 from picoquic_qlog import PicoquicQlogTailer
 from zixi_hls_health import (
+    zixi_fast_hls_origin_available,
     zixi_hls_heal_kind,
     mediamtx_hls_playback_url,
     mediamtx_hls_probe_url,
@@ -845,12 +847,21 @@ def llhls_packager_transit_ms(
 
 
 class UploadService:
-    # Zixi's SRT push input is a single shared listener (one port per input
-    # object; see zixi_input_reset.py). Per-job stream IDs stop two runs from
-    # reusing the same input object, but they still can't both bind that port
-    # at once, so overlapping SRT jobs are serialized here instead of racing
-    # add_stream/remove_stream calls against each other.
-    _zixi_srt_ingest_lock = threading.Lock()
+    # Zixi's SRT push input is one listener per Broadcaster. Serialize jobs
+    # that share a host so they do not race add_stream/remove_stream. Do not
+    # use one global lock — three SRT legs to Central/East/Linode must run
+    # together or the waiting legs 404 Fast HLS for the whole encode.
+    _zixi_srt_locks: Dict[str, threading.Lock] = {}
+    _zixi_srt_locks_guard = threading.Lock()
+
+    def _managed_srt_lock(self, job: UploadJob) -> threading.Lock:
+        host = (urlparse(job.destination.url).hostname or "zixi").lower()
+        with self._zixi_srt_locks_guard:
+            lock = self._zixi_srt_locks.get(host)
+            if lock is None:
+                lock = threading.Lock()
+                self._zixi_srt_locks[host] = lock
+            return lock
 
     def __init__(self) -> None:
         # psutil Process handles must persist across samples for cpu_percent
@@ -866,8 +877,10 @@ class UploadService:
             return self._run_obs_monitor(job, on_sample=on_sample)
         if job.destination.protocol == "srt":
             if job.managed_zixi_stream_id():
+                srt_lock = self._managed_srt_lock(job)
                 logger.info(
-                    "Waiting for exclusive access to shared Zixi SRT ingest (job %s)...",
+                    "Waiting for exclusive access to Zixi SRT ingest on %s (job %s)...",
+                    urlparse(job.destination.url).hostname or "zixi",
                     job.job_id,
                 )
                 while True:
@@ -876,14 +889,14 @@ class UploadService:
                         # encode crash — finalize as success so the UI does
                         # not paint a red "ffmpeg 255" / ingest failure.
                         return UploadResult(success=True)
-                    acquired = self._zixi_srt_ingest_lock.acquire(timeout=1.0)
+                    acquired = srt_lock.acquire(timeout=1.0)
                     if acquired:
                         break
                 logger.info("Acquired Zixi SRT ingest for job %s.", job.job_id)
                 try:
                     return self._run_srt_pipeline(job, on_sample=on_sample)
                 finally:
-                    self._zixi_srt_ingest_lock.release()
+                    srt_lock.release()
                     # Defer Zixi input deletion until after JobManager marks the job
                     # completed/failed so the browser can flip playbackGate→ended and
                     # destroy HLS before the playlist 404s. See cleanup_zixi_srt_input_if_managed.
@@ -1712,7 +1725,11 @@ class UploadService:
                 ).ok
                 manifest_url = self._managed_hls_manifest_url(job)
                 hls = None
-                if manifest_url:
+                watch_fast_hls = zixi_fast_hls_origin_available(
+                    ingest_provider=job.destination.ingest_provider or "",
+                    endpoint_url=job.destination.url,
+                )
+                if manifest_url and watch_fast_hls:
                     try:
                         hls = probe_hls_segment_ready(manifest_url, timeout=2.0)
                     except Exception:
@@ -1731,9 +1748,12 @@ class UploadService:
                     self._publish_zixi_delivery_media_origin(job)
                 # Default SRT path is direct ffmpeg — it has no sample-loop heal.
                 # Keep watching Fast HLS here and refresh the EC packager once
-                # if the playlist freezes while HTTP-TS stays live.
+                # if the playlist freezes while HTTP-TS stays live. Skip on
+                # East/Linode Edge Compute — playback.m3u8 404s forever and a
+                # "stuck" heal would reset a working SRT push.
                 if (
                     notified
+                    and watch_fast_hls
                     and job.destination.protocol == "srt"
                     and job.managed_zixi_stream_id()
                     and heals_used < _HLS_HEAL_ATTEMPTS
@@ -2274,11 +2294,17 @@ class UploadService:
                                 exc_info=True,
                             )
 
-                # Zixi Fast HLS only: gate on segment readiness; auto-heal once if wedged.
+                # Zixi Fast HLS only (Central Broadcaster). East/Linode Edge
+                # Compute 404s playback.m3u8; treating that as "stuck" used to
+                # srt_reset a live HTTP-TS session.
                 if (
                     manifest_url
                     and elapsed >= _HLS_WARMUP_SEC
                     and not is_mediamtx
+                    and zixi_fast_hls_origin_available(
+                        ingest_provider=job.destination.ingest_provider or "",
+                        endpoint_url=job.destination.url,
+                    )
                 ):
                     try:
                         health = probe_hls_segment_ready(manifest_url)
@@ -2511,6 +2537,14 @@ class UploadService:
     # A 5-line tail dropped those on Linode (no :18000 scrape) so preview
     # stayed false while the 40-line end-of-job check passed.
     _MOQ_PUBLISHER_LOG_TAIL = 40
+
+    @staticmethod
+    def _read_file(path: str, max_bytes: int = 262144) -> str:
+        try:
+            with open(path, "rb") as fh:
+                return fh.read(max_bytes).decode("utf-8", errors="replace")
+        except OSError:
+            return ""
 
     @staticmethod
     def _tail_file(path: str, max_lines: int = 5) -> str:
@@ -2794,6 +2828,21 @@ class UploadService:
         # or track" refusal + wasted retry budget this gate exists to avoid).
         preview_ready_deadline = start_time + moq_preview_ready_grace_sec(
             job.media_path, job.duration_sec
+        )
+
+        def _publisher_log_text() -> str:
+            return (
+                f"{self._read_file(publisher_stdout_path)}\n"
+                f"{self._read_file(publisher_log_path)}"
+            )
+
+        # ffmpeg is already feeding ftyp. Wait here so CONNECT is classified
+        # from the full log before we spend the encode with no session.
+        wait_for_publisher_webtransport(
+            _publisher_log_text,
+            lambda: publisher_proc is not None
+            and publisher_proc.poll() is None
+            and not job.is_cancelled(),
         )
 
         try:
@@ -3107,9 +3156,12 @@ class UploadService:
             # finish in-flight groups. SIGKILL-ing the Docker wrapper while
             # ffmpeg was still live is how bench-216482ff died at -9 mid-publish.
             self._terminate_process(ffmpeg_proc)
+            # connection_id is printed at handshake, then object logs bury it.
+            # A 20-line tail misclassified a live session as never-connected
+            # and SIGKILL'd the publisher (operator HUD 2026-08-31).
             wt_log = (
-                f"{self._tail_file(publisher_stdout_path, max_lines=20)}\n"
-                f"{self._tail_file(publisher_log_path, max_lines=20)}"
+                f"{self._read_file(publisher_stdout_path)}\n"
+                f"{self._read_file(publisher_log_path)}"
             )
             self._stop_moq_publisher(
                 publisher_proc,
@@ -3152,8 +3204,8 @@ class UploadService:
             moqx_poller.observing and moqx_poller.publish_namespace_success_delta() >= 1
         )
         catalog_log = (
-            f"{self._tail_file(publisher_stdout_path, max_lines=40)}\n"
-            f"{self._tail_file(publisher_log_path, max_lines=40)}"
+            f"{self._read_file(publisher_stdout_path)}\n"
+            f"{self._read_file(publisher_log_path)}"
         )
         if moq_job_should_fail_without_namespace(
             publish_confirmed=publish_confirmed,
@@ -3172,11 +3224,18 @@ class UploadService:
                 quic_qlog_dir=qlog_dir,
             )
             finalized.success = False
-            wt_log = (
-                f"{self._tail_file(publisher_stdout_path, max_lines=20)}\n"
-                f"{self._tail_file(publisher_log_path, max_lines=20)}"
-            )
+            wt_log = catalog_log
             if not publisher_webtransport_connected(wt_log):
+                connect_line = next(
+                    (
+                        line.strip()
+                        for line in wt_log.splitlines()
+                        if "connect failed" in line.lower()
+                        or line.startswith("starting WebTransport")
+                        or line.startswith("waiting for ftyp")
+                    ),
+                    "",
+                )
                 finalized.error = describe_moq_connect_failure(
                     endpoint=target.endpoint,
                     backend=publisher_backend,
@@ -3187,6 +3246,7 @@ class UploadService:
                         or "--insecure" in publisher_cmd
                     ),
                     helper_sha=os.environ.get("MOQ_HELPER_GIT_SHA", ""),
+                    log_line=connect_line,
                 )
             else:
                 finalized.error = moq_publish_missing_error(

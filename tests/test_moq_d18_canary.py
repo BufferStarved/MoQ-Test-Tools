@@ -331,6 +331,20 @@ class Draft18CanaryPresetTests(unittest.TestCase):
         self.assertIn("SPA refresh", msg)
         self.assertIn("not a player or catalog problem", msg)
 
+    def test_connect_failure_includes_publisher_log_line(self) -> None:
+        msg = describe_moq_connect_failure(
+            endpoint="https://34-28-164-90.sslip.io:14433/moq-relay",
+            backend="moq5",
+            binary="/tmp/moq5-fmp4-publish",
+            draft=18,
+            skip_verify=True,
+            helper_sha="7677c63",
+            log_line="endpoint connect failed: -2",
+        )
+        self.assertIn("insecure-skip-verify=on", msg)
+        self.assertIn("endpoint connect failed: -2", msg)
+        self.assertNotIn("git pull", msg)
+
     def test_file_source_probe_script_stays_off_camera_and_prod(self) -> None:
         script = (ROOT / "scripts" / "probe_d18_publish.py").read_text()
         self.assertIn("dummy.mp4", script)

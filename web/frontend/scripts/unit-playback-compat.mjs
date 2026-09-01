@@ -17,8 +17,11 @@ function isMediaMtxManaged(id) {
 function isZixiManagedIngest(id) {
   return ingestRole(id) === "zixi";
 }
+function zixiFastHlsAvailable(id) {
+  return id === "gcp_zixi";
+}
 
-function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
+function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "", endpointUrl = "") {
   if (mode === "auto") return false;
   if (protocol === "moq") return mode === "moq";
   if (mode === "moq") return false;
@@ -29,13 +32,20 @@ function isPlaybackModeCompatible(mode, protocol, ingestEndpointId = "") {
     return mode === "whep";
   }
   const mediamtx = isMediaMtxManaged(ingestEndpointId);
-  const zixi = isZixiManagedIngest(ingestEndpointId);
+  const zixi =
+    isZixiManagedIngest(ingestEndpointId) ||
+    /35\.196\.215\.179|45\.33\.68\.151|35\.222\.33\.58|:10080/.test(endpointUrl);
   if (mediamtx) {
     return mode === "ll-hls" || mode === "ll-dash" || mode === "hls" || mode === "whep" || mode === "mpegts";
   }
   if (zixi) {
-    if (protocol === "srt") return mode === "hls";
-    return mode === "hls" || mode === "mpegts";
+    if (
+      zixiFastHlsAvailable(ingestEndpointId) ||
+      (!isZixiManagedIngest(ingestEndpointId) && endpointUrl.includes("35.222.33.58"))
+    ) {
+      return mode === "hls" || mode === "mpegts";
+    }
+    return mode === "mpegts";
   }
   if (protocol === "srt" || protocol === "rtmp" || protocol === "hls" || protocol === "dash") {
     return mode === "hls" || mode === "mpegts" || mode === "whep";
@@ -75,6 +85,7 @@ function defaultPlaybackModeForProtocol(protocol, ingestEndpointId = "") {
   if (protocol === "hls") return "mpegts";
   if (isMediaMtxManaged(ingestEndpointId)) return "ll-hls";
   if (isZixiManagedIngest(ingestEndpointId)) {
+    if (!zixiFastHlsAvailable(ingestEndpointId)) return "mpegts";
     return protocol === "rtmp" ? "mpegts" : "hls";
   }
   if (protocol === "dash") return "hls";
@@ -98,7 +109,8 @@ assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_east_mediamtx"), "ll-hls
 assert.equal(defaultPlaybackModeForProtocol("srt", "linode_mediamtx"), "ll-hls");
 assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_zixi"), "mpegts");
 assert.equal(defaultPlaybackModeForProtocol("rtmp", "gcp_east_zixi"), "mpegts");
-assert.equal(defaultPlaybackModeForProtocol("srt", "linode_zixi"), "hls");
+assert.equal(defaultPlaybackModeForProtocol("srt", "linode_zixi"), "mpegts");
+assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_east_zixi"), "mpegts");
 assert.equal(defaultPlaybackModeForProtocol("srt", "gcp_zixi"), "hls");
 assert.equal(defaultPlaybackModeForProtocol("moq", "gcp_moq_relay"), "moq");
 assert.equal(defaultPlaybackModeForProtocol("webrtc", "gcp_mediamtx"), "whep");
@@ -124,6 +136,10 @@ assert.equal(
   "MPEG-TS (mpegts.js) (recommended)",
 );
 assert.equal(
+  playbackModeLabelForSelection("mpegts", "srt", "gcp_east_zixi"),
+  "MPEG-TS (mpegts.js) (recommended)",
+);
+assert.equal(
   playbackModeLabelForSelection("hls", "srt", "gcp_zixi"),
   "HLS (hls.js) (recommended)",
 );
@@ -132,7 +148,8 @@ assert.equal(
 assert.equal(isPlaybackModeCompatible("auto", "rtmp", "gcp_zixi"), false);
 assert.equal(isPlaybackModeCompatible("auto", "srt", "gcp_mediamtx"), false);
 
-// Zixi must not offer MTX-only or broken embed modes
+// Zixi must not offer MTX-only or broken embed modes.
+// Central Broadcaster: Fast HLS + HTTP-TS. East/Linode Edge Compute: HTTP-TS only.
 for (const ingest of ["gcp_zixi", "gcp_east_zixi", "linode_zixi"]) {
   for (const mode of ["ll-hls", "ll-dash", "whep", "dash", "zixi-embed", "webrtc", "moq"]) {
     assert.equal(
@@ -141,17 +158,28 @@ for (const ingest of ["gcp_zixi", "gcp_east_zixi", "linode_zixi"]) {
       `${ingest} should reject ${mode}`,
     );
   }
-  assert.equal(isPlaybackModeCompatible("hls", "rtmp", ingest), true, ingest);
-  assert.equal(isPlaybackModeCompatible("hls", "srt", ingest), true, ingest);
-  assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), false, ingest);
+  assert.equal(isPlaybackModeCompatible("mpegts", "srt", ingest), true, ingest);
   assert.equal(isPlaybackModeCompatible("mpegts", "rtmp", ingest), true, ingest);
-  assert.equal(resolvedPlaybackMode("hls", "srt", ingest), "hls", ingest);
-  assert.equal(resolvedPlaybackMode("mpegts", "srt", ingest), "hls", ingest);
-  assert.equal(playbackModeBlockedReason("hls", "srt", ingest), undefined, ingest);
-  assert.equal(playbackModeBlockedReason("hls", "rtmp", ingest), undefined, ingest);
-  assert.deepEqual(playbackModesForSelection("srt", ingest), ["hls"]);
-  assert.deepEqual(playbackModesForSelection("rtmp", ingest), ["hls", "mpegts"]);
+  assert.equal(resolvedPlaybackMode("mpegts", "srt", ingest), "mpegts", ingest);
+  assert.equal(playbackModeBlockedReason("mpegts", "srt", ingest), undefined, ingest);
 }
+assert.equal(isPlaybackModeCompatible("hls", "srt", "gcp_zixi"), true);
+assert.equal(isPlaybackModeCompatible("hls", "rtmp", "gcp_zixi"), true);
+assert.equal(isPlaybackModeCompatible("hls", "srt", "gcp_east_zixi"), false);
+assert.equal(isPlaybackModeCompatible("hls", "srt", "linode_zixi"), false);
+assert.equal(isPlaybackModeCompatible("hls", "rtmp", "gcp_east_zixi"), false);
+assert.equal(resolvedPlaybackMode("hls", "srt", "gcp_zixi"), "hls");
+assert.equal(resolvedPlaybackMode("hls", "srt", "gcp_east_zixi"), "mpegts");
+assert.equal(resolvedPlaybackMode("hls", "srt", "linode_zixi"), "mpegts");
+assert.deepEqual(playbackModesForSelection("srt", "gcp_zixi"), ["hls", "mpegts"]);
+assert.deepEqual(playbackModesForSelection("rtmp", "gcp_zixi"), ["hls", "mpegts"]);
+assert.deepEqual(playbackModesForSelection("srt", "gcp_east_zixi"), ["mpegts"]);
+assert.deepEqual(playbackModesForSelection("srt", "linode_zixi"), ["mpegts"]);
+assert.deepEqual(playbackModesForSelection("rtmp", "gcp_east_zixi"), ["mpegts"]);
+assert.deepEqual(playbackModesForSelection("rtmp", "linode_zixi"), ["mpegts"]);
+assert.equal(isPlaybackModeCompatible("hls", "srt", "custom", "srt://35.196.215.179:10080?mode=caller"), false);
+assert.equal(isPlaybackModeCompatible("mpegts", "srt", "custom", "srt://35.196.215.179:10080?mode=caller"), true);
+assert.equal(isPlaybackModeCompatible("hls", "srt", "custom", "srt://35.222.33.58:10080?mode=caller"), true);
 
 // MediaMTX matrix (every cloud, not just us-central1)
 for (const ingest of ["gcp_mediamtx", "gcp_east_mediamtx", "linode_mediamtx"]) {

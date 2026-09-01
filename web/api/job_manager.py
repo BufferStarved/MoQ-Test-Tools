@@ -399,6 +399,20 @@ class JobManager:
                     error="Cancelled while waiting for a cloud encode slot",
                 )
                 return
+        # Helper SRT: delete+recreate SRT Test before job=running. The HLS
+        # player attaches on running; resetting after that 404s
+        # playback.m3u8?stream=SRT Test for the whole wait (operator HUD
+        # 2026-08-31). First-connect HLS grace still applies — the helper is
+        # the next SRT client. Per-host lock on the helper lets three Zixi
+        # boxes publish in parallel.
+        if (
+            job.publisher_host == "local"
+            and local_publisher_enabled()
+            and publisher_hub is not None
+            and job.destination.protocol == "srt"
+            and job.managed_zixi_stream_id()
+        ):
+            self._service._reset_zixi_srt_input_if_managed(job)
         started_at_epoch = time.time()
         self._update(job_id, status=JobStatus.RUNNING, started_at_epoch=started_at_epoch)
         start_epoch = started_at_epoch
@@ -430,10 +444,6 @@ class JobManager:
             if job.publisher_host == "browser":
                 result = self._run_browser_publisher_job(job_id, job)
             elif job.publisher_host == "local" and local_publisher_enabled() and publisher_hub is not None:
-                if job.destination.protocol == "srt" and job.managed_zixi_stream_id():
-                    # Helper SRT shares exclusive "SRT Test". Clear leftover
-                    # cloud dummy.mp4 so this laptop publish is the first client.
-                    self._service._reset_zixi_srt_input_if_managed(job)
                 result = publisher_hub.run_remote(
                     job,
                     on_sample=on_sample,

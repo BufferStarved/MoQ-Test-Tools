@@ -119,3 +119,20 @@ describe("SRT Zixi dest grid vs MediaMTX preferred sort", () => {
     assert.equal(pickDestForHost("gcp_east", dests, "gcp_mediamtx", free), "gcp_east_mediamtx");
   });
 });
+
+describe("Safari player support", () => {
+  const safariCtx: RecipeContext = {
+    ...recipeCtx,
+    caps: { safari: true, webTransport: false, rtcPeerConnection: true },
+  };
+  const dests = destinationsForProtocol("srt", safariCtx, new Set(), { includeOccupied: true });
+
+  it("hides East/Linode Zixi (mpegts.js only) and keeps Central Fast HLS", () => {
+    assert.equal(dests.some((item) => item.id === "gcp_east_zixi"), false);
+    assert.equal(dests.some((item) => item.id === "linode_zixi"), false);
+    assert.equal(dests.some((item) => item.id === "gcp_zixi"), true);
+    assert.equal(dests.some((item) => item.id === "gcp_east_mediamtx"), true);
+    assert.equal(dests.some((item) => item.id === "linode_mediamtx"), true);
+    assert.equal(optionForHostCell("gcp_central", dests, "zixi", () => false)?.id, "gcp_zixi");
+  });
+});

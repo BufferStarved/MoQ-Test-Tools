@@ -39,6 +39,7 @@ export type ComparisonHud = {
   catalogReady?: boolean;
   namespace?: string;
   mpegTsLastReason?: string | null;
+  hlsLastError?: string | null;
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
   runStopped?: boolean;
@@ -264,6 +265,7 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
     }
     const verdict = classifyHlsEndVerdict({
       maxVideoTime: row.playback_video_time_sec,
+      lastError: hud.hlsLastError,
       encodeDurationSec: hud.encodeDurationSec,
       encodeElapsedSec: hud.encodeElapsedSec,
     });

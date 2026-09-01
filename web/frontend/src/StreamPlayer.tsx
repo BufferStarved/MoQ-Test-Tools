@@ -135,7 +135,7 @@ export function StreamPlayer({
 }: StreamPlayerProps) {
   const resolvedDraft = moqDraftVersion ?? moqDraftForIngest(ingestEndpointId);
   const pinTlsCert = moqPinTlsCert ?? moqPinTlsCertForIngest(ingestEndpointId);
-  const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId);
+  const resolvedMode = resolvedPlaybackMode(playbackMode, protocol, ingestEndpointId, endpointUrl);
 
   useEffect(() => {
     if (!onPlaybackModeChange) {
@@ -238,7 +238,7 @@ export function StreamPlayer({
               onUnrecoverableHls={
                 resolvedMode === "hls" &&
                 onPlaybackModeChange &&
-                isPlaybackModeCompatible("mpegts", protocol, ingestEndpointId) &&
+                isPlaybackModeCompatible("mpegts", protocol, ingestEndpointId, endpointUrl) &&
                 playbackModeAllowedInBrowser("mpegts", {
                   safari: isSafariBrowser(),
                   webTransport: typeof WebTransport !== "undefined",

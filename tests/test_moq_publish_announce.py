@@ -190,8 +190,11 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         body = text[start : text.index("\n    def _finalize_result", start)]
         pub = body.index("publisher_proc = subprocess.Popen")
         ffmpeg = body.index("ffmpeg_proc = subprocess.Popen")
+        wait = body.index("wait_for_publisher_webtransport")
         self.assertLess(pub, ffmpeg)
-        self.assertNotIn("wait_for_publisher_webtransport", body)
+        # Feed ftyp immediately; wait for CONNECT only after ffmpeg is piping.
+        # Blocking Popen on CONNECT starved stdin and SIGKILL'd "waiting for ftyp".
+        self.assertLess(ffmpeg, wait)
         self.assertNotIn("stdout=subprocess.DEVNULL", body)
         self.assertIn("paced=should_pace_moq_publisher", body)
         self.assertIn("waiting for ftyp+moov", body)
@@ -203,6 +206,9 @@ class PublisherAnnounceContractTests(unittest.TestCase):
         stop = body.index("self._terminate_process(ffmpeg_proc)")
         pub_stop = body.index("self._stop_moq_publisher")
         self.assertLess(stop, pub_stop)
+        stop_chunk = body[stop:pub_stop]
+        self.assertNotIn("max_lines=20", stop_chunk)
+        self.assertIn("_read_file(publisher_stdout_path)", stop_chunk)
 
     def test_live_catalog_tail_is_long_enough_without_admin_scrape(self) -> None:
         body = (ROOT / "src" / "upload_service.py").read_text()

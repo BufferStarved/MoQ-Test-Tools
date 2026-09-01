@@ -154,12 +154,19 @@ export function EndpointSection({
     moqFingerprintUrl: endpoint.moqFingerprintUrl,
     moqNamespace: endpoint.moqNamespace,
   });
-  const playerModes = selectablePlaybackModes(endpoint.protocol, endpoint.ingestEndpointId, caps);
+  const playUrl = isCustom ? endpoint.endpointUrl : undefined;
+  const playerModes = selectablePlaybackModes(
+    endpoint.protocol,
+    endpoint.ingestEndpointId,
+    caps,
+    playUrl,
+  );
   const resolvedMode = resolvedSelectablePlaybackMode(
     endpoint.playbackMode,
     endpoint.protocol,
     endpoint.ingestEndpointId,
     caps,
+    playUrl,
   );
   const showWhepField = showWhepUrlField(
     resolvedMode,
@@ -264,14 +271,27 @@ export function EndpointSection({
       )}
 
       {lockPlayer || playerModes.length <= 1 ? (
-        <p className="endpoint-static-field">
-          <span className="field-label-with-icon">
-            <IconMonitor size={14} /> Player
-          </span>
-          <strong>
-            {playbackModeLabelForSelection(resolvedMode, endpoint.protocol, endpoint.ingestEndpointId)}
-          </strong>
-        </p>
+        <>
+          <p className="endpoint-static-field">
+            <span className="field-label-with-icon">
+              <IconMonitor size={14} /> Player
+            </span>
+            <strong>
+              {playbackModeLabelForSelection(
+                resolvedMode,
+                endpoint.protocol,
+                endpoint.ingestEndpointId,
+                playUrl,
+              )}
+            </strong>
+          </p>
+          {playerModes.length === 0 ? (
+            <p className="hint">
+              No working player in this browser for that destination. Safari cannot play Zixi HTTP-TS
+              (mpegts.js); use Central Fast HLS or MediaMTX LL-HLS.
+            </p>
+          ) : null}
+        </>
       ) : (
         <>
           <label>
@@ -285,7 +305,12 @@ export function EndpointSection({
             >
               {playerModes.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {playbackModeLabelForSelection(item.id, endpoint.protocol, endpoint.ingestEndpointId)}
+                  {playbackModeLabelForSelection(
+                    item.id,
+                    endpoint.protocol,
+                    endpoint.ingestEndpointId,
+                    playUrl,
+                  )}
                 </option>
               ))}
             </select>

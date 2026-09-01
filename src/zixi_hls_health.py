@@ -22,6 +22,24 @@ logger = logging.getLogger("MoQ-SRT-Bench")
 _DEFAULT_HLS_PORT = 7777
 _TS_SYNC = 0x47
 _MIN_TS_BYTES = 188
+# Central Broadcaster — the only Zixi whose Fast HLS packager actually serves
+# playback.m3u8. East + Linode are licensed as Zixi Edge Compute.
+_ZIXI_FAST_HLS_HOSTS = frozenset({"35.222.33.58"})
+
+
+def zixi_fast_hls_origin_available(*, ingest_provider: str = "", endpoint_url: str = "") -> bool:
+    """True when this Zixi host can serve Fast HLS (Central Broadcaster only)."""
+    provider = (ingest_provider or "").strip().lower()
+    if provider == "gcp_zixi":
+        return True
+    if "zixi" in provider:
+        return False
+    raw = (endpoint_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = (parsed.hostname or "").strip()
+    return host in _ZIXI_FAST_HLS_HOSTS
 
 
 @dataclass(frozen=True)

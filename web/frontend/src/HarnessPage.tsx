@@ -96,7 +96,7 @@ export function HarnessPage({ jobId, playback }: { jobId: string; playback: stri
   }
 
   const requested = (playback ||
-    defaultPlaybackModeForProtocol(job.protocol, ingestEndpointId)) as PlaybackMode;
+    defaultPlaybackModeForProtocol(job.protocol, ingestEndpointId, job.endpoint_url)) as PlaybackMode;
   const mode = modeOverride || requested;
 
   return (

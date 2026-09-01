@@ -12,6 +12,7 @@ import {
   normalizeCloudHost,
   normalizePublishUrl,
   publishCollisionKeys,
+  zixiFastHlsAvailable,
 } from "./ingestEndpoints.ts";
 import type { Preset } from "./types.ts";
 
@@ -99,6 +100,14 @@ describe("9-host encode registry", () => {
     const srt = ingestEndpointsFromPresets(presets).filter((item) => item.id.endsWith("_zixi"));
     assert.equal(srt.length, 9);
     assert.equal(srt.filter((item) => item.available).length, 3);
+    assert.equal(zixiFastHlsAvailable("gcp_zixi"), true);
+    assert.equal(zixiFastHlsAvailable("gcp_east_zixi"), false);
+    assert.equal(zixiFastHlsAvailable("linode_zixi"), false);
+    const eastZixi = srt.find((item) => item.id === "gcp_east_zixi");
+    const centralZixi = srt.find((item) => item.id === "gcp_zixi");
+    assert.match(eastZixi?.detail ?? "", /HTTP-TS/);
+    assert.doesNotMatch(eastZixi?.detail ?? "", /Broadcaster Fast HLS/);
+    assert.match(centralZixi?.detail ?? "", /Fast HLS/);
   });
 
   it("surfaces dest-down notes instead of Not deployed for dead GCP Zixi", () => {

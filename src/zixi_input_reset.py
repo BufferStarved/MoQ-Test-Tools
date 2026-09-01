@@ -231,6 +231,9 @@ def reset_zixi_srt_input(
         ("rec_history", str(_DEFAULT_REC_HISTORY_SEC)),
         ("rec_path", ""),
         ("type", "SRT"),
+        # Do not send host at all. The Zixi UI listener add (type=SRT) has no
+        # host field. host= (even empty) reuses the last remote and the input
+        # shows source=1.2.3.4:10080 Connecting instead of source=:10080.
         ("port", str(port)),
         (
             "max_bitrate",

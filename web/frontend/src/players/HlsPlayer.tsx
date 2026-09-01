@@ -74,7 +74,7 @@ interface HlsPlayerProps {
 }
 
 const MANIFEST_POLL_MS = 400;
-const MANIFEST_POLL_MAX = 120;
+const MANIFEST_POLL_MAX = 180;
 /**
  * Start as soon as a segment URI exists. Waiting for MEDIA-SEQUENCE advance
  * cost ~20s when Zixi long-polls empty playlists. Stale single-segment loops
@@ -84,6 +84,8 @@ const MANIFEST_START_POLLS = 2;
 const MANIFEST_STUCK_POLLS = 60;
 /** Faster give-up when MPEG-TS fallback is available (~3s vs ~24s). */
 const MANIFEST_STUCK_POLLS_FALLBACK = 8;
+/** Consecutive empty/404 playlist fetches before switching to MPEG-TS. */
+const MANIFEST_404_FALLBACK_POLLS = 8;
 /** Only jump when clearly stuck behind; aggressive jumps on 1-deep playlists stutter. */
 const LIVE_JUMP_BEHIND_SEC = 4;
 const LIVE_JUMP_BEHIND_SHALLOW_SEC = 6;
@@ -189,17 +191,23 @@ async function segmentFetchable(manifestRemoteUrl: string, segmentLine: string):
 }
 
 
-async function fetchManifestBody(fetchUrl: string): Promise<string | null> {
+async function fetchManifestProbe(
+  fetchUrl: string,
+): Promise<{ body: string | null; http: number | "error" }> {
   try {
     const response = await fetch(fetchUrl, { cache: "no-store" });
     if (!response.ok) {
-      return null;
+      return { body: null, http: response.status };
     }
     const body = await response.text();
-    return body.includes("#EXTM3U") ? body : null;
+    return { body: body.includes("#EXTM3U") ? body : null, http: response.status };
   } catch {
-    return null;
+    return { body: null, http: "error" };
   }
+}
+
+async function fetchManifestBody(fetchUrl: string): Promise<string | null> {
+  return (await fetchManifestProbe(fetchUrl)).body;
 }
 
 async function waitForManifest(
@@ -208,19 +216,29 @@ async function waitForManifest(
   onAttempt: (attempt: number, detail: string) => void,
   onStuck?: (sequence: string) => void,
   stuckPolls: number = MANIFEST_STUCK_POLLS,
+  emptyFallbackPolls: number = MANIFEST_POLL_MAX,
 ): Promise<string | null> {
   const manifestUrl = proxiedPlaybackUrl(url);
   let previousSequence: string | null = null;
   let previousSegment: string | null = null;
   let unchangedPolls = 0;
   let unreadablePolls = 0;
+  let emptyPolls = 0;
   for (let attempt = 1; attempt <= MANIFEST_POLL_MAX; attempt += 1) {
     if (!shouldContinue()) {
       return null;
     }
     try {
-      const topBody = await fetchManifestBody(manifestUrl);
-      if (topBody) {
+      const probed = await fetchManifestProbe(manifestUrl);
+      const topBody = probed.body;
+      if (!topBody) {
+        emptyPolls += 1;
+        onAttempt(attempt, `http=${probed.http} origin_miss=${emptyPolls}`);
+        if (emptyPolls >= emptyFallbackPolls) {
+          return null;
+        }
+      } else {
+        emptyPolls = 0;
         let body = topBody;
         let mediaPlaylistUrl = url;
 
@@ -806,6 +824,7 @@ export default function HlsPlayer({
           }
         },
         onUnrecoverableHlsRef.current ? MANIFEST_STUCK_POLLS_FALLBACK : MANIFEST_STUCK_POLLS,
+        onUnrecoverableHlsRef.current ? MANIFEST_404_FALLBACK_POLLS : MANIFEST_POLL_MAX,
       );
 
       if (destroyed) {
@@ -813,7 +832,7 @@ export default function HlsPlayer({
       }
       if (!manifestBody) {
         fail(
-          "HLS never became playable during the encode (playlist appeared but segments stayed HTTP 400). Zixi needs a few seconds after the first SRT packets before chunk N is readable — check diagnostics for segment_ready=yes.",
+          "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
           Boolean(onUnrecoverableHlsRef.current),
         );
         return;
