@@ -121,21 +121,6 @@ export function SourceSection({
         tip="This computer’s camera, or a file already on the server."
       />
       <div className="source-mode-options source-mode-options-primary" role="radiogroup" aria-label="Media source">
-        <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
-          <input
-            type="radio"
-            name="source-mode"
-            checked={isLocalWebcam}
-            disabled={disabled}
-            onChange={selectWebcam}
-          />
-          <span className="source-mode-card-body">
-            <strong>
-              <IconCamera size={15} /> Webcam
-            </strong>
-            <span className="source-mode-card-hint">This computer’s camera</span>
-          </span>
-        </label>
         <label className={`source-mode-card${isCloudPlayout ? " selected" : ""}`}>
           <input
             type="radio"
@@ -149,6 +134,21 @@ export function SourceSection({
               <IconFilm size={15} /> VOD-to-Live Cloud Playout
             </strong>
             <span className="source-mode-card-hint">A file on the server</span>
+          </span>
+        </label>
+        <label className={`source-mode-card${isLocalWebcam ? " selected" : ""}`}>
+          <input
+            type="radio"
+            name="source-mode"
+            checked={isLocalWebcam}
+            disabled={disabled}
+            onChange={selectWebcam}
+          />
+          <span className="source-mode-card-body">
+            <strong>
+              <IconCamera size={15} /> Webcam
+            </strong>
+            <span className="source-mode-card-hint">This computer’s camera</span>
           </span>
         </label>
       </div>

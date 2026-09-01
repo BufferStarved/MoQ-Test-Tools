@@ -3,12 +3,12 @@
  * source + encoder + output set that already exists in ingestEndpoints /
  * operator recipes. Applying a preset only fills the form — Start is unchanged.
  *
- * Precanned recipes default tiles/players and mask later wizard steps that
- * they already decided. `lockProtocolMix` hides per-tile protocol dropdowns
- * (Cloud: one shared picker; Contribution: fixed 3-way mix).
- * `lockEndpoints` hides Destination pickers. Locking `outputs` still hides
- * Add/remove unless the recipe unlocks that step. Run parameters (live-edge
- * vs complete, bitrate, VMAF) stay visible. "Build your own" locks nothing.
+ * Precanned recipes pick ingest hosts, players, and gateways for the
+ * operator. The dest/player matrix stays on Build Your Own only.
+ * `lockProtocolMix` hides per-tile protocol dropdowns (Cloud: one shared
+ * picker; Contribution: fixed 3-way mix). Locking `outputs` hides
+ * Add/remove and Destination pickers. Run parameters (Live Edge vs
+ * Complete, bitrate, VMAF) stay visible.
  */
 import {
   CLOUD_ENCODE_HOST_IDS,
@@ -59,63 +59,75 @@ export interface BenchmarkPresetDef {
   lockProtocolMix?: boolean;
   /**
    * Hide Destination / ingest-host pickers. Defaults to locking them
-   * whenever `outputs` is locked, unless `showEndpointPickers` is set.
+   * whenever `outputs` is locked.
    */
   lockEndpoints?: boolean;
-  /**
-   * Show per-tile Destination pickers even when `outputs` is locked.
-   * Without this, locking outputs hides protocol mix AND ingest hosts.
-   */
-  showEndpointPickers?: boolean;
   /** One-line “what you will see” after picking this recipe. */
   lockedSummary: string;
 }
 
-/** No visitor default — the first screen is only “What to run”. */
+/** No visitor default — the first screen is only “What to Run”. */
 export const DEFAULT_BENCHMARK_PRESET: BenchmarkPresetId | null = null;
 
+/** Greyed placeholder in the preset group — not a runnable recipe yet. */
+export const PLAYER_TEST_PLACEHOLDER = {
+  id: "player-test",
+  label: "Player Test",
+  hint: "Coming soon.",
+} as const;
+
+/** Heading for the four precanned recipes (Build Your Own sits outside this group). */
+export const PRESET_COMPARISON_GROUP_LABEL = "Preset Comparisons";
+
+/**
+ * Visitor card order: most stable preset → least stable, then Build Your Own
+ * last (least constrained). Do not shuffle without updating the group chrome.
+ */
 export const BENCHMARK_PRESET_DEFS: BenchmarkPresetDef[] = [
   {
-    id: "build-your-own",
-    label: "Build your own",
-    hint: "You pick the source, destinations, and players.",
-    locks: [],
-    lockedSummary: "",
+    id: "protocol-compare",
+    label: "Protocol Comparison",
+    hint: "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
+    locks: ["testScope", "outputs"],
+    lockedSummary: "SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
+  },
+  {
+    id: "cloud-compare",
+    label: "Cloud/Edge Comparison",
+    hint: "Compare the same protocol across live clouds and regions. Paths and players are chosen for you.",
+    locks: ["testScope", "outputs"],
+    lockProtocolMix: true,
+    lockedSummary: "One protocol, compared across live clouds and regions.",
   },
   {
     id: "contribution-compare",
-    label: "Ingest comparison",
-    hint: "Contribution and acquisition performance across clouds and protocols",
+    label: "Ingest Comparison",
+    hint: "Contribution and acquisition performance across clouds and protocols.",
     locks: ["testScope", "encoder", "outputs"],
     lockProtocolMix: true,
-    lockEndpoints: false,
-    showEndpointPickers: true,
     lockedSummary: "Encode and ingest meters only. No players.",
   },
   {
     id: "webrtc-vs-moq",
     label: "Webcam Browsers",
-    hint: "Webcam & WebCodecs API protocol comparison",
+    hint: "Webcam and WebCodecs protocol comparison.",
     locks: ["testScope", "source", "encoder", "outputs"],
     lockedSummary: "Webcam via WebCodecs: MoQ vs WebRTC.",
   },
   {
-    id: "protocol-compare",
-    label: "Protocol Comparison",
-    hint: "Compare SRT, RTMP, WebRTC and MoQ upload and playback (MediaMTX LL-HLS for SRT)",
-    locks: ["testScope", "outputs"],
-    lockedSummary: "SRT, RTMP, WebRTC, and MoQ — MediaMTX LL-HLS for SRT.",
-  },
-  {
-    id: "cloud-compare",
-    label: "Cloud/Edge Comparison",
-    hint: "Compare upload and delivery performance of the same protocols across multiple infrastructure providers and regions",
-    locks: ["testScope"],
-    lockProtocolMix: true,
-    lockEndpoints: false,
-    lockedSummary: "One protocol, compared across live clouds and regions.",
+    id: "build-your-own",
+    label: "Build Your Own",
+    hint: "You pick the source, destinations, and players.",
+    locks: [],
+    lockedSummary: "",
   },
 ];
+
+export const PRESET_COMPARISON_DEFS: BenchmarkPresetDef[] = BENCHMARK_PRESET_DEFS.filter(
+  (item) => item.id !== "build-your-own",
+);
+
+export const BUILD_YOUR_OWN_DEF = BENCHMARK_PRESET_DEFS.find((item) => item.id === "build-your-own");
 
 export function recipeDef(id: BenchmarkPresetId | null): BenchmarkPresetDef | undefined {
   return id ? BENCHMARK_PRESET_DEFS.find((item) => item.id === id) : undefined;
@@ -125,7 +137,7 @@ export function recipeLocksStep(id: BenchmarkPresetId | null, step: RecipeWizard
   return recipeDef(id)?.locks.includes(step) ?? false;
 }
 
-/** Later wizard steps stay hidden until a recipe is picked. Build your own shows all. */
+/** Later wizard steps stay hidden until a recipe is picked. Build Your Own shows all. */
 export function wizardStepVisible(
   id: BenchmarkPresetId | null,
   step: RecipeWizardStep,
@@ -141,9 +153,9 @@ export function recipeLocksProtocolMix(id: BenchmarkPresetId | null): boolean {
 }
 
 /**
- * Destination / ingest-host pickers. Unlocked recipes show them; locking
- * `outputs` hides them unless `lockEndpoints` is false or `showEndpointPickers`
- * is set. Cloud compare unlocks endpoints so each tile is a region.
+ * Destination / ingest-host pickers. Build Your Own shows them. Precanned
+ * recipes lock `outputs` so the matrix stays hidden — hosts and players
+ * are chosen from the most stable path for that recipe.
  */
 export function recipeLocksEndpoints(id: BenchmarkPresetId | null): boolean {
   if (id === null) {
@@ -159,9 +171,6 @@ export function recipeLocksEndpoints(id: BenchmarkPresetId | null): boolean {
   if (def.lockEndpoints === false) {
     return false;
   }
-  if (def.showEndpointPickers) {
-    return false;
-  }
   return recipeLocksStep(id, "outputs");
 }
 
@@ -173,12 +182,11 @@ export function recipeShowsEndpointPickers(id: BenchmarkPresetId | null): boolea
 }
 
 /**
- * One protocol picker for every tile. True when the mix is locked to a
- * single protocol and output tiles stay visible (Cloud compare).
- * Contribution locks `outputs` so the 3-way mix has no picker.
+ * One protocol picker for every tile. Cloud compare keeps this even when
+ * the dest/player matrix is hidden. Contribution has a fixed 3-way mix.
  */
 export function recipeShowsSharedProtocolPicker(id: BenchmarkPresetId | null): boolean {
-  return recipeLocksProtocolMix(id) && wizardStepVisible(id, "outputs");
+  return id === "cloud-compare" && recipeLocksProtocolMix(id);
 }
 
 export function cloudCompareProtocolLabel(protocol: PublishProtocolId): string {
@@ -192,13 +200,13 @@ export function cloudCompareProtocolLabel(protocol: PublishProtocolId): string {
 }
 
 export function cloudCompareProtocolHint(protocol: PublishProtocolId): string {
-  if (protocol === "srt" || protocol === "rtmp") {
-    return "Zixi or MediaMTX in each wired region";
-  }
   if (protocol === "webrtc") {
-    return "MediaMTX WHIP URLs that exist — not AWS";
+    return "Same publish on every live region that accepts it.";
   }
-  return "Public :14433 relays — leftover :4433 hidden";
+  if (protocol === "moq") {
+    return "Same publish on every live public relay.";
+  }
+  return "Same publish on every live region.";
 }
 
 /** Contribution compare needs the laptop helper (SRT/RTMP + webcam ffmpeg). */
@@ -207,12 +215,11 @@ export function recipeNeedsLaptopHelper(id: BenchmarkPresetId): boolean {
 }
 
 /**
- * Recipes that already decided the output mix hide the Outputs wizard step.
- * Still show those tiles on the last decision so a visitor sees destinations
- * before Start (browser4 / protocol-compare). Custom keeps walking the wizard.
+ * Precanned recipes never open the dest/player matrix before Start.
+ * Build Your Own walks that step. Run tiles still appear once a job starts.
  */
-export function recipeRevealsLockedOutputs(id: BenchmarkPresetId | null): boolean {
-  return Boolean(id) && recipeLocksStep(id, "outputs") && !recipeShowsEndpointPickers(id);
+export function recipeRevealsLockedOutputs(_id: BenchmarkPresetId | null): boolean {
+  return false;
 }
 
 export function recipeLockedSummary(id: BenchmarkPresetId | null): string | null {

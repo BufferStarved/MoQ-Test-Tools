@@ -43,16 +43,17 @@ describe("setup wizard sequence", () => {
     assert.equal(isLastSetupStep(steps, "encode"), true);
   });
 
-  it("Where to host inserts the shared protocol picker before Encode", () => {
+  it("Where to host inserts the shared protocol picker before Encode and hides dests", () => {
     const steps = setupStepsForRecipe(setupFlagsForPreset("cloud-compare"));
-    assert.deepEqual(steps, ["recipe", "source", "protocol", "encode", "outputs"]);
+    assert.deepEqual(steps, ["recipe", "source", "protocol", "encode"]);
     assert.equal(setupStepState(steps, "protocol", "source"), "collapsed");
     assert.equal(setupStepState(steps, "protocol", "encode"), "hidden");
+    assert.equal(setupStepState(steps, "encode", "outputs"), "hidden");
   });
 
-  it("Ingest only keeps Source and destination pickers, skips Test/Encode/Outputs config", () => {
+  it("Ingest only keeps Source and Encode, hides dest/player matrix", () => {
     const steps = setupStepsForRecipe(setupFlagsForPreset("contribution-compare"));
-    assert.deepEqual(steps, ["recipe", "source", "encode", "outputs"]);
+    assert.deepEqual(steps, ["recipe", "source", "encode"]);
   });
 
   it("MoQ vs WebRTC only asks Encode after the recipe", () => {

@@ -19,13 +19,16 @@ assert.match(presetSrc, /build-your-own/);
 assert.match(presetSrc, /cloud-compare/);
 assert.match(presetSrc, /contribution-compare/);
 assert.match(presetSrc, /webrtc-vs-moq/);
-assert.match(presetSrc, /label: "Ingest comparison"/);
+assert.match(presetSrc, /label: "Ingest Comparison"/);
 assert.match(presetSrc, /label: "Cloud\/Edge Comparison"/);
 assert.match(presetSrc, /label: "Webcam Browsers"/);
 assert.match(presetSrc, /label: "Protocol Comparison"/);
-assert.match(presetSrc, /label: "Build your own"/);
+assert.match(presetSrc, /label: "Build Your Own"/);
+assert.match(presetSrc, /PRESET_COMPARISON_GROUP_LABEL = "Preset Comparisons"/);
 assert.match(presetSrc, /You pick the source, destinations, and players\./);
-assert.match(presetSrc, /Contribution and acquisition performance across clouds and protocols/);
+assert.match(presetSrc, /Contribution and acquisition performance across clouds and protocols\./);
+assert.match(presetSrc, /PLAYER_TEST_PLACEHOLDER/);
+assert.match(presetSrc, /label: "Player Test"/);
 assert.doesNotMatch(presetSrc, /Contribution Protocol Comparison for Streaming Workflows/);
 assert.doesNotMatch(presetSrc, /WebRTC vs MOQ for realtime video\./);
 assert.doesNotMatch(presetSrc, /label: "Watch all four protocols"/);
@@ -36,10 +39,15 @@ assert.doesNotMatch(presetSrc, /label: "Contribution ingest"/);
 assert.doesNotMatch(presetSrc, /label: "WebRTC vs MoQ"/);
 assert.match(
   presetSrc,
-  /id: "build-your-own"[\s\S]*id: "contribution-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "protocol-compare"[\s\S]*id: "cloud-compare"/,
+  /id: "protocol-compare"[\s\S]*id: "cloud-compare"[\s\S]*id: "contribution-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "build-your-own"/,
 );
 assert.match(appSrc, /recipe-card-custom/);
-assert.match(appSrc, /recipe-card-custom/);
+assert.match(appSrc, /recipe-preset-group/);
+assert.match(appSrc, /PRESET_COMPARISON_GROUP_LABEL/);
+assert.match(appSrc, /PRESET_COMPARISON_DEFS/);
+assert.match(appSrc, /BUILD_YOUR_OWN_DEF/);
+assert.doesNotMatch(presetSrc, /label: "Build your own"/);
+assert.doesNotMatch(presetSrc, /label: "Ingest comparison"/);
 assert.match(presetSrc, /TEST_SCOPE_UPLOAD/);
 assert.match(presetSrc, /defaultRecipeEndpoints/);
 assert.match(presetSrc, /BROWSER4_OUTPUT_KEYS/);
@@ -50,25 +58,34 @@ assert.match(presetSrc, /recipeShowsEndpointPickers/);
 assert.match(presetSrc, /recipeLocksProtocolMix/);
 assert.match(presetSrc, /recipeLocksEndpoints/);
 assert.match(presetSrc, /recipeShowsSharedProtocolPicker/);
-assert.match(presetSrc, /showEndpointPickers:\s*true/);
+assert.doesNotMatch(presetSrc, /showEndpointPickers:\s*true/);
 assert.match(presetSrc, /lockProtocolMix:\s*true/);
-assert.match(presetSrc, /lockEndpoints:\s*false/);
-assert.match(presetSrc, /MediaMTX LL-HLS for SRT/);
+assert.doesNotMatch(presetSrc, /lockEndpoints:\s*false/);
+assert.match(presetSrc, /most stable path for each/);
 assert.match(presetSrc, /Encode and ingest meters only/);
 assert.match(presetSrc, /One protocol, compared across live clouds/);
 assert.match(appSrc, /handleBenchmarkPreset/);
-assert.match(appSrc, /BENCHMARK_PRESET_DEFS/);
+assert.match(appSrc, /recipe-picker/);
 assert.match(appSrc, /recipe-options/);
+assert.match(appSrc, /recipe-custom-group/);
+assert.match(appSrc, /PLAYER_TEST_PLACEHOLDER/);
+assert.match(appSrc, /comingSoon/);
+assert.match(appSrc, /What to Run/);
 assert.match(appSrc, /wizardStepVisible/);
 assert.match(appSrc, /recipeShowsEndpointPickers/);
 assert.match(appSrc, /recipeShowsSharedProtocolPicker/);
 assert.match(appSrc, /lockProtocol=\{lockOutputProtocol\}/);
 assert.match(appSrc, /showOutputConfig && canAddOutput/);
 assert.match(appSrc, /cloud-compare-protocol/);
-assert.match(appSrc, /Same protocol on every tile/);
+assert.match(appSrc, /Ingest and players are chosen for you/);
 assert.doesNotMatch(presetSrc, /aws_zixi/);
 assert.doesNotMatch(appSrc, /handleBenchmarkPreset\([^)]+\);\s*void handleStart/);
 assert.doesNotMatch(sourceSrc, /onMediaSourceChange\("browser_moq"\)/);
+assert.match(
+  sourceSrc,
+  /VOD-to-Live Cloud Playout[\s\S]*Webcam/,
+  "cloud VOD-to-live playout must be listed before webcam",
+);
 assert.match(operatorSrc, /source=webcam&encoder=browser/);
 assert.match(operatorSrc, /parseOperatorEncoder/);
 

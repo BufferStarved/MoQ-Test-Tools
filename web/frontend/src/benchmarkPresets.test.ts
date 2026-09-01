@@ -3,6 +3,10 @@ import { describe, it } from "node:test";
 import {
   applyBenchmarkPreset,
   BENCHMARK_PRESET_DEFS,
+  BUILD_YOUR_OWN_DEF,
+  PLAYER_TEST_PLACEHOLDER,
+  PRESET_COMPARISON_DEFS,
+  PRESET_COMPARISON_GROUP_LABEL,
   benchmarkPresetLegal,
   recipeLockedSummary,
   recipeNeedsLaptopHelper,
@@ -364,36 +368,45 @@ describe("applyBenchmarkPreset", () => {
 });
 
 describe("recipe wizard locks", () => {
-  it("lists recipes in the visitor order, Custom first", () => {
+  it("lists recipes most stable to least, Build Your Own last", () => {
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => item.id),
       [
-        "build-your-own",
-        "contribution-compare",
-        "webrtc-vs-moq",
         "protocol-compare",
         "cloud-compare",
+        "contribution-compare",
+        "webrtc-vs-moq",
+        "build-your-own",
       ],
     );
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => [item.label, item.hint]),
       [
-        ["Build your own", "You pick the source, destinations, and players."],
-        [
-          "Ingest comparison",
-          "Contribution and acquisition performance across clouds and protocols",
-        ],
-        ["Webcam Browsers", "Webcam & WebCodecs API protocol comparison"],
         [
           "Protocol Comparison",
-          "Compare SRT, RTMP, WebRTC and MoQ upload and playback (MediaMTX LL-HLS for SRT)",
+          "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
         ],
         [
           "Cloud/Edge Comparison",
-          "Compare upload and delivery performance of the same protocols across multiple infrastructure providers and regions",
+          "Compare the same protocol across live clouds and regions. Paths and players are chosen for you.",
         ],
+        [
+          "Ingest Comparison",
+          "Contribution and acquisition performance across clouds and protocols.",
+        ],
+        ["Webcam Browsers", "Webcam and WebCodecs protocol comparison."],
+        ["Build Your Own", "You pick the source, destinations, and players."],
       ],
     );
+    assert.equal(PRESET_COMPARISON_GROUP_LABEL, "Preset Comparisons");
+    assert.deepEqual(
+      PRESET_COMPARISON_DEFS.map((item) => item.id),
+      ["protocol-compare", "cloud-compare", "contribution-compare", "webrtc-vs-moq"],
+    );
+    assert.equal(BUILD_YOUR_OWN_DEF?.id, "build-your-own");
+    assert.equal(BENCHMARK_PRESET_DEFS.at(-1)?.id, "build-your-own");
+    assert.equal(PLAYER_TEST_PLACEHOLDER.label, "Player Test");
+    assert.match(PLAYER_TEST_PLACEHOLDER.hint, /Coming soon/i);
   });
 
   it("hides later steps until a recipe is picked", () => {
@@ -408,24 +421,24 @@ describe("recipe wizard locks", () => {
     assert.equal(wizardStepVisible("protocol-compare", "outputs"), false);
     assert.equal(wizardStepVisible("protocol-compare", "source"), true);
     assert.equal(wizardStepVisible("protocol-compare", "encoder"), true);
-    assert.match(recipeLockedSummary("protocol-compare") ?? "", /MediaMTX LL-HLS for SRT/);
+    assert.match(recipeLockedSummary("protocol-compare") ?? "", /most stable path/);
   });
 
-  it("contribution-compare unlocks source and endpoint pickers; protocol mix stays locked", () => {
+  it("contribution-compare unlocks source; dest/player matrix stays hidden", () => {
     assert.equal(recipeLocksStep("contribution-compare", "source"), false);
     assert.equal(wizardStepVisible("contribution-compare", "source"), true);
     assert.equal(wizardStepVisible("contribution-compare", "testScope"), false);
     assert.equal(wizardStepVisible("contribution-compare", "encoder"), false);
     assert.equal(wizardStepVisible("contribution-compare", "outputs"), false);
-    assert.equal(recipeShowsEndpointPickers("contribution-compare"), true);
+    assert.equal(recipeShowsEndpointPickers("contribution-compare"), false);
     assert.equal(recipeShowsEndpointPickers("protocol-compare"), false);
-    assert.equal(recipeShowsEndpointPickers("cloud-compare"), true);
+    assert.equal(recipeShowsEndpointPickers("cloud-compare"), false);
     assert.equal(recipeShowsEndpointPickers("build-your-own"), true);
     assert.equal(recipeShowsEndpointPickers(null), false);
     assert.equal(recipeLocksProtocolMix("contribution-compare"), true);
     assert.equal(recipeLocksProtocolMix("cloud-compare"), true);
-    assert.equal(recipeLocksEndpoints("contribution-compare"), false);
-    assert.equal(recipeLocksEndpoints("cloud-compare"), false);
+    assert.equal(recipeLocksEndpoints("contribution-compare"), true);
+    assert.equal(recipeLocksEndpoints("cloud-compare"), true);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
     assert.equal(recipeShowsSharedProtocolPicker("contribution-compare"), false);
     assert.match(recipeLockedSummary("contribution-compare") ?? "", /Encode and ingest meters only/);
@@ -435,20 +448,21 @@ describe("recipe wizard locks", () => {
     assert.equal(recipeNeedsLaptopHelper("cloud-compare"), false);
   });
 
-  it("cloud-compare unlocks source and region tiles; protocol mix stays one shared picker", () => {
+  it("cloud-compare unlocks source and one shared protocol picker; dest matrix stays hidden", () => {
     assert.equal(wizardStepVisible("cloud-compare", "source"), true);
-    assert.equal(wizardStepVisible("cloud-compare", "outputs"), true);
+    assert.equal(wizardStepVisible("cloud-compare", "outputs"), false);
     assert.equal(wizardStepVisible("cloud-compare", "testScope"), false);
     assert.equal(recipeLocksProtocolMix("cloud-compare"), true);
-    assert.equal(recipeLocksEndpoints("cloud-compare"), false);
+    assert.equal(recipeLocksEndpoints("cloud-compare"), true);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
     assert.match(recipeLockedSummary("cloud-compare") ?? "", /One protocol, compared across live clouds/);
   });
 
-  it("locked-output recipes reveal tiles before Start; Custom does not", () => {
-    assert.equal(recipeRevealsLockedOutputs("webrtc-vs-moq"), true);
-    assert.equal(recipeRevealsLockedOutputs("protocol-compare"), true);
+  it("precanned recipes never reveal the dest/player matrix before Start", () => {
+    assert.equal(recipeRevealsLockedOutputs("webrtc-vs-moq"), false);
+    assert.equal(recipeRevealsLockedOutputs("protocol-compare"), false);
     assert.equal(recipeRevealsLockedOutputs("contribution-compare"), false);
+    assert.equal(recipeRevealsLockedOutputs("cloud-compare"), false);
     assert.equal(recipeRevealsLockedOutputs("build-your-own"), false);
     assert.equal(recipeRevealsLockedOutputs(null), false);
   });

@@ -110,9 +110,12 @@ import { StepHeading } from "./StepHeading";
 import { operatorBenchmarkPreset, operatorEndpoints, parseOperatorSearch } from "./operatorRecipe";
 import {
   applyBenchmarkPreset,
-  BENCHMARK_PRESET_DEFS,
+  BUILD_YOUR_OWN_DEF,
+  PRESET_COMPARISON_DEFS,
+  PRESET_COMPARISON_GROUP_LABEL,
   cloudCompareProtocolHint,
   cloudCompareProtocolLabel,
+  PLAYER_TEST_PLACEHOLDER,
   recipeDef,
   recipeLockedSummary,
   recipeLocksProtocolMix,
@@ -120,6 +123,7 @@ import {
   recipeShowsEndpointPickers,
   recipeShowsSharedProtocolPicker,
   wizardStepVisible,
+  type BenchmarkPresetDef,
   type BenchmarkPresetId,
 } from "./benchmarkPresets";
 import { SetupStepFrame } from "./SetupStepFrame";
@@ -276,6 +280,49 @@ function resolvePresetId(endpoint: EndpointConfig): string | undefined {
 
 function isIngestEndpointAvailable(endpoint: EndpointConfig, presets: Preset[]): boolean {
   return isIngestEndpointIdAvailable(endpoint.ingestEndpointId, endpoint.protocol, presets);
+}
+
+function RecipeCard({
+  preset,
+  selected,
+  disabled,
+  comingSoon = false,
+  onSelect,
+}: {
+  preset: Pick<BenchmarkPresetDef, "id" | "label" | "hint">;
+  selected: boolean;
+  disabled: boolean;
+  comingSoon?: boolean;
+  onSelect?: (id: BenchmarkPresetId) => void;
+}) {
+  const custom = preset.id === "build-your-own";
+  if (comingSoon) {
+    return (
+      <div className="source-mode-card recipe-card-soon" aria-disabled="true">
+        <span className="source-mode-card-body">
+          <strong>{preset.label}</strong>
+          <span className="source-mode-card-hint">{preset.hint}</span>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <label
+      className={`source-mode-card${custom ? " recipe-card-custom" : ""}${selected ? " selected" : ""}`}
+    >
+      <input
+        type="radio"
+        name="harness-recipe"
+        checked={selected}
+        disabled={disabled}
+        onChange={() => onSelect?.(preset.id as BenchmarkPresetId)}
+      />
+      <span className="source-mode-card-body">
+        <strong>{preset.label}</strong>
+        <span className="source-mode-card-hint">{preset.hint}</span>
+      </span>
+    </label>
+  );
 }
 
 function outputStatusTone(
@@ -1971,7 +2018,7 @@ function App() {
     isUploadOnlyScope(testScope)
       ? null
       : playbackPolicy === PLAYBACK_POLICY_LIVE_EDGE
-        ? "Live edge"
+        ? "Live Edge"
         : "Complete",
   ]
     .filter(Boolean)
@@ -2096,7 +2143,7 @@ function App() {
         <div className="hero-right">
           <StatusDot
             tone={bootstrapping ? "idle" : apiOnline ? "ok" : "bad"}
-            label={bootstrapping ? "Connecting…" : apiOnline ? "API online" : "API offline"}
+            label={bootstrapping ? "Connecting…" : apiOnline ? "API Online" : "API Offline"}
             className="hero-api-status"
           />
           {tab === "benchmark" && (recipePicked || loading) && (
@@ -2144,35 +2191,48 @@ function App() {
                   step="recipe"
                   index={recipeStep}
                   state={recipeState}
-                  title="What to run"
-                  summary={recipeDef(activePresetId)?.label ?? "Choose a recipe"}
+                  title="What to Run"
+                  summary={recipeDef(activePresetId)?.label ?? "Choose a Recipe"}
                   onReopen={() => reopenSetup("recipe")}
                 >
                 <section className="recipe-section">
                   <StepHeading
                     step={recipeStep}
-                    title="What to run"
-                    tip="Pick what you want to see, then press Start. Or build your own."
+                    title="What to Run"
+                    tip="Pick what you want to see, then press Start. Or Build Your Own."
                   />
-                  <div className="source-mode-options recipe-options" role="radiogroup" aria-label="Harness recipes">
-                    {BENCHMARK_PRESET_DEFS.map((preset) => (
-                      <label
-                        key={preset.id}
-                        className={`source-mode-card${preset.id === "build-your-own" ? " recipe-card-custom" : ""}${activePresetId === preset.id ? " selected" : ""}`}
-                      >
-                        <input
-                          type="radio"
-                          name="harness-recipe"
-                          checked={activePresetId === preset.id}
-                          disabled={bootstrapping || !apiOnline || loading}
-                          onChange={() => handleBenchmarkPreset(preset.id)}
+                  <div className="recipe-picker" role="radiogroup" aria-label="Harness recipes">
+                    <div className="recipe-preset-group">
+                      <h4 className="recipe-preset-group-label">{PRESET_COMPARISON_GROUP_LABEL}</h4>
+                      <div className="source-mode-options recipe-options">
+                        {PRESET_COMPARISON_DEFS.map((preset) => (
+                          <RecipeCard
+                            key={preset.id}
+                            preset={preset}
+                            selected={activePresetId === preset.id}
+                            disabled={bootstrapping || !apiOnline || loading}
+                            onSelect={handleBenchmarkPreset}
+                          />
+                        ))}
+                        <RecipeCard
+                          preset={PLAYER_TEST_PLACEHOLDER}
+                          selected={false}
+                          disabled
+                          comingSoon
                         />
-                        <span className="source-mode-card-body">
-                          <strong>{preset.label}</strong>
-                          <span className="source-mode-card-hint">{preset.hint}</span>
-                        </span>
-                      </label>
-                    ))}
+                      </div>
+                    </div>
+                    {BUILD_YOUR_OWN_DEF ? (
+                      <div className="recipe-custom-group">
+                        <h4 className="recipe-preset-group-label">Custom</h4>
+                        <RecipeCard
+                          preset={BUILD_YOUR_OWN_DEF}
+                          selected={activePresetId === BUILD_YOUR_OWN_DEF.id}
+                          disabled={bootstrapping || !apiOnline || loading}
+                          onSelect={handleBenchmarkPreset}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                   {lockedRecipeSummary ? (
                     <p className="field-hint recipe-locked-summary">{lockedRecipeSummary}</p>
@@ -2186,7 +2246,7 @@ function App() {
                   index={testScopeStep}
                   state={testScopeState}
                   title="Scope"
-                  summary={testScope === TEST_SCOPE_UPLOAD ? "Upload only" : "End-to-end"}
+                  summary={testScope === TEST_SCOPE_UPLOAD ? "Upload Only" : "End-to-End"}
                   onReopen={() => reopenSetup("testScope")}
                   onContinue={setupHasContinue ? continueSetup : undefined}
                 >
@@ -2206,7 +2266,7 @@ function App() {
                         onChange={() => setTestScope(TEST_SCOPE_E2E)}
                       />
                       <span className="source-mode-card-body">
-                        <strong>End-to-end</strong>
+                        <strong>End-to-End</strong>
                         <span className="source-mode-card-hint">{TEST_SCOPE_E2E_COPY}</span>
                       </span>
                     </label>
@@ -2219,7 +2279,7 @@ function App() {
                         onChange={() => setTestScope(TEST_SCOPE_UPLOAD)}
                       />
                       <span className="source-mode-card-body">
-                        <strong>Upload only</strong>
+                        <strong>Upload Only</strong>
                         <span className="source-mode-card-hint">{TEST_SCOPE_UPLOAD_COPY}</span>
                       </span>
                     </label>
@@ -2270,7 +2330,7 @@ function App() {
                   index={protocolStep}
                   state={protocolState}
                   title="Protocol"
-                  summary={sharedProtocol ? cloudCompareProtocolLabel(sharedProtocol) : "Choose a protocol"}
+                  summary={sharedProtocol ? cloudCompareProtocolLabel(sharedProtocol) : "Choose a Protocol"}
                   onReopen={() => reopenSetup("protocol")}
                   onContinue={setupHasContinue ? continueSetup : undefined}
                 >
@@ -2278,7 +2338,7 @@ function App() {
                   <StepHeading
                     step={protocolStep}
                     title="Protocol"
-                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way is Protocol Comparison."
+                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way is Protocol Comparison. Ingest and players are chosen for you."
                   />
                   <div className="source-mode-options" role="radiogroup" aria-label="Cloud compare protocol">
                     {cloudProtocolChoices.map((protocol) => (
@@ -2441,7 +2501,7 @@ function App() {
                     ) : null}
                     <div className="encode-profile-grid">
                       <label>
-                        Bitrate / resolution
+                        Bitrate / Resolution
                         <select
                           value={encodeLadder}
                           onChange={(e) => setEncodeLadder(e.target.value)}
@@ -2467,7 +2527,7 @@ function App() {
                             onChange={() => setPlaybackPolicy(PLAYBACK_POLICY_LIVE_EDGE)}
                           />
                           <span className="source-mode-card-body">
-                            <strong>Live edge</strong>
+                            <strong>Live Edge</strong>
                             <span className="source-mode-card-hint">{PLAYBACK_POLICY_LIVE_COPY}</span>
                           </span>
                         </label>
@@ -2504,7 +2564,7 @@ function App() {
                           }
                           onChange={(e) => setComputeVmaf(e.target.checked)}
                         />
-                        <span>Score picture quality</span>
+                        <span>Score Picture Quality</span>
                       </label>
                       <span className="field-hint">
                         {vmafUnavailableReason ??
@@ -2541,7 +2601,7 @@ function App() {
                 <>
               <StepHeading
                 step={outputsStep}
-                title="Where it goes"
+                title="Where It Goes"
                 tip={
                   isUploadOnlyScope(testScope)
                     ? showOutputConfig
@@ -2561,7 +2621,7 @@ function App() {
                   aria-label={`Add another output (${endpoints.length} of ${MAX_ENDPOINTS})`}
                 >
                   <IconPlus size={16} />
-                  Add output
+                  Add Output
                   <span className="stream-add-chip-meta">
                     {endpoints.length}/{MAX_ENDPOINTS}
                   </span>
@@ -2636,7 +2696,7 @@ function App() {
                         title={`Output ${index + 1}`}
                         compactHeader
                         protocol={endpoint.protocol}
-                        endpointUrl={resolveEndpointUrl(endpoint, presets)}
+                        endpointUrl={leg?.job.endpoint_url || resolveEndpointUrl(endpoint, presets)}
                         ingestEndpointId={endpoint.ingestEndpointId}
                         playbackMode={endpoint.playbackMode}
                         playbackDvr={false}

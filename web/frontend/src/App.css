@@ -273,6 +273,7 @@ h1 {
 
   .benchmark-split-setup .source-mode-options,
   .benchmark-split-setup .recipe-options,
+  .benchmark-split-setup .recipe-picker,
   .benchmark-split-setup .cloud-protocol-section .source-mode-options {
     max-width: 100%;
   }
@@ -2935,20 +2936,81 @@ code {
   color: var(--success);
 }
 
+.recipe-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 12px;
+  max-width: 1080px;
+  padding: 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(99, 102, 241, 0.05), transparent 42%),
+    var(--surface-soft);
+}
+
+.recipe-preset-group {
+  flex: 1 1 28rem;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.recipe-custom-group {
+  flex: 1 1 12rem;
+  max-width: 18rem;
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px dashed var(--accent-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(160deg, rgba(99, 102, 241, 0.1), rgba(56, 189, 248, 0.06) 55%, var(--surface) 100%);
+}
+
+.recipe-preset-group-label {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
 .recipe-options {
-  max-width: 960px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 176px), 1fr));
+  max-width: none;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr));
 }
 
-.recipe-options .source-mode-card.recipe-card-custom {
-  border-style: dashed;
-  border-color: var(--surface-border-strong);
-  background: var(--surface-soft);
+.recipe-custom-group .source-mode-card.recipe-card-custom {
+  min-height: 5.5rem;
+  border-style: solid;
+  border-color: var(--accent-border);
+  background: var(--surface);
 }
 
-.recipe-options .source-mode-card.recipe-card-custom.selected {
+.recipe-custom-group .source-mode-card.recipe-card-custom.selected {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.recipe-card-soon {
+  cursor: default;
+  opacity: 0.48;
+  background: var(--surface-soft);
+  border-style: dashed;
+  border-color: var(--surface-border-strong);
+}
+
+.recipe-card-soon:has(input:disabled) {
+  opacity: 0.48;
 }
 
 .recipe-locked-summary {
