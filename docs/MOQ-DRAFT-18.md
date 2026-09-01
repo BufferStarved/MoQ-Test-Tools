@@ -18,7 +18,7 @@ IETF newest is [draft-ietf-moq-transport-19](https://datatracker.ietf.org/doc/dr
 |---|---|---|
 | VM | `moq-relay-gcp` | same VM, second container |
 | Container | `moqx` | `moqx-canary` |
-| Image | `ghcr.io/openmoq/moqx:329b98b` | `ghcr.io/openmoq/moqx:75af044` (or `MOQX_CANARY_IMAGE`) |
+| Image | `ghcr.io/openmoq/moqx:329b98b` | `ghcr.io/openmoq/moqx:71fab3a` (or `MOQX_CANARY_IMAGE`) |
 | WebTransport | `https://34-28-164-90.sslip.io:4433/moq-relay` | `https://34-28-164-90.sslip.io:14433/moq-relay` |
 | Admin `/info` | TCP 8000 (may be public) | TCP **18000**, localhost / SSH hop only |
 | UI preset | none (hidden) | `moq_gcp_relay_d18` |

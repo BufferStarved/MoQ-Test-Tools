@@ -209,8 +209,8 @@ def main() -> int:
         log(f"FAIL canary IAP /info: {canary_info}")
     else:
         log(f"canary /info: {canary_info.strip()}")
-        if "75af044" not in canary_info and "88f9d27" not in canary_info:
-            log("NOTE: canary /info is not 75af044 or leftover 88f9d27")
+        if "71fab3a" not in canary_info and "75af044" not in canary_info and "88f9d27" not in canary_info:
+            log("NOTE: canary /info is not 71fab3a (or leftover 75af044/88f9d27)")
 
     before_ok, before_body = iap_curl("/metrics", 18000)
     if not before_ok:

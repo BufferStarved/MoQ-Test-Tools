@@ -1,0 +1,20 @@
+diff --git b/packages/player/src/player-pipeline.ts a/packages/player/src/player-pipeline.ts
+index f652c06..6299699 100644
+--- b/packages/player/src/player-pipeline.ts
++++ a/packages/player/src/player-pipeline.ts
+@@ -346,10 +346,11 @@ export function configurePipelines(
+       pipelines.videoPipeline.setCodec(trackInfo.video.codec);
+     }
+ 
+-    if (trackInfo.video.initData || trackInfo.video.codec) {
+-      const configBytes = trackInfo.video.initData
+-        ? Uint8Array.from(atob(trackInfo.video.initData), c => c.charCodeAt(0))
+-        : new Uint8Array(0);
++    // LOC: catalog has codec but no initData. Configuring VideoDecoder
++    // with empty description puts Chrome in Annex-B mode; avcC IDRs then
++    // never emit (b2969493 decoder=ok frame=-). Wait for LOC VideoConfig.
++    if (trackInfo.video.initData) {
++      const configBytes = Uint8Array.from(atob(trackInfo.video.initData), c => c.charCodeAt(0));
+       pipelines.videoPipeline.configure(configBytes);
+     }
+   }

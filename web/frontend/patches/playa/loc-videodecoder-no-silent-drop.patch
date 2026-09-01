@@ -1,0 +1,65 @@
+diff --git b/packages/browser/src/webcodecs-video-decoder.ts a/packages/browser/src/webcodecs-video-decoder.ts
+index c5d31e9..d889008 100644
+--- b/packages/browser/src/webcodecs-video-decoder.ts
++++ a/packages/browser/src/webcodecs-video-decoder.ts
+@@ -185,7 +185,11 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
+     }
+ 
+     this.createDecoder();
+-    this.applyConfig();
++    // H.264 without avcC is Annex-B mode. Do not apply an empty
++    // description — that was catalog-ready / rendered=0 (b2969493).
++    if (!this.strategy.usesDescription || this.lastDescription) {
++      this.applyConfig();
++    }
+     if (codecChanged) {
+       this.checkConfigSupport();
+     }
+@@ -202,7 +206,12 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
+    * @see draft-ietf-moq-loc-01 §2 (LOC payload = EncodedVideoChunk.data)
+    */
+   decode(chunk: VideoChunkInit, renderTimeUs: number): void {
+-    if (!this.lastCodec || !this.decoder || this.decoder.state !== 'configured') return;
++    if (!this.lastCodec || !this.decoder || this.decoder.state !== 'configured') {
++      // Silent return was 89cf102: catalog-ready, decoder=ok, frame=-.
++      throw new Error(
++        `VideoDecoder.decode skipped: decoder=${this.decoder?.state ?? 'none'} codec=${this.lastCodec || 'none'}`,
++      );
++    }
+ 
+     // Backpressure: if decoder queue is full, reset and wait for the
+     // next keyframe. Continuing would break the reference chain — later
+@@ -215,7 +224,12 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
+ 
+     // Codec-specific chunk preparation (format conversion, sanitization)
+     const prepared = this.strategy.prepareChunkData(chunk.data, this.lastDescription);
+-    if (!prepared) return;
++    if (!prepared) {
++      if (chunk.type === 'key' && this.lastCodec.startsWith('avc')) {
++        throw new Error('VideoDecoder dropped key chunk (no VCL after sanitize)');
++      }
++      return;
++    }
+     const { data, droppedReason } = prepared;
+ 
+     // Track observed chunk
+@@ -237,6 +251,11 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
+     if (this.awaitingKeyframe) {
+       if (!this.strategy.isAcceptableSyncPoint(data, chunk.type, this.lastDescription)) {
+         if (this.debug) console.debug('[WebCodecsVideoDecoder] Awaiting keyframe, dropping chunk type=%s', chunk.type);
++        if (chunk.type === 'key' && this.lastCodec.startsWith('avc')) {
++          throw new Error(
++            `VideoDecoder rejected key chunk as sync point (${this.lastObservedChunkSummary})`,
++          );
++        }
+         return;
+       }
+       this.awaitingKeyframe = false;
+@@ -384,6 +403,7 @@ export class WebCodecsVideoDecoder implements VideoDecoderLike {
+ 
+   private applyConfig(): void {
+     if (!this.decoder || !this.lastCodec) return;
++    if (this.strategy.usesDescription && !this.lastDescription) return;
+     this.decoder.configure(this.buildConfig());
+   }
+ 

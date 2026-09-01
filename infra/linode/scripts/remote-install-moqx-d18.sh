@@ -14,7 +14,7 @@ if [[ -z "$RELAY_IP" ]]; then
 fi
 
 DOMAIN="${RELAY_IP//./-}.sslip.io"
-IMAGE="${MOQX_CANARY_IMAGE:-ghcr.io/openmoq/moqx:75af044}"
+IMAGE="${MOQX_CANARY_IMAGE:-ghcr.io/openmoq/moqx:71fab3a}"
 CANARY_PORT="${MOQX_CANARY_PORT:-14433}"
 CANARY_PICO_PORT="${MOQX_CANARY_PICO_PORT:-14434}"
 CANARY_ADMIN_PORT="${MOQX_CANARY_ADMIN_PORT:-18000}"

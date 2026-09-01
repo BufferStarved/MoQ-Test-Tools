@@ -18,9 +18,9 @@ set -euo pipefail
 ACTION="${1:-start}"
 ZONE="${GCP_ZONE:-us-central1-a}"
 INSTANCE="${MOQX_CANARY_INSTANCE:-moq-relay-gcp}"
-# GHCR tags are short SHAs. 75af044 is openmoq/moqx main @ 2026-08-25
-# (snapshot-latest / moxygen c6808b5). Do not use this image on leftover :4433.
-IMAGE="${MOQX_CANARY_IMAGE:-ghcr.io/openmoq/moqx:75af044}"
+# GHCR tags are short SHAs. 71fab3a is openmoq/moqx main @ 2026-08-31
+# (snapshot-latest / moxygen 37fed63). Do not use this image on leftover :4433.
+IMAGE="${MOQX_CANARY_IMAGE:-ghcr.io/openmoq/moqx:71fab3a}"
 CANARY_PORT="${MOQX_CANARY_PORT:-14433}"
 CANARY_PICO_PORT="${MOQX_CANARY_PICO_PORT:-14434}"
 CANARY_ADMIN_PORT="${MOQX_CANARY_ADMIN_PORT:-18000}"

@@ -7,7 +7,7 @@ MOQ5_DIR="$ROOT_DIR/tools/moq5"
 DEPS_DIR="$ROOT_DIR/tools/deps"
 INSTALL_PREFIX="$MOQ5_DIR/install"
 PUBLISHER_BIN="$ROOT_DIR/tools/moq5-publisher/bin/moq5-fmp4-publish"
-# Default: openmoq/moq5 main (4a6dcf7 Joining FETCH + catalog bootstrap).
+# Default: openmoq/moq5 main (0cb6ecf picoquic terminal ownership).
 # Live-write publish_tracks is still open as openmoq/moq5#9 — apply
 # live-write-publish-tracks-catalog.patch so PUBLISH_OK Forward 0 still
 # puts the catalog on the wire.

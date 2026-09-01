@@ -16,14 +16,37 @@ FORCE="${FORCE:-0}"
 # (its per-package tsconfig "extends"/"references" paths assume it) rather
 # than flattening, and point our package.json at packages/playa directly.
 PLAYA_PKG_DIR="$VENDOR_DIR/packages/playa"
+PLAYA_PATCH_DIR="$FRONTEND_DIR/patches/playa"
+
+apply_local_playa_patches() {
+  # LOC paint seams we keep until playa main has them. FORCE=1 would
+  # otherwise wipe: play() after catalog_received, no silent VideoDecoder
+  # drop, no empty avcC configure.
+  local patch
+  for patch in "$PLAYA_PATCH_DIR"/*.patch; do
+    [[ -f "$patch" ]] || continue
+    if git apply --check --directory="$VENDOR_DIR" "$patch" >/dev/null 2>&1; then
+      git apply --directory="$VENDOR_DIR" "$patch"
+      echo "Applied $(basename "$patch")"
+    elif git apply --reverse --check --directory="$VENDOR_DIR" "$patch" >/dev/null 2>&1; then
+      echo "$(basename "$patch") already applied"
+    else
+      echo "WARNING: could not apply $patch" >&2
+    fi
+  done
+}
 
 if [[ "$FORCE" == "1" || ! -d "$PLAYA_PKG_DIR/dist" ]]; then
   echo "Cloning playa monorepo (ref=$PLAYA_REF) into $VENDOR_DIR"
   rm -rf "$VENDOR_DIR"
   mkdir -p "$(dirname "$VENDOR_DIR")"
   git clone --depth 1 --branch "$PLAYA_REF" "$PLAYA_REPO" "$VENDOR_DIR"
+  PLAYA_SHA="$(git -C "$VENDOR_DIR" rev-parse HEAD)"
+  printf '%s %s\n' "$PLAYA_SHA" "$PLAYA_REF" > "$VENDOR_DIR/VENDOR_SHA"
   rm -rf "$VENDOR_DIR/.git"
 fi
+
+apply_local_playa_patches
 
 if [[ ! -f "$PLAYA_PKG_DIR/dist/index.js" ]]; then
   echo "Building @playa/player (pnpm workspace: build all packages)..."
@@ -78,4 +101,7 @@ fi
 npm install --prefix "$FRONTEND_DIR"
 
 echo "Playa ready: $PLAYA_PKG_DIR"
+if [[ -f "$VENDOR_DIR/VENDOR_SHA" ]]; then
+  echo "Playa pin: $(tr -d '\n' < "$VENDOR_DIR/VENDOR_SHA")"
+fi
 echo "MoQ playback uses @playa/player in Chrome/Edge (WebTransport)."
