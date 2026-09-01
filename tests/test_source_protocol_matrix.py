@@ -57,6 +57,14 @@ class SourceProtocolMatrixTests(unittest.TestCase):
         self.assertFalse(na)
         self.assertTrue(split)
 
+    def test_brokered_webcam_moq_fanout_reports_solo_gop(self):
+        job = _job("moq", "udp://127.0.0.1:50123?timeout=15000000", 400)
+        job.dest_count = 6
+        ms, na, split = _job_segmentation(job)
+        self.assertEqual(ms, moq_group_duration_ms(400, brokered=False))
+        self.assertFalse(na)
+        self.assertTrue(split)
+
     def test_continuous_publish_has_no_segmentation_hop(self):
         for proto, media in (
             ("srt", "dummy.mp4"),

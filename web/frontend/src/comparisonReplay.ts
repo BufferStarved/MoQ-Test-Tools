@@ -119,10 +119,22 @@ export function comparisonLegTone(input: {
     }
     return "idle";
   }
+  const painted = (input.framesRendered ?? 0) > 0;
   if (status === "completed") {
+    // East/Linode HTTP-TS can job=completed after a mid-clip stall or
+    // empty-reply with 0 paint. preview_ready / encode-only is not glass.
+    if (protocol === "srt" || protocol === "rtmp" || protocol === "webrtc") {
+      return painted ? "ok" : "bad";
+    }
     return "ok";
   }
   if (status === "running") {
+    if (protocol === "srt" || protocol === "rtmp" || protocol === "webrtc") {
+      if (input.previewReady === false) {
+        return "warn";
+      }
+      return painted ? "ok" : "warn";
+    }
     return input.previewReady === false ? "warn" : "ok";
   }
   return "idle";
@@ -150,6 +162,13 @@ export function comparisonLegStatusLabel(input: {
     if (status === "running" && !painted) {
       return input.previewReady === false ? "buffering" : "no paint";
     }
+  }
+  if (
+    (protocol === "srt" || protocol === "rtmp" || protocol === "webrtc") &&
+    (status === "completed" || status === "failed") &&
+    (input.framesRendered ?? 0) <= 0
+  ) {
+    return "Failed";
   }
   if (status === "queued") {
     return "queued";

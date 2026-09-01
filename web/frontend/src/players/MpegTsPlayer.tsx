@@ -615,7 +615,10 @@ export default function MpegTsPlayer({
             originHost: mpegTsOriginHost(url),
             upstreamStatus: idle.upstreamStatus,
             firstByteTimeout: idle.firstByteTimeout,
-            headersReceived: idle.firstByteTimeout || idle.upstreamStatus != null,
+            emptyReply: idle.emptyReply,
+            headersReceived:
+              idle.emptyReply || idle.firstByteTimeout || idle.upstreamStatus != null,
+            bytesReceived: 0,
           });
           pushDiag(`connect_probe=fail http=${probe ? probe.status : "n/a"} reason=${reason}`);
           scheduleReconnect(reason);

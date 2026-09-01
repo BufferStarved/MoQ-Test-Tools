@@ -474,19 +474,24 @@ class JobManager:
                     # Local-agent CSVs live on the laptop; rewrite from samples
                     # so /api/results/{filename} can serve the Results tab.
                     csv_path = self._persist_collected_samples_csv(job_id, job) or csv_path
-                self._update(
-                    job_id,
-                    status=JobStatus.COMPLETED,
-                    csv_path=csv_path,
-                    summary_path=result.summary_path,
-                    encoder_vmaf_status=result.encoder_vmaf_status,
-                    encoder_vmaf_score=result.encoder_vmaf_score,
-                    encoder_psnr_db=result.encoder_psnr_db,
-                    encoder_ssim=result.encoder_ssim,
-                    encoder_vmaf_error=result.encoder_vmaf_error,
-                    psnr_db=result.psnr_db,
-                    ssim=result.ssim,
-                )
+                completed = {
+                    "status": JobStatus.COMPLETED,
+                    "csv_path": csv_path,
+                    "summary_path": result.summary_path,
+                    "encoder_vmaf_status": result.encoder_vmaf_status,
+                    "encoder_vmaf_score": result.encoder_vmaf_score,
+                    "encoder_psnr_db": result.encoder_psnr_db,
+                    "encoder_ssim": result.encoder_ssim,
+                    "encoder_vmaf_error": result.encoder_vmaf_error,
+                    "psnr_db": result.psnr_db,
+                    "ssim": result.ssim,
+                }
+                # Drop / write-block notes ride on success so HUD is not
+                # silent catalog-ready / 0 paint. Do not pass error=None —
+                # that would clear a live warning.
+                if result.error:
+                    completed["error"] = result.error
+                self._update(job_id, **completed)
                 if job.compute_vmaf_on_ingest:
                     with self._lock:
                         record = self._jobs.get(job_id)

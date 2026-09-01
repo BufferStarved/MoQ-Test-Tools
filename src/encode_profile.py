@@ -196,13 +196,14 @@ def srt_latency_us(target_latency_ms: int) -> int:
     return clamp_target_latency_ms(target_latency_ms) * 1000
 
 
-# MoQ GOP bounds (seconds). Solo/file encode only — the shared webcam broker
-# stays at 1s (MASTER_GOP_FRAMES) and MoQ copies that bitstream. Floor 0.25s
-# is 8 frames @ 30fps; ultrafast+zerolatency handles that without a second
-# x264 on the UDP hop. Do not drop the broker master to 0.5s (24fps / 0.8×).
+# MoQ GOP bounds (seconds). Solo/file encode, and brokered MoQ children when
+# dest_count >= 2 (re-encode, not copy). The shared webcam broker master stays
+# at 1s (MASTER_GOP_FRAMES) — do not drop it to 0.5s (24fps / 0.8×).
+# Floor 0.25s is 8 frames @ 30fps.
 MOQ_GOP_SEC_MIN = 0.25
 MOQ_GOP_SEC_MAX = 1.0
 # Shared broker master IDR cadence. Must match webcam_broker.MASTER_GOP_FRAMES.
+# Only reported when dest_count < 2 still copies that bitstream.
 BROKER_GOP_MS = 1000.0
 # MediaMTX LL-HLS part duration — the HLS object, not a 1s CMAF group.
 LL_HLS_PART_MS = 200.0
@@ -221,7 +222,7 @@ def moq_gop_frames_for_latency(target_latency_ms: int, *, fps: int = ASSUMED_FPS
     offset that then persists for the entire session. That wait is
     ``latency_segmentation_ms`` (CMAF group), not ingest RTT. GOP = target/2
     keeps worst-case join (2 × GOP) at or under the target; the floor is
-    0.25s for solo/file (brokered copy stays 1s).
+    0.25s for solo/file and dest_count >= 2 re-encode (copy stays 1s).
     """
     ms = clamp_target_latency_ms(target_latency_ms)
     seconds = min(MOQ_GOP_SEC_MAX, max(MOQ_GOP_SEC_MIN, ms / 2000.0))
@@ -232,15 +233,17 @@ def moq_group_duration_ms(
     target_latency_ms: int,
     *,
     brokered: bool = False,
+    dest_count: int = 1,
     fps: int = ASSUMED_FPS,
 ) -> float:
     """Closed-group duration the NextGroupStart subscriber must wait.
 
-    Brokered webcam copies the 1s master — do not report the solo 0.25s GOP
-    for a bitstream that still closes every second. File/solo use
-    ``moq_gop_frames_for_latency``. This is object cadence, not ingest RTT.
+    dest_count < 2 on a brokered hop still copies the 1s master — do not
+    report the solo 0.25s GOP for that bitstream. dest_count >= 2 re-encodes
+    at ``moq_gop_frames_for_latency``. File/solo use that GOP too.
+    This is object cadence, not ingest RTT.
     """
-    if brokered:
+    if brokered and dest_count < 2:
         return float(BROKER_GOP_MS)
     frames = moq_gop_frames_for_latency(target_latency_ms, fps=fps)
     return round((frames / float(fps)) * 1000.0, 1)

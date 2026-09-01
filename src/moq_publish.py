@@ -1034,6 +1034,59 @@ def build_ffmpeg_input_args(media_path: str, *, duration_sec: Optional[int] = No
     return args
 
 
+def should_reencode_brokered_moq(dest_count: int) -> bool:
+    """True when webcam fan-out must not copy the 1s master onto QUIC.
+
+    dest_count >= 2 (any MoQ sibling on the shared tee): three copies of a
+    ~670KB IDR write-block moq5 (jobs 22cb3358 / 3f6e7aba / c36c6b49).
+    dest_count == 1 keeps copy (share_policy=always tests / unused solo tee).
+    """
+    try:
+        n = int(dest_count)
+    except (TypeError, ValueError):
+        n = 1
+    return n >= 2
+
+
+def moq_fanout_encode_ladder(encode_ladder: str, dest_count: int) -> str:
+    """Cheaper ladder for each MoQ child when dest_count >= 2.
+
+    A second full-rate x264 on the UDP hop ran 24↔37 fps (CSV 2026-08-21).
+    540p / 1500k ultrafast is ~half the pixels and bitrate of 720p/3000k.
+    """
+    if should_reencode_brokered_moq(dest_count):
+        return "540p"
+    return encode_ladder or DEFAULT_ENCODE_LADDER_ID
+
+
+def publisher_fragment_drop_count(log_text: str) -> int:
+    """Highest drop_n from moq5 ``dropping fragment (N)`` lines.
+
+    Older binaries sampled the log (first 3, then every 50). max(N) still
+    works; line count is the fallback when the parenthetical is missing.
+    """
+    text = log_text or ""
+    counted = [int(match) for match in re.findall(r"dropping fragment\s*\((\d+)\)", text, re.I)]
+    if counted:
+        return max(counted)
+    return sum(
+        1
+        for line in text.splitlines()
+        if "dropping fragment" in line.lower() or "would block after retry" in line.lower()
+    )
+
+
+def publisher_write_block_error(log_text: str) -> Optional[str]:
+    """HUD/job error when QUIC dropped CMAF fragments. None if no drops."""
+    drops = publisher_fragment_drop_count(log_text)
+    if drops <= 0:
+        return None
+    return (
+        f"MoQ QUIC write-blocked: dropped {drops} fragments. "
+        "Catalog-ready is not paint."
+    )
+
+
 def build_ffmpeg_moq_cmd(
     media_path: str,
     *,
@@ -1042,6 +1095,7 @@ def build_ffmpeg_moq_cmd(
     target_latency_ms: int = DEFAULT_TARGET_LATENCY_MS,
     duration_sec: Optional[int] = None,
     vmaf_reference_path: str = "",
+    dest_count: int = 1,
 ) -> List[str]:
     # MoQ must NOT use the shared latency-sized GOP: openmoq ships one CMAF
     # fragment (= one GOP via frag_keyframe) per MoQ group/object, and the
@@ -1049,20 +1103,38 @@ def build_ffmpeg_moq_cmd(
     # is paid twice (fragment accumulation + join offset) and persists all
     # session. See moq_gop_frames_for_latency for the sizing rationale.
     #
-    # Webcam UDP is already H.264 from the broker. A second x264 (even
-    # ultrafast) still ran at 24↔37 fps / 0.84↔1.28× while the RTMP sibling
-    # held 30/0.99 (comparison CSV 2026-08-21). Remux copy; groups follow
-    # the master's 1s IDRs.
-    if is_shared_encode_udp(media_path) or is_brokered_webcam_udp(media_path):
+    # dest_count == 1 brokered UDP: copy the 1s master (no extra x264).
+    # dest_count >= 2: re-encode at moq_gop (~0.25s) ultrafast / 540p so
+    # three QUIC publishes do not each copy a ~670KB IDR. Do not drop the
+    # broker master GOP to 0.5s (24fps / 0.8×, CSV 2026-08-20).
+    if is_shared_encode_udp(media_path):
+        # Cloud comparison hub — already one encode, copy.
+        video_args = ["-c:v", "copy"]
+        audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
+    elif is_brokered_webcam_udp(media_path) and not should_reencode_brokered_moq(dest_count):
         # Video copy. Audio must be re-encoded: empty_moov writes the
         # header before the first ADTS packet, so -c:a copy leaves no
         # AudioSpecificConfig and moq5 fails "CMAF track 1" (job 7037dc27).
         video_args = ["-c:v", "copy"]
         audio_args = list(BROWSER_COMPAT_AUDIO_ARGS)
+    elif is_brokered_webcam_udp(media_path):
+        video_args = build_video_encode_args(
+            moq_fanout_encode_ladder(encode_ladder, dest_count),
+            target_latency_ms,
+            gop_frames=moq_gop_frames_for_latency(target_latency_ms),
+            preset="ultrafast",
+            output_cfr=False,
+            rebase_pts=True,
+        )
+        audio_args = [
+            *BROWSER_COMPAT_AUDIO_ARGS,
+            "-af",
+            "asetpts=PTS-STARTPTS",
+        ]
     elif is_device_webcam_source(media_path):
         # Solo webcam (broker skipped): one encode at the MoQ GOP (~0.25s).
-        # Mixed siblings keep the 1s master and copy it — do not drop that
-        # GOP for SRT/RTMP (known 24 fps / 0.8×).
+        # Mixed siblings keep the 1s master; MoQ children re-encode when
+        # dest_count >= 2 (see should_reencode_brokered_moq).
         video_args = build_video_encode_args(
             encode_ladder,
             target_latency_ms,

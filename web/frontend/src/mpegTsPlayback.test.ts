@@ -4,6 +4,7 @@ import {
   classifyMpegTsEndVerdict,
   mpegTsFetchIdleSignal,
   mpegTsFrozenOriginReason,
+  mpegTsEmptyReplyReason,
   mpegTsIdleOriginReason,
   mpegTsMayMarkPlaybackOk,
   mpegTsOriginHost,
@@ -92,6 +93,15 @@ describe("mpegTsShouldWaitForEncode", () => {
         encodeFramesTotal: 12,
         jobStatus: "completed",
         lastReason: "HTTP 404",
+      }),
+      true,
+    );
+    const empty = mpegTsEmptyReplyReason("35.196.215.179:7777");
+    assert.equal(
+      mpegTsHoldReconnectsWhileJobRunning({
+        encodeFramesTotal: 90,
+        jobStatus: "running",
+        lastReason: empty,
       }),
       true,
     );
@@ -187,6 +197,20 @@ describe("mpegTsProbeFailReason", () => {
     });
     assert.equal(reason, mpegTsIdleOriginReason("35.222.33.58:7777", 200));
   });
+
+  it("names SRT Test.ts empty-reply as idle-class, not frozen host-down", () => {
+    const reason = mpegTsProbeFailReason({
+      httpStatus: 504,
+      originHost: "35.196.215.179:7777",
+      emptyReply: true,
+      firstByteTimeout: true,
+    });
+    assert.equal(reason, mpegTsEmptyReplyReason("35.196.215.179:7777"));
+    assert.match(reason, /empty-reply/i);
+    assert.match(reason, /SRT Test\.ts/i);
+    assert.doesNotMatch(reason, /frozen/i);
+    assert.doesNotMatch(reason, /manifest unreachable/i);
+  });
 });
 
 describe("mpegTsFetchIdleSignal", () => {
@@ -207,6 +231,16 @@ describe("mpegTsFetchIdleSignal", () => {
     });
     assert.equal(idle.firstByteTimeout, true);
     assert.equal(idle.upstreamStatus, 200);
+  });
+
+  it("reads X-Playback-First-Byte=empty-reply from the fetch proxy", () => {
+    const idle = mpegTsFetchIdleSignal({
+      httpStatus: 504,
+      firstByteHeader: "empty-reply",
+      detail: "Playback fetch: origin closed with no HTTP status (empty-reply)",
+    });
+    assert.equal(idle.emptyReply, true);
+    assert.equal(idle.firstByteTimeout, true);
   });
 
   it("does not treat a plain host-down 504 as idle", () => {

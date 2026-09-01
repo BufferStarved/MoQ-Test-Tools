@@ -27,7 +27,12 @@ from encode_profile import (  # noqa: E402
     moq_gop_frames_for_latency,
     moq_group_duration_ms,
 )
-from moq_publish import build_ffmpeg_moq_cmd  # noqa: E402
+from moq_publish import (  # noqa: E402
+    build_ffmpeg_moq_cmd,
+    publisher_fragment_drop_count,
+    publisher_write_block_error,
+    should_reencode_brokered_moq,
+)
 
 
 class MoqGopLatencyTests(unittest.TestCase):
@@ -57,6 +62,8 @@ class MoqGopLatencyTests(unittest.TestCase):
 
     def test_group_duration_splits_brokered_from_solo(self):
         self.assertEqual(moq_group_duration_ms(400, brokered=True), BROKER_GOP_MS)
+        self.assertEqual(moq_group_duration_ms(400, brokered=True, dest_count=1), BROKER_GOP_MS)
+        self.assertEqual(moq_group_duration_ms(400, brokered=True, dest_count=6), 266.7)
         self.assertEqual(moq_group_duration_ms(400, brokered=False), 266.7)
 
     def test_gop_floor_for_ultra_low_targets(self):
@@ -123,6 +130,45 @@ class MoqGopLatencyTests(unittest.TestCase):
         self.assertNotIn("-preset", cmd)
         self.assertNotIn("-g", cmd)
         self.assertNotIn("use_wallclock_as_timestamps", cmd)
+
+    def test_webcam_udp_moq_cmd_reencodes_when_dest_count_ge_2(self):
+        self.assertFalse(should_reencode_brokered_moq(1))
+        self.assertTrue(should_reencode_brokered_moq(2))
+        copy = build_ffmpeg_moq_cmd(
+            "udp://127.0.0.1:50123?fifo_size=1000000",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=400,
+            duration_sec=60,
+            dest_count=1,
+        )
+        self.assertEqual(copy[copy.index("-c:v") + 1], "copy")
+        cmd = build_ffmpeg_moq_cmd(
+            "udp://127.0.0.1:50123?fifo_size=1000000",
+            progress_path="/tmp/progress.txt",
+            encode_ladder="720p",
+            target_latency_ms=400,
+            duration_sec=60,
+            dest_count=6,
+        )
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "libx264")
+        self.assertEqual(cmd[cmd.index("-preset") + 1], "ultrafast")
+        self.assertEqual(cmd[cmd.index("-g") + 1], "8")
+        self.assertEqual(cmd[cmd.index("-b:v") + 1], "1500k")
+        self.assertIn("scale=-2:540", " ".join(cmd))
+        self.assertNotEqual(cmd[cmd.index("-c:v") + 1], "copy")
+
+    def test_publisher_drop_count_from_sampled_log(self):
+        log = (
+            "sender ready (namespace + catalog published)\n"
+            + "".join(
+                "write(vide_1) would block after retry; dropping fragment (3)\n" for _ in range(3)
+            )
+            + "write(vide_1) would block after retry; dropping fragment (50)\n"
+        )
+        self.assertEqual(publisher_fragment_drop_count(log), 50)
+        self.assertIn("50", publisher_write_block_error(log) or "")
+        self.assertIsNone(publisher_write_block_error("sender ready\nobj vide wall_dt_ms=0\n"))
 
     def test_file_moq_cmd_keeps_veryfast(self):
         cmd = build_ffmpeg_moq_cmd(

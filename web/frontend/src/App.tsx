@@ -66,6 +66,7 @@ import {
   nextAddableEndpoint,
   obsMoqSupported,
   publishProtocolIdsForSource,
+  recipeFanoutWarning,
   recipeIssue,
   siblingOccupiedCollisionKeys,
   uniqueEndpointsByPublishSlot,
@@ -425,6 +426,7 @@ function App() {
     [mediaSource, presets, recipeCaps, features.local_publisher_whip, encoder],
   );
   const recipeBlockReason = recipeIssue(endpoints, recipeContext);
+  const fanoutWarning = recipeFanoutWarning(endpoints, recipeContext);
   const obsEncoderSupported = obsMoqSupported(recipeContext);
   // Last-mile camera choice ("" = agent default device).
   const [webcamDeviceIndex, setWebcamDeviceIndex] = useState("");
@@ -1597,7 +1599,7 @@ function App() {
         presetName ||
         `${ingestEndpointLabel(unavailableEndpoint.ingestEndpointId)} · ${protocolLabel(unavailableEndpoint.protocol)}`;
       setError(
-        `Select an available ingest endpoint (${label}) or use a custom URL.`,
+        `Select an available ingest (${label}) or a custom URL. GCP West, AWS, and Zixi on Dallas/Fremont are not deployed.`,
       );
       setLoading(false);
       return;
@@ -2079,6 +2081,11 @@ function App() {
           Safari playback is not supported. Use Chrome or Edge.
         </div>
       )}
+      {fanoutWarning && !safariUnsupported ? (
+        <div className="info-banner" role="status">
+          {fanoutWarning}
+        </div>
+      ) : null}
       <header className="hero">
         <div className="hero-brand">
           <span className="hero-mark" aria-hidden="true">

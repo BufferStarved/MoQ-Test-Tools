@@ -6,7 +6,7 @@
  *
  *   source          encode                         SRT  RTMP  WHIP  MoQ :14433
  *   dummy/bbb/upload  server ffmpeg (cloud playout)  yes  yes   yes   CMAF
- *   webcam+ffmpeg     helper / broker (1s IDR copy)  yes  yes   yes*  CMAF
+ *   webcam+ffmpeg     helper / broker (1s master; MoQ re-encodes at 2+)  yes  yes   yes*  CMAF
  *   webcam+solo       helper re-encode (0.25s GOP)   —    —     —    CMAF
  *   webcam+browser    in-tab WebCodecs / RTC         no   no    yes   LOC
  *   browser_moq       same as webcam+browser         no   no    yes   LOC
@@ -253,6 +253,10 @@ describe("Go Live and segmentation hops", () => {
     assert.equal(file.ms, moqGroupDurationMs(400));
     assert.notEqual(file.ms, 1000);
     assert.equal(broker.ms, 1000);
+    assert.equal(
+      segmentationMsForPublish("moq", 400, { mediaPath: "udp://127.0.0.1:9", destCount: 6 }).ms,
+      moqGroupDurationMs(400),
+    );
     assert.equal(segmentationMsForPublish("srt", 2000, { mediaPath: "dummy.mp4" }).notApplicable, true);
     assert.equal(segmentationMsForPublish("webrtc", 400).notApplicable, true);
   });

@@ -17,7 +17,7 @@ export const HLS_LIVE_SYNC_DURATION_SEC_MIN = 1;
 /** Solo/file MoQ only. Shared broker master stays at 1s (do not drop it). */
 export const MOQ_GOP_SEC_MIN = 0.25;
 export const MOQ_GOP_SEC_MAX = 1.0;
-/** Matches webcam_broker.MASTER_GOP_FRAMES @ 30fps — brokered MoQ copies this. */
+/** Matches webcam_broker.MASTER_GOP_FRAMES @ 30fps — dest_count < 2 still copies this. */
 export const BROKER_GOP_MS = 1000;
 /** MediaMTX LL-HLS part duration. Not a 1s CMAF group. */
 export const LL_HLS_PART_MS = 200;
@@ -155,9 +155,10 @@ export function moqGopFramesForLatency(targetLatencyMs: number, fps = ASSUMED_FP
 /** Closed-group duration the NextGroupStart subscriber waits — not ingest RTT. */
 export function moqGroupDurationMs(
   targetLatencyMs: number,
-  options: { brokered?: boolean; fps?: number } = {},
+  options: { brokered?: boolean; destCount?: number; fps?: number } = {},
 ): number {
-  if (options.brokered) {
+  const destCount = options.destCount ?? 1;
+  if (options.brokered && destCount < 2) {
     return BROKER_GOP_MS;
   }
   const fps = options.fps ?? ASSUMED_FPS;
@@ -171,12 +172,12 @@ export function isBrokeredWebcamMedia(mediaPath: string | null | undefined): boo
 
 /**
  * `latency_segmentation_ms` for the publisher hop. File and cloud playout
- * use the solo MoQ GOP. Only the brokered UDP master reports 1s.
+ * use the solo MoQ GOP. dest_count < 2 on a brokered hop still reports 1s.
  */
 export function segmentationMsForPublish(
   protocol: string,
   targetLatencyMs: number,
-  options: { mediaPath?: string; brokered?: boolean } = {},
+  options: { mediaPath?: string; brokered?: boolean; destCount?: number } = {},
 ): { ms: number | null; notApplicable: boolean } {
   const proto = (protocol || "").trim().toLowerCase();
   if (proto === "webrtc") {
@@ -184,7 +185,10 @@ export function segmentationMsForPublish(
   }
   if (proto === "moq") {
     const brokered = options.brokered ?? isBrokeredWebcamMedia(options.mediaPath);
-    return { ms: moqGroupDurationMs(targetLatencyMs, { brokered }), notApplicable: false };
+    return {
+      ms: moqGroupDurationMs(targetLatencyMs, { brokered, destCount: options.destCount }),
+      notApplicable: false,
+    };
   }
   if (proto === "hls") {
     return { ms: LL_HLS_PART_MS, notApplicable: false };

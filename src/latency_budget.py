@@ -298,8 +298,9 @@ def resolve_segmentation_ms(
     Returns ``(ms_or_none, not_applicable)``. ``None`` + not n/a means
     unmeasured — never report that as 0. WebRTC (WHEP) has no CMAF group.
     SRT/RTMP/HTTP-TS are continuous at muxed→publish; their object wait, if
-    any, is the packager. MoQ uses the GOP/group in force (1s brokered copy,
-    solo/file from ``moq_gop_frames_for_latency``). LL-HLS parts are 200 ms
+    any, is the packager. MoQ uses the GOP/group in force (1s when dest_count
+    < 2 copies the broker master, else ``moq_gop_frames_for_latency``).
+    LL-HLS parts are 200 ms
     — not a 1s CMAF group. 0.5s/1s on MoQ CMAF is group duration
     (NextGroupStart), not ingest RTT.
     """

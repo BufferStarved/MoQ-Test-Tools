@@ -25,7 +25,10 @@ import {
   RECIPE_CHROME_CAPS,
   coerceRecipe,
   obsMoqSupported,
+  recipeFanoutWarning,
   recipeIssue,
+  webcamSixWayFanout,
+  webcamSrtShouldUseRegionalMtx,
   uniqueEndpointsByPublishSlot,
   type RecipeContext,
   type RecipeEncoderId,
@@ -275,6 +278,84 @@ describe("every prod dest × playback mode", () => {
     );
     assert.equal(coerced[0]?.playbackMode, "mpegts");
     assert.equal(recipeIssue(coerced, ctx("dummy", "ffmpeg")), null);
+  });
+});
+
+describe("recipeFanoutWarning", () => {
+  it("warns on webcam 2-dest 1s GOP and 6-way MTX remap, and on browser LOC", () => {
+    const two = [
+      {
+        id: "a",
+        protocol: "srt" as const,
+        ingestEndpointId: "gcp_east_zixi",
+        endpointUrl: "",
+        vmafAvailable: false,
+        serverMetricsAvailable: false,
+        playbackMode: "mpegts" as const,
+        playbackDvr: false,
+      },
+      {
+        id: "b",
+        protocol: "moq" as const,
+        ingestEndpointId: "gcp_moq_relay_d18",
+        endpointUrl: "",
+        vmafAvailable: false,
+        serverMetricsAvailable: false,
+        playbackMode: "moq" as const,
+        playbackDvr: false,
+      },
+    ];
+    const twoWarn = recipeFanoutWarning(two, { source: "webcam", encoder: "ffmpeg" });
+    assert.match(twoWarn ?? "", /1s GOP/i);
+    assert.doesNotMatch(twoWarn ?? "", /6-way/i);
+
+    const six = [
+      ...two,
+      { ...two[0], id: "c", ingestEndpointId: "linode_zixi" },
+      { ...two[0], id: "d", protocol: "rtmp" as const, ingestEndpointId: "gcp_zixi" },
+      { ...two[1], id: "e", ingestEndpointId: "gcp_east_moq_relay_d18" },
+      { ...two[1], id: "f", ingestEndpointId: "linode_moq_relay_d18" },
+    ];
+    const sixWarn = recipeFanoutWarning(six, { source: "webcam", encoder: "ffmpeg" });
+    assert.match(sixWarn ?? "", /6-way/i);
+    assert.match(sixWarn ?? "", /MediaMTX LL-HLS/i);
+    assert.equal(webcamSixWayFanout(six, { source: "webcam", encoder: "ffmpeg" }), true);
+    assert.equal(webcamSixWayFanout(two, { source: "webcam", encoder: "ffmpeg" }), false);
+    assert.equal(webcamSrtShouldUseRegionalMtx(six, { source: "webcam", encoder: "ffmpeg" }), true);
+    assert.equal(webcamSrtShouldUseRegionalMtx(two, { source: "webcam", encoder: "ffmpeg" }), false);
+
+    const sixIssue = recipeIssue(six, ctx("webcam", "ffmpeg"));
+    assert.equal(sixIssue, null);
+    assert.equal(recipeIssue(two, ctx("webcam", "ffmpeg")), null);
+    assert.equal(recipeIssue(six, ctx("dummy", "ffmpeg")), null);
+
+    const coercedSix = coerceRecipe(six, ctx("webcam", "ffmpeg"));
+    const eastSrt = coercedSix.find((item) => item.id === "a");
+    const linodeSrt = coercedSix.find((item) => item.id === "c");
+    const centralRtmp = coercedSix.find((item) => item.id === "d");
+    assert.equal(eastSrt?.ingestEndpointId, "gcp_east_mediamtx");
+    assert.equal(eastSrt?.playbackMode, "ll-hls");
+    assert.equal(linodeSrt?.ingestEndpointId, "linode_mediamtx");
+    assert.equal(linodeSrt?.playbackMode, "ll-hls");
+    assert.equal(centralRtmp?.ingestEndpointId, "gcp_zixi");
+    assert.equal(recipeIssue(coercedSix, ctx("webcam", "ffmpeg")), null);
+    assert.equal(
+      uniqueEndpointsByPublishSlot(coercedSix, ctx("webcam", "ffmpeg")).length,
+      coercedSix.length,
+    );
+
+    const soloEast = coerceRecipe([two[0]], ctx("webcam", "ffmpeg"));
+    assert.equal(soloEast[0]?.ingestEndpointId, "gcp_east_zixi");
+    assert.equal(soloEast[0]?.playbackMode, "mpegts");
+    const twoCoerced = coerceRecipe(two, ctx("webcam", "ffmpeg"));
+    assert.equal(twoCoerced[0]?.ingestEndpointId, "gcp_east_zixi");
+    assert.equal(twoCoerced[0]?.playbackMode, "mpegts");
+
+    const browser = recipeFanoutWarning(two.slice(1), { source: "webcam", encoder: "browser" });
+    assert.match(browser ?? "", /LOC \(not CMAF\)/i);
+    assert.match(browser ?? "", /audio is off/i);
+
+    assert.equal(recipeFanoutWarning(two, { source: "dummy", encoder: "ffmpeg" }), null);
   });
 });
 

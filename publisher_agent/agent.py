@@ -269,6 +269,7 @@ class PublisherAgent:
                 # device:webcam input — without this refresh the RTMP/SRT
                 # direct pipelines ignore the rewritten media_path and open
                 # the camera anyway, defeating the broker entirely.
+                job.dest_count = max(1, len(webcam_session.ports))
                 job.refresh_ffmpeg_cmd()
                 if webcam_session.direct_device:
                     logger.info(

@@ -51,7 +51,7 @@ export function mpegTsHoldReconnectsWhileJobRunning(options: {
   if (!mpegTsJobStillRunning(options.jobStatus)) {
     return false;
   }
-  return /sent no media|idle HTTP-TS|unbounded stream|HTTP 404/i.test(
+  return /sent no media|idle HTTP-TS|unbounded stream|HTTP 404|empty-reply|closed the socket with no HTTP/i.test(
     options.lastReason || "",
   );
 }
@@ -88,7 +88,7 @@ export function mpegTsMayMarkPlaybackOk(options: {
   lastReason?: string | null;
 }): boolean {
   if (
-    /manifest unreachable|HTTP |timed out|origin may be frozen|sent no media|idle HTTP-TS/i.test(
+    /manifest unreachable|HTTP |timed out|origin may be frozen|sent no media|idle HTTP-TS|empty-reply|closed the socket with no HTTP/i.test(
       options.lastReason || "",
     )
   ) {
@@ -134,28 +134,49 @@ export function mpegTsIdleOriginReason(host: string, httpStatus = 200): string {
   );
 }
 
+/**
+ * TCP accepted, then the origin closed with zero HTTP bytes.
+ * Live 2026-09-01: East/Linode/Central `SRT Test.ts` empty-closes when idle;
+ * `benchmark.ts` answers HTTP 200 + INT64_MAX instead. Collapsing empty-reply
+ * to "frozen" burned reconnects and showed 502 through the fetch proxy.
+ */
+export function mpegTsEmptyReplyReason(host: string): string {
+  return (
+    `HTTP-TS origin ${host} closed the socket with no HTTP status (empty-reply). ` +
+    `Zixi SRT Test.ts does this when the named output is idle — unlike benchmark.ts, ` +
+    `which answers HTTP 200 with no media. This is not playback OK.`
+  );
+}
+
 /** Decode /api/playback/fetch idle vs host-down signaling. */
 export function mpegTsFetchIdleSignal(options: {
   httpStatus?: number | null;
   upstreamStatusHeader?: string | null;
   firstByteHeader?: string | null;
   detail?: string | null;
-}): { upstreamStatus: number | null; firstByteTimeout: boolean } {
+}): { upstreamStatus: number | null; firstByteTimeout: boolean; emptyReply: boolean } {
   const raw = Number(options.upstreamStatusHeader || "");
   const fromHeader = Number.isFinite(raw) && raw > 0 ? raw : null;
-  const idleHeader = (options.firstByteHeader || "").trim().toLowerCase() === "idle";
+  const firstByte = (options.firstByteHeader || "").trim().toLowerCase();
+  const idleHeader = firstByte === "idle";
+  const emptyReply =
+    firstByte === "empty-reply" || /empty-reply|closed with no HTTP status/i.test(options.detail || "");
   const detail = options.detail || "";
   const fromDetail = /answered HTTP (\d+) but sent no media/i.exec(detail);
+  if (emptyReply) {
+    return { upstreamStatus: fromHeader, firstByteTimeout: true, emptyReply: true };
+  }
   if (idleHeader || fromDetail) {
     return {
       upstreamStatus: fromHeader ?? (fromDetail ? Number(fromDetail[1]) : 200),
       firstByteTimeout: true,
+      emptyReply: false,
     };
   }
   if (fromHeader) {
-    return { upstreamStatus: fromHeader, firstByteTimeout: false };
+    return { upstreamStatus: fromHeader, firstByteTimeout: false, emptyReply: false };
   }
-  return { upstreamStatus: null, firstByteTimeout: false };
+  return { upstreamStatus: null, firstByteTimeout: false, emptyReply: false };
 }
 
 /** Honest connect_probe failure — do not call a timeout "manifest unreachable". */
@@ -165,11 +186,18 @@ export function mpegTsProbeFailReason(options: {
   originHost?: string;
   upstreamStatus?: number | null;
   firstByteTimeout?: boolean;
+  emptyReply?: boolean;
   headersReceived?: boolean;
   bytesReceived?: number | null;
 }): string {
   const err = (options.fetchError || "").toLowerCase();
   const host = (options.originHost || "").trim() || "the HTTP-TS origin";
+  if (
+    options.emptyReply === true ||
+    /empty-reply|closed the socket with no HTTP/i.test(options.fetchError || "")
+  ) {
+    return mpegTsEmptyReplyReason(host);
+  }
   const timedOut =
     options.httpStatus === 504 ||
     options.firstByteTimeout === true ||
@@ -190,7 +218,7 @@ export function mpegTsProbeFailReason(options: {
     options.firstByteTimeout === true ||
     options.bytesReceived === 0 ||
     (originAnswered && timedOut);
-  if (originAnswered && noMedia) {
+  if (originAnswered && noMedia && !options.emptyReply) {
     return mpegTsIdleOriginReason(host, answeredStatus ?? 200);
   }
   if (timedOut) {

@@ -1024,11 +1024,11 @@ static int publish_fragment(moq_media_sender_t *tx, app_ctx_t *ctx,
         moq_rcbuf_decref(payload_rc);
         static unsigned drop_n;
         drop_n++;
-        if (drop_n <= 3 || (drop_n % 50) == 0) {
-            fprintf(stderr,
-                    "write(%s) would block after retry; dropping fragment (%u)\n",
-                    slot->name, drop_n);
-        }
+        /* Always log drop_n so helper scrape / HUD can show the real count
+         * (sampled first-3-then-every-50 hid 47 drops as "(3)"). */
+        fprintf(stderr,
+                "write(%s) would block after retry; dropping fragment (%u)\n",
+                slot->name, drop_n);
         return 0;
     }
     if (wr != MOQ_OK) {

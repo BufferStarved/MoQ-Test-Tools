@@ -58,6 +58,23 @@ class PlaybackFetchIdleHelpersTests(unittest.TestCase):
         self.assertIn("answered HTTP 200 but sent no media", body["detail"])
         self.assertNotEqual(body["detail"], api_main.PLAYBACK_FETCH_TIMED_OUT)
 
+    def test_empty_reply_is_distinct_from_idle_and_host_down(self) -> None:
+        empty = api_main.playback_fetch_empty_reply_response()
+        self.assertEqual(empty.status_code, 504)
+        self.assertEqual(empty.headers["X-Playback-First-Byte"], "empty-reply")
+        self.assertNotIn("X-Playback-Upstream-Status", empty.headers)
+        body = json.loads(empty.body)
+        self.assertIn("empty-reply", body["detail"])
+        self.assertNotEqual(body["detail"], api_main.PLAYBACK_FETCH_TIMED_OUT)
+        self.assertTrue(api_main.looks_like_named_zixi_http_ts_path("/SRT%20Test.ts"))
+        self.assertTrue(api_main.looks_like_named_zixi_http_ts_path("/benchmark.ts"))
+        self.assertFalse(api_main.looks_like_named_zixi_http_ts_path("/hls/stream/seg001.ts"))
+
+    def test_playback_client_read_timeout_is_120s_per_chunk(self) -> None:
+        timeout = api_main._get_playback_client().timeout
+        self.assertEqual(timeout.read, 120.0)
+        self.assertEqual(timeout.connect, 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

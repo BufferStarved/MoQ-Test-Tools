@@ -438,6 +438,17 @@ describe("humanizeJobError protocol", () => {
     assert.doesNotMatch(shown, /closed publisher pipe/i);
   });
 
+  it("does not dress comparison remux ffmpeg 183 as an ingest close", () => {
+    const raw =
+      "RTMP publish failed (ffmpeg 183): Press [q] to stop, [?] for help | [flv @ 0x70b974070d80] Tag [27][0][0][0] incompatible with output codec id '27' ([7][0][0][0]) | [tee @ 0x5b246d67ec80] Slave '[f=flv:flvflags=no_duration_filesize]rtmp://35.222.33.58:1935/live/benchmark': error writing header: Invalid data";
+    const shown = humanizeJobError(raw, { protocol: "rtmp" }) ?? "";
+    assert.match(shown, /ffmpeg 183/);
+    assert.match(shown, /vtag 27/i);
+    assert.doesNotMatch(shown, /The ingest closed/i);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
+    assert.doesNotMatch(shown, /CMAF/i);
+  });
+
   it("does not dress VMAF overwrite 239 as an RTMP ingest close", () => {
     const raw =
       "ffmpeg exited with code 239: File '/tmp/moq-bench-jj0cwj6i/vmaf_reference.ts' already exists. Overwrite? [y/N] Not overwriting - exiting | Error opening output files: File exists.";
@@ -622,6 +633,25 @@ describe("capture error mapping", () => {
   it("recognizes ffmpeg 251 / avfoundation as a capture error", () => {
     assert.equal(isCaptureOrPublishError(capture251), true);
     assert.equal(isCaptureOrPublishError("MoQ catalog never loaded"), false);
+  });
+
+  it("names QUIC write-block drops instead of catalog-ready 0 paint", () => {
+    const drop = "MoQ QUIC write-blocked: dropped 47 fragments. Catalog-ready is not paint.";
+    assert.equal(isCaptureOrPublishError(drop), true);
+    assert.match(humanizeJobError(drop) ?? "", /dropped 47/i);
+    assert.match(
+      humanizeJobError("write(vide_1) would block after retry; dropping fragment (47)") ?? "",
+      /dropped 47/i,
+    );
+    const shown = noMediaFailMessage({
+      catalogReady: true,
+      namespace: "bench-22cb3358",
+      jobStatus: "completed",
+      jobError: drop,
+      previewReady: true,
+    });
+    assert.match(shown, /dropped 47/i);
+    assert.doesNotMatch(shown, /catalog loaded but no video frames/i);
   });
 
   it("surfaces the encode error when the job failed, not a catalog miss", () => {

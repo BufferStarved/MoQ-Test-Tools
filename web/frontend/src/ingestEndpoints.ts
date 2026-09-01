@@ -500,6 +500,18 @@ export function ingestRole(ingestEndpointId: string): "zixi" | "mediamtx" | "moq
   return null;
 }
 
+/** Same-host MediaMTX for East/Linode Zixi. Central Fast HLS stays on Zixi. */
+export function siblingMediamtxIngest(ingestEndpointId: string): IngestEndpointId | null {
+  if (ingestRole(ingestEndpointId) !== "zixi") {
+    return null;
+  }
+  const host = cloudHostFromIngest(ingestEndpointId);
+  if (host === "gcp_central") {
+    return null;
+  }
+  return `${ingestPrefixForCloudHost(host)}_mediamtx` as IngestEndpointId;
+}
+
 export function remapIngestToCloudHost(
   ingestEndpointId: string,
   host: CloudEncodeHostId,

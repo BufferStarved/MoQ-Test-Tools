@@ -323,7 +323,10 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("srt publish failed") ||
     text.includes("already exists") ||
     text.includes("not overwriting") ||
-    text.includes("file exists")
+    text.includes("file exists") ||
+    text.includes("would block") ||
+    text.includes("dropping fragment") ||
+    text.includes("write-blocked")
   );
 }
 
@@ -363,6 +366,14 @@ export function humanizeJobError(
   if (/one-shot catalog miss|catalog object never reached/i.test(raw)) {
     return raw;
   }
+  if (/would block|dropping fragment|write-blocked/i.test(raw)) {
+    const count =
+      raw.match(/dropped (\d+) fragments/i)?.[1] ??
+      raw.match(/dropping fragment \((\d+)\)/i)?.[1];
+    return count
+      ? `MoQ QUIC write-blocked: dropped ${count} fragments. Catalog-ready is not paint.`
+      : "MoQ QUIC write-blocked (dropping fragments). Catalog-ready is not paint.";
+  }
   if (!isCaptureOrPublishError(raw)) {
     return raw;
   }
@@ -391,6 +402,15 @@ export function humanizeJobError(
     !/avfoundation|camera i\/o|selected framerate/i.test(raw)
   ) {
     return "RTMP publish failed (ffmpeg 251). Another publisher already holds this stream key. This is not an ingest close mid-stream.";
+  }
+  if (
+    kind === "rtmp" &&
+    (ffmpegCode === "183" || /tag \[27\]/i.test(raw) || /incompatible with output codec id/i.test(raw))
+  ) {
+    return (
+      "RTMP publish failed (ffmpeg 183): comparison remux from MPEG-TS left FLV vtag 27. " +
+      "Needs -tag:v 7 / vtag=7. This is not an ingest close."
+    );
   }
   if (kind === "rtmp") {
     return ffmpegCode

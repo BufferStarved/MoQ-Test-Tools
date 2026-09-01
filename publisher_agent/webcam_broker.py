@@ -93,12 +93,28 @@ MASTER_HARD_CAP_SEC = 15 * 60
 # 1080p tops out at 5250/6000) re-encodes *down* from this, never up.
 MASTER_BITRATE_KBPS = 5250
 MASTER_MAXRATE_KBPS = 6000
-# 1s GOP on the shared capture. Brokered MoQ *copies* this bitstream —
-# there is no 0.5s child re-encode (that comment was stale; a second x264
-# on the UDP hop still ran 24↔37 fps). A 0.5s master plus two siblings
-# dropped encode to ~24fps / 0.8× (CSV 2026-08-20). Solo webcam MoQ skips
-# the broker and uses moq_gop_frames_for_latency (~0.25s) in moq_publish.
+# dest_count >= 3: shrink 1s fragments so leftover copies (and SRT children)
+# are ~half the bytes. Do not drop GOP to 0.5s — CSV 2026-08-20: a 0.5s
+# master + two siblings → ~24fps / 0.8×. MoQ children re-encode at
+# ~0.25s / 540p in moq_publish when dest_count >= 2 (not a 1s copy).
+MASTER_BITRATE_FANOUT_KBPS = 2500
+MASTER_MAXRATE_FANOUT_KBPS = 3000
+# 1s GOP on the shared capture. Shorter master GOP is unsafe (see above).
+# Solo webcam MoQ skips the broker and uses moq_gop_frames_for_latency.
 MASTER_GOP_FRAMES = ASSUMED_FPS
+
+
+def master_bitrate_kbps(dest_count: int) -> int:
+    """Master video bitrate. dest_count >= 3 shrinks 1s fragments (~320KB vs ~670KB)."""
+    if dest_count >= 3:
+        return MASTER_BITRATE_FANOUT_KBPS
+    return MASTER_BITRATE_KBPS
+
+
+def master_maxrate_kbps(dest_count: int) -> int:
+    if dest_count >= 3:
+        return MASTER_MAXRATE_FANOUT_KBPS
+    return MASTER_MAXRATE_KBPS
 # Some MacBook cameras default to a *portrait* native AVFoundation capture
 # mode (e.g. 1080x1920) when no size is requested — confirmed 2026-08-06 on
 # a MacBook Pro built-in camera, with no rotation metadata to correct it.
@@ -358,11 +374,11 @@ class WebcamBroker:
             "-sc_threshold",
             "0",
             "-b:v",
-            f"{MASTER_BITRATE_KBPS}k",
+            f"{master_bitrate_kbps(len(ports))}k",
             "-maxrate",
-            f"{MASTER_MAXRATE_KBPS}k",
+            f"{master_maxrate_kbps(len(ports))}k",
             "-bufsize",
-            f"{MASTER_MAXRATE_KBPS}k",
+            f"{master_maxrate_kbps(len(ports))}k",
             "-x264-params",
             "repeat-headers=1",
             *BROWSER_COMPAT_AUDIO_ARGS,

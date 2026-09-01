@@ -17,8 +17,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from publisher_agent.webcam_broker import (  # noqa: E402
     MASTER_GOP_FRAMES,
+    MASTER_BITRATE_KBPS,
     PREFERRED_LANDSCAPE_VIDEO_SIZE,
     WebcamBroker,
+    master_bitrate_kbps,
 )
 import publisher_agent.webcam_broker as _webcam_broker_mod  # noqa: E402
 
@@ -47,9 +49,13 @@ class SoloDirectDeviceTests(unittest.TestCase):
 
 class MasterGopTests(unittest.TestCase):
     def test_master_gop_is_one_second_not_half_or_hls_6s(self) -> None:
-        # Shared capture GOP is 1s. Do not drop it for mixed siblings.
-        # Solo MoQ skips the broker and encodes 0.25s groups in moq_publish.
+        # Shared capture GOP stays 1s. 0.5s master + two siblings → ~24fps.
+        # dest_count >= 3 shrinks bitrate; MoQ children re-encode in moq_publish.
         self.assertEqual(MASTER_GOP_FRAMES, 30)
+        self.assertEqual(master_bitrate_kbps(1), MASTER_BITRATE_KBPS)
+        self.assertEqual(master_bitrate_kbps(2), MASTER_BITRATE_KBPS)
+        self.assertEqual(master_bitrate_kbps(3), 2500)
+        self.assertEqual(master_bitrate_kbps(6), 2500)
 
 
 class LandscapeRetryTests(unittest.TestCase):
@@ -169,7 +175,7 @@ class TeeMapArgsTests(unittest.TestCase):
     Error opening input files: Input/output error").
     """
 
-    def _captured_spawn_cmd(self, input_args) -> list:
+    def _captured_spawn_cmd(self, input_args, ports=None) -> list:
         broker = WebcamBroker()
         captured = {}
 
@@ -187,7 +193,7 @@ class TeeMapArgsTests(unittest.TestCase):
             "publisher_agent.webcam_broker.subprocess.Popen",
             side_effect=fake_popen,
         ):
-            broker._spawn_capture("device:webcam", [50000], video_size=None)
+            broker._spawn_capture("device:webcam", ports or [50000], video_size=None)
         return captured["cmd"]
 
     def test_popen_eio_is_camera_io_error_not_bare_errno(self) -> None:
@@ -239,6 +245,15 @@ class TeeMapArgsTests(unittest.TestCase):
         cmd = self._captured_spawn_cmd(input_args)
         map_values = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
         self.assertEqual(map_values, ["0:v:0", "1:a:0"])
+
+    def test_three_dest_master_uses_lower_bitrate_not_shorter_gop(self) -> None:
+        input_args = ["-f", "avfoundation", "-framerate", "30", "-i", "0:0"]
+        two = self._captured_spawn_cmd(input_args, ports=[50001, 50002])
+        six = self._captured_spawn_cmd(input_args, ports=[50001, 50002, 50003, 50004, 50005, 50006])
+        self.assertEqual(two[two.index("-g") + 1], "30")
+        self.assertEqual(six[six.index("-g") + 1], "30")
+        self.assertEqual(two[two.index("-b:v") + 1], "5250k")
+        self.assertEqual(six[six.index("-b:v") + 1], "2500k")
 
 
 class RefreshFfmpegCmdTests(unittest.TestCase):

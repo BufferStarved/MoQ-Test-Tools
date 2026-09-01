@@ -44,18 +44,21 @@ class PublisherProtocolTests(unittest.TestCase):
             target_latency_ms=2500,
             publisher_host="local",
             encoder="obs",
+            dest_count=6,
         )
         payload = upload_job_to_dict(job)
         self.assertEqual(payload["protocol_version"], PROTOCOL_VERSION)
         self.assertEqual(payload["media_path"], "device:webcam")
         self.assertEqual(payload["publisher_host"], "local")
         self.assertEqual(payload["encoder"], "obs")
+        self.assertEqual(payload["dest_count"], 6)
 
         restored = upload_job_from_dict(payload)
         self.assertEqual(restored.media_path, "device:webcam")
         self.assertEqual(restored.job_id, "job-abc")
         self.assertEqual(restored.publisher_host, "local")
         self.assertEqual(restored.encoder, "obs")
+        self.assertEqual(restored.dest_count, 6)
         self.assertEqual(restored.encode_ladder, "1080p")
         self.assertEqual(restored.target_latency_ms, 2500)
         self.assertEqual(restored.destination.preset_id, "moq_mediamtx_gcp_srt")

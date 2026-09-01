@@ -219,6 +219,35 @@ class FfmpegFailureMessageTests(unittest.TestCase):
             )
         )
 
+    def test_rtmp_183_flv_vtag_is_not_ingest_close_and_is_not_retried(self) -> None:
+        from upload_service import ingest_session_retry_kind, looks_like_flv_vtag_mismatch
+
+        process = MagicMock()
+        process.returncode = 183
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"[flv @ 0x70b974070d80] Tag [27][0][0][0] incompatible with output "
+            b"codec id '27' ([7][0][0][0])\n"
+            b"[tee @ 0x5b246d67ec80] Slave '[f=flv:flvflags=no_duration_filesize]"
+            b"rtmp://35.222.33.58:1935/live/benchmark': error writing header: Invalid data\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertTrue(looks_like_flv_vtag_mismatch(message, 183))
+        self.assertIn("vtag 27", message)
+        self.assertIn("not an ingest close", message)
+        self.assertNotIn("The ingest closed", message)
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=0.4,
+                remaining_sec=19.6,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+                error=message,
+            )
+        )
+
     def test_moq_closed_pipe_keeps_cmaf_hint(self) -> None:
         process = MagicMock()
         process.returncode = 224

@@ -654,6 +654,8 @@ describe("comparison remux RTMP ffmpeg 183 FLV vtag", () => {
     });
     assert.equal(shown.status, "Failed");
     assert.match(shown.error ?? "", /RTMP publish failed \(ffmpeg 183\)/i);
+    assert.match(shown.error ?? "", /vtag 27/i);
+    assert.doesNotMatch(shown.error ?? "", /The ingest closed/i);
     assert.doesNotMatch(shown.error ?? "", /CMAF init/i);
     assert.doesNotMatch(shown.error ?? "", /closed publisher pipe/i);
   });
@@ -785,6 +787,73 @@ describe("BBB file MoQ shared-hub never-announce", () => {
     const leg = visibleLeg(moq, hud);
     assert.equal(leg.status, "Failed");
     assert.notEqual(leg.status, "Playback OK");
+  });
+});
+
+describe("East SRT Test.ts empty-reply", () => {
+  it("fails closed on empty-reply without calling Playback OK or frozen host-down", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 2 (SRT) · gcp/us-east1",
+      protocol: "srt",
+      endpoint: "srt://35.196.215.179:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 90,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const empty =
+      "HTTP-TS origin 35.196.215.179:7777 closed the socket with no HTTP status (empty-reply). Zixi SRT Test.ts does this when the named output is idle — unlike benchmark.ts, which answers HTTP 200 with no media. This is not playback OK.";
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      mpegTsLastReason: empty,
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /empty-reply/i);
+    assert.match(shown.error ?? "", /35\.196\.215\.179:7777/);
+    assert.doesNotMatch(shown.error ?? "", /frozen/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+    assert.equal(
+      comparisonLegTone({
+        protocol: "srt",
+        jobStatus: "completed",
+        previewReady: true,
+        framesRendered: 0,
+      }),
+      "bad",
+    );
+    assert.equal(
+      comparisonLegStatusLabel({
+        protocol: "srt",
+        jobStatus: "completed",
+        previewReady: true,
+        framesRendered: 0,
+      }),
+      "Failed",
+    );
+  });
+});
+
+describe("Zixi DASH selection falls back to HLS in HUD", () => {
+  it("does not call Playback OK DASH when the tile is HLS because the MPD is unavailable", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 1 (SRT) · gcp/us-central1",
+      protocol: "srt",
+      endpoint: "srt://35.222.33.58:10080?mode=caller&latency=2000000&streamid=#!::r=SRT",
+      encode_frames_total: 1800,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "completed",
+      hlsLastError: "HLS (hls.js · DASH MPD unavailable)",
+      encodeDurationSec: 60,
+    });
+    assert.match(shown.status, /Failed/i);
+    assert.match(shown.error ?? "", /DASH MPD unavailable/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
   });
 });
 
@@ -1126,5 +1195,30 @@ describe("6-way webcam bench-22cb3358 replay", () => {
     });
     assert.match(error, /never announced namespace bench-22cb3358/i);
     assert.match(error, /SUBSCRIBE 0x10/i);
+  });
+
+  it("write-block drops beat catalog-ready 0 paint", () => {
+    const error = visibleMoqError(moq, {
+      playaLines: ["catalog received", "ready levels=1"],
+      jobStatus: "completed",
+      previewReady: true,
+      catalogReady: true,
+      jobError: "MoQ QUIC write-blocked: dropped 47 fragments. Catalog-ready is not paint.",
+      namespace: "bench-22cb3358",
+    });
+    assert.match(error, /dropped 47/i);
+    assert.match(error, /write-block/i);
+    assert.doesNotMatch(error, /catalog loaded but no video frames/i);
+    assert.doesNotMatch(error, /catalog object never reached/i);
+    const raw = visibleMoqError(moq, {
+      playaLines: ["catalog received"],
+      jobStatus: "completed",
+      previewReady: true,
+      catalogReady: true,
+      jobError: "write(vide_1) would block after retry; dropping fragment (47)",
+      namespace: "bench-22cb3358",
+    });
+    assert.match(raw, /dropped 47/i);
+    assert.doesNotMatch(raw, /catalog loaded but no video frames/i);
   });
 });

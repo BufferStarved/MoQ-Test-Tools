@@ -94,6 +94,7 @@ def upload_job_to_dict(job: UploadJob) -> Dict[str, Any]:
         "publisher_host": getattr(job, "publisher_host", "local"),
         "encoder": getattr(job, "encoder", "ffmpeg") or "ffmpeg",
         "publisher_session": getattr(job, "publisher_session", "") or "",
+        "dest_count": max(1, int(getattr(job, "dest_count", 1) or 1)),
     }
 
 
@@ -120,6 +121,10 @@ def upload_job_from_dict(data: Dict[str, Any]) -> UploadJob:
     job.publisher_host = str(data.get("publisher_host") or "local")
     job.encoder = str(data.get("encoder") or "ffmpeg")
     job.publisher_session = str(data.get("publisher_session") or "")
+    try:
+        job.dest_count = max(1, int(data.get("dest_count") or 1))
+    except (TypeError, ValueError):
+        job.dest_count = 1
     return job
 
 

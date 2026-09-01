@@ -14,6 +14,7 @@ import {
   isCustomIngestEndpoint,
   publishCollisionKeys,
   resolveEndpointUrl,
+  siblingMediamtxIngest,
   type IngestEndpointId,
 } from "./ingestEndpoints.ts";
 import {
@@ -376,6 +377,10 @@ export function coerceRecipe(endpoints: EndpointConfig[], ctx: RecipeContext): E
     }
     return coerced;
   });
+  const remapped = remapWebcamFanoutSrt(next, ctx);
+  if (remapped !== next) {
+    return remapped;
+  }
   return changed ? next : endpoints;
 }
 
@@ -542,6 +547,109 @@ export function uniqueEndpointsByPublishSlot(
     kept.push(endpoint);
   }
   return kept.length === endpoints.length ? endpoints : kept;
+}
+
+/** Banner copy for webcam 6-way — not a Start hard-block. */
+export const WEBCAM_SIX_WAY_START_BLOCK =
+  "Webcam 6-way remaps East/Linode SRT to that region's MediaMTX LL-HLS " +
+  "(Central Zixi Fast HLS stays). MoQ children re-encode at ~0.25s / 540p " +
+  "so QUIC does not copy three 1s IDRs.";
+
+/**
+ * One laptop encode + 3 QUIC + 3 SRT. Not a recipe default — only Build
+ * your own can assemble this. Start is allowed; East/Linode SRT coerce to MTX.
+ */
+export function webcamSixWayFanout(
+  endpoints: EndpointConfig[],
+  ctx: Pick<RecipeContext, "source" | "encoder">,
+): boolean {
+  const encoder = recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg");
+  if (ctx.source !== "webcam" || encoder !== "ffmpeg") {
+    return false;
+  }
+  const moq = endpoints.filter((item) => item.protocol === "moq").length;
+  const tsish = endpoints.filter((item) => item.protocol === "srt" || item.protocol === "rtmp").length;
+  return endpoints.length >= 6 || (moq >= 3 && tsish >= 3);
+}
+
+/** dest_count >= 3, or 2+ MoQ with 2+ SRT — East/Linode Zixi HTTP-TS stalls. */
+export function webcamSrtShouldUseRegionalMtx(
+  endpoints: EndpointConfig[],
+  ctx: Pick<RecipeContext, "source" | "encoder">,
+): boolean {
+  const encoder = recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg");
+  if (ctx.source !== "webcam" || encoder !== "ffmpeg") {
+    return false;
+  }
+  const moq = endpoints.filter((item) => item.protocol === "moq").length;
+  const srt = endpoints.filter((item) => item.protocol === "srt").length;
+  return endpoints.length >= 3 || (moq >= 2 && srt >= 2);
+}
+
+function remapWebcamFanoutSrt(
+  endpoints: EndpointConfig[],
+  ctx: RecipeContext,
+): EndpointConfig[] {
+  if (!webcamSrtShouldUseRegionalMtx(endpoints, ctx)) {
+    return endpoints;
+  }
+  const used = collisionKeysFor(endpoints);
+  let changed = false;
+  const next = endpoints.map((endpoint) => {
+    if (endpoint.protocol !== "srt") {
+      return endpoint;
+    }
+    const sibling = siblingMediamtxIngest(endpoint.ingestEndpointId);
+    if (!sibling || !ingestAllowedForRecipe(sibling, "srt", ctx)) {
+      return endpoint;
+    }
+    const newKey = ingestCollisionKey(sibling, "srt");
+    const oldKey = ingestCollisionKey(endpoint.ingestEndpointId, "srt");
+    if (newKey && used.has(newKey) && newKey !== oldKey) {
+      return endpoint;
+    }
+    const playbackMode = resolvedSelectablePlaybackMode("ll-hls", "srt", sibling, ctx.caps);
+    if (oldKey) {
+      used.delete(oldKey);
+    }
+    if (newKey) {
+      used.add(newKey);
+    }
+    changed = true;
+    return { ...endpoint, ingestEndpointId: sibling, playbackMode };
+  });
+  return changed ? next : endpoints;
+}
+
+/**
+ * Non-blocking Start copy: webcam fan-out mitigations and the in-tab encoder.
+ * 6-way is allowed (user rejected a lab-only hard-block).
+ */
+export function recipeFanoutWarning(
+  endpoints: EndpointConfig[],
+  ctx: Pick<RecipeContext, "source" | "encoder">,
+): string | null {
+  const encoder = recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg");
+  if (encoder === "browser") {
+    return (
+      "Browser encoder publishes LOC (not CMAF) and audio is off. Chrome only. " +
+      "Use one or two dests (MoQ / WebRTC) — this is not the ffmpeg CMAF canary."
+    );
+  }
+  if (ctx.source !== "webcam" || encoder !== "ffmpeg") {
+    return null;
+  }
+  if (webcamSixWayFanout(endpoints, ctx)) {
+    return WEBCAM_SIX_WAY_START_BLOCK;
+  }
+  if (endpoints.length >= 2) {
+    return (
+      "Two or more webcam dests share a 1s GOP master. MoQ legs re-encode " +
+      "(ultrafast, not copy) when dest_count >= 2. East/Linode Zixi HTTP-TS " +
+      "stays for 2-dest; 3+ dests remap those SRT tiles to MediaMTX LL-HLS."
+    );
+  }
+  return null;
 }
 
 export function recipeIssue(endpoints: EndpointConfig[], ctx: RecipeContext): string | null {

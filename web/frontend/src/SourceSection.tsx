@@ -38,7 +38,7 @@ export function encoderModeExplainer(encoder: EncoderId): string {
     return "OBS encodes. The OpenMOQ plugin is draft-16 only — it cannot publish to this site’s draft-18 relays. Use ffmpeg (helper) for MoQ.";
   }
   if (encoder === "browser") {
-    return "This tab encodes the webcam with the WebCodecs API. MoQ and WebRTC only — no SRT or RTMP, no helper app.";
+    return "This tab encodes the webcam with WebCodecs. MoQ is LOC (not CMAF); audio is off. Chrome only. No SRT or RTMP, no helper app.";
   }
   return "ffmpeg (helper) encodes every protocol on this laptop: SRT, RTMP, WebRTC (if WHIP), and MoQ. This is the default last-mile path.";
 }

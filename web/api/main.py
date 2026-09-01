@@ -1406,6 +1406,34 @@ def playback_fetch_idle_response(upstream_status: int) -> Response:
     )
 
 
+def looks_like_named_zixi_http_ts_path(path: str) -> bool:
+    """Zixi named outputs (`/SRT Test.ts`, `/benchmark.ts`), not HLS segments."""
+    path_l = (path or "").lower()
+    if not path_l.endswith(".ts"):
+        return False
+    if "/hls/" in path_l or "/llhls/" in path_l:
+        return False
+    return True
+
+
+def playback_fetch_empty_reply_detail() -> str:
+    return "Playback fetch: origin closed with no HTTP status (empty-reply)"
+
+
+def playback_fetch_empty_reply_response() -> Response:
+    """SRT Test.ts idle: TCP accept then FIN with zero HTTP bytes → not host-down."""
+    return Response(
+        status_code=504,
+        content=json.dumps({"detail": playback_fetch_empty_reply_detail()}),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Playback-First-Byte": "empty-reply",
+        },
+    )
+
+
 def _get_playback_client() -> httpx.AsyncClient:
     global _playback_client
     if _playback_client is None or _playback_client.is_closed:
@@ -1567,6 +1595,10 @@ async def playback_fetch(url: str, request: Request):
         upstream = await client.send(upstream_request, stream=True)
     except httpx.TimeoutException as exc:
         raise HTTPException(status_code=504, detail=PLAYBACK_FETCH_TIMED_OUT) from exc
+    except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+        if looks_like_named_zixi_http_ts_path(parsed.path or ""):
+            return playback_fetch_empty_reply_response()
+        raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Playback fetch failed: {exc}") from exc
     if upstream.status_code >= 400:

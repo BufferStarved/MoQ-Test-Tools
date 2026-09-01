@@ -320,10 +320,11 @@ test("Zixi Fast HLS collects 2s segmentation on RTMP", () => {
   assert.equal(budget.segmentationMs, 2000);
 });
 
-test("solo MoQ group is 0.25s; brokered copy stays 1s", () => {
+test("solo MoQ group is 0.25s; dest_count < 2 brokered copy stays 1s", () => {
   assert.equal(moqGopFramesForLatency(400), 8);
   assert.equal(moqGroupDurationMs(400), 266.7);
   assert.equal(moqGroupDurationMs(400, { brokered: true }), 1000);
+  assert.equal(moqGroupDurationMs(400, { brokered: true, destCount: 6 }), 266.7);
 });
 
 test("metric definitions name CMAF group and refuse to call it ingest", async () => {

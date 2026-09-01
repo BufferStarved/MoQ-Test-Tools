@@ -65,6 +65,7 @@ from moq_publish import (
     publisher_catalog_published,
     publisher_first_object_sent,
     publisher_webtransport_connected,
+    publisher_write_block_error,
     should_pace_moq_publisher,
     wait_for_publisher_webtransport,
     MPEGTS_VIDEO_BSF,
@@ -220,6 +221,18 @@ def looks_like_vmaf_overwrite(text: str) -> bool:
     return False
 
 
+def looks_like_flv_vtag_mismatch(text: str, returncode: int | None = None) -> bool:
+    """Copy remux MPEG-TS (codec_tag=27) into FLV without vtag=7 — ffmpeg 183.
+
+    Not an ingest close. Retrying will hit the same mux error.
+    """
+    t = (text or "").lower()
+    tag_miss = "tag [27]" in t or "incompatible with output codec" in t
+    if returncode == 183 or "ffmpeg 183" in t or "code 183" in t:
+        return tag_miss or "flv" in t
+    return tag_miss
+
+
 def looks_like_occupied_rtmp_input(text: str, returncode: int | None = None) -> bool:
     """Second RTMP publisher to the same Zixi/MediaMTX key — not a mid-stream close.
 
@@ -253,6 +266,8 @@ def ingest_session_retry_kind(
     if looks_like_vmaf_overwrite(error):
         return None
     if looks_like_occupied_rtmp_input(error):
+        return None
+    if looks_like_flv_vtag_mismatch(error):
         return None
     if (protocol or "").strip().lower() not in _INGEST_SESSION_RETRY_PROTOCOLS:
         return None
@@ -333,6 +348,9 @@ class UploadJob:
     publisher_session: str = ""
     # "ffmpeg" (default) or "obs" (OpenMOQ plugin + OBS SRT/RTMP outputs).
     encoder: str = "ffmpeg"
+    # Sibling jobs on the shared webcam tee (len(session.ports)). dest_count
+    # >= 2 makes brokered MoQ re-encode instead of copying the 1s master.
+    dest_count: int = 1
     cancel_event: Optional[threading.Event] = None
     # JobManager sets this so SRT preview stays gated until HLS segments are readable.
     on_preview_ready: Optional[Callable[[bool], None]] = field(default=None, repr=False)
@@ -636,8 +654,9 @@ class UploadSample:
 def _job_segmentation(job) -> tuple[Optional[float], bool, bool]:
     """Known object cadence, n/a flag, and whether to split GOP out of encode.
 
-    MoQ: 1s when the brokered UDP master is copied, else the solo/file GOP
-    (~0.25s). HLS publish: 200ms LL parts — not a 1s CMAF group. WebRTC is
+    MoQ: 1s when dest_count < 2 copies the brokered UDP master, else the
+    solo/file GOP (~0.25s). HLS publish: 200ms LL parts — not a 1s CMAF
+    group. WebRTC is
     n/a. SRT/RTMP remuxed to HLS collect the known object (MediaMTX 200ms
     parts, Zixi Fast HLS segment); plain TS/FLV without a remux stays n/a.
     """
@@ -646,11 +665,16 @@ def _job_segmentation(job) -> tuple[Optional[float], bool, bool]:
     media = str(getattr(job, "media_path", "") or "")
     target = int(getattr(job, "target_latency_ms", DEFAULT_TARGET_LATENCY_MS) or DEFAULT_TARGET_LATENCY_MS)
     provider = str(getattr(dest, "ingest_provider", "") or "").strip().lower()
+    dest_count = int(getattr(job, "dest_count", 1) or 1)
     if proto == "webrtc":
         return None, True, False
     if proto == "moq":
         return (
-            moq_group_duration_ms(target, brokered=is_brokered_webcam_udp(media)),
+            moq_group_duration_ms(
+                target,
+                brokered=is_brokered_webcam_udp(media),
+                dest_count=dest_count,
+            ),
             False,
             True,
         )
@@ -2647,6 +2671,7 @@ class UploadService:
             target_latency_ms=job.target_latency_ms,
             duration_sec=job.duration_sec,
             vmaf_reference_path=job.vmaf_reference_capture_path,
+            dest_count=int(getattr(job, "dest_count", 1) or 1),
         )
         publisher_cmd = build_moq_publisher_cmd(
             publisher_bin,
@@ -3214,6 +3239,7 @@ class UploadService:
             f"{self._read_file(publisher_stdout_path)}\n"
             f"{self._read_file(publisher_log_path)}"
         )
+        drop_error = publisher_write_block_error(catalog_log)
         if moq_job_should_fail_without_namespace(
             publish_confirmed=publish_confirmed,
             poller_observing=moqx_poller.observing,
@@ -3260,9 +3286,13 @@ class UploadService:
                     namespace=namespace,
                     observing=moqx_poller.observing,
                 )
+            if drop_error:
+                finalized.error = (
+                    f"{finalized.error} {drop_error}" if finalized.error else drop_error
+                )
             return finalized
 
-        return self._finalize_result(
+        finalized = self._finalize_result(
             job,
             collector,
             server_metrics_enabled=ingest_poller.enabled,
@@ -3270,6 +3300,9 @@ class UploadService:
             quic_qlog_enabled=bool(qlog_tailer and qlog_tailer.enabled),
             quic_qlog_dir=qlog_dir,
         )
+        if drop_error:
+            finalized.error = drop_error
+        return finalized
 
     def _finalize_result(
         self,
@@ -3582,6 +3615,12 @@ class UploadService:
                 f"ffmpeg exited with code {process.returncode}: VMAF reference "
                 "already exists (overwrite prompt). This is not an ingest close "
                 "or a MoQ publisher pipe."
+            )
+        if proto == "rtmp" and looks_like_flv_vtag_mismatch(stderr, process.returncode):
+            return (
+                f"RTMP publish failed (ffmpeg {process.returncode}). "
+                "Comparison remux from MPEG-TS left FLV vtag 27. "
+                "Needs -tag:v 7 / vtag=7. This is not an ingest close."
             )
         if proto == "rtmp" and looks_like_occupied_rtmp_input(
             f"{stderr}\n{detail}", process.returncode
