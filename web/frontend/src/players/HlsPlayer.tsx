@@ -5,6 +5,7 @@ import { resolvePlaybackXhrUrl } from "../playbackFetch";
 import { waitingPlayerStatus, type PlaybackGate } from "../playbackGate";
 import { isGracefulHlsEos } from "../hlsEos";
 import { classifyHlsEndVerdict, hlsPaintedOk } from "../hlsPlayback";
+import { playerErrorForFailedJob } from "../moqCmafPlayback";
 import { bufferedAheadSec, RebufferTracker } from "../playbackBuffer";
 import { clockSkewMs } from "../clockSkew";
 import { createPlaybackDiagReporter } from "../playbackDiag";
@@ -43,6 +44,8 @@ interface HlsPlayerProps {
   encodeStartedAtEpoch?: number | null;
   onPlaybackSample?: (sample: PlaybackMetricsSnapshot & { elapsed_sec: number }) => void;
   jobStatus?: string;
+  jobError?: string | null;
+  protocol?: string | null;
   waitingForEncodeSlot?: boolean;
   encodeQueueAhead?: number;
   benchmarkLoading?: boolean;
@@ -344,6 +347,8 @@ export default function HlsPlayer({
   encodeStartedAtEpoch,
   onPlaybackSample,
   jobStatus,
+  jobError = null,
+  protocol = null,
   waitingForEncodeSlot = false,
   encodeQueueAhead = 0,
   benchmarkLoading = false,
@@ -631,7 +636,15 @@ export default function HlsPlayer({
     // explicitly non-null alias rather than re-checking in every handler.
     const video: HTMLVideoElement = mountedVideo;
 
+    const jobFail = playerErrorForFailedJob({ jobStatus, jobError, protocol });
     if (playbackGate !== "live") {
+      if (jobFail || (jobStatus || "").toLowerCase() === "failed") {
+        const shown = jobFail || "Publish job failed. Encode-only is not playback.";
+        lastErrorRef.current = shown;
+        setError(shown);
+        setStatus("Failed");
+        return;
+      }
       if (playbackGate === "ended") {
         const session = sessionRef.current;
         const verdict = classifyHlsEndVerdict({
@@ -670,10 +683,10 @@ export default function HlsPlayer({
       return;
     }
 
-    if (jobStatus === "failed") {
-      lastErrorRef.current =
-        "SRT encode job failed (0 kbps). Restart ./scripts/dev.sh — API must use ffmpeg-full with libsrt.";
-      setError(lastErrorRef.current);
+    if (jobFail || (jobStatus || "").toLowerCase() === "failed") {
+      const shown = jobFail || "Publish job failed. Encode-only is not playback.";
+      lastErrorRef.current = shown;
+      setError(shown);
       setStatus("Failed");
       return;
     }
@@ -1537,7 +1550,7 @@ export default function HlsPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [url, playbackGate, jobStatus, jobId, waitingForEncodeSlot, encodeQueueAhead]);
+  }, [url, playbackGate, jobStatus, jobError, protocol, jobId, waitingForEncodeSlot, encodeQueueAhead]);
 
   function togglePlayPause() {
     const video = videoRef.current;

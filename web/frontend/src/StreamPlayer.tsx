@@ -220,6 +220,8 @@ export function StreamPlayer({
               deliveryMediaOriginSec={deliveryMediaOriginSec}
               onPlaybackSample={onPlaybackSample}
               jobStatus={jobStatus}
+              jobError={jobError}
+              protocol={protocol}
               waitingForEncodeSlot={waitingForEncodeSlot}
               encodeQueueAhead={encodeQueueAhead}
               benchmarkLoading={benchmarkLoading}

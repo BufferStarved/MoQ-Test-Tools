@@ -69,6 +69,39 @@ class RtmpStreamIdTests(unittest.TestCase):
             "benchmark",
         )
 
+    def test_mediamtx_rtmp_gets_unique_job_path_zixi_does_not(self):
+        from moq_publish import apply_mediamtx_rtmp_job_path, mediamtx_rtmp_job_path
+
+        job_id = "a1b2c3d4-1111-2222-3333-444444444444"
+        self.assertEqual(mediamtx_rtmp_job_path(job_id), "benchmark-a1b2c3d4")
+        self.assertEqual(
+            apply_mediamtx_rtmp_job_path(
+                "rtmp://173.230.155.121:1935/benchmark",
+                protocol="rtmp",
+                ingest_provider="linode_west_mediamtx",
+                job_id=job_id,
+            ),
+            "rtmp://173.230.155.121:1935/benchmark-a1b2c3d4",
+        )
+        self.assertEqual(
+            apply_mediamtx_rtmp_job_path(
+                "rtmp://35.222.33.58:1935/live/benchmark",
+                protocol="rtmp",
+                ingest_provider="gcp_zixi",
+                job_id=job_id,
+            ),
+            "rtmp://35.222.33.58:1935/live/benchmark",
+        )
+        self.assertEqual(
+            apply_mediamtx_rtmp_job_path(
+                "srt://173.230.155.121:8890?mode=caller&streamid=publish:benchmark",
+                protocol="srt",
+                ingest_provider="linode_west_mediamtx",
+                job_id=job_id,
+            ),
+            "srt://173.230.155.121:8890?mode=caller&streamid=publish:benchmark",
+        )
+
 
 class ZixiSrtStreamIdTests(unittest.TestCase):
     def test_ensure_zixi_srt_streamid_on_bare_url_and_localhost(self) -> None:

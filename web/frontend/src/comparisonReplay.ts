@@ -8,9 +8,9 @@
 import { uniqueDownloadStreams } from "./downloadStreams.ts";
 import {
   classifyMoqEndVerdict,
-  humanizeJobError,
   isSubscribeRejectedLog,
   noMediaFailMessage,
+  playerErrorForFailedJob,
   shouldFailNoMediaWatchdog,
   MOQ_CATALOG_REFRESH_WAIT_MS,
 } from "./moqCmafPlayback.ts";
@@ -236,11 +236,24 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
     };
   }
   if (protocol === "rtmp" || protocol === "srt" || protocol === "webrtc") {
-    if (hud.jobError) {
+    const jobFail = playerErrorForFailedJob({
+      jobStatus: hud.jobStatus,
+      jobError: hud.jobError,
+      protocol,
+    });
+    if (jobFail) {
       return {
         stream: row.stream,
         protocol,
-        error: humanizeJobError(hud.jobError, { protocol }),
+        error: jobFail,
+        status: "Failed",
+      };
+    }
+    if ((hud.jobStatus || "").toLowerCase() === "failed") {
+      return {
+        stream: row.stream,
+        protocol,
+        error: "Publish job failed. Encode-only is not playback.",
         status: "Failed",
       };
     }

@@ -30,7 +30,12 @@ from playback_metrics import (
     robust_e2e_stats,
 )
 from encode_profile import encode_profile_summary
-from moq_publish import classify_job_exception, classify_result_error, is_device_browser_source
+from moq_publish import (
+    apply_mediamtx_rtmp_job_path,
+    classify_job_exception,
+    classify_result_error,
+    is_device_browser_source,
+)
 from moq_relay_certs import fingerprint_for_relay_url
 from quality_metrics import patch_summary_quality_leg
 from publisher_protocol import sample_to_dict
@@ -239,6 +244,29 @@ class JobManager:
                 namespace=moq_namespace,
             )
 
+        from destinations import PRESET_BY_ID, ingest_settings_for_preset
+
+        if preset_id:
+            agent_url, recording_dir = ingest_settings_for_preset(preset_id)
+            job.ingest_agent_url = agent_url
+            job.ingest_recording_dir = recording_dir
+
+        ingest_provider = (
+            (PRESET_BY_ID.get(preset_id).ingest_provider if preset_id and PRESET_BY_ID.get(preset_id) else "")
+            or job.destination.ingest_provider
+            or ""
+        ).strip().lower()
+
+        # MediaMTX RTMP must not publish to the standing SRT/WHIP ``benchmark``
+        # path. Unique per-job path; Zixi RTMP stays on the configured input.
+        if job.destination.protocol == "rtmp":
+            job.destination.url = apply_mediamtx_rtmp_job_path(
+                job.destination.url,
+                protocol=job.destination.protocol,
+                ingest_provider=ingest_provider,
+                job_id=job_id,
+            )
+
         zixi_stream_id: Optional[str] = None
         zixi_playback_stream_id: Optional[str] = None
         if job.destination.protocol == "srt":
@@ -269,24 +297,11 @@ class JobManager:
             # Gate RTMP→Zixi Fast HLS the same way as SRT: wait for a readable
             # segment before the browser attaches (avoids burning TTFF on the
             # preflight + empty-playlist poll). Stream id is the RTMP key
-            # (preset default "benchmark").
+            # (Zixi ``benchmark``; MediaMTX ``benchmark-<job[:8]>``).
             zixi_stream_id = zixi_rtmp_stream_id_for_preset(preset_id) or zixi_stream_id_from_rtmp_url(
                 job.destination.url
             )
             zixi_playback_stream_id = zixi_stream_id
-
-        from destinations import PRESET_BY_ID, ingest_settings_for_preset
-
-        if preset_id:
-            agent_url, recording_dir = ingest_settings_for_preset(preset_id)
-            job.ingest_agent_url = agent_url
-            job.ingest_recording_dir = recording_dir
-
-        ingest_provider = (
-            (PRESET_BY_ID.get(preset_id).ingest_provider if preset_id and PRESET_BY_ID.get(preset_id) else "")
-            or job.destination.ingest_provider
-            or ""
-        ).strip().lower()
         # HTTP-TS PUT presets are encode-only on current Broadcaster settings —
         # do not gate them on missing playback. See needs_publish_preview for
         # why MoQ needs this gate too, not just Zixi/MediaMTX HLS.

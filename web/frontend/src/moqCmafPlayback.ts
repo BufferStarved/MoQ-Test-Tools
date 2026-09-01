@@ -326,7 +326,34 @@ export function isCaptureOrPublishError(error?: string | null): boolean {
     text.includes("file exists") ||
     text.includes("would block") ||
     text.includes("dropping fragment") ||
-    text.includes("write-blocked")
+    text.includes("write-blocked") ||
+    text.includes("unknown option") ||
+    text.includes("vtag") ||
+    text.includes("slave muxer") ||
+    text.includes("option not found") ||
+    text.includes("nothing was written")
+  );
+}
+
+/** MPEG-TS→FLV remux left tag 27 or passed muxer option vtag (Lavf63). */
+export function isFlvVtagRemuxMiss(error?: string | null): boolean {
+  const raw = error || "";
+  return (
+    /tag \[27\]/i.test(raw) ||
+    /\[27\]\[0\]\[0\]\[0\]/i.test(raw) ||
+    /0x001b/i.test(raw) ||
+    /unknown option ['"]?vtag['"]?/i.test(raw) ||
+    /incompatible with output codec id/i.test(raw) ||
+    (/option not found/i.test(raw) && /flv|tee|vtag/i.test(raw)) ||
+    (/slave muxer/i.test(raw) && /vtag|flv|0x001b|\[27\]|option not found/i.test(raw)) ||
+    (/nothing was written/i.test(raw) && /flv|tee|vtag|option not found/i.test(raw))
+  );
+}
+
+function flvVtagRemuxFailMessage(code: string): string {
+  return (
+    `RTMP publish failed (ffmpeg ${code}): comparison remux from MPEG-TS left FLV vtag 27. ` +
+    "Needs -tag:v 7. Muxer option vtag=7 is not supported on this ffmpeg. This is not an ingest close."
   );
 }
 
@@ -403,14 +430,14 @@ export function humanizeJobError(
   ) {
     return "RTMP publish failed (ffmpeg 251). Another publisher already holds this stream key. This is not an ingest close mid-stream.";
   }
+  const flvVtagMiss = isFlvVtagRemuxMiss(raw);
   if (
-    kind === "rtmp" &&
-    (ffmpegCode === "183" || /tag \[27\]/i.test(raw) || /incompatible with output codec id/i.test(raw))
+    flvVtagMiss ||
+    (kind === "rtmp" &&
+      (ffmpegCode === "183" || ffmpegCode === "8") &&
+      /flv|tee|vtag|0x001b|\[27\]/i.test(raw))
   ) {
-    return (
-      "RTMP publish failed (ffmpeg 183): comparison remux from MPEG-TS left FLV vtag 27. " +
-      "Needs -tag:v 7 / vtag=7. This is not an ingest close."
-    );
+    return flvVtagRemuxFailMessage(ffmpegCode || (flvVtagMiss ? "8" : "183"));
   }
   if (kind === "rtmp") {
     return ffmpegCode

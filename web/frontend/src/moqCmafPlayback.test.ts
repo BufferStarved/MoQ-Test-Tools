@@ -11,6 +11,7 @@ import {
   CMAF_STARVE_HOLD_SEC,
   humanizeJobError,
   isCaptureOrPublishError,
+  isFlvVtagRemuxMiss,
   isPlayableCatalogReady,
   isPublisherNotReadyError,
   isSubscribeRejectedLog,
@@ -447,6 +448,29 @@ describe("humanizeJobError protocol", () => {
     assert.doesNotMatch(shown, /The ingest closed/i);
     assert.doesNotMatch(shown, /closed publisher pipe/i);
     assert.doesNotMatch(shown, /CMAF/i);
+  });
+
+  it("does not dress prod Lavf63 unknown option vtag ffmpeg 8 as an ingest close", () => {
+    const raw =
+      "RTMP publish failed (ffmpeg 8): Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p | [flv @ 0x77e4b4070d80] Unknown option 'vtag' | [tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting. | Conversion failed!. The ingest closed the connection — this is not a MoQ publisher pipe.";
+    const shown = humanizeJobError(raw, { protocol: "rtmp" }) ?? "";
+    assert.match(shown, /ffmpeg 8/);
+    assert.match(shown, /vtag 27/i);
+    assert.doesNotMatch(shown, /The ingest closed/i);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
+  });
+
+  it("classifies the operator Lavf63 tee-header empty-output miss without protocol", () => {
+    const raw =
+      "RTMP publish failed (ffmpeg 8): encoder         : Lavf63.6.100 | Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], q=2-31, 30 fps, 30 tbr, 90k tbn | Press [q] to stop, [?] for help | [flv @ 0x77e4b4070d80] Unknown option 'vtag' | [tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting. | [out#0/tee @ 0x5da730d7f080] Could not write header (incorrect codec parameters ?): Option not found | Nothing was written into output file | [out#1/mpegts @ 0x5da730d80000] Output file is empty | Conversion failed!. The ingest closed the connection — this is not a MoQ publisher pipe.";
+    assert.equal(isFlvVtagRemuxMiss(raw), true);
+    const shown = humanizeJobError(raw) ?? "";
+    assert.match(shown, /ffmpeg 8/);
+    assert.match(shown, /vtag 27/i);
+    assert.match(shown, /Needs -tag:v 7/);
+    assert.doesNotMatch(shown, /The ingest closed/i);
+    assert.doesNotMatch(shown, /Unknown option/);
+    assert.doesNotMatch(shown, /closed publisher pipe/i);
   });
 
   it("does not dress VMAF overwrite 239 as an RTMP ingest close", () => {

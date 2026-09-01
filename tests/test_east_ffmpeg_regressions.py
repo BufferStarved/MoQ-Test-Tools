@@ -248,6 +248,74 @@ class FfmpegFailureMessageTests(unittest.TestCase):
             )
         )
 
+    def test_rtmp_8_unknown_vtag_option_is_not_ingest_close(self) -> None:
+        from upload_service import ingest_session_retry_kind, looks_like_flv_vtag_mismatch
+
+        process = MagicMock()
+        process.returncode = 8
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p\n"
+            b"[flv @ 0x77e4b4070d80] Unknown option 'vtag'\n"
+            b"[tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting.\n"
+            b"[out#0/tee @ 0x5da730d7f080] Could not write header "
+            b"(incorrect codec parameters ?): Option not found\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertTrue(looks_like_flv_vtag_mismatch(message, 8))
+        self.assertIn("vtag 27", message)
+        self.assertIn("ffmpeg 8", message)
+        self.assertIn("Needs -tag:v 7", message)
+        self.assertIn("not an ingest close", message)
+        self.assertNotIn("The ingest closed", message)
+        self.assertNotIn("Unknown option", message)
+
+    def test_rtmp_8_tee_header_empty_output_is_not_ingest_close(self) -> None:
+        from upload_service import ingest_session_retry_kind, looks_like_flv_vtag_mismatch
+
+        process = MagicMock()
+        process.returncode = 8
+        process.stderr = MagicMock()
+        process.stderr.read.return_value = (
+            b"encoder         : Lavf63.6.100\n"
+            b"Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p\n"
+            b"[flv @ 0x77e4b4070d80] Unknown option 'vtag'\n"
+            b"[tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting.\n"
+            b"[out#0/tee @ 0x5da730d7f080] Could not write header "
+            b"(incorrect codec parameters ?): Option not found\n"
+            b"Nothing was written into output file\n"
+            b"[out#1/mpegts @ 0x5da730d80000] Output file is empty\n"
+            b"Conversion failed!\n"
+        )
+        message = UploadService()._ffmpeg_failure_message(process, protocol="rtmp")
+        self.assertTrue(looks_like_flv_vtag_mismatch(message, 8))
+        self.assertIn("vtag 27", message)
+        self.assertIn("Needs -tag:v 7", message)
+        self.assertNotIn("The ingest closed", message)
+        self.assertNotIn("Unknown option", message)
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=0.4,
+                remaining_sec=19.6,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+                error=message,
+            )
+        )
+        self.assertIsNone(
+            ingest_session_retry_kind(
+                protocol="rtmp",
+                ran_sec=0.4,
+                remaining_sec=19.6,
+                early_exit_retries=0,
+                mid_run_retries=0,
+                cancelled=False,
+                error=message,
+            )
+        )
+
     def test_moq_closed_pipe_keeps_cmaf_hint(self) -> None:
         process = MagicMock()
         process.returncode = 224

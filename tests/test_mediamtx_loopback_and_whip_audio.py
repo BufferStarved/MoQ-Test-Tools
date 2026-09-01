@@ -77,6 +77,24 @@ class MediaMtxProbeUrlTests(unittest.TestCase):
             "http://66.175.213.81:8888/benchmark/index.m3u8",
         )
 
+    def test_remote_mediamtx_rtmp_preview_uses_unique_job_path(self) -> None:
+        service = UploadService()
+        job = UploadJob(
+            media_path="/tmp/x.mp4",
+            destination=DestinationProfile(
+                protocol="rtmp",
+                url="rtmp://173.230.155.121:1935/benchmark-a1b2c3d4",
+                preset_id="moq_mediamtx_linode_west_rtmp",
+                ingest_provider="linode_west_mediamtx",
+            ),
+            duration_sec=5,
+        )
+        self.assertTrue(service._is_remote_mediamtx_publish(job))
+        self.assertEqual(
+            service._managed_hls_manifest_url(job),
+            "http://173.230.155.121:8888/benchmark-a1b2c3d4/index.m3u8",
+        )
+
     def test_colocated_mediamtx_preview_uses_loopback(self) -> None:
         service = UploadService()
         job = UploadJob(

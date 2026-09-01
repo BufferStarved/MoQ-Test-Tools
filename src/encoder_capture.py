@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
-from typing import List
+from typing import List, Optional
 
 from moq_publish import MPEGTS_VIDEO_BSF
 
@@ -44,8 +44,22 @@ def vmaf_reference_path(temp_dir: str, protocol: str = "", job_id: str = "") -> 
     return os.path.join(temp_dir, vmaf_reference_filename(protocol, job_id))
 
 
-def build_tee_output_args(protocol: str, network_url: str, capture_path: str) -> List[str]:
-    """Build ffmpeg tee muxer args that write to network + local capture file."""
+def build_tee_output_args(
+    protocol: str,
+    network_url: str,
+    capture_path: str,
+    *,
+    follow_codec: Optional[List[str]] = None,
+) -> List[str]:
+    """Build ffmpeg args that write to network + local capture file.
+
+    SRT still uses the tee muxer (MPEG-TS slaves accept the same packets).
+    RTMP must not: prod Lavf63 forwards stream ``-tag:v 7`` to each FLV
+    slave as muxer option ``vtag``, which FLV rejects (``Unknown option
+    'vtag'``). Two discrete ``-f flv`` outputs plus stream ``-tag:v 7``
+    set FLV tag 7 without that muxer option. ffmpeg 8 does not inherit
+    ``-c:v`` onto the second output, so ``follow_codec`` restates it.
+    """
     if protocol in {"srt", "hls", "dash", "http"}:
         tee_spec = (
             f"[f=mpegts]{network_url}|[f=mpegts:onfail=ignore]{capture_path}"
@@ -53,14 +67,21 @@ def build_tee_output_args(protocol: str, network_url: str, capture_path: str) ->
         return ["-map", "0", "-bsf:v", MPEGTS_VIDEO_BSF, "-f", "tee", tee_spec]
 
     if protocol == "rtmp":
-        # Copy remux from the comparison MPEG-TS hub leaves codec_tag=27
-        # (AV_CODEC_ID_H264). FLV requires tag 7 or ffmpeg 183s:
-        # "Tag [27] incompatible with output codec id '27' ([7][0][0][0])".
-        tee_spec = (
-            f"[f=flv:vtag=7:flvflags=no_duration_filesize]{network_url}"
-            f"|[f=flv:vtag=7:flvflags=no_duration_filesize:onfail=ignore]{capture_path}"
-        )
-        return ["-map", "0", "-tag:v", "7", "-f", "tee", tee_spec]
+        # MPEG-TS hub copy remux leaves codec_tag=27. FLV needs stream tag 7.
+        # Never put a muxer option named vtag on FLV (Lavf63 rejects it).
+        flv = ["-tag:v", "7", "-f", "flv", "-flvflags", "no_duration_filesize"]
+        second_codec = list(follow_codec or ["-c:v", "copy", "-c:a", "copy"])
+        return [
+            "-map",
+            "0",
+            *flv,
+            network_url,
+            "-map",
+            "0",
+            *second_codec,
+            *flv,
+            capture_path,
+        ]
 
     raise ValueError(f"Encoder capture tee is not supported for protocol: {protocol}")
 

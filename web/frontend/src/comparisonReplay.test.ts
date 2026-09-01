@@ -684,6 +684,134 @@ describe("comparison 32 Zixi occupied RTMP 251", () => {
   });
 });
 
+describe("cloud-compare RTMP BBB MTX HLS 404 after job failed", () => {
+  it("keeps prod ffmpeg 8 unknown vtag as remux miss, not only HLS 404", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 5 (RTMP) · linode/us-west",
+      protocol: "rtmp",
+      endpoint: "rtmp://173.230.155.121:1935/benchmark",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const hudLines = [
+      "gate=ended",
+      "job=failed",
+      "benchmark=idle",
+      "player=Failed (see diagnostics)",
+      "manifest_poll=N http=404 origin_miss=N",
+      "last_error=HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+      "manifest=http://173.230.155.121:8888/benchmark/index.m3u8",
+    ];
+    const shown = visibleLeg(row, {
+      jobStatus: "failed",
+      jobError:
+        "RTMP publish failed (ffmpeg 8): encoder         : Lavf63.6.100 | Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], q=2-31, 30 fps, 30 tbr, 90k tbn | Press [q] to stop, [?] for help | [flv @ 0x77e4b4070d80] Unknown option 'vtag' | [tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting. | Conversion failed!. The ingest closed the connection — this is not a MoQ publisher pipe.",
+      hlsLastError:
+        "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+    });
+    assert.match(hudLines.join("\n"), /173\.230\.155\.121:8888\/benchmark\/index\.m3u8/);
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /ffmpeg 8/);
+    assert.match(shown.error ?? "", /vtag 27/i);
+    assert.doesNotMatch(shown.error ?? "", /HLS manifest never loaded/i);
+    assert.doesNotMatch(shown.error ?? "", /The ingest closed/i);
+    assert.doesNotMatch(shown.status, /Playback OK/i);
+  });
+
+  it("keeps the 2026-09-01 Cloud/Edge Zixi+MTX Lavf63 tee vtag miss as one remux HUD", () => {
+    const operatorError =
+      "RTMP publish failed (ffmpeg 8): encoder         : Lavf63.6.100 | Stream #1:0: Video: h264 (Main) ([27][0][0][0] / 0x001B), yuv420p(progressive), 1280x720 [SAR 1:1 DAR 16:9], q=2-31, 30 fps, 30 tbr, 90k tbn | Press [q] to stop, [?] for help | [flv @ 0x77e4b4070d80] Unknown option 'vtag' | [tee @ 0x5da730d7dd80] Slave muxer #0 failed, aborting. | [out#0/tee @ 0x5da730d7f080] Could not write header (incorrect codec parameters ?): Option not found | Nothing was written into output file | [out#1/mpegts @ 0x5da730d80000] Output file is empty | Conversion failed!. The ingest closed the connection — this is not a MoQ publisher pipe.";
+    const zixiHud = [
+      "gate=ended",
+      "job=failed",
+      "player=Failed (see diagnostics)",
+      "last_error=mpegts origin sent no media",
+    ];
+    const mtxHud = [
+      "gate=ended",
+      "job=failed",
+      "benchmark=idle",
+      "player=Failed (see diagnostics)",
+      "manifest_poll=N http=404 origin_miss=N",
+      "last_error=HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+      "manifest=http://173.230.155.121:8888/benchmark/index.m3u8",
+    ];
+    const zixi = visibleLeg(
+      {
+        stream: "Stream 4 (RTMP) · gcp/us-central1",
+        protocol: "rtmp",
+        endpoint: "rtmp://35.222.33.58:1935/live/benchmark",
+        encode_frames_total: 0,
+        playback_frames_rendered: 0,
+        playback_video_time_sec: 0,
+        playback_ttff_ms: 0,
+        moqx_publish_namespace_success: 0,
+      },
+      {
+        jobStatus: "failed",
+        jobError: operatorError,
+        mpegTsLastReason: "mpegts origin sent no media",
+      },
+    );
+    const mtx = visibleLeg(
+      {
+        stream: "Stream 5 (RTMP) · linode/us-west",
+        protocol: "rtmp",
+        endpoint: "rtmp://173.230.155.121:1935/benchmark",
+        encode_frames_total: 0,
+        playback_frames_rendered: 0,
+        playback_video_time_sec: 0,
+        playback_ttff_ms: 0,
+        moqx_publish_namespace_success: 0,
+      },
+      {
+        jobStatus: "failed",
+        jobError: operatorError,
+        hlsLastError:
+          "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+      },
+    );
+    assert.match(zixiHud.join("\n"), /mpegts origin sent no media/);
+    assert.match(mtxHud.join("\n"), /173\.230\.155\.121:8888\/benchmark\/index\.m3u8/);
+    for (const shown of [zixi, mtx]) {
+      assert.equal(shown.status, "Failed");
+      assert.equal(shown.error, zixi.error);
+      assert.match(shown.error ?? "", /ffmpeg 8/);
+      assert.match(shown.error ?? "", /vtag 27/i);
+      assert.match(shown.error ?? "", /Needs -tag:v 7/);
+      assert.doesNotMatch(shown.error ?? "", /The ingest closed/i);
+      assert.doesNotMatch(shown.error ?? "", /Unknown option/);
+      assert.doesNotMatch(shown.error ?? "", /HLS manifest never loaded/i);
+      assert.doesNotMatch(shown.error ?? "", /mpegts origin sent no media/i);
+      assert.doesNotMatch(shown.status, /Playback OK/i);
+    }
+  });
+
+  it("does not let HLS 404 be the only story when job=failed with no job.error", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 5 (RTMP) · linode/us-west",
+      protocol: "rtmp",
+      endpoint: "rtmp://173.230.155.121:1935/benchmark",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "failed",
+      hlsLastError:
+        "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /Publish job failed/i);
+    assert.doesNotMatch(shown.error ?? "", /HLS manifest never loaded/i);
+  });
+});
+
 describe("comparison 32 Linode Zixi SRT idle HTTP-TS", () => {
   it("fails closed on 45.33.68.151:7777 HTTP 200 + 0 TS bytes, not frozen host", () => {
     const row: ComparisonLastRow = {

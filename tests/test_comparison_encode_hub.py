@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -19,9 +21,11 @@ from comparison_encode_hub import (  # noqa: E402
     shared_encode_reader_url,
 )
 from destinations import DestinationProfile  # noqa: E402
+from encoder_capture import build_tee_output_args  # noqa: E402
 from moq_publish import (  # noqa: E402
     SHARED_ENCODE_QUERY,
     build_ffmpeg_moq_cmd,
+    find_ffmpeg,
     is_brokered_webcam_udp,
     is_shared_encode_udp,
 )
@@ -180,7 +184,7 @@ class CopyRemuxTests(unittest.TestCase):
                 self.assertIn("flv", formats)
 
     @patch("upload_service.find_ffmpeg", return_value="ffmpeg")
-    def test_rtmp_encoder_tee_also_forces_flv_vtag_7(self, _ffmpeg):
+    def test_rtmp_encoder_capture_uses_two_flv_outputs_not_tee(self, _ffmpeg):
         url = shared_encode_reader_url(41997)
         job = UploadJob(
             media_path=url,
@@ -195,8 +199,88 @@ class CopyRemuxTests(unittest.TestCase):
         cmd = job._build_ffmpeg_cmd(capture_path="/tmp/encoder_capture.flv")
         self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
         self.assertEqual(cmd[cmd.index("-tag:v") + 1], "7")
-        spec = next(arg for arg in cmd if "vtag=7" in arg)
-        self.assertIn("rtmp://35.222.33.58:1935/live/benchmark", spec)
+        self.assertNotIn("tee", cmd)
+        self.assertTrue(all("vtag=" not in str(arg) for arg in cmd))
+        formats = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-f"]
+        self.assertGreaterEqual(formats.count("flv"), 2)
+        self.assertNotIn("tee", formats)
+        self.assertIn("rtmp://35.222.33.58:1935/live/benchmark", cmd)
+        self.assertIn("/tmp/encoder_capture.flv", cmd)
+
+    def test_ffmpeg8_two_output_remux_sets_flv_tag_7_without_muxer_vtag(self):
+        ffmpeg = find_ffmpeg()
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = str(Path(tmp) / "hub.ts")
+            net = str(Path(tmp) / "net.flv")
+            cap = str(Path(tmp) / "cap.flv")
+            ref = str(Path(tmp) / "ref.ts")
+            make = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=size=320x180:rate=30:duration=0.4",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:duration=0.4",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "64k",
+                    "-bsf:v",
+                    "h264_mp4toannexb",
+                    "-f",
+                    "mpegts",
+                    hub,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(make.returncode, 0, make.stderr)
+            remux = [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-i",
+                hub,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                *build_tee_output_args("rtmp", net, cap),
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-f",
+                "mpegts",
+                ref,
+            ]
+            self.assertNotIn("tee", remux)
+            self.assertTrue(all("vtag=" not in arg for arg in remux))
+            done = subprocess.run(remux, capture_output=True, text=True, check=False)
+            combined = f"{done.stdout}\n{done.stderr}"
+            self.assertNotIn("Unknown option", combined)
+            self.assertNotIn("unknown option 'vtag'", combined.lower())
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("([7][0][0][0]", done.stderr)
+            self.assertTrue(Path(net).is_file() and Path(net).stat().st_size > 0)
+            self.assertTrue(Path(cap).is_file() and Path(cap).stat().st_size > 0)
 
     def test_moq_cmd_copies_shared_master(self):
         url = shared_encode_reader_url(41998)

@@ -13,6 +13,7 @@ import {
 import { PROD_PRESETS } from "./fixtures/prodPresets.ts";
 import {
   RECIPE_HIDDEN_INGEST_IDS,
+  cloudHostFromIngest,
   ingestEndpointIdForPreset,
   resolveEndpointUrl,
 } from "./ingestEndpoints.ts";
@@ -38,11 +39,11 @@ import {
 } from "./recipeSupport.ts";
 
 const RECIPES: BenchmarkPresetId[] = [
-  "build-your-own",
   "protocol-compare",
   "cloud-compare",
   "contribution-compare",
   "webrtc-vs-moq",
+  "build-your-own",
 ];
 
 const SOURCES: RecipeSourceId[] = ["dummy", "bbb", "upload", "webcam", "browser_moq"];
@@ -259,6 +260,60 @@ describe("every prod dest × playback mode", () => {
       playbackModesForSelection("srt", "custom", centralUrl).map((item) => item.id),
       ["hls", "mpegts"],
     );
+  });
+
+  it("cloud-compare RTMP BBB fans five dests: Zixi HTTP-TS plus unique-host MTX LL-HLS", () => {
+    const applied = applyBenchmarkPreset("cloud-compare", ctx("bbb", "ffmpeg"), nextId(), {
+      source: "bbb",
+      encoder: "ffmpeg",
+      protocol: "rtmp",
+    });
+    assert.equal(applied.endpoints.length, 5, String(applied.endpoints.map((item) => item.ingestEndpointId)));
+    const byHost = Object.fromEntries(
+      applied.endpoints.map((endpoint) => [cloudHostFromIngest(endpoint.ingestEndpointId), endpoint]),
+    );
+    assert.equal(byHost.gcp_central?.ingestEndpointId, "gcp_zixi");
+    assert.equal(byHost.gcp_east?.ingestEndpointId, "gcp_east_zixi");
+    assert.equal(byHost.linode_east?.ingestEndpointId, "linode_zixi");
+    assert.equal(byHost.linode_central?.ingestEndpointId, "linode_central_mediamtx");
+    assert.equal(byHost.linode_west?.ingestEndpointId, "linode_west_mediamtx");
+    const playUrls: string[] = [];
+    for (const endpoint of applied.endpoints) {
+      const url = resolveEndpointUrl(endpoint, PROD_PRESETS);
+      const target = resolvePlaybackTarget({
+        protocol: "rtmp",
+        endpointUrl: url,
+        ingestEndpointId: endpoint.ingestEndpointId,
+        playbackMode: endpoint.playbackMode,
+      });
+      playUrls.push(target.url);
+      if (endpoint.ingestEndpointId.endsWith("_zixi")) {
+        assert.equal(target.engine, "mpegts");
+        assert.match(target.url, /:7777\/benchmark\.ts/);
+        assert.doesNotMatch(target.url, /:8888/);
+        assert.doesNotMatch(target.url, /173\.230\.155\.121/);
+      } else {
+        assert.equal(target.engine, "hls");
+        assert.match(target.url, /:8888\/benchmark\/index\.m3u8/);
+      }
+    }
+    assert.equal(new Set(playUrls).size, 5, String(playUrls));
+    assert.equal(
+      playUrls.filter((item) => item.includes("173.230.155.121:8888/benchmark/index.m3u8")).length,
+      1,
+    );
+  });
+
+  it("MediaMTX RTMP unique job path plays LL-HLS on the same host, not standing benchmark", () => {
+    const target = resolvePlaybackTarget({
+      protocol: "rtmp",
+      endpointUrl: "rtmp://173.230.155.121:1935/benchmark-a1b2c3d4",
+      ingestEndpointId: "linode_west_mediamtx",
+      playbackMode: "ll-hls",
+    });
+    assert.equal(target.engine, "hls");
+    assert.equal(target.url, "http://173.230.155.121:8888/benchmark-a1b2c3d4/index.m3u8");
+    assert.doesNotMatch(target.url, /\/benchmark\/index\.m3u8/);
   });
 
   it("remaps a saved Fast HLS player off East Zixi before Start", () => {

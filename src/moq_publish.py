@@ -208,6 +208,42 @@ def zixi_stream_id_from_rtmp_url(url: str) -> Optional[str]:
     return key or None
 
 
+def mediamtx_rtmp_job_path(job_id: str) -> str:
+    """Per-job MediaMTX path so RTMP does not steal SRT/WHIP ``benchmark``."""
+    slug = (job_id or "").replace("-", "")[:8]
+    return f"benchmark-{slug}" if slug else "benchmark"
+
+
+def with_mediamtx_rtmp_path(url: str, path: str) -> str:
+    """Replace the RTMP stream key (last path segment)."""
+    text = (url or "").strip()
+    clean = (path or "").strip().strip("/")
+    if not text or not clean:
+        return text
+    parsed = urlparse(text)
+    parts = [p for p in (parsed.path or "").split("/") if p]
+    if parts:
+        parts[-1] = clean
+    else:
+        parts = [clean]
+    return urlunparse(parsed._replace(path="/" + "/".join(parts)))
+
+
+def apply_mediamtx_rtmp_job_path(
+    url: str,
+    *,
+    protocol: str,
+    ingest_provider: str,
+    job_id: str,
+) -> str:
+    """Give MediaMTX RTMP a unique path. Zixi and SRT/WHIP stay on ``benchmark``."""
+    if (protocol or "").strip().lower() != "rtmp":
+        return url
+    if not (ingest_provider or "").strip().lower().endswith("_mediamtx"):
+        return url
+    return with_mediamtx_rtmp_path(url, mediamtx_rtmp_job_path(job_id))
+
+
 def zixi_http_push_stream_id_for_preset(preset_id: str) -> Optional[str]:
     """Stream ID for Zixi TS-over-HTTP push presets (HLS/DASH ingest buttons)."""
     if preset_id in _ZIXI_HTTP_PUSH_PRESET_IDS:

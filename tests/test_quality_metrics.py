@@ -32,10 +32,15 @@ class EncoderCaptureTests(unittest.TestCase):
     def test_build_tee_output_args_rtmp(self):
         args = build_tee_output_args("rtmp", "rtmp://host/live/key", "/tmp/capture.flv")
         self.assertEqual(args[0:4], ["-map", "0", "-tag:v", "7"])
-        spec = args[args.index("-f") + 2]
-        self.assertIn("vtag=7", spec)
-        self.assertIn("rtmp://host/live/key", spec)
-        self.assertIn("/tmp/capture.flv", spec)
+        self.assertNotIn("tee", args)
+        self.assertTrue(all("vtag=" not in str(arg) for arg in args))
+        self.assertEqual(args.count("-f"), 2)
+        self.assertEqual(args[args.index("-f") + 1], "flv")
+        self.assertIn("no_duration_filesize", args)
+        self.assertIn("rtmp://host/live/key", args)
+        self.assertIn("/tmp/capture.flv", args)
+        self.assertEqual(args[args.index("-c:v") + 1], "copy")
+        self.assertEqual(args[args.index("-c:a") + 1], "copy")
 
 
 class QualityMetricsTests(unittest.TestCase):

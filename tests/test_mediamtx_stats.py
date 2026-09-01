@@ -62,6 +62,14 @@ class MediaMtxPathFromUrlTests(unittest.TestCase):
             "benchmark",
         )
 
+    def test_rtmp_unique_job_path(self):
+        self.assertEqual(
+            MediaMtxStatsPoller._path_from_url(
+                "rtmp://173.230.155.121:1935/benchmark-a1b2c3d4"
+            ),
+            "benchmark-a1b2c3d4",
+        )
+
     def test_whip_path(self):
         self.assertEqual(
             MediaMtxStatsPoller._path_from_url("http://34.9.217.178:8889/benchmark/whip"),

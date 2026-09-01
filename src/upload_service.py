@@ -222,15 +222,56 @@ def looks_like_vmaf_overwrite(text: str) -> bool:
 
 
 def looks_like_flv_vtag_mismatch(text: str, returncode: int | None = None) -> bool:
-    """Copy remux MPEG-TS (codec_tag=27) into FLV without vtag=7 — ffmpeg 183.
+    """Copy remux MPEG-TS (codec_tag=27) into FLV without stream tag 7.
 
-    Not an ingest close. Retrying will hit the same mux error.
+    ffmpeg 183 is the classic ``Tag [27] incompatible`` miss. Prod Lavf63
+    instead dies ffmpeg 8 when a muxer option named vtag reaches FLV
+    (``Unknown option 'vtag'`` / ``Option not found``) while the stream is
+    still tagged 27 / 0x001B — including the leftover ``-tag:v 7`` + tee
+    path that forwards the stream tag as slave option vtag. Neither is an
+    ingest close. Retrying will hit the same mux error.
     """
     t = (text or "").lower()
-    tag_miss = "tag [27]" in t or "incompatible with output codec" in t
-    if returncode == 183 or "ffmpeg 183" in t or "code 183" in t:
-        return tag_miss or "flv" in t
-    return tag_miss
+    tag_miss = (
+        "tag [27]" in t
+        or "incompatible with output codec" in t
+        or "([27][0][0][0]" in t
+        or "0x001b" in t
+        or "vtag 27" in t
+        or "needs -tag:v 7" in t
+        or "muxer option vtag" in t
+        or "unknown option 'vtag'" in t
+        or 'unknown option "vtag"' in t
+        or ("unknown option" in t and "vtag" in t)
+        or (
+            "option not found" in t
+            and ("flv" in t or "tee" in t or "vtag" in t)
+        )
+    )
+    tee_header_empty = (
+        ("slave muxer" in t or "could not write header" in t)
+        and ("nothing was written" in t or "output file is empty" in t)
+        and ("flv" in t or "tee" in t or "vtag" in t)
+    )
+    if returncode in {8, 183} or "ffmpeg 183" in t or "code 183" in t or "ffmpeg 8" in t:
+        return tag_miss or tee_header_empty or (
+            "flv" in t
+            and (
+                "vtag" in t
+                or "option not found" in t
+                or "slave muxer" in t
+            )
+        )
+    return tag_miss or tee_header_empty
+
+
+def flv_vtag_remux_fail_message(returncode: int | None) -> str:
+    """One HUD line for MPEG-TS→FLV tag 7 miss / rejected muxer vtag."""
+    code = returncode if returncode is not None else 8
+    return (
+        f"RTMP publish failed (ffmpeg {code}): comparison remux from MPEG-TS left FLV vtag 27. "
+        "Needs -tag:v 7. Muxer option vtag=7 is not supported on this ffmpeg. This is not an ingest close."
+    )
 
 
 def looks_like_occupied_rtmp_input(text: str, returncode: int | None = None) -> bool:
@@ -469,6 +510,11 @@ class UploadJob:
         udp_url: str = "",
         capture_path: str = "",
     ) -> List[str]:
+        audio_args = (
+            WHIP_COMPAT_AUDIO_ARGS
+            if self.destination.protocol == "webrtc"
+            else BROWSER_COMPAT_AUDIO_ARGS
+        )
         if capture_path:
             if udp_url:
                 network_url = udp_url
@@ -478,10 +524,16 @@ class UploadJob:
                 network_url = self.destination.url
                 if self._is_mediamtx_destination():
                     network_url = mediamtx_loopback_publish_url(network_url)
+            follow_codec = (
+                [*self._video_args(), *audio_args]
+                if self.destination.protocol == "rtmp"
+                else None
+            )
             output_args = build_tee_output_args(
                 self.destination.protocol,
                 network_url,
                 capture_path,
+                follow_codec=follow_codec,
             )
         elif udp_url:
             output_args = ["-bsf:v", MPEGTS_VIDEO_BSF, "-f", "mpegts", udp_url]
@@ -490,11 +542,6 @@ class UploadJob:
         offset_args: List[str] = []
         if self._uses_zixi_mpegts_output():
             offset_args = ffmpeg_output_ts_offset_args(self._ensure_zixi_output_ts_offset())
-        audio_args = (
-            WHIP_COMPAT_AUDIO_ARGS
-            if self.destination.protocol == "webrtc"
-            else BROWSER_COMPAT_AUDIO_ARGS
-        )
         # Live sources: stream-copy the consumed input as the VMAF reference
         # (see vmaf_reference_capture_path). Positioned as a second output so
         # the -c:v copy only applies to it, not the network encode. Device
@@ -1602,15 +1649,16 @@ class UploadService:
 
     def _managed_hls_manifest_url(self, job: UploadJob) -> Optional[str]:
         if self._is_mediamtx_destination(job):
+            path_name = MediaMtxStatsPoller._path_from_url(job.destination.url) or "benchmark"
             if job.publisher_host == "local" or self._is_remote_mediamtx_publish(job):
                 # Laptop agents and cross-cloud encodes are not co-located with
                 # MediaMTX. Probe the same public LL-HLS origin the browser uses.
                 # Loopback here would hit us-central1 MediaMTX (or nothing).
-                return mediamtx_hls_playback_url("benchmark", endpoint_url=job.destination.url)
+                return mediamtx_hls_playback_url(path_name, endpoint_url=job.destination.url)
             # Cloud encode is co-located with MediaMTX; probe via loopback. Hairpinning
             # to the VM's own public IP can hang, so public playback URLs stay in the
             # SPA/proxy for that case.
-            return mediamtx_hls_probe_url("benchmark")
+            return mediamtx_hls_probe_url(path_name)
         stream_id = job.managed_zixi_stream_id()
         if not stream_id:
             return None
@@ -3616,12 +3664,10 @@ class UploadService:
                 "already exists (overwrite prompt). This is not an ingest close "
                 "or a MoQ publisher pipe."
             )
-        if proto == "rtmp" and looks_like_flv_vtag_mismatch(stderr, process.returncode):
-            return (
-                f"RTMP publish failed (ffmpeg {process.returncode}). "
-                "Comparison remux from MPEG-TS left FLV vtag 27. "
-                "Needs -tag:v 7 / vtag=7. This is not an ingest close."
-            )
+        if proto == "rtmp" and looks_like_flv_vtag_mismatch(
+            f"{stderr}\n{detail}", process.returncode
+        ):
+            return flv_vtag_remux_fail_message(process.returncode)
         if proto == "rtmp" and looks_like_occupied_rtmp_input(
             f"{stderr}\n{detail}", process.returncode
         ):
@@ -3642,6 +3688,8 @@ class UploadService:
         ):
             message = combine_ffmpeg_closed_pipe_error(message, "")
         elif proto == "rtmp":
+            if looks_like_flv_vtag_mismatch(f"{stderr}\n{detail}", process.returncode):
+                return flv_vtag_remux_fail_message(process.returncode)
             message = (
                 f"RTMP publish failed (ffmpeg {process.returncode}): {detail}. "
                 "The ingest closed the connection — this is not a MoQ publisher pipe."
