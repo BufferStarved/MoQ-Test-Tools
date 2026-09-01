@@ -53,11 +53,14 @@ def build_tee_output_args(protocol: str, network_url: str, capture_path: str) ->
         return ["-map", "0", "-bsf:v", MPEGTS_VIDEO_BSF, "-f", "tee", tee_spec]
 
     if protocol == "rtmp":
+        # Copy remux from the comparison MPEG-TS hub leaves codec_tag=27
+        # (AV_CODEC_ID_H264). FLV requires tag 7 or ffmpeg 183s:
+        # "Tag [27] incompatible with output codec id '27' ([7][0][0][0])".
         tee_spec = (
-            f"[f=flv:flvflags=no_duration_filesize]{network_url}"
-            f"|[f=flv:flvflags=no_duration_filesize:onfail=ignore]{capture_path}"
+            f"[f=flv:vtag=7:flvflags=no_duration_filesize]{network_url}"
+            f"|[f=flv:vtag=7:flvflags=no_duration_filesize:onfail=ignore]{capture_path}"
         )
-        return ["-map", "0", "-f", "tee", tee_spec]
+        return ["-map", "0", "-tag:v", "7", "-f", "tee", tee_spec]
 
     raise ValueError(f"Encoder capture tee is not supported for protocol: {protocol}")
 

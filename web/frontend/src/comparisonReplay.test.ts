@@ -635,6 +635,30 @@ describe("BBB comparison Zixi RTMP 239 overwrite", () => {
   });
 });
 
+describe("comparison remux RTMP ffmpeg 183 FLV vtag", () => {
+  it("keeps the 16:50 FLV tag-27 miss as RTMP publish failed, not a CMAF pipe", () => {
+    const row: ComparisonLastRow = {
+      stream: "Stream 4 (RTMP) · gcp/us-central1",
+      protocol: "rtmp",
+      endpoint: "rtmp://35.222.33.58:1935/live/benchmark",
+      encode_frames_total: 0,
+      playback_frames_rendered: 0,
+      playback_video_time_sec: 0,
+      playback_ttff_ms: 0,
+      moqx_publish_namespace_success: 0,
+    };
+    const shown = visibleLeg(row, {
+      jobStatus: "failed",
+      jobError:
+        "RTMP publish failed (ffmpeg 183): Press [q] to stop, [?] for help | [flv @ 0x70b974070d80] Tag [27][0][0][0] incompatible with output codec id '27' ([7][0][0][0]) | [tee @ 0x5b246d67ec80] Slave '[f=flv:flvflags=no_duration_filesize]rtmp://35.222.33.58:1935/live/benchmark': error writing header: Invalid data",
+    });
+    assert.equal(shown.status, "Failed");
+    assert.match(shown.error ?? "", /RTMP publish failed \(ffmpeg 183\)/i);
+    assert.doesNotMatch(shown.error ?? "", /CMAF init/i);
+    assert.doesNotMatch(shown.error ?? "", /closed publisher pipe/i);
+  });
+});
+
 describe("comparison 32 Zixi occupied RTMP 251", () => {
   it("does not dress ffmpeg 251 as ingest close after a standing canary held benchmark", () => {
     const row: ComparisonLastRow = {

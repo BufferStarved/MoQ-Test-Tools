@@ -132,6 +132,8 @@ class DestinationProfile:
             return ["-f", "mpegts", self.url]
         if self.protocol == "rtmp":
             return [
+                "-tag:v",
+                "7",
                 "-f",
                 "flv",
                 "-flvflags",

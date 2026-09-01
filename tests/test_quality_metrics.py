@@ -31,9 +31,11 @@ class EncoderCaptureTests(unittest.TestCase):
 
     def test_build_tee_output_args_rtmp(self):
         args = build_tee_output_args("rtmp", "rtmp://host/live/key", "/tmp/capture.flv")
-        self.assertEqual(args[0:2], ["-map", "0"])
-        self.assertIn("rtmp://host/live/key", args[4])
-        self.assertIn("/tmp/capture.flv", args[4])
+        self.assertEqual(args[0:4], ["-map", "0", "-tag:v", "7"])
+        spec = args[args.index("-f") + 2]
+        self.assertIn("vtag=7", spec)
+        self.assertIn("rtmp://host/live/key", spec)
+        self.assertIn("/tmp/capture.flv", spec)
 
 
 class QualityMetricsTests(unittest.TestCase):

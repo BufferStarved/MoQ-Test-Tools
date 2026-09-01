@@ -170,6 +170,33 @@ class CopyRemuxTests(unittest.TestCase):
             self.assertIn("-c:v", job.ffmpeg_cmd)
             self.assertEqual(job.ffmpeg_cmd[job.ffmpeg_cmd.index("-c:v") + 1], "copy")
             self.assertNotIn("libx264", job.ffmpeg_cmd)
+            if protocol == "rtmp":
+                self.assertEqual(job.ffmpeg_cmd[job.ffmpeg_cmd.index("-tag:v") + 1], "7")
+                formats = [
+                    job.ffmpeg_cmd[i + 1]
+                    for i, arg in enumerate(job.ffmpeg_cmd)
+                    if arg == "-f" and i + 1 < len(job.ffmpeg_cmd)
+                ]
+                self.assertIn("flv", formats)
+
+    @patch("upload_service.find_ffmpeg", return_value="ffmpeg")
+    def test_rtmp_encoder_tee_also_forces_flv_vtag_7(self, _ffmpeg):
+        url = shared_encode_reader_url(41997)
+        job = UploadJob(
+            media_path=url,
+            destination=DestinationProfile(
+                protocol="rtmp",
+                url="rtmp://35.222.33.58:1935/live/benchmark",
+                preset_id="moq_zixi_gcp_rtmp",
+                ingest_provider="zixi",
+            ),
+            duration_sec=20,
+        )
+        cmd = job._build_ffmpeg_cmd(capture_path="/tmp/encoder_capture.flv")
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
+        self.assertEqual(cmd[cmd.index("-tag:v") + 1], "7")
+        spec = next(arg for arg in cmd if "vtag=7" in arg)
+        self.assertIn("rtmp://35.222.33.58:1935/live/benchmark", spec)
 
     def test_moq_cmd_copies_shared_master(self):
         url = shared_encode_reader_url(41998)
