@@ -368,14 +368,14 @@ describe("applyBenchmarkPreset", () => {
 });
 
 describe("recipe wizard locks", () => {
-  it("lists recipes most stable to least, Build Your Own last", () => {
+  it("lists presets in purpose order, Build Your Own last", () => {
     assert.deepEqual(
       BENCHMARK_PRESET_DEFS.map((item) => item.id),
       [
-        "protocol-compare",
-        "cloud-compare",
         "contribution-compare",
+        "cloud-compare",
         "webrtc-vs-moq",
+        "protocol-compare",
         "build-your-own",
       ],
     );
@@ -383,25 +383,28 @@ describe("recipe wizard locks", () => {
       BENCHMARK_PRESET_DEFS.map((item) => [item.label, item.hint]),
       [
         [
-          "Protocol Comparison",
-          "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
-        ],
-        [
-          "Cloud/Edge Comparison",
-          "Compare the same protocol across live clouds and regions. Paths and players are chosen for you.",
-        ],
-        [
           "Ingest Comparison",
           "Contribution and acquisition performance across clouds and protocols.",
         ],
-        ["Webcam Browsers", "Webcam and WebCodecs protocol comparison."],
+        [
+          "Network Path & Cloud Comparison",
+          "Same protocol across live clouds and regions. Network path and player are chosen for you.",
+        ],
+        [
+          "MoQ vs WebRTC",
+          "Webcam with WebCodecs for realtime streaming comparison.",
+        ],
+        [
+          "Protocol Comparison",
+          "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
+        ],
         ["Build Your Own", "You pick the source, destinations, and players."],
       ],
     );
     assert.equal(PRESET_COMPARISON_GROUP_LABEL, "Preset Comparisons");
     assert.deepEqual(
       PRESET_COMPARISON_DEFS.map((item) => item.id),
-      ["protocol-compare", "cloud-compare", "contribution-compare", "webrtc-vs-moq"],
+      ["contribution-compare", "cloud-compare", "webrtc-vs-moq", "protocol-compare"],
     );
     assert.equal(BUILD_YOUR_OWN_DEF?.id, "build-your-own");
     assert.equal(BENCHMARK_PRESET_DEFS.at(-1)?.id, "build-your-own");
@@ -455,7 +458,7 @@ describe("recipe wizard locks", () => {
     assert.equal(recipeLocksProtocolMix("cloud-compare"), true);
     assert.equal(recipeLocksEndpoints("cloud-compare"), true);
     assert.equal(recipeShowsSharedProtocolPicker("cloud-compare"), true);
-    assert.match(recipeLockedSummary("cloud-compare") ?? "", /One protocol, compared across live clouds/);
+    assert.match(recipeLockedSummary("cloud-compare") ?? "", /network paths and regions/);
   });
 
   it("precanned recipes never reveal the dest/player matrix before Start", () => {

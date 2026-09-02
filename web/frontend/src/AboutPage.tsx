@@ -52,11 +52,11 @@ export function AboutPage() {
     <section className="panel about-panel">
       <header className="about-header">
         <div>
-          <h2>About MoQ Bench</h2>
+          <h2>About BufferStarved</h2>
           <p className="about-lede">
-            A decision toolkit for streaming architects. Run the same encode against competing
-            upload protocols and host locations, watch browser playback side by side, and leave with
-            data for protocol choice, ingest placement, player selection, and config recipes.
+            A decision toolkit for streaming architects. Compare live ingest protocols, network
+            paths, and playback software side by side — then leave with data for protocol choice,
+            ingest placement, player selection, and workflow recipes.
           </p>
         </div>
         <div className="about-header-links">
@@ -85,6 +85,10 @@ export function AboutPage() {
                 land) under one wall-clock window.
               </li>
               <li>
+                <strong>Which network path?</strong> Same protocol across GCP, Linode, and edge
+                relays — see how geography and gateway choice change upload and glass metrics.
+              </li>
+              <li>
                 <strong>Where should I host ingest?</strong> Race Zixi, MediaMTX, OpenMOQ relay, or
                 a custom origin in the same recipe.
               </li>
@@ -104,6 +108,31 @@ export function AboutPage() {
             </ul>
           </div>
         </div>
+      </section>
+
+      <section className="about-section">
+        <h3>What to Run presets</h3>
+        <ul className="about-list">
+          <li>
+            <strong>Ingest Comparison</strong> — SRT, RTMP, and MoQ upload meters on one cloud;
+            encode and ingest only (no glass).
+          </li>
+          <li>
+            <strong>Network Path &amp; Cloud Comparison</strong> — one publish protocol fanned across
+            live regions and gateways; paths and players are chosen for you.
+          </li>
+          <li>
+            <strong>MoQ vs WebRTC</strong> — this-tab WebCodecs webcam compared on draft-18 MoQ
+            and MediaMTX WHIP/WHEP.
+          </li>
+          <li>
+            <strong>Protocol Comparison</strong> — SRT, RTMP, WebRTC, and MoQ on the most stable
+            path for each from one cloud playout source.
+          </li>
+          <li>
+            <strong>Build Your Own</strong> — pick source, destinations, protocols, and players.
+          </li>
+        </ul>
       </section>
 
       <section className="about-section">

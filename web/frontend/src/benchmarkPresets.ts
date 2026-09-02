@@ -80,25 +80,10 @@ export const PLAYER_TEST_PLACEHOLDER = {
 export const PRESET_COMPARISON_GROUP_LABEL = "Preset Comparisons";
 
 /**
- * Visitor card order: most stable preset → least stable, then Build Your Own
- * last (least constrained). Do not shuffle without updating the group chrome.
+ * Visitor card order: purpose-led presets left → right (ingest, network path,
+ * realtime browser, full protocol mix), then Build Your Own last.
  */
 export const BENCHMARK_PRESET_DEFS: BenchmarkPresetDef[] = [
-  {
-    id: "protocol-compare",
-    label: "Protocol Comparison",
-    hint: "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
-    locks: ["testScope", "outputs"],
-    lockedSummary: "SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
-  },
-  {
-    id: "cloud-compare",
-    label: "Cloud/Edge Comparison",
-    hint: "Compare the same protocol across live clouds and regions. Paths and players are chosen for you.",
-    locks: ["testScope", "outputs"],
-    lockProtocolMix: true,
-    lockedSummary: "One protocol, compared across live clouds and regions.",
-  },
   {
     id: "contribution-compare",
     label: "Ingest Comparison",
@@ -108,11 +93,26 @@ export const BENCHMARK_PRESET_DEFS: BenchmarkPresetDef[] = [
     lockedSummary: "Encode and ingest meters only. No players.",
   },
   {
+    id: "cloud-compare",
+    label: "Network Path & Cloud Comparison",
+    hint: "Same protocol across live clouds and regions. Network path and player are chosen for you.",
+    locks: ["testScope", "outputs"],
+    lockProtocolMix: true,
+    lockedSummary: "One protocol, compared across live network paths and regions.",
+  },
+  {
     id: "webrtc-vs-moq",
-    label: "Webcam Browsers",
-    hint: "Webcam and WebCodecs protocol comparison.",
+    label: "MoQ vs WebRTC",
+    hint: "Webcam with WebCodecs for realtime streaming comparison.",
     locks: ["testScope", "source", "encoder", "outputs"],
     lockedSummary: "Webcam via WebCodecs: MoQ vs WebRTC.",
+  },
+  {
+    id: "protocol-compare",
+    label: "Protocol Comparison",
+    hint: "Compare SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
+    locks: ["testScope", "outputs"],
+    lockedSummary: "SRT, RTMP, WebRTC, and MoQ on the most stable path for each.",
   },
   {
     id: "build-your-own",

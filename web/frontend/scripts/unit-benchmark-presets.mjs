@@ -20,8 +20,8 @@ assert.match(presetSrc, /cloud-compare/);
 assert.match(presetSrc, /contribution-compare/);
 assert.match(presetSrc, /webrtc-vs-moq/);
 assert.match(presetSrc, /label: "Ingest Comparison"/);
-assert.match(presetSrc, /label: "Cloud\/Edge Comparison"/);
-assert.match(presetSrc, /label: "Webcam Browsers"/);
+assert.match(presetSrc, /label: "Network Path & Cloud Comparison"/);
+assert.match(presetSrc, /label: "MoQ vs WebRTC"/);
 assert.match(presetSrc, /label: "Protocol Comparison"/);
 assert.match(presetSrc, /label: "Build Your Own"/);
 assert.match(presetSrc, /PRESET_COMPARISON_GROUP_LABEL = "Preset Comparisons"/);
@@ -36,10 +36,12 @@ assert.doesNotMatch(presetSrc, /label: "Cloud compare"/);
 assert.doesNotMatch(presetSrc, /label: "Capture to glass"/);
 assert.doesNotMatch(presetSrc, /label: "Custom"/);
 assert.doesNotMatch(presetSrc, /label: "Contribution ingest"/);
+assert.doesNotMatch(presetSrc, /label: "Webcam Browsers"/);
+assert.doesNotMatch(presetSrc, /label: "Cloud\/Edge Comparison"/);
 assert.doesNotMatch(presetSrc, /label: "WebRTC vs MoQ"/);
 assert.match(
   presetSrc,
-  /id: "protocol-compare"[\s\S]*id: "cloud-compare"[\s\S]*id: "contribution-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "build-your-own"/,
+  /id: "contribution-compare"[\s\S]*id: "cloud-compare"[\s\S]*id: "webrtc-vs-moq"[\s\S]*id: "protocol-compare"[\s\S]*id: "build-your-own"/,
 );
 assert.match(appSrc, /recipe-card-custom/);
 assert.match(appSrc, /recipe-preset-group/);
@@ -63,7 +65,8 @@ assert.match(presetSrc, /lockProtocolMix:\s*true/);
 assert.doesNotMatch(presetSrc, /lockEndpoints:\s*false/);
 assert.match(presetSrc, /most stable path for each/);
 assert.match(presetSrc, /Encode and ingest meters only/);
-assert.match(presetSrc, /One protocol, compared across live clouds/);
+assert.match(presetSrc, /One protocol, compared across live network paths/);
+assert.match(appSrc, /ideal live workflow/);
 assert.match(appSrc, /handleBenchmarkPreset/);
 assert.match(appSrc, /recipe-picker/);
 assert.match(appSrc, /recipe-options/);
@@ -77,7 +80,7 @@ assert.match(appSrc, /recipeShowsSharedProtocolPicker/);
 assert.match(appSrc, /lockProtocol=\{lockOutputProtocol\}/);
 assert.match(appSrc, /showOutputConfig && canAddOutput/);
 assert.match(appSrc, /cloud-compare-protocol/);
-assert.match(appSrc, /Ingest and players are chosen for you/);
+assert.match(presetSrc, /Network path and player are chosen for you/);
 assert.doesNotMatch(presetSrc, /aws_zixi/);
 assert.doesNotMatch(appSrc, /handleBenchmarkPreset\([^)]+\);\s*void handleStart/);
 assert.doesNotMatch(sourceSrc, /onMediaSourceChange\("browser_moq"\)/);

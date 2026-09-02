@@ -2134,9 +2134,10 @@ function App() {
             <IconBroadcast size={20} />
           </span>
           <div>
-            <h1>MoQ Bench</h1>
+            <h1>BufferStarved</h1>
             <p className="hero-lede">
-              Compare live ingest protocols. Pick a recipe, press Start, watch the players.
+              Compare live ingest protocols, network paths, and software components to find your
+              ideal live workflow.
             </p>
           </div>
         </div>
@@ -2338,7 +2339,7 @@ function App() {
                   <StepHeading
                     step={protocolStep}
                     title="Protocol"
-                    tip="Same publish protocol on every cloud tile. Mixed-protocol 4-way is Protocol Comparison. Ingest and players are chosen for you."
+                    tip="Same publish protocol on every network path tile. Mixed-protocol 4-way is Protocol Comparison. Gateways and players are chosen for you."
                   />
                   <div className="source-mode-options" role="radiogroup" aria-label="Cloud compare protocol">
                     {cloudProtocolChoices.map((protocol) => (
