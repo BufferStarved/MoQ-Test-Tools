@@ -507,6 +507,7 @@ export default function MoqPlayer({
           jobStatus: jobStatusRef.current,
           jobError: jobErrorRef.current,
           subscribeRejected: subscribeRejectedRef.current,
+          benchmarkLoading: loadingRef.current,
         });
         if (verdict.ok) {
           setError(null);

@@ -43,6 +43,7 @@ export type ComparisonHud = {
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
   runStopped?: boolean;
+  benchmarkLoading?: boolean;
 };
 
 export type VisibleLeg = {
@@ -227,6 +228,8 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
       previewReady: hud.previewReady,
       subscribeRejected,
       bitrateBps: row.playback_bitrate_bps,
+      runStopped: hud.runStopped,
+      benchmarkLoading: hud.benchmarkLoading,
     });
     return {
       stream: row.stream,
@@ -266,6 +269,7 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
       encodeElapsedSec: hud.encodeElapsedSec,
       runStopped: hud.runStopped,
       jobStatus: hud.jobStatus,
+      benchmarkLoading: hud.benchmarkLoading,
     });
     return {
       stream: row.stream,
@@ -287,6 +291,8 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
         encodeDurationSec: hud.encodeDurationSec,
         encodeElapsedSec: hud.encodeElapsedSec,
         runStopped: hud.runStopped,
+        jobStatus: hud.jobStatus,
+        benchmarkLoading: hud.benchmarkLoading,
       });
       return {
         stream: row.stream,
@@ -301,6 +307,8 @@ export function visibleLeg(row: ComparisonLastRow, hud: ComparisonHud = {}): Vis
       encodeDurationSec: hud.encodeDurationSec,
       encodeElapsedSec: hud.encodeElapsedSec,
       runStopped: hud.runStopped,
+      jobStatus: hud.jobStatus,
+      benchmarkLoading: hud.benchmarkLoading,
     });
     return {
       stream: row.stream,

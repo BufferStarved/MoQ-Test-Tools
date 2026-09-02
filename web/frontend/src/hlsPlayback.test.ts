@@ -47,4 +47,31 @@ describe("classifyHlsEndVerdict", () => {
     assert.equal(verdict.status, "Playback OK");
     assert.equal(verdict.error, null);
   });
+
+  it("returns Playback OK after operator stop even when the playhead lagged", () => {
+    const verdict = classifyHlsEndVerdict({
+      maxVideoTime: 32.2,
+      lastError:
+        "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+      encodeDurationSec: 50,
+      encodeElapsedSec: 50,
+      runStopped: true,
+      jobStatus: "completed",
+      benchmarkLoading: false,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
+
+  it("returns Playback OK when the encode completed and the comparison is idle", () => {
+    const verdict = classifyHlsEndVerdict({
+      maxVideoTime: 32.2,
+      encodeDurationSec: 50,
+      encodeElapsedSec: 50,
+      jobStatus: "completed",
+      benchmarkLoading: false,
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
 });

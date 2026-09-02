@@ -1,4 +1,4 @@
-import { isGracefulMoqEncodeOver } from "./playbackEos.ts";
+import { isGracefulMoqEncodeOver, isGracefulPlaybackEnd } from "./playbackEos.ts";
 import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
 
 /**
@@ -638,6 +638,7 @@ export function classifyMoqEndVerdict(options: {
   previewReady?: boolean;
   subscribeRejected?: boolean;
   bitrateBps?: number;
+  benchmarkLoading?: boolean;
 }): MoqEndVerdict {
   const jobFail = playerErrorForFailedJob(options);
   if (jobFail && !moqHasRenderedMedia(options)) {
@@ -676,6 +677,21 @@ export function classifyMoqEndVerdict(options: {
       error: null,
     };
   }
+  if (
+    played &&
+    isGracefulPlaybackEnd({
+      playedOk: true,
+      jobStatus: options.jobStatus,
+      runStopped: options.runStopped,
+      benchmarkLoading: options.benchmarkLoading,
+    })
+  ) {
+    return {
+      ok: true,
+      status: "Playback OK",
+      error: null,
+    };
+  }
   if (played && !covered) {
     return {
       ok: false,
@@ -689,7 +705,24 @@ export function classifyMoqEndVerdict(options: {
       }),
     };
   }
-  if (options.lastError && !(played && isNoMediaCatalogMessage(options.lastError))) {
+  if (
+    options.lastError &&
+    !(
+      played &&
+      (isGracefulMoqEncodeOver({
+        playedOk: true,
+        jobStatus: options.jobStatus,
+        runStopped: options.runStopped,
+      }) ||
+        isGracefulPlaybackEnd({
+          playedOk: true,
+          jobStatus: options.jobStatus,
+          runStopped: options.runStopped,
+          benchmarkLoading: options.benchmarkLoading,
+        }))
+    ) &&
+    !(played && isNoMediaCatalogMessage(options.lastError))
+  ) {
     return {
       ok: false,
       status: "Failed (see diagnostics)",

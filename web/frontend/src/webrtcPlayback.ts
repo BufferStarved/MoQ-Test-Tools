@@ -49,6 +49,7 @@ export function classifyWhepEndVerdict(options: {
   encodeElapsedSec?: number;
   runStopped?: boolean;
   jobStatus?: string;
+  benchmarkLoading?: boolean;
 }): WhepEndVerdict {
   const played = whepHasRenderedMedia(options);
   const covered = playbackCoveredEncode(options);

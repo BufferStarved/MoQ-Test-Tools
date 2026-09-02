@@ -252,6 +252,7 @@ export default function WhepPlayer({
           encodeElapsedSec: encodeElapsedRef.current,
           runStopped: runStoppedRef.current,
           jobStatus: jobStatusRef.current,
+          benchmarkLoading: loadingRef.current,
         });
         if (verdict.ok) {
           setError(null);

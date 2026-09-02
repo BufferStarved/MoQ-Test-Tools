@@ -6,6 +6,29 @@
 
 import { playbackCoveredEncode } from "./playbackEndVerdict.ts";
 
+/**
+ * Operator Stop or encode-over after the player already painted. Post-stop
+ * origin 404 / ICE close / playlist gone must not surface as a failure.
+ */
+export function isGracefulPlaybackEnd(options: {
+  playedOk: boolean;
+  jobStatus?: string;
+  runStopped?: boolean;
+  benchmarkLoading?: boolean;
+}): boolean {
+  if (!options.playedOk) {
+    return false;
+  }
+  if (options.runStopped) {
+    return true;
+  }
+  const status = (options.jobStatus || "").toLowerCase();
+  if (status === "completed" || status === "failed") {
+    return options.benchmarkLoading === false;
+  }
+  return false;
+}
+
 export function encodeLooksFinished(options: {
   jobStatus?: string;
   benchmarkLoading?: boolean;

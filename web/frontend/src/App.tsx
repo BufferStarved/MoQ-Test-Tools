@@ -516,7 +516,7 @@ function App() {
     }
     return gate;
   }
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [comparisonStopped, setComparisonStopped] = useState(false);
   const [webcamStatus, setWebcamStatus] = useState<string | null>(null);
   const [browserPreviewStream, setBrowserPreviewStream] = useState<MediaStream | null>(null);
   const [browserHasAudio, setBrowserHasAudio] = useState(false);
@@ -1633,6 +1633,7 @@ function App() {
     comparisonFinishedRef.current = false;
     comparisonJobIdsRef.current = [];
     stopRequestedRef.current = false;
+    setComparisonStopped(false);
     setSessionMetrics([]);
     setSessionMetricLabels([]);
     setSelectedSessionKey(null);
@@ -1944,6 +1945,7 @@ function App() {
   async function handleStopComparison() {
     stopRequestedRef.current = true;
     comparisonFinishedRef.current = true;
+    setComparisonStopped(true);
     stopBrowserMoqRun();
     setComparisonLegs((current) =>
       current.map((leg) => ({
@@ -2804,7 +2806,7 @@ function App() {
                           startedAtEpoch: leg?.job.started_at_epoch,
                           completedAtMs: leg?.completedAtMs,
                         })}
-                        runStopped={Boolean(leg?.job.cancelled)}
+                        runStopped={comparisonStopped || Boolean(leg?.job.cancelled)}
                         targetLatencyMs={moqPlayerTargetLatencyMs(
                           leg?.job.target_latency_ms ??
                             targetLatencyMsForProtocol(endpoint.protocol),

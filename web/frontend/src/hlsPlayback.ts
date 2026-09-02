@@ -4,6 +4,7 @@
  * the whole run. Encode-only is not playback.
  */
 
+import { isGracefulPlaybackEnd } from "./playbackEos.ts";
 import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
 
 export type HlsEndVerdict =
@@ -25,8 +26,20 @@ export function classifyHlsEndVerdict(options: {
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
   runStopped?: boolean;
+  jobStatus?: string;
+  benchmarkLoading?: boolean;
 }): HlsEndVerdict {
   if (hlsPaintedOk(options)) {
+    if (
+      isGracefulPlaybackEnd({
+        playedOk: true,
+        jobStatus: options.jobStatus,
+        runStopped: options.runStopped,
+        benchmarkLoading: options.benchmarkLoading,
+      })
+    ) {
+      return { ok: true, status: "Playback OK", error: null };
+    }
     if (options.runStopped) {
       return { ok: true, status: "Playback OK", error: null };
     }

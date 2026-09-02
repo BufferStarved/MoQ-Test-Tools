@@ -274,6 +274,24 @@ describe("classifyMoqEndVerdict", () => {
     assert.equal(verdict.status, "Encode ended");
     assert.doesNotMatch(verdict.status, /Failed/i);
   });
+
+  it("ignores stale cross-protocol teardown copy after a painted stop", () => {
+    const verdict = classifyMoqEndVerdict({
+      firstFrame: true,
+      framesRendered: 900,
+      videoTimeSec: 32.2,
+      catalogReady: true,
+      encodeDurationSec: 50,
+      encodeElapsedSec: 50,
+      runStopped: true,
+      jobStatus: "completed",
+      benchmarkLoading: false,
+      lastError:
+        "HLS manifest never loaded — origin 404 or unreachable. Encode-only is not playback.",
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.error, null);
+  });
 });
 
 describe("noMediaFailMessage", () => {

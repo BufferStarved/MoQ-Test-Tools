@@ -4,6 +4,7 @@ import {
   isGracefulMpegTsEos,
   isGracefulMoqEncodeOver,
   isGracefulMoqReset,
+  isGracefulPlaybackEnd,
   isGracefulWhepDisconnect,
   playedMostOfEncode,
 } from "./playbackEos.ts";
@@ -34,6 +35,27 @@ describe("isGracefulMpegTsEos", () => {
         jobStatus: "running",
         videoTimeSec: 21.2,
         encodeDurationSec: 81,
+      }),
+      false,
+    );
+  });
+});
+
+describe("isGracefulPlaybackEnd", () => {
+  it("treats completed encode-over after paint as graceful when the comparison is idle", () => {
+    assert.equal(
+      isGracefulPlaybackEnd({
+        playedOk: true,
+        jobStatus: "completed",
+        benchmarkLoading: false,
+      }),
+      true,
+    );
+    assert.equal(
+      isGracefulPlaybackEnd({
+        playedOk: true,
+        jobStatus: "completed",
+        benchmarkLoading: true,
       }),
       false,
     );

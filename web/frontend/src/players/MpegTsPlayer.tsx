@@ -310,6 +310,8 @@ export default function MpegTsPlayer({
           encodeDurationSec: encodeDurationRef.current,
           encodeElapsedSec: encodeElapsedRef.current,
           runStopped: runStoppedRef.current,
+          jobStatus: jobStatusRef.current,
+          benchmarkLoading: loadingRef.current,
         });
         if (verdict.ok) {
           setError(null);
@@ -423,6 +425,8 @@ export default function MpegTsPlayer({
         encodeDurationSec: encodeDurationRef.current,
         encodeElapsedSec: encodeElapsedRef.current,
         runStopped: runStoppedRef.current,
+        jobStatus: jobStatusRef.current,
+        benchmarkLoading: loadingRef.current,
       });
       if (!verdict.ok) {
         failPlayback(verdict.error || lastReason || diag);

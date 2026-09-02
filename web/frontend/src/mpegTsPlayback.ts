@@ -3,6 +3,7 @@
  * eight "manifest unreachable" probes with zero rendered frames.
  */
 
+import { isGracefulPlaybackEnd } from "./playbackEos.ts";
 import { playbackCoveredEncode, stallAgainstEncodeMessage } from "./playbackEndVerdict.ts";
 
 export function mpegTsPaintedOk(options: {
@@ -266,9 +267,21 @@ export function classifyMpegTsEndVerdict(options: {
   encodeDurationSec?: number;
   encodeElapsedSec?: number;
   runStopped?: boolean;
+  jobStatus?: string;
+  benchmarkLoading?: boolean;
 }): MpegTsEndVerdict {
-  // Stop after paint is Playback OK even when the playhead lags the unused
-  // encode cap (21s of a 71s file after the operator hit Stop).
+  // Stop or encode-over after paint: origin 504 / idle is teardown, not a stall.
+  if (
+    options.paintedOk &&
+    isGracefulPlaybackEnd({
+      playedOk: true,
+      jobStatus: options.jobStatus,
+      runStopped: options.runStopped,
+      benchmarkLoading: options.benchmarkLoading,
+    })
+  ) {
+    return { ok: true, status: "Playback OK", error: null };
+  }
   if (options.paintedOk && options.runStopped) {
     return { ok: true, status: "Playback OK", error: null };
   }

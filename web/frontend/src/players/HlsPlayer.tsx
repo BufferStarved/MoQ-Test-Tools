@@ -440,6 +440,10 @@ export default function HlsPlayer({
   encodeElapsedRef.current = encodeElapsedSec ?? 0;
   const runStoppedRef = useRef(runStopped);
   runStoppedRef.current = runStopped;
+  const jobStatusRef = useRef(jobStatus);
+  jobStatusRef.current = jobStatus;
+  const loadingRef = useRef(benchmarkLoading);
+  loadingRef.current = benchmarkLoading;
 
   // Zixi Fast HLS timelines are encode-anchored: with the per-run input
   // reset, raw currentTime IS media position since encode start, so the
@@ -658,6 +662,8 @@ export default function HlsPlayer({
           encodeDurationSec: encodeDurationRef.current,
           encodeElapsedSec: encodeElapsedRef.current,
           runStopped: runStoppedRef.current,
+          jobStatus: jobStatusRef.current,
+          benchmarkLoading: loadingRef.current,
         });
         if (verdict.ok) {
           setError(null);
@@ -1307,6 +1313,8 @@ export default function HlsPlayer({
               encodeDurationSec: encodeDurationRef.current,
               encodeElapsedSec: encodeElapsedRef.current,
               runStopped: runStoppedRef.current,
+              jobStatus: jobStatusRef.current,
+              benchmarkLoading: loadingRef.current,
             });
             if (verdict.ok) {
               setError(null);

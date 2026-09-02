@@ -1387,6 +1387,7 @@ describe("protocol comparison Stop after paint (Central Zixi HTTP-TS)", () => {
     const shown = visibleLeg(row, {
       jobStatus: "completed",
       runStopped: true,
+      benchmarkLoading: false,
       encodeDurationSec: 81,
       encodeElapsedSec: 71,
       mpegTsLastReason: "HTTP 504",
