@@ -12,7 +12,7 @@ interface LocalPublisherSetupProps {
   connected: boolean;
   compact?: boolean;
   /** Webcam last-mile setup uses shorter copy focused on the agent command. */
-  variant?: "default" | "webcam";
+  variant?: "default" | "localFfmpeg";
   /** Highlight the draft-18 canary helper when the recipe hits `:14433`. */
   preferD18?: boolean;
   /** Per-browser helper binding so ffmpeg opens this user's camera. */
@@ -52,10 +52,10 @@ export function LocalPublisherSetup({
   return (
     <div className={`local-publisher-setup${compact ? " compact" : ""}`}>
       <p className="local-publisher-setup-lede">
-        {variant === "webcam" ? (
+        {variant === "localFfmpeg" ? (
           <>
-            Start the helper on <strong>this computer</strong> so ffmpeg opens{" "}
-            <strong>your</strong> camera — not a shared operator webcam.
+            <strong>Local ffmpeg</strong> runs encode on this laptop — copy the helper command
+            below and run it in a terminal before Start.
           </>
         ) : (
           <>

@@ -1283,6 +1283,37 @@ input:disabled {
   font-weight: 500;
 }
 
+.hero-tip {
+  margin: 6px 0 0;
+  max-width: 36rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.hero-tip-dismiss {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.hero-tip-dismiss:hover {
+  color: var(--text);
+}
+
+.hero-tip-dismiss:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .player-success-hint {
   margin: 6px 0 0;
   font-size: 0.72rem;
