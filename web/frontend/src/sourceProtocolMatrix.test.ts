@@ -263,6 +263,7 @@ describe("Go Live and segmentation hops", () => {
 
   it("keeps file / cloud pipeline GOP notes off the webcam broker", () => {
     assert.equal(encoderSectionMoqGopNote("ffmpeg").includes("webcam"), false);
-    assert.equal(encoderSectionMoqGopNote("ffmpeg-local").includes("broker"), true);
+    assert.equal(encoderSectionMoqGopNote("ffmpeg-local").includes("broker"), false);
+    assert.equal(encoderSectionMoqGopNote("ffmpeg-local"), encoderSectionMoqGopNote("ffmpeg"));
   });
 });

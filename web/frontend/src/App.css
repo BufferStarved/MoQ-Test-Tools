@@ -155,8 +155,17 @@ h1 {
 
 .hero-start-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.hero-start-hint {
+  margin: 0;
+  max-width: 18rem;
+  text-align: right;
+  font-size: 0.78rem;
+  line-height: 1.35;
 }
 
 .hero-start-button {

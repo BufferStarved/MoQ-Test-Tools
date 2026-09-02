@@ -549,12 +549,6 @@ export function uniqueEndpointsByPublishSlot(
   return kept.length === endpoints.length ? endpoints : kept;
 }
 
-/** Banner copy for webcam 6-way — not a Start hard-block. */
-export const WEBCAM_SIX_WAY_START_BLOCK =
-  "Webcam 6-way remaps East/Linode SRT to that region's MediaMTX LL-HLS " +
-  "(Central Zixi Fast HLS stays). MoQ children re-encode at ~0.25s / 540p " +
-  "so QUIC does not copy three 1s IDRs.";
-
 /**
  * One laptop encode + 3 QUIC + 3 SRT. Not a recipe default — only Build
  * your own can assemble this. Start is allowed; East/Linode SRT coerce to MTX.
@@ -646,28 +640,11 @@ function remapWebcamFanoutSrt(
   return changed ? next : endpoints;
 }
 
-/**
- * Non-blocking Start copy: webcam fan-out mitigations.
- * 6-way is allowed (user rejected a lab-only hard-block).
- */
+/** Reserved for future non-blocking webcam fan-out copy (Start is never gated here). */
 export function recipeFanoutWarning(
-  endpoints: EndpointConfig[],
-  ctx: Pick<RecipeContext, "source" | "encoder">,
+  _endpoints: EndpointConfig[],
+  _ctx: Pick<RecipeContext, "source" | "encoder">,
 ): string | null {
-  const encoder = recipeEncoderForSource(ctx.source, ctx.encoder ?? "ffmpeg");
-  if (ctx.source !== "webcam" || encoder !== "ffmpeg") {
-    return null;
-  }
-  if (webcamSixWayFanout(endpoints, ctx)) {
-    return WEBCAM_SIX_WAY_START_BLOCK;
-  }
-  if (endpoints.length >= 2) {
-    return (
-      "Two or more webcam dests share a 1s GOP master. MoQ legs re-encode " +
-      "(ultrafast, not copy) when dest_count >= 2. East/Linode Zixi HTTP-TS " +
-      "stays for 2-dest; 3+ dests remap those SRT tiles to MediaMTX LL-HLS."
-    );
-  }
   return null;
 }
 

@@ -297,9 +297,11 @@ def features(session: str = ""):
     hub = publisher_hub.status(normalize_publisher_session(session))
     from cloud_placement import encode_hosts_for_api
 
+    session_id = normalize_publisher_session(session)
     return {
         "local_publisher": bool(hub.get("enabled")),
         "local_publisher_connected": bool(hub.get("connected")),
+        "publisher_session_valid": publisher_hub.valid_session(session_id) if session_id else False,
         "local_publisher_whip": bool(hub.get("whip")),
         "local_publisher_obs": hub.get("obs") or {
             "websocket": False,

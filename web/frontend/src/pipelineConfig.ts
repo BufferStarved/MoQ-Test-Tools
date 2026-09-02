@@ -132,11 +132,9 @@ function playbackLabel(mode?: string | null): string {
   }
 }
 
-/** File / cloud playout must not inherit the webcam-broker GOP comment. */
-export function encoderSectionMoqGopNote(kind: PipelineEncodeKind): string {
-  return kind === "ffmpeg-local"
-    ? "Shared webcam broker 1s master; MoQ children re-encode at ~0.25s when dest_count >= 2"
-    : "MoQ has no segments — player target";
+/** MoQ player hold note — same for cloud and laptop ffmpeg. */
+export function encoderSectionMoqGopNote(_kind: PipelineEncodeKind): string {
+  return "MoQ has no segments — player target";
 }
 
 function encoderSection(
@@ -209,14 +207,8 @@ function encoderSection(
       },
       {
         label: "MoQ GOP",
-        value:
-          kind === "ffmpeg-local"
-            ? "30 frames (~1s @ 30 fps, shared broker)"
-            : `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
-        note:
-          kind === "ffmpeg-local"
-            ? "Shared webcam broker 1s master; MoQ children re-encode at ~0.25s when dest_count >= 2"
-            : `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
+        value: `${summary.moq_gop_frames} frames (~${Math.round((summary.moq_gop_frames / 30) * 1000) / 1000}s @ 30 fps)`,
+        note: `MoQ has no segments — player target ${summary.moq_target_latency_ms} ms`,
       },
       {
         label: "VBV bufsize",

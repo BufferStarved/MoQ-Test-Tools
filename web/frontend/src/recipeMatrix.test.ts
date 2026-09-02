@@ -338,7 +338,7 @@ describe("every prod dest × playback mode", () => {
 });
 
 describe("recipeFanoutWarning", () => {
-  it("warns on webcam 2-dest 1s GOP and 6-way MTX remap", () => {
+  it("does not surface webcam fan-out copy in the UI", () => {
     const two = [
       {
         id: "a",
@@ -361,9 +361,7 @@ describe("recipeFanoutWarning", () => {
         playbackDvr: false,
       },
     ];
-    const twoWarn = recipeFanoutWarning(two, { source: "webcam", encoder: "ffmpeg" });
-    assert.match(twoWarn ?? "", /1s GOP/i);
-    assert.doesNotMatch(twoWarn ?? "", /6-way/i);
+    assert.equal(recipeFanoutWarning(two, { source: "webcam", encoder: "ffmpeg" }), null);
 
     const six = [
       ...two,
@@ -372,9 +370,7 @@ describe("recipeFanoutWarning", () => {
       { ...two[1], id: "e", ingestEndpointId: "gcp_east_moq_relay_d18" },
       { ...two[1], id: "f", ingestEndpointId: "linode_moq_relay_d18" },
     ];
-    const sixWarn = recipeFanoutWarning(six, { source: "webcam", encoder: "ffmpeg" });
-    assert.match(sixWarn ?? "", /6-way/i);
-    assert.match(sixWarn ?? "", /MediaMTX LL-HLS/i);
+    assert.equal(recipeFanoutWarning(six, { source: "webcam", encoder: "ffmpeg" }), null);
     assert.equal(webcamSixWayFanout(six, { source: "webcam", encoder: "ffmpeg" }), true);
     assert.equal(webcamSixWayFanout(two, { source: "webcam", encoder: "ffmpeg" }), false);
     assert.equal(webcamSrtShouldUseRegionalMtx(six, { source: "webcam", encoder: "ffmpeg" }), true);
@@ -474,8 +470,8 @@ describe("cloud-compare webcam Start gate", () => {
       assertStartable(`cloud-compare/webcam/ffmpeg/${protocol}`, "webcam", "ffmpeg", applied);
       const nextCtx = ctx(applied.source, applied.encoder);
       assert.equal(recipeIssue(applied.endpoints, nextCtx), null);
-      assert.notEqual(recipeFanoutWarning(applied.endpoints, nextCtx), null);
-      assert.doesNotMatch(
+      assert.equal(recipeFanoutWarning(applied.endpoints, nextCtx), null);
+      assert.equal(
         comparisonStartTitle({
           recipeIssue: recipeIssue(applied.endpoints, nextCtx),
           apiOnline: true,
@@ -486,8 +482,8 @@ describe("cloud-compare webcam Start gate", () => {
           bbbAvailable: true,
           mediaPath: "device:webcam",
           browserCanStart: true,
-        }) ?? "",
-        /1s GOP|6-way|MediaMTX LL-HLS/,
+        }),
+        undefined,
       );
       const helperTitle = comparisonStartTitle({
         recipeIssue: null,
@@ -501,20 +497,6 @@ describe("cloud-compare webcam Start gate", () => {
         browserCanStart: true,
       });
       assert.match(helperTitle ?? "", /local publisher agent/i);
-      assert.equal(
-        comparisonStartTitle({
-          recipeIssue: null,
-          apiOnline: true,
-          endpointCount: applied.endpoints.length,
-          source: applied.source,
-          encoder: applied.encoder,
-          helperConnected: true,
-          bbbAvailable: true,
-          mediaPath: "device:webcam",
-          browserCanStart: true,
-        }),
-        undefined,
-      );
     });
   }
 

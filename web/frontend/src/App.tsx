@@ -450,6 +450,7 @@ function App() {
         ? "browser"
         : "cloud";
   const [publisherSession, setPublisherSession] = useState(readPublisherSession);
+  const [publisherSessionStale, setPublisherSessionStale] = useState(false);
   const recipeCaps = useMemo(() => {
     const detected = detectBrowserMoqCapabilities();
     return {
@@ -704,25 +705,45 @@ function App() {
   }, [loadBootstrapData]);
 
   useEffect(() => {
-    if (publisherSession) {
+    if (!apiOnline) {
       return;
     }
     let cancelled = false;
-    void mintPublisherSession()
-      .then((minted) => {
+    async function syncPublisherSession() {
+      const stored = readPublisherSession();
+      try {
+        const probe = await fetchFeatures(stored || undefined);
+        if (cancelled) {
+          return;
+        }
+        if (stored && probe.publisher_session_valid !== false) {
+          setPublisherSession(stored);
+          return;
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+      }
+      try {
+        const minted = await mintPublisherSession();
         if (cancelled || !minted.session_id) {
           return;
         }
         writePublisherSession(minted.session_id);
         setPublisherSession(minted.session_id);
-      })
-      .catch(() => {
+        if (stored) {
+          setPublisherSessionStale(true);
+        }
+      } catch {
         /* API offline — helper command waits until mint succeeds */
-      });
+      }
+    }
+    void syncPublisherSession();
     return () => {
       cancelled = true;
     };
-  }, [publisherSession]);
+  }, [apiOnline]);
 
   // Poll agent connection whenever the API is up (local publish may be enabled).
   useEffect(() => {
@@ -2059,6 +2080,12 @@ function App() {
   );
   const helperConnected =
     Boolean(features.local_publisher) && Boolean(features.local_publisher_connected);
+
+  useEffect(() => {
+    if (helperConnected) {
+      setPublisherSessionStale(false);
+    }
+  }, [helperConnected]);
   const obsWebsocketUp = Boolean(features.local_publisher_obs?.websocket);
   const hasMoqOutput = endpoints.some((endpoint) => endpoint.protocol === "moq");
   const obsStartAllowed =
@@ -2150,6 +2177,11 @@ function App() {
           {tab === "benchmark" && (recipePicked || loading) && (
             <div className="hero-start-row" aria-label="Run controls">
               {renderStartStop("hero-start-button", { start: recipePicked })}
+              {startDisabled && startHint ? (
+                <p className="field-hint hero-start-hint" role="status">
+                  {startHint}
+                </p>
+              ) : null}
             </div>
           )}
           <a className="hero-support" href={PAYPAL_DONATE_URL} target="_blank" rel="noreferrer">
@@ -2470,6 +2502,7 @@ function App() {
                               endpoint.ingestEndpointId.includes("moq_relay_d18"),
                             )}
                             publisherSession={publisherSession}
+                            sessionStale={publisherSessionStale}
                           />
                         )}
                         {encoder === "obs" && (

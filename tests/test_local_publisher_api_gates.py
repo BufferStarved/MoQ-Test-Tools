@@ -258,6 +258,18 @@ class LocalPublisherApiGateTests(unittest.TestCase):
         self.assertIn("local_publisher_whip", resp.json())
         self.assertFalse(resp.json()["local_publisher_whip"])
 
+    def test_features_marks_invalid_publisher_session(self) -> None:
+        with patch.object(api_main.publisher_hub, "valid_session", return_value=False):
+            resp = self.client.get("/api/features?session=stale-after-deploy")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["publisher_session_valid"])
+
+    def test_features_marks_valid_publisher_session(self) -> None:
+        with patch.object(api_main.publisher_hub, "valid_session", return_value=True):
+            resp = self.client.get("/api/features?session=live-visitor")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["publisher_session_valid"])
+
     def test_helper_launcher_is_downloadable(self) -> None:
         resp = self.client.get("/run-local-publisher.sh")
         self.assertEqual(resp.status_code, 200, resp.text)

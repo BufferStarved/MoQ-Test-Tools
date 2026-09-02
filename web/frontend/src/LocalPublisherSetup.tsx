@@ -17,6 +17,8 @@ interface LocalPublisherSetupProps {
   preferD18?: boolean;
   /** Per-browser helper binding so ffmpeg opens this user's camera. */
   publisherSession?: string;
+  /** Session was re-minted (e.g. after deploy) — copy the command again. */
+  sessionStale?: boolean;
 }
 
 export function LocalPublisherSetup({
@@ -26,6 +28,7 @@ export function LocalPublisherSetup({
   variant = "default",
   preferD18: _preferD18 = false,
   publisherSession = "",
+  sessionStale = false,
 }: LocalPublisherSetupProps) {
   const [copied, setCopied] = useState(false);
   const [showCommand, setShowCommand] = useState(false);
@@ -61,6 +64,12 @@ export function LocalPublisherSetup({
           </>
         )}
       </p>
+      {sessionStale ? (
+        <p className="field-hint local-publisher-setup-stale" role="status">
+          This browser session was refreshed (often after a deploy). Copy the command again, then
+          run it in a terminal.
+        </p>
+      ) : null}
       {shortCommand ? (
         <div className="local-publisher-setup-command">
           <div className="local-publisher-setup-actions">

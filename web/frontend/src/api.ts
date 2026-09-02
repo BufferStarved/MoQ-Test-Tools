@@ -86,6 +86,8 @@ export interface BundledMediaSource {
 export interface FeatureFlags {
   local_publisher: boolean;
   local_publisher_connected: boolean;
+  /** True when the browser session is still minted on this API host (survives deploy). */
+  publisher_session_valid?: boolean;
   local_publisher_agents: LocalPublisherAgentInfo[];
   /** Connected laptop agent can mux `-f whip`. False until proven. */
   local_publisher_whip?: boolean;
