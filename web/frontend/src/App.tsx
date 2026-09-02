@@ -226,6 +226,7 @@ const operatorPlan = parseOperatorSearch(
   typeof window !== "undefined" ? window.location.search : "",
 );
 const PUBLISHER_SESSION_KEY = "moq-publisher-session";
+const LAUNCH_BANNER_KEY = "moq-launch-banner-dismissed";
 
 function readPublisherSession(): string {
   try {
@@ -238,6 +239,22 @@ function readPublisherSession(): string {
 function writePublisherSession(sessionId: string): void {
   try {
     sessionStorage.setItem(PUBLISHER_SESSION_KEY, sessionId);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+function launchBannerDismissed(): boolean {
+  try {
+    return localStorage.getItem(LAUNCH_BANNER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistLaunchBannerDismissed(): void {
+  try {
+    localStorage.setItem(LAUNCH_BANNER_KEY, "1");
   } catch {
     /* ignore quota / private mode */
   }
@@ -381,6 +398,7 @@ const SCORE_PICTURE_QUALITY_COPY =
 
 function App() {
   const [tab, setTab] = useState<Tab>("benchmark");
+  const [launchBannerVisible, setLaunchBannerVisible] = useState(() => !launchBannerDismissed());
   const [protocols, setProtocols] = useState<Protocol[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [endpoints, setEndpoints] = useState<EndpointConfig[]>([]);
@@ -496,6 +514,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [apiOnline, setApiOnline] = useState(false);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   // Bumped when a leg's playback drain window expires (see PLAYBACK_DRAIN_MS);
   // the value is unused — the re-render re-evaluates drainedPlaybackGate.
   const [, setDrainTick] = useState(0);
@@ -2152,6 +2171,40 @@ function App() {
           Safari playback is not supported. Use Chrome or Edge.
         </div>
       )}
+      {tab === "benchmark" && launchBannerVisible ? (
+        <div className="info-banner launch-banner" role="region" aria-label="Getting started">
+          <div className="launch-banner-body">
+            <p className="launch-banner-title">
+              <strong>Getting started</strong>
+            </p>
+            <ul className="launch-banner-list">
+              <li>
+                Use <strong>Chrome</strong> on desktop for the best experience.
+              </li>
+              <li>
+                <strong>Webcam</strong> needs the laptop helper — copy the command under Encode.
+              </li>
+              <li>
+                During busy periods, cloud encodes may <strong>queue</strong> (about 4 at a time).
+              </li>
+              <li>
+                <strong>VMAF</strong> is optional and slow — leave it off for a quick try.
+              </li>
+            </ul>
+          </div>
+          <button
+            type="button"
+            className="launch-banner-dismiss"
+            aria-label="Dismiss getting started tips"
+            onClick={() => {
+              persistLaunchBannerDismissed();
+              setLaunchBannerVisible(false);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
       {fanoutWarning && !safariUnsupported ? (
         <div className="info-banner" role="status">
           {fanoutWarning}
